@@ -188,6 +188,8 @@ python3 -c "import json; json.dump({'workspace_root': '$WS', 'workspace_members'
 expect 2 "metadata without a resolved graph is exit 2" "no resolved dependency graph"
 python3 -c "import json; json.dump({'workspace_root': '$WS', 'workspace_members': ['core'], 'packages': [{'id': 'core', 'name': 'interweave-claude-channel-core', 'manifest_path': '$WS/crates/claude/channel-core/Cargo.toml'}], 'resolve': {'nodes': [{'id': 'other', 'deps': []}]}}, open('$SANDBOX/meta.json', 'w'))"
 expect 2 "a bridge package with no node in the graph is exit 2" "has no node in the resolved graph"
+python3 -c "import json; json.dump({'workspace_root': '$WS', 'workspace_members': ['core'], 'packages': [{'id': 'core', 'name': 'interweave-claude-channel-core', 'manifest_path': '$WS/crates/claude/channel-core/Cargo.toml'}, {'id': 'mid', 'name': 'interweave-mid', 'manifest_path': '$WS/crates/api/mid/Cargo.toml'}], 'resolve': {'nodes': [{'id': 'core', 'deps': [{'pkg': 'mid', 'dep_kinds': [{'kind': None}]}]}]}}, open('$SANDBOX/meta.json', 'w'))"
+expect 2 "a crate it reaches with no node in the graph is exit 2, not a pass" "interweave-mid has no node in the resolved graph"
 python3 -c "import json; json.dump({'workspace_root': '$WS', 'workspace_members': ['core'], 'packages': [{'id': 'core', 'name': 'interweave-claude-channel-core', 'manifest_path': '$WS/crates/claude/channel-core/Cargo.toml'}], 'resolve': {'nodes': [{'id': 'core', 'deps': [{'pkg': 'zz', 'dep_kinds': [{'kind': None}]}]}]}}, open('$SANDBOX/meta.json', 'w'))"
 expect 2 "an unexpected error in the walk is exit 2, not a breach" "could not walk cargo metadata"
 # An error while loading, before the walk: a package with no manifest path.

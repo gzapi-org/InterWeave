@@ -14,8 +14,8 @@
 # apps/claude-channel (the bridge's composition root) reaches nothing under
 # crates/transport/, nothing under crates/discovery/ and no libp2p crate.
 # It reaches the daemon through ipc-client and the neutral contracts under
-# crates/api/; the reply-token table moved out of crates/transport/runtime
-# into channel-core for this reason (§19 step 2).
+# crates/api/; §19 step 2 moves the reply-token table out of
+# crates/transport/runtime into channel-core for this reason.
 # check_human_layering.sh is the precedent; check_ipc_layering.sh holds
 # ipc-client, which the bridge depends on, to the same transport rule.
 #
@@ -40,7 +40,7 @@
 #      libp2p
 #   1  one does; the path from the package to the offender is printed
 #   2  a failure to check: cargo metadata failed or returned no resolved
-#      graph, a bridge package has no node in it, planned_members could not
+#      graph, a bridge package or a crate it reaches has no node in it, planned_members could not
 #      be read, a required package is neither a member nor planned, or the
 #      load or the walk raised an error it did not expect
 # <<< help
@@ -126,13 +126,15 @@ def runtime_deps(node):
 
 def walk(start):
     """Breadth-first from start; each offender printed once, by its shortest path."""
-    if start not in nodes:
-        print(f"{me}: {packages[start]['name']} has no node in the resolved graph", file=sys.stderr)
-        sys.exit(2)
     parent, queue, found = {start: None}, [start], 0
     while queue:
         cur = queue.pop(0)
-        for dep in runtime_deps(nodes.get(cur, {})):
+        if cur not in nodes:
+            # A crate with no node would end the walk below it unseen and
+            # read as a pass.
+            print(f"{me}: {packages[cur]['name']} has no node in the resolved graph", file=sys.stderr)
+            sys.exit(2)
+        for dep in runtime_deps(nodes[cur]):
             if dep in parent:
                 continue
             parent[dep] = cur
