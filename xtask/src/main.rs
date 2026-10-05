@@ -286,8 +286,26 @@ fn clippy_task() -> Task {
     )
 }
 
+/// The workspace tests as CI's `Tests` step runs them: under
+/// `tools/ci/with_display.sh`, since the desktop client's end-to-end cases
+/// open a window and read it over AT-SPI. Run bare, those cases fail on a
+/// host without a session bus while CI passes them, and a local run that is
+/// always red hides the failure that matters. Where the wrapper cannot
+/// stand the session up it refuses (125) and the task fails, named.
 fn test_task() -> Task {
-    cargo_task("cargo test", &["test", "--workspace", "--all-targets"])
+    let cargo = cargo();
+    Task::new(
+        "cargo test (under tools/ci/with_display.sh, as CI)",
+        "bash",
+        &[
+            "tools/ci/with_display.sh",
+            &cargo,
+            "test",
+            "--workspace",
+            "--all-targets",
+            "--locked",
+        ],
+    )
 }
 
 /// Run every task, reporting each, and return the number that failed.
@@ -500,6 +518,32 @@ mod tests {
 
     /// Clippy failures must fail the command; a warning nobody fails on is a
     /// lint policy nobody follows.
+    /// The local test task is CI's `Tests` step: the same wrapper and the
+    /// same cargo arguments, read from the workflow.
+    #[test]
+    fn the_test_task_is_ci_s_tests_step() {
+        let root = repo_root().expect("the xtask package has a parent directory");
+        let workflow =
+            fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("ci.yml is readable");
+        let step = workflow
+            .lines()
+            .filter_map(|line| {
+                line.trim()
+                    .strip_prefix("run: bash tools/ci/with_display.sh ")
+            })
+            .find(|rest| rest.starts_with("cargo test"))
+            .expect("CI runs cargo test under with_display.sh");
+        let task = test_task();
+        assert_eq!(task.program, "bash");
+        assert_eq!(
+            task.args.first().map(String::as_str),
+            Some("tools/ci/with_display.sh")
+        );
+        let ours: Vec<&str> = task.args.iter().skip(2).map(String::as_str).collect();
+        let ci: Vec<&str> = step.split_whitespace().skip(1).collect();
+        assert_eq!(ours, ci, "xtask's cargo test arguments are CI's");
+    }
+
     #[test]
     fn clippy_denies_warnings() {
         let args = clippy_task().args;
