@@ -797,7 +797,13 @@ there is no trade to make.
 
 **Do not arm `--auto` on a change to a security boundary until the
 review class's review is posted on the current head with no open P1 or
-P2 and the owner has given the word.** Green checks are not a review:
+P2.** With eight or more work commits that is the whole gate — the
+owner's standing word covers a boundary PR too (the owner, 2026-10-05:
+"over 8 commits a PR can be armed without my authorization, just
+complete the job", and "over 16 commits don't require my
+authorization"); under eight the owner's word is asked in the basis, as
+the count rule says; sixteen is batch-size advice, not an arming
+condition. Green checks are not a review:
 §9 already says the merge is not evidence that anything was reviewed,
 and the queue lands a PR the moment the last check passes.
 
@@ -829,7 +835,8 @@ tools/gh/pr-review-status.sh <n>
 ```
 
 reports it on the `blind reviews` line against the current head; arm when
-it does, no thread is unresolved, and the owner has spoken. **That line
+it does and no thread is unresolved (under eight work commits, once the
+owner has spoken). **That line
 is bound to the poster** (agent-fabric 26d6f98, 2026-09-26): a marked
 review counts as blind only when it was posted by the PR author — the
 account every session pushes as — or by a login named in
@@ -844,10 +851,12 @@ nothing pushed since.
 **Arm with `tools/gh/arm.sh <n> --basis "<one line>"`, never by hand.**
 It applies the gates above before `gh pr merge --auto`: the PR is open,
 not a draft and this session's; no `AWAITING-SUPPLY` lacks its range
-line; a security-boundary change has the review class's review of the
-current head, no unresolved thread and the phrase `owner's word` in the
-basis; and under eight work commits (`tools/gh/pr-gate.sh` counts them)
-only on the owner's word. It posts the basis as a comment and prints
+line; a security-boundary change has the review class's review of the current
+head and no unresolved thread; and under eight work commits
+(`tools/gh/pr-gate.sh` counts them) — boundary or not — only on the
+owner's word, the phrase `owner's word` in the basis (agent-fabric #99
+brings the tool to this rule; before it the tool asked the phrase on
+every boundary PR). It posts the basis as a comment and prints
 the watcher line. Which changed files are a security boundary is
 agent-fabric's `projects/interweave/integration/gh/arm.json` — the list
 above in path form, matched case-insensitively, the normative vectors
@@ -856,7 +865,7 @@ under `fixtures/` and the crate redirections in `Cargo.toml` and
 touches its subject in a file the paths miss, pass `--boundary`, and
 propose the path to fabric-coordinator.
 `--no-boundary "<why>"` is the opposite: it skips this whole gate —
-review, threads and the owner's word — and is taken only with `--waiver
+review and threads — and is taken only with `--waiver
 <message-id|seq>`, never alone (the owner's ruling of 2026-10-04,
 agent-fabric #92). The waiver is architect-cto's — the holder of
 `arm.json`'s `waiver_role` — a DECISION or REPLY addressed to this
