@@ -798,10 +798,10 @@ there is no trade to make.
 **Do not arm `--auto` on a change to a security boundary until the
 review class's review is posted on the current head with no open P1 or
 P2.** With eight or more work commits that is the whole gate — the
-owner's standing word covers a boundary PR too (the owner, 2026-10-05:
-"over 8 commits a PR can be armed without my authorization, just
-complete the job", and "over 16 commits don't require my
-authorization"); under eight the owner's word is asked in the basis, as
+owner's standing word covers a boundary PR too (the standing word of
+2026-09-27, "over 8 commits a PR can be armed without my authorization,
+just complete the job", and of 2026-10-05, "over 16 commits don't
+require my authorization", ruled to cover a boundary on 2026-10-05); under eight the owner's word is asked in the basis, as
 the count rule says; sixteen is batch-size advice, not an arming
 condition. Green checks are not a review:
 §9 already says the merge is not evidence that anything was reviewed,
@@ -856,7 +856,9 @@ head and no unresolved thread; and under eight work commits
 (`tools/gh/pr-gate.sh` counts them) — boundary or not — only on the
 owner's word, the phrase `owner's word` in the basis (agent-fabric #99
 brings the tool to this rule; before it the tool asked the phrase on
-every boundary PR). It posts the basis as a comment and prints
+every boundary PR — until it lands, a basis on eight or more names the
+consent it has, e.g. `owner's word: the standing word of 2026-09-27`,
+never the phrase alone). It posts the basis as a comment and prints
 the watcher line. Which changed files are a security boundary is
 agent-fabric's `projects/interweave/integration/gh/arm.json` — the list
 above in path form, matched case-insensitively, the normative vectors

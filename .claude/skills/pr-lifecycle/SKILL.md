@@ -55,7 +55,7 @@ terms that rode in with copied material.
 17c. tools/gh/pr-review-status.sh <n>            # blind reviews against the CURRENT head; unresolved threads
 18.  tools/gh/arm.sh <n> --basis "<why>"   # ONLY when done; never `gh pr merge --auto` by hand —
                                 #   arm.sh applies the gates of CLAUDE.md §9 (review, threads,
-                                #   the owner's word or architect-cto's --waiver) before it arms.
+                                #   or architect-cto's --waiver for those two — and, under eight, the owner's word) before it arms.
 19.  tools/gh/wait-merged.sh <n> &      # background; its exit is the callback
 ```
 
