@@ -47,10 +47,38 @@ pub(crate) struct EventQueue {
 impl EventQueue {
     /// Queue `event`, replacing an unread one with the same key in
     /// place: the key keeps its position, the value is the newest.
+    ///
+    /// A peer's path and its disconnection are not independent. The
+    /// runtime hands a disconnection over before the messages and a
+    /// pending path notice after them, and a disconnection does not
+    /// withdraw that notice, so a path queued with a disconnection may
+    /// describe a connection that has gone -- and the client cannot tell
+    /// it from a path taken after a reconnect. A path is a route indicator
+    /// the person may rely on (`human-client-ui.md` §7), so the queue
+    /// fails blank: a disconnection drops the peer's queued path, and a
+    /// path for a peer whose disconnection is still queued is not queued
+    /// (`a_disconnection_drops_the_peers_queued_path`,
+    /// `a_path_behind_a_queued_disconnection_is_dropped`). A stale notice
+    /// taken after the disconnection was handed over is not seen here.
     pub(crate) fn push(&mut self, event: ClientEvent) {
         let key = Key::of(&event);
+        match &event {
+            ClientEvent::PeerDisconnected { peer } => self.remove(&Key::Path(peer.clone())),
+            ClientEvent::PeerPath { peer, .. }
+                if self.latest.contains_key(&Key::Peer(peer.clone())) =>
+            {
+                return;
+            }
+            _ => {}
+        }
         if self.latest.insert(key.clone(), event).is_none() {
             self.order.push_back(key);
+        }
+    }
+
+    fn remove(&mut self, key: &Key) {
+        if self.latest.remove(key).is_some() {
+            self.order.retain(|queued| queued != key);
         }
     }
 
@@ -104,11 +132,9 @@ mod tests {
     use interweave_human_client_api::{Connectivity, SessionState};
 
     #[test]
-    fn a_peers_path_is_its_newest_and_apart_from_its_disconnection() {
+    fn a_peers_path_is_its_newest_in_one_slot() {
         use interweave_transport_api::PeerPath;
-        let peer = interweave_profile_identity::ProfileIdentity::generate()
-            .transport_identity()
-            .expect("a peer");
+        let peer = a_peer();
         let mut q = EventQueue::default();
         for path in [PeerPath::Direct, PeerPath::Relayed, PeerPath::Direct] {
             q.push(ClientEvent::PeerPath {
@@ -116,16 +142,75 @@ mod tests {
                 path,
             });
         }
-        q.push(ClientEvent::PeerDisconnected { peer: peer.clone() });
-        assert_eq!(q.len(), 2, "one path slot and one disconnection");
+        assert_eq!(q.len(), 1, "one path slot");
         assert_eq!(
             q.pop(),
             Some(ClientEvent::PeerPath {
-                peer: peer.clone(),
+                peer,
                 path: PeerPath::Direct
             })
         );
-        assert_eq!(q.pop(), Some(ClientEvent::PeerDisconnected { peer }));
+    }
+
+    fn a_peer() -> TransportIdentity {
+        interweave_profile_identity::ProfileIdentity::generate()
+            .transport_identity()
+            .expect("a peer")
+    }
+
+    #[test]
+    fn a_disconnection_drops_the_peers_queued_path() {
+        use interweave_transport_api::PeerPath;
+        let (peer, other) = (a_peer(), a_peer());
+        let mut q = EventQueue::default();
+        for p in [&peer, &other] {
+            q.push(ClientEvent::PeerPath {
+                peer: p.clone(),
+                path: PeerPath::Relayed,
+            });
+        }
+        q.push(ClientEvent::PeerDisconnected { peer: peer.clone() });
+        assert_eq!(
+            (q.pop(), q.pop(), q.pop()),
+            (
+                Some(ClientEvent::PeerPath {
+                    peer: other,
+                    path: PeerPath::Relayed
+                }),
+                Some(ClientEvent::PeerDisconnected { peer }),
+                None
+            ),
+            "the other peer's path stays; this peer's goes"
+        );
+    }
+
+    #[test]
+    fn a_path_behind_a_queued_disconnection_is_dropped() {
+        use interweave_transport_api::PeerPath;
+        let peer = a_peer();
+        let mut q = EventQueue::default();
+        q.push(ClientEvent::PeerDisconnected { peer: peer.clone() });
+        q.push(ClientEvent::PeerPath {
+            peer: peer.clone(),
+            path: PeerPath::Relayed,
+        });
+        assert_eq!(
+            q.pop(),
+            Some(ClientEvent::PeerDisconnected { peer: peer.clone() })
+        );
+        assert_eq!(q.pop(), None, "no path for a peer just disconnected");
+        // Once the disconnection is handed over, a path is the path again.
+        q.push(ClientEvent::PeerPath {
+            peer: peer.clone(),
+            path: PeerPath::Direct,
+        });
+        assert_eq!(
+            q.pop(),
+            Some(ClientEvent::PeerPath {
+                peer,
+                path: PeerPath::Direct
+            })
+        );
     }
 
     #[test]

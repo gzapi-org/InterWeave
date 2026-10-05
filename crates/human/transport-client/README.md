@@ -49,7 +49,7 @@ A row that survived a restart into a configuration that cannot send it becomes `
 
 It is read from the runtime's state pushed on the data session (`ServerState`, at open and on each change) and from the admin port's status, asked every 5 s; the later wins. A pushed state with no summary changes it only when the runtime is unavailable (`Offline`).
 
-**Route indicator** (`human-client-ui.md` §7): a path change to a peer the session has a route to (`PeerPathChanged`) is `ClientEvent::PeerPath { peer, path }`, the newest path per peer. It is never a reconnect, a disconnection or a message.
+**Route indicator** (`human-client-ui.md` §7): a path change to a peer the session has a route to (`PeerPathChanged`) is `ClientEvent::PeerPath { peer, path }`, the newest path per peer. It is never a reconnect, a disconnection or a message. A peer's disconnection drops its queued path, and a path behind a queued disconnection is not raised: the runtime does not withdraw a pending path notice at a disconnection, so such a path may describe a connection that has gone, and the indicator is left blank rather than shown wrong (`queue.rs` tests). A stale notice that arrives after the disconnection was handed over is not caught here.
 
 **Inbound** (`drain`):
 - A message is committed as unread before it is returned.
