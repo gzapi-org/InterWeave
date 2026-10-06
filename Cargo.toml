@@ -555,14 +555,18 @@ overflow-checks = true
 # client ships as one binary, apps/human-desktop composing app-core,
 # human-store, transport-client, ui-model/ui-slint over ipc-client on
 # winit with a software renderer, proved against two daemons without a
-# person. STAGE 16 IS OPEN: the Claude Code Channel bridge, which ran
-# beside Stage 15 under the plan's §19 record since 2026-10-03 and is now
-# the LOWEST open stage this status names; crates/claude/channel-core and
-# apps/claude-channel join the members under §19. Nothing here is
-# server-mode reachability evidence for ADR-0034 §7's release gate: that
-# decision is separate. Read architecture/roadmap/BOTTOM-UP-
-# IMPLEMENTATION-PLAN.md §19 (Stage 16) before creating a package.
-status = "stage-16-claude-code-channel"
+# person. STAGE 16 CLOSED on 2026-10-06 (the plan's §19 closing record):
+# the Claude Code Channel bridge, crates/claude/channel-core and
+# apps/claude-channel, delivered the network to an installed Claude Code
+# session as a Channel, proved against two daemons and inside Claude Code
+# 2.1.288. STAGE 17 IS OPEN by this status: the Android human client
+# (§20), whose prerequisites — SPIKE-008 and SPIKE-009 — are its first
+# work; no §20 package is created before those spikes close and the
+# stage's record lands. Nothing here is server-mode reachability
+# evidence for ADR-0034 §7's release gate: that decision is separate.
+# Read architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md §20
+# (Stage 17) before creating a package.
+status = "stage-17-android-human-client"
 architecture_root = "architecture"
 
 planned_members = [
