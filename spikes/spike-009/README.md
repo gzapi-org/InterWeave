@@ -106,7 +106,7 @@ The recorded run is [`device/REPRODUCTION-2026-10-06d.log`](./device/REPRODUCTIO
 
 **Two invalidation signals, both seen on this device:** `UnrecoverableKeyException` from `KeyStore.getKey` after a credential change (D6a, part 3), and `KeyPermanentlyInvalidatedException` from `Cipher.init` after a biometric enrollment (part 4). Recovery has to be entered on either.
 
-**Limit:** neither part-4 key was used before the event. The per-operation key's prompt went unanswered, and the timed key was only generated, so their pre-event health rests on generation and `KeyInfo`. After the event the timed key was shown to wrap, not to unwrap. Part 3's per-operation key did complete one, and the same configuration is used here.
+**Limit: part 4 does not meet the row's own precondition** (each fresh key wrapped and unwrapped once before the event). The timed key was only generated before it, and after it was shown to wrap, not to unwrap. The per-operation key's pre-event prompt went unanswered, so no pre-event result line exists for it. One unrecorded fact narrows the gap: `Prompt.java` initialises the cipher on the key before it builds the prompt, and records and exits on any exception, so the prompt appearing before the event means `Cipher.init` on that same key succeeded then, while after the event the same call threw `KeyPermanentlyInvalidatedException`. That is an init-level before/after on one key, with the "before" seen by the operator, not recorded. Part 3's `op6b` is not a control for `op6c`. Meeting the row exactly needs a re-run: fresh keys, both pre-event uses recorded, then one fingerprint added on the Fingerprints page; the phone already holds three.
 
 ## The device half: the plan, as written before the run
 
