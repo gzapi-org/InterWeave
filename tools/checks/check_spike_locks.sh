@@ -221,7 +221,7 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     # invisible because it looks exactly like success.
     if [[ ${#locks[@]} -eq 0 && -n "$( find spikes -name Cargo.toml -not -path '*/target/*' -print -quit 2>/dev/null )" ]]; then
         echo "check_spike_locks: spike crates are present but git tracks no" >&2
-        echo "  spikes/*/Cargo.lock. Either the pathspec here is wrong or the locks" >&2
+        echo "  spikes/**/Cargo.lock. Either the pathspec here is wrong or the locks" >&2
         echo "  stopped being committed; both are findings, and neither is a pass." >&2
         exit 2
     fi
