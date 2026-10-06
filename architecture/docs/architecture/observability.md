@@ -4,7 +4,7 @@
 
 - structured diagnostics, stable event/counter names;
 - no private keys, secret config, or payload bodies in normal logs;
-- peer/channel/endpoint identifiers may be sensitive and should support redaction/hashing modes — the first rule in force (A 2026-10-06): a log line names a remote PeerId only when that peer is on the profile's trust allowlist (the operator put it there, and the daemon's log is the run-dir owner's, as the `admin.trust.set` audit line already is); any other peer — pre-authentication, infrastructure, discovery — appears as its bounded class only; no hashed or truncated form, which would be a new identifier nobody can act on;
+- peer/channel/endpoint identifiers may be sensitive and should support redaction/hashing modes — the first rule in force (A 2026-10-06): a log line names a remote PeerId only when that peer is on the profile's trust allowlist (the operator put it there, and the daemon's log is the run-dir owner's, as the `admin.trust.set` audit line already is); any other peer — pre-authentication, infrastructure, discovery — appears as its bounded class only; no hashed or truncated form, which would be a new identifier nobody can act on. One exception, by the identifier's origin: the `admin.trust.set` audit line names the PeerId of the request whatever its allowlist status (a revoke of an absent peer, an allow refused at capacity), because that identifier came from the operator's own request over the admin socket, not from the network, and `LOCAL-CLIENT.md` §5 requires the record to carry it;
 - Claude receives high-level status by default; local CLI/human admin may expose deeper detail.
 
 ## Status model
