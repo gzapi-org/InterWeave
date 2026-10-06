@@ -422,7 +422,7 @@ impl DialFailureClass {
     /// The class of a dial libp2p reports failed: its identity check and
     /// this node's own refusal; anything else is `dial_failed`.
     ///
-    /// NOT `refused` or `timeout`, which `observability.md` also lists:
+    /// Refused and timeout are not told apart, and both are `dial_failed`:
     /// measured on a refused dial (`tests/gate_notes.rs`), the socket's
     /// `io::Error` sits inside the builder's composed `either::Either`,
     /// whose `source()` skips it and whose type parameters depend on the
@@ -1255,10 +1255,22 @@ mod class_tests {
     use libp2p::core::transport::TransportError;
     use libp2p::swarm::DialError;
 
-    /// A transport failure is `dial_failed` whatever the socket said:
-    /// the kind is not reachable structurally (`of_dial_error`).
+    /// A transport failure is `dial_failed` whatever the socket said --
+    /// the kind is not reachable structurally (`of_dial_error`) -- and a
+    /// denial by this node's own handler is `denied`: the established
+    /// hook's refusal of a quarantined address comes back as
+    /// `DialError::Denied` in an `OutgoingConnectionError`
+    /// (`outbound_gate.rs`).
     #[test]
     fn a_transport_failure_is_dial_failed_and_this_nodes_refusal_is_denied() {
+        let denied = DialError::Denied {
+            cause: libp2p::swarm::ConnectionDenied::new(std::io::Error::other("quarantined")),
+        };
+        assert_eq!(
+            DialFailureClass::of_dial_error(&denied),
+            DialFailureClass::LocallyDenied
+        );
+        assert_eq!(DialFailureClass::LocallyDenied.label(), "denied");
         let refused = DialError::Transport(vec![(
             "/ip4/127.0.0.1/tcp/1".parse().expect("valid"),
             TransportError::Other(std::io::Error::new(
