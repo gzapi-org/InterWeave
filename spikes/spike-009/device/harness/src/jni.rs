@@ -2,8 +2,10 @@
 // Copyright 2026 Andrea Benetton
 //! `org.interweave.spike009.Core`'s natives, over raw JNI. The surface
 //! is byte arrays and ints only; a PeerId crosses as its UTF-8 bytes.
-//! A null return or a negative code is the caller's to report -- nothing
-//! here throws, so no Java exception can be left pending.
+//! A null return or a nonzero code is the caller's to report. The Rust
+//! code throws nothing; the one JNI call here that can raise is
+//! `NewByteArray`, whose allocation failure returns null with Java's
+//! `OutOfMemoryError` pending, which the caller then sees thrown.
 
 #![allow(unsafe_code, clippy::missing_safety_doc)]
 
@@ -146,7 +148,9 @@ pub unsafe extern "system" fn Java_org_interweave_spike009_Core_verify(
 }
 
 /// The PeerId a typed phrase restores, or null when the production
-/// parse refuses it (D7's picker). The phrase's bytes are not kept.
+/// parse refuses it (D7's picker). The phrase's bytes are not retained
+/// past the call; zeroing them is best-effort (a plain write the optimiser
+/// may drop), and the Java caller's `String` copy is not cleared at all.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_org_interweave_spike009_Core_peerOfPhrase(
     env: *mut JNIEnv,
