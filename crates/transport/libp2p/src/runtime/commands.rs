@@ -1601,9 +1601,16 @@ pub(super) fn dial_peer(
 /// Put a held send on the wire now that its peer is connected, asking
 /// again what the command asked when it arrived and might have changed
 /// while it waited for its dial: the lease (a revoke, a release, a
-/// reconfiguration ends it), the drain, the peer's trust, and the source
-/// endpoint's outbound narrowing -- each answered as the `SendDirect` arm
-/// answers it. The payload limit and the self-send are fixed at arrival.
+/// reconfiguration ends it), the drain and the peer's trust -- each
+/// answered as the `SendDirect` arm answers it. The payload limit and the
+/// self-send are fixed at arrival.
+///
+/// The source endpoint's outbound narrowing is asked again too, as
+/// defence in depth and not because it can move on its own: narrowing
+/// changes only through a reconfiguration, which ends every lease first,
+/// and the profile trust it also reads moves with `classify` (#208
+/// re-review, round 2). It stays so a future path that narrows without
+/// ending the lease is still caught.
 pub(super) fn dispatch_held(
     swarm: &mut GatedSwarm,
     manager: &ConnectionManager,

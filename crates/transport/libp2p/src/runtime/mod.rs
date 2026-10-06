@@ -1604,11 +1604,6 @@ impl SwarmRuntime {
                 );
 
                 tokio::select! {
-                    // THE HEAD-START RAN OUT (§12, step 9): a circuit
-                    // route deferred behind a direct dial is dialled now
-                    // unless a direct connection to the peer landed
-                    // meanwhile -- in which case the race is over and
-                    // the relay stays a route in the book for later.
                     // A HELD SEND'S HORIZON, on its own timer: the retry
                     // tick may be far longer than the horizon.
                     () = tokio::time::sleep_until(held_due.unwrap_or_else(tokio::time::Instant::now)), if held_due.is_some() => {
@@ -1616,6 +1611,11 @@ impl SwarmRuntime {
                             let _ = send.reply.send(Err(DirectError::PeerUnreachable));
                         }
                     }
+                    // THE HEAD-START RAN OUT (§12, step 9): a circuit
+                    // route deferred behind a direct dial is dialled now
+                    // unless a direct connection to the peer landed
+                    // meanwhile -- in which case the race is over and
+                    // the relay stays a route in the book for later.
                     () = tokio::time::sleep_until(race_due.unwrap_or_else(tokio::time::Instant::now)), if race_due.is_some() => {
                         let now = now_ms(started);
                         for (peer, relayed) in races.take_due(now) {
