@@ -1779,6 +1779,31 @@ impl ConnectionManager {
         Ok(())
     }
 
+    /// An inbound connection from `peer` was RETAINED: the peer is up.
+    ///
+    /// Resets the peer's dial backoff -- the peer-scoped suppression and
+    /// the scheduled retry with its attempt count -- because a peer that
+    /// just reached this profile is better evidence than a timer its
+    /// failures set while it was away (architect-cto's ruling of
+    /// 2026-10-06, relay seq 13444: a restarted peer must not stay
+    /// unreachable for the backoff's 30-60 s after it is back).
+    /// CONNECTIVITY.md's cadence stays for a peer that has not shown
+    /// itself. Address quarantines are untouched: an inbound proves the
+    /// peer, not any address this profile dials it at.
+    ///
+    /// Called only after retention admitted the connection, so it never
+    /// acts for a peer the trust policy refuses. Returns whether there was
+    /// anything to reset.
+    pub fn record_inbound_retained(&mut self, peer: &TransportIdentity, now_ms: u64) -> bool {
+        self.observe(now_ms);
+        let backoff = self.policy.clear_peer_backoff(peer);
+        let retry = self.retries.remove(peer).is_some();
+        if backoff || retry {
+            self.publish();
+        }
+        backoff || retry
+    }
+
     /// Record that an established connection has gone.
     ///
     /// Takes the slot rather than a count, so releasing it is the same
@@ -3232,6 +3257,53 @@ mod tests {
             delays.contains(&(5 * 60 * 1_000)),
             "and actually reaches the ceiling: {delays:?}"
         );
+    }
+
+    #[test]
+    fn a_retained_inbound_resets_the_peers_backoff_and_keeps_its_quarantines() {
+        let mut m = manager(8);
+        let t = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 0)
+            .expect("admitted");
+        m.record_failure(t, 0);
+        let q = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/q"), 0)
+            .expect("admitted");
+        assert!(m.record_identity_mismatch(q, 0));
+        // The control: the failure holds the peer off, and its retry is
+        // scheduled 30 s out.
+        assert_eq!(
+            m.handle().load().admit(&request(P1, "/a"), 1_000).err(),
+            Some(DialDenial::PeerBackoff)
+        );
+        assert_eq!(m.scheduled_retries(), 1);
+
+        assert!(m.record_inbound_retained(&peer(P1), 1_000));
+        assert_eq!(m.scheduled_retries(), 0, "the retry and its count go");
+        assert!(
+            m.handle().load().admit(&request(P1, "/a"), 1_000).is_ok(),
+            "the peer is dialable at once"
+        );
+        assert_eq!(
+            m.handle().load().admit(&request(P1, "/q"), 1_000).err(),
+            Some(DialDenial::AddressQuarantined),
+            "an inbound proves the peer, not the mismatched address"
+        );
+        // The next failure starts the cadence over, at 30 s.
+        let t = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 2_000)
+            .expect("admitted");
+        m.record_failure(t, 2_000);
+        assert!(!m.is_retry_due(&peer(P1), 31_999));
+        assert!(m.is_retry_due(&peer(P1), 32_000));
+        // Nothing to reset is said so.
+        assert!(!m.record_inbound_retained(&peer(P2), 2_000));
     }
 
     #[test]

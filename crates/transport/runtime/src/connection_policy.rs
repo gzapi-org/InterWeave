@@ -691,6 +691,18 @@ impl ConnectionPolicy {
         self.peers.get(peer)
     }
 
+    /// Forget `peer`'s peer-scoped backoff, keeping every address record.
+    ///
+    /// For a peer that has just shown itself up -- an inbound connection
+    /// from it was retained -- so the timer its earlier failures set is
+    /// worse evidence than the connection. Address state stays: an
+    /// inbound proves the PEER, not that any address this profile dialed
+    /// reaches it, so a quarantine for an identity mismatch survives.
+    /// Returns whether there was a backoff to forget.
+    pub fn clear_peer_backoff(&mut self, peer: &TransportIdentity) -> bool {
+        self.peers.remove(peer).is_some()
+    }
+
     /// Decide whether a dial may proceed.
     ///
     /// Evaluated in the order ADR-0011 states: drain, then class and
