@@ -47,9 +47,9 @@
 #   1. crates/transport/libp2p/tests/root_funnel.rs exists;
 #   2. each PRUNE test builds its Swarm through `RootFunnel::new(` in its
 #      own body (from its `fn` line to the `}` at that line's indent,
-#      comments and a CR ignored), so a prune test reduced to the bare
-#      composite cannot pass on another test's use of the funnel, nor on
-#      a commented-out call;
+#      `//` comments and a CR ignored), so a prune test reduced to the
+#      bare composite cannot pass on another test's use of the funnel, nor
+#      on a `//`-commented call (a /* */ block is not parsed);
 #   3. the crate does not switch off test discovery (`autotests = false`)
 #      unless a [[test]] names root_funnel;
 #   4. .github/workflows/ci.yml runs `cargo test --workspace --all-targets`
