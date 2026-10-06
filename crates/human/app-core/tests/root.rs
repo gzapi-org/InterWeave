@@ -19,7 +19,10 @@ use interweave_human_app_core::{
 };
 use interweave_human_store::{HumanStore, InboundOrigin, NewInbound, RowId, StoreOptions};
 use interweave_human_transport_client::{ClientConfig, TransportClient};
-use interweave_human_ui_model::{ConversationKey, Intent, LabelKey, Table, UiModel, ViewEvent};
+use interweave_human_ui_model::{
+    ConversationKey, Intent, LabelKey, Table, TrustChange, TrustInput, TrustOutcome, UiModel,
+    ViewEvent,
+};
 use interweave_local_client_fake::{FakeConfig, FakeEndpoint, FakeNetwork, FakeNode};
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::{EndpointId, TransportError, TransportIdentity};
@@ -583,5 +586,62 @@ async fn a_sent_message_clears_the_composer_only_if_it_was_not_edited_since() {
         alice.model().composer(&to_bob).draft,
         "",
         "unedited: cleared"
+    );
+}
+
+fn trust(input: TrustInput) -> Vec<ViewEvent> {
+    vec![ViewEvent::Trust(input)]
+}
+
+/// The trust settings through the root: opening reads the daemon's
+/// allowlist, a proposal reaches nothing, and only a confirmation sends
+/// the change -- which the daemon then holds, read back.
+#[tokio::test]
+async fn a_trust_change_reaches_the_daemon_only_once_confirmed() {
+    let (a, b) = FakeNetwork::pair(node(), node());
+    let (mut root, _) = Root::new(facade(&a, memory()));
+    root.pump(0).await;
+
+    root.will(trust(TrustInput::Opened));
+    root.pump(1).await;
+    let list = root.model().trust_settings().list().cloned().expect("read");
+    assert_eq!(list.local_peer.as_ref(), Some(a.peer()));
+    assert_eq!(list.allowed, vec![b.peer().clone()]);
+
+    let stranger = peer();
+    root.will(trust(TrustInput::EntryChanged(
+        stranger.as_str().to_owned(),
+    )));
+    root.will(trust(TrustInput::ProposeAllow));
+    root.pump(2).await;
+    let set = |c: &Command| matches!(c, Command::SetTrust(_));
+    assert!(!root.commands.iter().any(set), "a proposal sends nothing");
+    assert!(root.model().trust_settings().pending().is_some());
+
+    root.will(trust(TrustInput::Confirm));
+    root.pump(3).await;
+    let change = TrustChange {
+        peer: stranger.clone(),
+        allowed: true,
+    };
+    assert!(root.commands.contains(&Command::SetTrust(change.clone())));
+    let settings = root.model().trust_settings();
+    assert_eq!(settings.outcome().0, Some(&TrustOutcome::Changed(change)));
+    assert!(
+        settings
+            .list()
+            .is_some_and(|l| l.allowed.contains(&stranger)),
+        "the daemon holds it, read back"
+    );
+
+    root.will(trust(TrustInput::ProposeRevoke(b.peer().clone())));
+    root.will(trust(TrustInput::Confirm));
+    root.pump(4).await;
+    assert!(
+        root.model()
+            .trust_settings()
+            .list()
+            .is_some_and(|l| !l.allowed.contains(b.peer())),
+        "revoked, read back"
     );
 }

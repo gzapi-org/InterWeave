@@ -181,6 +181,10 @@ impl<S: Surface, O: Opener> ModelSide<S, O> {
             Update::Read(row) => self.model.read(row),
             Update::Kept { item, row } => self.model.kept(item, row),
             Update::Unkept(row) => self.model.unkept(row),
+            Update::TrustRead(answer) => self.model.trust_settings_mut().read(answer),
+            Update::TrustSet { change, answer } => {
+                self.model.trust_settings_mut().set(change, answer);
+            }
             Update::Done(command) => {
                 self.in_flight.remove(&InFlight::of(&command));
             }
@@ -216,6 +220,13 @@ impl<S: Surface, O: Opener> ModelSide<S, O> {
                     ViewEvent::DraftChanged { key, draft } => {
                         self.model.draft_changed(key, draft);
                     }
+                    ViewEvent::Trust(input) => {
+                        if let Some(intent) = self.model.trust_settings_mut().input(input)
+                            && let Some(command) = self.command_for(intent)
+                        {
+                            commands.push(command);
+                        }
+                    }
                     ViewEvent::Intent(intent) => {
                         if let Some(command) = self.command_for(intent) {
                             commands.push(command);
@@ -247,6 +258,8 @@ impl<S: Surface, O: Opener> ModelSide<S, O> {
             Intent::Cancel(row) => Command::Cancel(row),
             Intent::Reopen => Command::Reopen,
             Intent::RecheckStorage => Command::RecheckStorage,
+            Intent::ReadTrust => Command::ReadTrust,
+            Intent::SetTrust(change) => Command::SetTrust(change),
         };
         if !self.in_flight.insert(InFlight::of(&command)) {
             return None;

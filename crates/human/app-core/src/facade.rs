@@ -165,6 +165,19 @@ impl<B: DataSessionBinding, A: AdminBinding> FacadeSide<B, A> {
                 self.client.recheck(now);
                 Ok(())
             }
+            Command::ReadTrust => {
+                updates.push(Update::TrustRead(Box::pin(self.client.trust()).await));
+                Ok(())
+            }
+            Command::SetTrust(change) => {
+                let answer =
+                    Box::pin(self.client.set_trust(change.peer.clone(), change.allowed)).await;
+                updates.push(Update::TrustSet {
+                    change: change.clone(),
+                    answer,
+                });
+                Ok(())
+            }
         };
         updates.push(match outcome {
             Ok(()) => Update::Done(command),
