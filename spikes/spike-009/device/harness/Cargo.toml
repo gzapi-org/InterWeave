@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# SPIKE-009 device harness, Rust core -- EVIDENCE ONLY, and deliberately
+# not a workspace member (an empty [workspace] table below), as every
+# spike harness. Built for arm64-v8a with cargo-ndk and loaded by the
+# harness app over JNI; every byte decision about the envelope is made
+# here, so the device and host halves judge one layout with one code
+# path, while the AES-256-GCM operation itself is AndroidKeyStore's.
+
+[package]
+name = "spike-009-device"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+
+[lib]
+name = "spike009"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Exact, the version the root Cargo.lock resolves; raw JNI, so the
+# binding surface is byte arrays and ints and nothing else.
+jni-sys = "=0.3.1"
+
+# THE PRODUCTION IDENTITY, by revision (SPIKES.md, "frozen all the way
+# down"): the tree this run built against, origin/main when the first
+# recorded device run was made.
+interweave-profile-identity = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "7e2978d1d5df427454262d0fb7df15856c9b46f7" }
+interweave-transport-api = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "7e2978d1d5df427454262d0fb7df15856c9b46f7" }
+
+[dev-dependencies]
+# The host half's envelope, included by path in the layout test: the
+# device framing must give back the host's bytes, and the device AAD
+# must authenticate the host's ciphertext.
+aes-gcm = "=0.10.3"
+
+[workspace]
