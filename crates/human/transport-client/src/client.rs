@@ -33,16 +33,19 @@ use interweave_local_client_api::{
 use interweave_transport_api::{
     BroadcastMessageV1, ChannelId, ConnectivitySummary, DirectDestination, DirectInboundState,
     EndpointId, Health, MediaType, MessageId, PathReadiness, Payload, TransportError,
+    TransportIdentity,
 };
 
 use crate::backoff::{RECHECK, REOPEN, SEND};
 use crate::problem::{
-    AttemptFailure, OpenFailure, classify_open, classify_send, ends_session, may_have_reached,
+    AttemptFailure, OpenFailure, classify_open, classify_send, classify_trust, ends_session,
+    may_have_reached,
 };
 use crate::queue::{Capped, EventQueue};
 use interweave_human_client_api::{
     ClientEvent, Connectivity, Destination, Diagnostics, Origin, OutboundStatus, OutboundUpdate,
-    Received, RowError, SendError, SendProblem, SessionProblem, SessionState,
+    Received, RowError, SendError, SendProblem, SessionProblem, SessionState, TrustList,
+    TrustProblem,
 };
 
 /// How many committed messages wait for hand-over at most: one session
@@ -449,6 +452,54 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
             self.next_recheck_at = now;
             self.tick_storage(now);
         }
+    }
+
+    /// The profile's trust allowlist (`human-client-ui.md` §8), read over
+    /// an administrative connection of its own that holds `admin.trust`
+    /// alone and closes with the call: the standing status connection
+    /// never holds trust authority, and nothing holds it between a
+    /// person's settings actions.
+    ///
+    /// # Errors
+    /// The failure's class.
+    pub async fn trust(&self) -> Result<TrustList, TrustProblem> {
+        let admin = self.trust_port().await?;
+        let view = admin.trust().await.map_err(classify_trust)?;
+        Ok(TrustList {
+            local_peer: view.local_peer,
+            allowed: view.allowed,
+        })
+    }
+
+    /// Allow `peer`, or revoke it, then read the allowlist back -- what the
+    /// daemon holds afterwards, not what was asked -- on one such
+    /// connection. Revoking closes the peer's connections and each
+    /// session is told `PeerDisconnected` (`LOCAL-CLIENT.md` §7 item 11).
+    ///
+    /// # Errors
+    /// The failure's class; nothing was changed when it came from the set.
+    pub async fn set_trust(
+        &self,
+        peer: TransportIdentity,
+        allowed: bool,
+    ) -> Result<TrustList, TrustProblem> {
+        let admin = self.trust_port().await?;
+        admin
+            .set_trust(peer, allowed)
+            .await
+            .map_err(classify_trust)?;
+        let view = admin.trust().await.map_err(classify_trust)?;
+        Ok(TrustList {
+            local_peer: view.local_peer,
+            allowed: view.allowed,
+        })
+    }
+
+    async fn trust_port(&self) -> Result<A::Admin, TrustProblem> {
+        self.admin_binding
+            .admin(BTreeSet::from([AdminCapability::Trust]))
+            .await
+            .map_err(classify_trust)
     }
 
     /// End the session; the facade does nothing more until dropped.

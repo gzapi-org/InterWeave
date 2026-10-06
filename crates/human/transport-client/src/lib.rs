@@ -26,5 +26,6 @@ pub use client::{ClientConfig, TransportClient, WallClock};
 // (plan §17 P2); re-exported so a caller of the facade needs one crate.
 pub use interweave_human_client_api::{
     ClientEvent, Connectivity, Destination, Diagnostics, Origin, OutboundStatus, OutboundUpdate,
-    Received, RowError, SendError, SendProblem, SessionProblem, SessionState,
+    Received, RowError, SendError, SendProblem, SessionProblem, SessionState, TrustList,
+    TrustProblem,
 };

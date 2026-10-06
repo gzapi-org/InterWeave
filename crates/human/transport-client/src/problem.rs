@@ -6,7 +6,7 @@
 //! to the transport fails to compile here rather than reaching a view
 //! unclassified.
 
-use interweave_human_client_api::{SendProblem, SessionProblem};
+use interweave_human_client_api::{SendProblem, SessionProblem, TrustProblem};
 use interweave_transport_api::TransportError;
 
 /// What one send attempt's failure means for its row.
@@ -132,6 +132,38 @@ pub(crate) const fn classify_open(error: TransportError) -> OpenFailure {
     }
 }
 
+/// Classify a trust read's or change's failure (`human-client-ui.md` §8).
+/// `InvalidArgument` is the port's refusal of this profile's own identity
+/// or of a new peer past the allowlist's ceiling (`LOCAL-CLIENT.md` §7
+/// item 11), a refusal the person can act on.
+pub(crate) const fn classify_trust(error: TransportError) -> TrustProblem {
+    match error {
+        TransportError::BackendUnavailable
+        | TransportError::ShuttingDown
+        | TransportError::Timeout
+        | TransportError::Overloaded
+        | TransportError::CancelledBeforeDispatch
+        | TransportError::CancellationRaced => TrustProblem::Unavailable,
+        TransportError::CapabilityDenied => TrustProblem::NotPermitted,
+        TransportError::InvalidArgument => TrustProblem::Refused,
+        TransportError::PayloadTooLarge
+        | TransportError::ChannelNotJoined
+        | TransportError::EndpointNotRegistered
+        | TransportError::EndpointUnknown
+        | TransportError::EndpointInUse
+        | TransportError::EndpointDisabled
+        | TransportError::EndpointClientKindDenied
+        | TransportError::UnauthorizedPeer
+        | TransportError::PeerUnknown
+        | TransportError::PeerUnreachable
+        | TransportError::RemoteEndpointUnavailable
+        | TransportError::ProtocolUnsupported
+        | TransportError::ProtocolViolation
+        | TransportError::VersionIncompatible
+        | TransportError::Internal => TrustProblem::Internal,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,6 +279,30 @@ mod tests {
                 classify_send(error),
                 AttemptFailure::NeedsAttention(SendProblem::NotConfigured),
                 "{error:?}: NotConfigured is the configuration check's alone"
+            );
+        }
+    }
+
+    #[test]
+    fn a_trust_failure_is_unavailable_not_permitted_refused_or_internal() {
+        assert_eq!(
+            classify_trust(TransportError::BackendUnavailable),
+            TrustProblem::Unavailable
+        );
+        assert_eq!(
+            classify_trust(TransportError::CapabilityDenied),
+            TrustProblem::NotPermitted
+        );
+        assert_eq!(
+            classify_trust(TransportError::InvalidArgument),
+            TrustProblem::Refused
+        );
+        for error in ALL {
+            // Only the port's own refusal reads as one the person caused.
+            assert_eq!(
+                classify_trust(error) == TrustProblem::Refused,
+                error == TransportError::InvalidArgument,
+                "{error:?}"
             );
         }
     }

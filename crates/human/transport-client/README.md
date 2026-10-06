@@ -61,6 +61,8 @@ It is read from the runtime's state pushed on the data session (`ServerState`, a
   - `Received.row` is the store's own row id, the one `unread_inbound` returns, so a re-list merges with what `drain` gave by row id;
   - `not_handed_over` is cumulative and monotone over the facade's life, and is never reset by a re-open.
 
+**Trust** (`human-client-ui.md` §8, `LOCAL-CLIENT.md` §7 item 11): `trust()` reads the allowlist and this profile's own identity; `set_trust(peer, allowed)` allows or revokes a peer and returns the allowlist read back afterwards. Each call opens an administrative connection of its own holding `admin.trust` and nothing else, and closes it with the call: the standing status connection never holds trust authority, and none is held between a person's actions (`tests/facade.rs`: `a_trust_call_opens_a_connection_holding_admin_trust_alone`). A failure is a `TrustProblem` class; `Refused` is the daemon's refusal of this profile's own identity or of a new peer past the allowlist's ceiling. The allowlist is a runtime overlay, lost when the daemon restarts (ADR-0028). A revocation reaches every open session as the peer's `PeerDisconnected`.
+
 **Driving:** poll-driven, and nothing is spawned. There are two clocks:
 - `tick(now)` and every `now` are the caller's MONOTONIC clock, and drive schedules only.
 - Persisted and wire times (`created_at`, `received_at`, an attempt's time, a broadcast's `sent_at_ms`) come from the WALL clock given to the constructor, in Unix ms.

@@ -9,12 +9,13 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex};
 
 use interweave_human_chat_protocol::{HumanChatV2, MessageKind};
 use interweave_human_store::{HumanStore, StoreOptions};
 use interweave_human_transport_client::{
     ClientConfig, ClientEvent, Connectivity, Destination, Origin, OutboundStatus, Received,
-    SendError, SendProblem, SessionProblem, SessionState, TransportClient,
+    SendError, SendProblem, SessionProblem, SessionState, TransportClient, TrustList, TrustProblem,
 };
 use interweave_local_client_api::{
     AdminBinding, AdminCapability, AdminPort, DataCapability, DataSessionBinding, DataSessionPort,
@@ -1373,5 +1374,143 @@ async fn a_path_change_is_the_peers_newest_path_and_nothing_else() {
             path: PeerPath::Direct,
         }],
         "one event, the newest path"
+    );
+}
+
+/// An admin binding over a fake node that records the capabilities each
+/// connection asked for: what a trust call holds, said by the port it
+/// opened rather than by the facade's word.
+#[derive(Clone)]
+struct Recording {
+    node: FakeNode,
+    asked: Arc<Mutex<Vec<BTreeSet<AdminCapability>>>>,
+}
+
+impl AdminBinding for Recording {
+    type Admin = <FakeNode as AdminBinding>::Admin;
+
+    fn admin(
+        &self,
+        capabilities: BTreeSet<AdminCapability>,
+    ) -> impl std::future::Future<Output = Result<Self::Admin, TransportError>> + Send {
+        self.asked
+            .lock()
+            .expect("the record")
+            .push(capabilities.clone());
+        let node = self.node.clone();
+        async move { node.admin(capabilities).await }
+    }
+}
+
+fn trusting(node: &FakeNode) -> (TransportClient<FakeNode, Recording>, Recording) {
+    let recording = Recording {
+        node: node.clone(),
+        asked: Arc::default(),
+    };
+    let client = TransportClient::new(
+        node.clone(),
+        recording.clone(),
+        memory(),
+        ClientConfig {
+            client_kind: "human-client".to_owned(),
+            endpoint: Some(human()),
+            channels: Vec::new(),
+            max_payload_bytes: LIMIT,
+        },
+        wall(),
+        0,
+    )
+    .expect("an empty store");
+    (client, recording)
+}
+
+/// The allowlist as the daemon holds it, this profile's own identity
+/// beside it; a change is read back, and a revocation reaches an open
+/// session as the peer's disconnection (`LOCAL-CLIENT.md` section 7 item 11).
+#[tokio::test]
+async fn trust_is_read_allowed_and_revoked_and_read_back() {
+    let (a, b) = FakeNetwork::pair(node_config(), node_config());
+    let (settings, _) = trusting(&a);
+    let mut session = client(&a, human(), memory());
+    ready(&mut session, 0).await;
+    let _ = events(&mut session);
+
+    let read = settings.trust().await.expect("the allowlist");
+    assert_eq!(
+        read,
+        TrustList {
+            local_peer: Some(a.peer().clone()),
+            allowed: vec![b.peer().clone()],
+        }
+    );
+
+    let stranger = ProfileIdentity::generate()
+        .transport_identity()
+        .expect("a peer");
+    let after = settings
+        .set_trust(stranger.clone(), true)
+        .await
+        .expect("allowed");
+    assert!(
+        after.allowed.contains(&stranger),
+        "read back with it: {after:?}"
+    );
+
+    let after = settings
+        .set_trust(b.peer().clone(), false)
+        .await
+        .expect("revoked");
+    assert!(
+        !after.allowed.contains(b.peer()),
+        "read back without it: {after:?}"
+    );
+    let _ = session.drain(16, 1).await;
+    assert!(
+        events(&mut session).contains(&ClientEvent::PeerDisconnected {
+            peer: b.peer().clone()
+        }),
+        "the open session was told"
+    );
+}
+
+/// This profile's own identity is never a peer to trust: the daemon's
+/// refusal is one the person can act on, and nothing changed.
+#[tokio::test]
+async fn trusting_this_profiles_own_identity_is_refused() {
+    let (a, b) = FakeNetwork::pair(node_config(), node_config());
+    let (settings, _) = trusting(&a);
+    assert_eq!(
+        settings.set_trust(a.peer().clone(), true).await,
+        Err(TrustProblem::Refused)
+    );
+    assert_eq!(
+        settings.trust().await.expect("the allowlist").allowed,
+        vec![b.peer().clone()]
+    );
+}
+
+/// Every connection a trust call opens holds `admin.trust` and nothing
+/// else, and one is opened per call: no trust authority is held between
+/// a person's settings actions, and none rides the status connection.
+#[tokio::test]
+async fn a_trust_call_opens_a_connection_holding_admin_trust_alone() {
+    let (a, b) = FakeNetwork::pair(node_config(), node_config());
+    let (mut settings, recording) = trusting(&a);
+    let _ = settings.trust().await.expect("the allowlist");
+    let _ = settings
+        .set_trust(b.peer().clone(), true)
+        .await
+        .expect("a no-op allow");
+    let trust_only = BTreeSet::from([AdminCapability::Trust]);
+    assert_eq!(
+        *recording.asked.lock().expect("the record"),
+        vec![trust_only.clone(), trust_only],
+        "one connection per call, each holding admin.trust alone"
+    );
+    // Control: the facade's own status read asks for status alone.
+    settings.tick(0).await;
+    assert_eq!(
+        recording.asked.lock().expect("the record").last(),
+        Some(&BTreeSet::from([AdminCapability::Status])),
     );
 }
