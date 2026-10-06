@@ -121,6 +121,10 @@ EOF
     git -C "$SANDBOX" branch -M main
     if [[ "$merged" == "yes" ]]; then
         git -C "$SANDBOX" update-ref refs/remotes/origin/main HEAD
+    elif [[ "$merged" == "first-run" ]]; then
+        # A spike's FIRST recorded run, on the pull request that adds it:
+        # origin/main holds the pin, HEAD the recording commit after it.
+        git -C "$SANDBOX" update-ref refs/remotes/origin/main "$PIN"
     else
         # The pin is a commit on a branch that never merged. Built as a
         # child of origin/main rather than by detaching, so the working
@@ -485,6 +489,21 @@ assert_rc "a pin that is an ancestor of origin/main and parents a spike-only com
 assert_contains "and says what it traced it to" "on origin/main, parent of"
 rm -rf "$SANDBOX"; SANDBOX=""
 
+# A FIRST RECORDED RUN: the recording commit is only on HEAD, as on the
+# pull request that adds it and in the merge queue's build of it.
+new_provenance_sandbox yes first-run
+run_provenance_guard
+assert_rc "a first run, recorded only on this branch, passes" 0
+assert_contains "and says where it found the recording" "recorded on this branch (not yet on origin/main), parent of"
+rm -rf "$SANDBOX"; SANDBOX=""
+
+# …while a spike-only commit on HEAD that does NOT parent the pin is
+# still no recording.
+new_provenance_sandbox no first-run
+run_provenance_guard
+assert_rc "a branch commit that also changes production is still refused" 1
+rm -rf "$SANDBOX"; SANDBOX=""
+
 # NOT AN ANCESTOR: a feature-branch tip that never merged, which is what
 # the first version of these pins recorded.
 new_provenance_sandbox yes no
@@ -578,7 +597,11 @@ else
     side="$( git -C "$SANDBOX" commit-tree "$side_tree" -m 'the run' )"
 fi
 merge="$( git -C "$SANDBOX" commit-tree "$evil_tree" -p "$PIN" -p "$side" -m 'merge' )"
+# HEAD too: the guard walks origin/main and HEAD, and the checkout CI
+# builds has HEAD at what it builds. Left on the fixture's own recording
+# commit, HEAD would supply a genuine recording and hide the merge.
 git -C "$SANDBOX" update-ref refs/remotes/origin/main "$merge"
+git -C "$SANDBOX" update-ref refs/heads/main "$merge"
 run_provenance_guard
 assert_rc "a pin whose only child is a MERGE fails" 1
 assert_contains "and does not accept an evil merge as a recording commit" "no commit in that"
