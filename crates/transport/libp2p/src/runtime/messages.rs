@@ -15,7 +15,9 @@ use tokio::sync::oneshot;
 use interweave_kademlia_control_api::{KademliaCommand, KademliaEvent};
 use interweave_transport_api::TransportError as DirectError;
 use interweave_transport_api::{DirectMessageV2, EndpointId, TransportIdentity};
-use interweave_transport_runtime::{DialDenial, RetentionRefusal, TrustSources};
+use interweave_transport_runtime::{
+    DialDenial, DialOrigin, GateNote, RetentionRefusal, TrustSources,
+};
 
 // `DirectEndpoints` still lives beside the loop that consumes it.
 use super::DirectEndpoints;
@@ -335,6 +337,85 @@ pub enum SwarmCommand {
         /// Answered once the Swarm has been dropped.
         reply: oneshot::Sender<()>,
     },
+}
+
+/// What a failed dial was, as an address-free class
+/// (`observability.md` §Logs, A 2026-10-06): the gate's own refusal by
+/// its name where the gate refused, else a fixed class. Never the
+/// library's error text, which can name an address (ADR-0052 rule 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialFailureClass {
+    /// The gate refused it.
+    Denied(DialDenial),
+    /// A peer ceiling would not have retained the connection.
+    Retention(RetentionRefusal),
+    /// Nothing is known about where to reach the peer.
+    NoKnownAddress,
+    /// This node's own handler refused the connection (`DialError::Denied`).
+    LocallyDenied,
+    /// The address answered with another identity.
+    IdentityMismatch,
+    /// Any other failure.
+    DialFailed,
+}
+
+impl DialFailureClass {
+    /// The class as a log line or a diagnostics row names it.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Denied(denial) => match denial {
+                DialDenial::ShuttingDown => "ShuttingDown",
+                DialDenial::Unauthorized => "Unauthorized",
+                DialDenial::NotAuthorizedForDataPlane => "NotAuthorizedForDataPlane",
+                DialDenial::PeerBackoff => "PeerBackoff",
+                DialDenial::AddressQuarantined => "AddressQuarantined",
+                DialDenial::TooManyPendingDials => "TooManyPendingDials",
+                DialDenial::ConnectionLimitReached => "ConnectionLimitReached",
+                DialDenial::PolicySuperseded => "PolicySuperseded",
+                DialDenial::PolicyStateFull => "PolicyStateFull",
+            },
+            Self::Retention(refusal) => match refusal {
+                RetentionRefusal::PerPeerLimitReached => "PerPeerLimitReached",
+                RetentionRefusal::ConnectedPeerLimitReached => "ConnectedPeerLimitReached",
+            },
+            Self::NoKnownAddress => "no_known_address",
+            Self::LocallyDenied => "denied",
+            Self::IdentityMismatch => "identity_mismatch",
+            Self::DialFailed => "dial_failed",
+        }
+    }
+
+    /// The class of a refused dial.
+    #[must_use]
+    pub const fn of_refusal(refusal: &DialRefusal) -> Self {
+        match refusal {
+            DialRefusal::NoKnownAddress => Self::NoKnownAddress,
+            DialRefusal::Policy(denial) => Self::Denied(*denial),
+            DialRefusal::Retention(refusal) => Self::Retention(*refusal),
+            DialRefusal::Backend(_) => Self::DialFailed,
+        }
+    }
+
+    /// The class of a dial libp2p reports failed: its identity check and
+    /// this node's own refusal; anything else is `dial_failed`.
+    ///
+    /// NOT `refused` or `timeout`, which `observability.md` also lists:
+    /// measured on a refused dial (`tests/gate_notes.rs`), the socket's
+    /// `io::Error` sits inside the builder's composed `either::Either`,
+    /// whose `source()` skips it and whose type parameters depend on the
+    /// transports compiled in, so no structural read reaches the kind.
+    /// Reading it out of the error's text is what this class exists not
+    /// to do.
+    #[must_use]
+    pub fn of_dial_error(error: &libp2p::swarm::DialError) -> Self {
+        use libp2p::swarm::DialError;
+        match error {
+            DialError::WrongPeerId { .. } => Self::IdentityMismatch,
+            DialError::Denied { .. } => Self::LocallyDenied,
+            _ => Self::DialFailed,
+        }
+    }
 }
 
 /// Why a dial did not proceed.
@@ -1092,7 +1173,104 @@ pub enum SwarmEvent {
     DialFailed {
         /// The peer that was being dialed, when known.
         peer: Option<TransportIdentity>,
-        /// What went wrong.
+        /// What went wrong, in the library's words. It can name an
+        /// address, so it is never logged; `class` is what a line or a
+        /// diagnostics row carries.
         detail: String,
+        /// What went wrong, address-free.
+        class: DialFailureClass,
     },
+    /// A failed dial scheduled the peer's next retry
+    /// (`ConnectionManager::drain_notes`).
+    RetryScheduled {
+        /// The peer.
+        peer: TransportIdentity,
+        /// Who asked for the dial that failed.
+        origin: DialOrigin,
+        /// Which retry it will be.
+        attempt: u32,
+        /// How long until it is due.
+        delay_ms: u64,
+        /// Whether the peer itself went into backoff.
+        peer_backoff: bool,
+    },
+    /// An address of the peer answered with another identity and is
+    /// quarantined.
+    AddressQuarantined {
+        /// The peer the address was dialled as.
+        peer: TransportIdentity,
+        /// For how long.
+        for_ms: u64,
+    },
+}
+
+impl SwarmEvent {
+    /// The event a gate note is reported as.
+    #[must_use]
+    pub fn from_note(note: GateNote) -> Self {
+        match note {
+            GateNote::RetryScheduled {
+                peer,
+                origin,
+                retry,
+            } => Self::RetryScheduled {
+                peer,
+                origin,
+                attempt: retry.attempt,
+                delay_ms: retry.delay_ms,
+                peer_backoff: retry.peer_backoff,
+            },
+            GateNote::AddressQuarantined { peer, for_ms } => {
+                Self::AddressQuarantined { peer, for_ms }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod class_tests {
+    use super::*;
+    use libp2p::core::transport::TransportError;
+    use libp2p::swarm::DialError;
+
+    /// A transport failure is `dial_failed` whatever the socket said:
+    /// the kind is not reachable structurally (`of_dial_error`).
+    #[test]
+    fn a_transport_failure_is_dial_failed_and_this_nodes_refusal_is_denied() {
+        let refused = DialError::Transport(vec![(
+            "/ip4/127.0.0.1/tcp/1".parse().expect("valid"),
+            TransportError::Other(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "refused",
+            )),
+        )]);
+        assert_eq!(
+            DialFailureClass::of_dial_error(&refused),
+            DialFailureClass::DialFailed
+        );
+        assert_eq!(
+            DialFailureClass::of_dial_error(&DialError::Aborted),
+            DialFailureClass::DialFailed
+        );
+    }
+
+    /// A refusal is named as the gate names it; the rest are the fixed
+    /// classes, and no label is empty.
+    #[test]
+    fn a_refusal_carries_the_gates_own_name() {
+        assert_eq!(
+            DialFailureClass::of_refusal(&DialRefusal::Policy(DialDenial::PeerBackoff)).label(),
+            "PeerBackoff"
+        );
+        assert_eq!(
+            DialFailureClass::of_refusal(&DialRefusal::NoKnownAddress).label(),
+            "no_known_address"
+        );
+        assert_eq!(
+            DialFailureClass::of_refusal(&DialRefusal::Backend("/ip4/1.2.3.4/tcp/1".into()))
+                .label(),
+            "dial_failed",
+            "the library's text, which can name an address, is not the class"
+        );
+    }
 }

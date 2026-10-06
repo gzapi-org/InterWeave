@@ -57,9 +57,9 @@ async fn dial_failure(runtime: &mut SwarmRuntime, peer: &TransportIdentity) -> S
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(!remaining.is_zero(), "no dial failure arrived");
         match tokio::time::timeout(remaining, runtime.next_event()).await {
-            Ok(Some(SwarmEvent::DialFailed { peer: who, detail }))
-                if who.as_ref() == Some(peer) =>
-            {
+            Ok(Some(SwarmEvent::DialFailed {
+                peer: who, detail, ..
+            })) if who.as_ref() == Some(peer) => {
                 return detail;
             }
             Ok(Some(_)) => {}

@@ -1423,6 +1423,7 @@ pub(super) fn translate(
             Some(SwarmEvent::DialFailed {
                 peer: peer_id.as_ref().and_then(|p| to_transport_identity(p).ok()),
                 detail: error.to_string(),
+                class: super::messages::DialFailureClass::of_dial_error(&error),
             })
         }
         Libp2pSwarmEvent::Behaviour(SubstrateBehaviourEvent::Identify(

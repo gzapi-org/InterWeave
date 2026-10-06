@@ -96,7 +96,7 @@ pub use status::{DialGateStatus, IngressStatus, PreAuthStatus, RuntimeStatus};
 
 pub use handle::{ShutdownReport, SwarmCommander};
 pub use messages::{
-    DialRefusal, HolePunchOutcome, PathChange, PeerPath, RelayReservationOutcome,
+    DialFailureClass, DialRefusal, HolePunchOutcome, PathChange, PeerPath, RelayReservationOutcome,
     RelayServerOutcome, SwarmCommand, SwarmEvent,
 };
 
@@ -1558,6 +1558,17 @@ impl SwarmRuntime {
                     break;
                 }
 
+                // THE GATE'S DECISIONS, handed up once per turn: every
+                // retry and quarantine the manager noted since the last
+                // (`drain_notes`), whichever path settled the dial.
+                // Informational, so at base capacity only, as deliveries
+                // are: a full outbox drops them rather than queueing.
+                for note in manager.drain_notes() {
+                    if may_buffer_delivery(outbox.len(), config.event_capacity) {
+                        outbox.push_back(SwarmEvent::from_note(note));
+                    }
+                }
+
                 // The deadline, when a shutdown is waiting out its
                 // grace. `None` the rest of the time, and the select
                 // branch below is inert then.
@@ -1635,6 +1646,7 @@ impl SwarmRuntime {
                                 outbox.push_back(SwarmEvent::DialFailed {
                                     peer: Some(peer.clone()),
                                     detail: format!("deferred circuit: {refusal:?}"),
+                                    class: messages::DialFailureClass::of_refusal(&refusal),
                                 });
                             }
                         }
@@ -1745,6 +1757,9 @@ impl SwarmRuntime {
                                             DialRefusal::Policy(
                                                 DialDenial::Unauthorized
                                             )
+                                        ),
+                                        class: messages::DialFailureClass::Denied(
+                                            DialDenial::Unauthorized,
                                         ),
                                     });
                                 }
@@ -1893,6 +1908,7 @@ impl SwarmRuntime {
                                     outbox.push_back(SwarmEvent::DialFailed {
                                         peer: Some(peer.clone()),
                                         detail: format!("scheduled retry: {refusal:?}"),
+                                        class: messages::DialFailureClass::of_refusal(&refusal),
                                     });
                                 }
                             }
