@@ -108,9 +108,9 @@ The recorded run is [`device/REPRODUCTION-2026-10-06d.log`](./device/REPRODUCTIO
 
 **Limit:** the per-operation key in part 4 was never used before the event. Its prompt went unanswered, so its pre-event health rests on its generation and `KeyInfo`, not on a completed unwrap. Part 3's per-operation key did complete one, and the same configuration is used here.
 
-## The device half: the plan
+## The device half: the plan, as written before the run
 
-[`device/`](./device), above. Every row has run (parts 1–4 above). Results are written to app-private storage and read back over adb (`run-as`). The fixture seed is the TEST-ONLY public vector only.
+[`device/`](./device), above. This is the plan the run followed, kept as written; what was measured is in parts 1–4 above, and where they differ the parts are the record. Two of its expectations were not measured: the control field's IME-suggestion leak (only its flags were read) and the clipboard check. Results are written to app-private storage and read back over adb (`run-as`). The fixture seed is the TEST-ONLY public vector only.
 
 | id | what | recorded |
 |---|---|---|
