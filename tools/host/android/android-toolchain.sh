@@ -346,14 +346,16 @@ mv "$new" "$store" || { [[ -e "$old" ]] && mv "$old" "$store"; mount_store; die 
 trap - EXIT
 # The previous tree (and profile) stay until every step below has
 # succeeded; a failure puts them back.
+# The profile is restored IN PLACE: on an AppVM $PROFILE is bind-mounted
+# from $pstore's inode, and a rename would leave the mount on the new text.
 rollback() {  # rollback <message>
-    if [[ -e "$old" ]]; then
-        if [[ "$persist" == bind ]] && mountpoint -q "$SDK_DIR"; then umount "$SDK_DIR"; fi
-        rm -rf "$store" && mv "$old" "$store" && mount_store
-        [[ -e "$pstore.old" ]] && mv "$pstore.old" "$pstore"
+    [[ -e "$old" ]] || die "$1"
+    if { [[ "$persist" != bind ]] || ! mountpoint -q "$SDK_DIR" || umount "$SDK_DIR"; } \
+        && rm -rf "$store" && mv "$old" "$store" && mount_store \
+        && { [[ ! -e "$pstore.old" ]] || { cat "$pstore.old" > "$pstore" && rm -f "$pstore.old"; }; }; then
         die "$1; the previous install is restored"
     fi
-    die "$1"
+    die "$1; restoring the previous install FAILED as well: the previous tree is at ${old}, if not at ${store} (and its profile at ${pstore}.old)"
 }
 mount_store || rollback "the new install is in $store but cannot be bind-mounted onto $SDK_DIR"
 
@@ -372,7 +374,8 @@ rm -f "$pstore.old"; if [[ -e "$pstore" ]]; then cp -p "$pstore" "$pstore.old" |
 if [[ "$persist" == bind ]]; then
     mkdir -p "$(dirname "$BIND_CONF")" \
         && printf "# Written by InterWeave tools/host/android/android-toolchain.sh --install.\nbinds+=( '%s' )\nbinds+=( '%s' )\n" \
-            "$SDK_DIR" "$PROFILE" > "$BIND_CONF" \
+            "$SDK_DIR" "$PROFILE" > "$BIND_CONF.new" \
+        && mv "$BIND_CONF.new" "$BIND_CONF" \
         || rollback "cannot write $BIND_CONF"
     # Now, without a restart: what Qubes does at the next boot (the SDK is
     # mounted already, just after the swap).

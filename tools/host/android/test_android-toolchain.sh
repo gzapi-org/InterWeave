@@ -308,6 +308,13 @@ if unshare -rm true 2>/dev/null; then
         && pass "  and the bind-dirs entry names the SDK and the profile" || fail "the bind-dirs entry is wrong" "$(cat "$SANDBOX/rw/config/50_android-sdk.conf" 2>&1)"
     INST_AFTER=" && sed -i '/android-sdk.sh/d' '$SANDBOX/rw/config/50_android-sdk.conf'; bash '$UNDER_TEST' --check" inst rw-only
     expect "  a profile bind-dirs does not keep is named, though the file is there now" 1 "does not keep $SANDBOX/etc/android-sdk.sh"
+    # On an AppVM, a failure after the profile is rewritten (here: the
+    # bind-dirs entry cannot be written) restores the profile IN PLACE, so
+    # the bind-mounted /etc file shows the previous text, not the new one.
+    rm -rf "$SANDBOX/rw" "$SANDBOX/opt"; : > "$SANDBOX/conf-not-a-dir"
+    INST_AFTER=" && echo '# previous' >> '$SANDBOX/etc/android-sdk.sh' && ANDROID_TOOLCHAIN_BIND_CONF='$SANDBOX/conf-not-a-dir/50.conf' bash '$UNDER_TEST' --install '$SANDBOX/a.tar.gz'; echo \"rc=\$?\"; tail -1 '$SANDBOX/etc/android-sdk.sh'" inst rw-only
+    [[ "$out" == *"the previous install is restored"*"rc=2"*"# previous" ]] \
+        && pass "  a rollback on an AppVM restores the mounted profile in place" || fail "the mounted profile was not restored" "$out"
     rm -rf "$SANDBOX/rw" "$SANDBOX/opt"
 elif [[ -n "${CI:-}" ]]; then
     fail "unprivileged user and mount namespaces are unavailable under CI: the install would go untested"
