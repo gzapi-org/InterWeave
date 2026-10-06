@@ -25,6 +25,7 @@ use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::{
     DirectMessageV2, EndpointId, MediaType, MessageId, Payload, TransportError, TransportIdentity,
 };
+use interweave_transport_libp2p::DialFailureClass;
 use interweave_transport_libp2p::runtime::{
     DirectEndpoints, SubstrateConfig, SubstrateError, SwarmEvent, SwarmRuntime,
 };
@@ -1975,6 +1976,29 @@ async fn a_restarted_peer_is_reachable_once_it_has_connected_in_and_held_off_bef
         "answered after {:?}",
         asked.elapsed()
     );
+    // And what held it is reported by the gate's own name, for the
+    // connectivity line and the peer's row; the caller had the bare code.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining, sender.next_event()).await {
+            Ok(Some(SwarmEvent::DialFailed {
+                peer: Some(p),
+                class,
+                ..
+            })) if p == receiver_peer
+                && class
+                    == DialFailureClass::Denied(
+                        interweave_transport_runtime::DialDenial::PeerBackoff,
+                    ) =>
+            {
+                break;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("the sender stopped"),
+            Err(elapsed) => panic!("no backoff class reported ({elapsed})"),
+        }
+    }
 
     // 3. The receiver connects in; the sender retains it.
     receiver
