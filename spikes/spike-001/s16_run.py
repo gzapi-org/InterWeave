@@ -35,6 +35,7 @@ import socket
 import subprocess
 import tempfile
 import time
+import traceback
 
 from spike_common import CLAUDE, REPO, child_env, claude_version, distil, raw_dir
 
@@ -269,6 +270,10 @@ def main() -> int:
                 os.chdir(cwd)
                 os.execvpe(cmd[0], cmd, child_env({"TERM": "xterm-256color", "COLUMNS": "120", "LINES": "40",
                                                    **long_term_token()}))
+            except BaseException:
+                # Loud: stderr is the pty, so the cause lands in the
+                # run's own screen capture.
+                traceback.print_exc()
             finally:
                 os._exit(127)
 
