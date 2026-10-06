@@ -3193,6 +3193,7 @@ version = "0.0.0"
 dependencies = [
  "interweave-claude-channel-core",
  "interweave-ipc-client",
+ "interweave-ipc-protocol",
  "interweave-local-client-api",
  "interweave-local-client-fake",
  "interweave-profile-config",

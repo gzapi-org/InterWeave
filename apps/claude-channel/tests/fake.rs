@@ -62,6 +62,9 @@ struct Record {
     down: AtomicBool,
     /// Joins are refused, as a daemon that will not take one answers.
     refuse_join: AtomicBool,
+    /// The next join finds the session dead, as a daemon restarting
+    /// between the open and the re-join leaves it.
+    die_on_join: AtomicBool,
 }
 
 impl Record {
@@ -118,6 +121,9 @@ impl DataSessionPort for RecordedSession {
         self.record.down()?;
         if self.record.refuse_join.load(Ordering::SeqCst) {
             return Err(TransportError::Overloaded);
+        }
+        if self.record.die_on_join.swap(false, Ordering::SeqCst) {
+            return Err(TransportError::BackendUnavailable);
         }
         self.inner.join(channel).await
     }
@@ -382,18 +388,38 @@ async fn an_inbound_direct_is_notified_and_replied_to_on_its_route() {
     assert!(text.starts_with("InvalidArgument"), "{text}");
 }
 
-/// `send` names the endpoint, or the remote default when it does not.
+/// `send` names the endpoint, or the remote default when it does not:
+/// the explicit target is B's `claude`, not its default `human`, and the
+/// message arrives at the session leased there.
 #[tokio::test]
 async fn send_is_endpoint_aware() {
     let mut w = World::start().await;
+    let b_claude =
+        w.b.open(
+            SessionRequest::new(
+                "test-peer",
+                Some(endpoint("claude")),
+                [DataCapability::Events, DataCapability::Commands],
+            )
+            .expect("request"),
+        )
+        .await
+        .expect("opens");
     let b = w.b.peer().as_str().to_owned();
     let (text, _) = w
         .tool(
             "send",
-            json!({"peer": b, "endpoint": "human", "content": "x"}),
+            json!({"peer": b, "endpoint": "claude", "content": "x"}),
         )
         .await;
-    assert_eq!(text, "remote transport accepted at endpoint human");
+    assert_eq!(text, "remote transport accepted at endpoint claude");
+    let arrived = b_claude.events(usize::MAX).await.expect("events");
+    assert!(
+        arrived
+            .iter()
+            .any(|e| matches!(e, SessionEvent::Direct(d) if d.payload.bytes() == b"x")),
+        "it arrived at B's claude: {arrived:?}"
+    );
     let (text, _) = w.tool("send", json!({"peer": b, "content": "y"})).await;
     assert_eq!(
         text, "remote transport accepted at endpoint human",
@@ -508,7 +534,7 @@ async fn no_administrative_request_leaves_the_bridge() {
         let answer = w
             .request("tools/call", json!({"name": admin, "arguments": {}}))
             .await;
-        assert_eq!(answer["error"]["code"], json!(-32601), "{admin} is no tool");
+        assert_eq!(answer["error"]["code"], json!(-32602), "{admin} is no tool");
     }
     let calls = w.record.calls();
     assert!(
@@ -607,4 +633,110 @@ async fn a_refused_rejoin_is_a_status_row_until_the_next_join() {
     let status = w.status().await;
     assert_eq!(status["rejoin_refused"], json!([]), "cleared by the join");
     assert_eq!(status["joined_channels"], json!(["general"]));
+}
+
+/// An endpoint another client holds is reported as that, not as the
+/// daemon's absence (TOOL-SURFACE.md §Tool results; LIFECYCLE.md
+/// §Endpoint conflict).
+#[tokio::test]
+async fn an_endpoint_conflict_is_reported_as_itself() {
+    let (a, b) = FakeNetwork::pair(config(), config());
+    let _holder = a
+        .open(
+            SessionRequest::new("other", Some(endpoint("claude")), [DataCapability::Events])
+                .expect("request"),
+        )
+        .await
+        .expect("holds claude");
+    let record = Arc::new(Record::default());
+    let binding = Recorded {
+        node: a.clone(),
+        record: Arc::clone(&record),
+    };
+    let (mut host_in, bridge_in) = tokio::io::duplex(1 << 16);
+    let (bridge_out, host_out) = tokio::io::duplex(1 << 16);
+    let env = Env {
+        now_ms: Box::new(|| 0),
+        entropy: Box::new(|| [1; 16]),
+    };
+    let config = Config {
+        endpoint: endpoint("claude"),
+        desired_channels: Ok(Vec::new()),
+    };
+    tokio::spawn(serve(
+        binding,
+        config,
+        env,
+        BufReader::new(bridge_in),
+        bridge_out,
+    ));
+    let mut lines = BufReader::new(host_out).lines();
+    let mut ask = async |id: u64, name: &str, arguments: Value| -> Value {
+        let line = json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+                          "params": {"name": name, "arguments": arguments}});
+        host_in
+            .write_all(format!("{line}\n").as_bytes())
+            .await
+            .expect("written");
+        let answer = tokio::time::timeout(PATIENCE, lines.next_line())
+            .await
+            .expect("in time")
+            .expect("readable")
+            .expect("a line");
+        serde_json::from_str(&answer).expect("json")
+    };
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    let mut id = 0;
+    loop {
+        id += 1;
+        let status: Value = serde_json::from_str(
+            ask(id, "status", json!({})).await["result"]["content"][0]["text"]
+                .as_str()
+                .expect("text"),
+        )
+        .expect("status json");
+        if status["endpoint_lease_state"] == json!("endpoint refused") {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never refused: {status}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let b_peer = b.peer().as_str().to_owned();
+    let answer = ask(id + 1, "send", json!({"peer": b_peer, "content": "x"})).await;
+    let text = answer["result"]["content"][0]["text"]
+        .as_str()
+        .expect("text");
+    assert!(text.starts_with("EndpointInUse"), "{text}");
+}
+
+/// A session that dies during the re-join is a reconnect, not a refusal:
+/// the join is kept and re-taken by the next open (LIFECYCLE.md step 6:
+/// only what "the daemon refuses" is a row).
+#[tokio::test]
+async fn a_session_dying_during_the_rejoin_keeps_the_join() {
+    let mut w = World::start().await;
+    w.tool("join", json!({"channel": "general"})).await;
+    w.record.down.store(true, Ordering::SeqCst);
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while w.status().await["endpoint_lease_state"] != json!("daemon unavailable") {
+        assert!(tokio::time::Instant::now() < deadline, "never saw it go");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    w.record.die_on_join.store(true, Ordering::SeqCst);
+    w.record.down.store(false, Ordering::SeqCst);
+    w.wait_connected().await;
+    let status = w.status().await;
+    assert_eq!(status["rejoin_refused"], json!([]), "no refusal recorded");
+    assert_eq!(
+        status["joined_channels"],
+        json!(["general"]),
+        "the join kept"
+    );
+    assert!(
+        !w.record.die_on_join.load(Ordering::SeqCst),
+        "the control: the dying re-join happened"
+    );
 }
