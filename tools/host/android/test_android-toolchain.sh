@@ -296,6 +296,20 @@ if unshare -rm true 2>/dev/null; then
     inst full
     [[ ! -e "$SANDBOX/etc/android-sdk.sh.old" && "$(cat "$SANDBOX/etc/android-sdk.sh")" == "# the new run" ]] \
         && pass "a profile copy left past the swap is dropped, the profile kept" || fail "the copy past the swap was mishandled" "$(cat "$SANDBOX/etc/android-sdk.sh"*)"
+    # A rollback killed after moving the failed tree aside (.dead) and
+    # before putting the previous one back: the previous tree, and its
+    # profile copy, come back; .dead is swept.
+    mv "$SANDBOX/opt/android-sdk" "$SANDBOX/opt/android-sdk.old"; mkdir -p "$SANDBOX/opt/android-sdk.dead/half"
+    echo '# the failed run' > "$SANDBOX/etc/android-sdk.sh"; echo '# previous' > "$SANDBOX/etc/android-sdk.sh.old"
+    inst full
+    [[ -e "$SANDBOX/opt/android-sdk/previous-install" && "$(ls -A "$SANDBOX/opt")" == android-sdk && "$(cat "$SANDBOX/etc/android-sdk.sh")" == "# previous" ]] \
+        && pass "a rollback killed between its moves is finished: previous tree and profile back, .dead swept" || fail "a killed rollback was not finished" "$(ls -a "$SANDBOX/opt") $(cat "$SANDBOX/etc/android-sdk.sh"*)"
+    # Killed rolling back where the previous install had no profile: the
+    # marker says so, and the failed run's profile goes.
+    mkdir -p "$SANDBOX/opt/android-sdk.dead/half"; echo '# the failed run' > "$SANDBOX/etc/android-sdk.sh"; : > "$SANDBOX/etc/android-sdk.sh.absent"
+    inst full
+    [[ ! -e "$SANDBOX/etc/android-sdk.sh" && ! -e "$SANDBOX/etc/android-sdk.sh.absent" && "$(ls -A "$SANDBOX/opt")" == android-sdk ]] \
+        && pass "  and where there was no profile, the failed run's profile is taken away" || fail "a killed no-profile rollback left a profile" "$(ls -a "$SANDBOX/etc" "$SANDBOX/opt")"
     rm -f "$SANDBOX/etc/android-sdk.sh"
     make_tree "$SANDBOX/bad" "platforms;android-30@9"; pack "$SANDBOX/bad"
     inst full
