@@ -116,7 +116,9 @@ The recorded run is [`device/REPRODUCTION-2026-10-06d.log`](./device/REPRODUCTIO
 - D7's IME-suggestion leak under the control: only the flags were read.
 - D7's clipboard check: copy, cut and paste are refused by construction, not measured.
 - D7's saved-state and crash-artifact search: run over the app's own storage only, with no positive control (D7's "did not establish" list).
-- D6b's pre-event use of both part-4 keys (part 4's Limit). Results are written to app-private storage and read back over adb (`run-as`). The fixture seed is the TEST-ONLY public vector only.
+- D6b's pre-event use of both part-4 keys (part 4's Limit).
+
+Results are written to app-private storage and read back over adb (`run-as`). The fixture seed is the TEST-ONLY public vector only.
 
 | id | what | recorded |
 |---|---|---|
