@@ -375,6 +375,15 @@ export component AppWindow inherits Window {
                 accessible-role: text;
                 accessible-label: self.text;
             }
+            // A visible caption: without it this profile's own PeerId reads
+            // as one more trusted peer (seen in the rendered window). The
+            // field below carries the same words for a screen reader.
+            Text {
+                text: root.own-peer-id-label;
+                font-size: 12px;
+                font-weight: 700;
+                accessible-role: none;
+            }
             // This profile's own identity, exact and selectable to copy
             // (human-client-ui.md section 11). Read-only.
             TextInput {
@@ -385,6 +394,41 @@ export component AppWindow inherits Window {
                 color: Palette.muted-text;
                 accessible-label: root.own-peer-id-label;
                 accessible-value: self.text;
+            }
+            // The add row under the explanation, above the list it adds to,
+            // with a visible caption (the field's own accessible label).
+            Text {
+                text: root.entry-label;
+                font-size: 12px;
+                font-weight: 700;
+                accessible-role: none;
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                height: 36px;
+                Rectangle {
+                    border-width: 1px;
+                    border-color: #444;
+                    border-radius: 4px;
+                    TextInput {
+                        x: 8px;
+                        width: parent.width - 16px;
+                        vertical-alignment: center;
+                        single-line: true;
+                        text <=> root.trust-entry;
+                        accessible-label: root.entry-label;
+                        edited => { root.trust-entry-edited(self.text); }
+                        changed has-focus => {
+                            if (self.has-focus) { root.focus-id = "trust-entry"; }
+                        }
+                    }
+                }
+                ActionButton {
+                    text: root.add-label;
+                    focus-key: "trust-add";
+                    pressed => { root.trust-add(); }
+                    focused(k) => { root.focus-id = k; }
+                }
             }
             Text {
                 text: root.trusted-heading;
@@ -426,33 +470,6 @@ export component AppWindow inherits Window {
                 }
             }
             }
-            }
-            HorizontalLayout {
-                spacing: 8px;
-                height: 36px;
-                Rectangle {
-                    border-width: 1px;
-                    border-color: #444;
-                    border-radius: 4px;
-                    TextInput {
-                        x: 8px;
-                        width: parent.width - 16px;
-                        vertical-alignment: center;
-                        single-line: true;
-                        text <=> root.trust-entry;
-                        accessible-label: root.entry-label;
-                        edited => { root.trust-entry-edited(self.text); }
-                        changed has-focus => {
-                            if (self.has-focus) { root.focus-id = "trust-entry"; }
-                        }
-                    }
-                }
-                ActionButton {
-                    text: root.add-label;
-                    focus-key: "trust-add";
-                    pressed => { root.trust-add(); }
-                    focused(k) => { root.focus-id = k; }
-                }
             }
             // The change waiting for the person: its exact PeerId and scope,
             // carried out only by Confirm. Focus lands on "do not change",
