@@ -241,8 +241,8 @@ fn s13_4_trust_is_mutated_only_by_confirming_a_change_that_names_the_exact_peer_
     };
     assert_eq!(model.trust_settings().pending(), Some(&change));
     assert_eq!(
-        model.trust_settings_mut().confirm(),
-        Some(Intent::SetTrust(change)),
+        model.trust_settings_mut().confirm(&change),
+        Some(Intent::SetTrust(change.clone())),
         "the exact PeerId, only on confirmation"
     );
 }

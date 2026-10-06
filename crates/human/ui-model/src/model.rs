@@ -72,18 +72,20 @@ impl From<&EndpointId> for RouteLabel {
     }
 }
 
-/// What trust the view may show for a peer. Stage 14 has no source for
-/// it (plan §17 (4)): every peer is "not verified by this client", never
-/// an invented value.
+/// What trust the view may show for a peer: every peer is "not verified
+/// by this client", never an invented value. The trust settings' allowlist
+/// says which peers this profile admits, not who a peer is, so it is no
+/// source for this.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trust {
     /// No verification by this client.
     NotVerifiedByThisClient,
 }
 
-/// What a view asks of the composition root: a legal intent, or an edit
-/// to a draft. It is the view's output, defined here rather than in the
-/// toolkit crate so a root that names no toolkit can handle it.
+/// What a view asks of the composition root: a legal intent, an edit to
+/// a draft, or an input to the trust settings. It is the view's output,
+/// defined here rather than in the toolkit crate so a root that names no
+/// toolkit can handle it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViewEvent {
     /// A legal intent, resolved against the model at take time.

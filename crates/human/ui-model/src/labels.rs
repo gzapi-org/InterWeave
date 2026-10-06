@@ -267,8 +267,13 @@ ui_texts! {
     /// The daemon refused the change: its own identity, or the list is
     /// full.
     TrustRefused => "The transport daemon refused this change. Nothing was changed.",
-    /// Anything else went wrong.
-    TrustFailed => "Trust could not be changed; details are in diagnostics. Nothing was changed.",
+    /// Anything else went wrong, before anything was changed. No raw code
+    /// is kept, so the text points nowhere for details.
+    TrustFailed => "Trust could not be read or changed. Nothing was changed.",
+    /// The daemon did not confirm a change, which may have been made: the
+    /// list is read again. `{peer}` the exact `PeerId`, whole. Never says
+    /// that nothing changed (TRANSPORT.md's outcome-unknown class).
+    TrustUnconfirmed => "The transport daemon did not confirm the change for {peer}; it may have been made. The list is read again.",
 }
 
 /// The English shown until real copy exists.

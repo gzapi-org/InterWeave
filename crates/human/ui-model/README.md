@@ -52,7 +52,7 @@ Agreed with the client's role before it was built (relay seqs 10630, 10639 and 1
 - `Reopen`;
 - `RecheckStorage`;
 - `ReadTrust`, when the trust settings open;
-- `SetTrust(change)`, only from `TrustSettings::confirm` of a change the person proposed in the settings -- the typed PeerId, or a listed peer's removal -- and was shown with its exact PeerId.
+- `SetTrust(change)`, only from `TrustSettings::confirm(shown)` of the change the person proposed in the settings -- the typed PeerId, or a listed peer's removal -- and was shown with its exact PeerId, while it is still the change waiting: a press never confirms a proposal that replaced the one on screen. A change's answer says whether it was made; "nothing was changed" is said only when nothing was, and a change made, or possibly made, whose list was not read back is read again (`take_reread`).
 
 **`ViewEvent`** is what a view hands the root: an `Intent`; a draft edit the root applies with `draft_changed`; or a trust settings input (`TrustInput`) the root applies with `TrustSettings::input`, which returns `ReadTrust` on opening and `SetTrust` on confirmation only. The root applies an edit or an input before it takes the view's events again. It lives here, not in the toolkit crate, so a root that names no toolkit can handle it; `ui-slint` re-exports it.
 

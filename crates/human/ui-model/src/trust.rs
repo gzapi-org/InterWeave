@@ -7,11 +7,11 @@
 //!
 //! A change is never made from a proposal. The person proposes -- the
 //! typed `PeerId`, or a listed peer's removal -- the view shows the exact
-//! `PeerId` and the scope, and only [`TrustSettings::confirm`] yields the
-//! intent that reaches the daemon. Nothing a message carries reaches
+//! `PeerId` and the scope, and only [`TrustSettings::confirm`] of the
+//! change shown yields the intent that reaches the daemon. Nothing a message carries reaches
 //! here: the inputs are the settings view's alone.
 
-use interweave_human_client_api::{TrustList, TrustProblem};
+use interweave_human_client_api::{TrustList, TrustProblem, TrustSetFailure};
 use interweave_transport_api::TransportIdentity;
 
 use crate::model::Intent;
@@ -39,8 +39,11 @@ pub enum EntryProblem {
 /// What the last action came to, for the view to say once.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrustOutcome {
-    /// The daemon made the change and read back the allowlist.
+    /// The daemon made the change.
     Changed(TrustChange),
+    /// The daemon did not confirm the change, which may have been made;
+    /// the allowlist is read again.
+    Unconfirmed(TrustChange),
     /// Reading or changing did nothing.
     Problem(TrustProblem),
     /// The typed `PeerId` was not proposed.
@@ -60,8 +63,10 @@ pub enum TrustInput {
     ProposeAllow,
     /// Propose removing trust from a listed peer.
     ProposeRevoke(TransportIdentity),
-    /// Carry out the change on show.
-    Confirm,
+    /// Carry out the change on show, named as it was shown: it is made
+    /// only while it is still the change waiting, so a press can never
+    /// confirm a proposal that replaced the one on screen.
+    Confirm(TrustChange),
     /// Drop the change on show.
     Cancel,
 }
@@ -77,6 +82,9 @@ pub struct TrustSettings {
     outcome: Option<TrustOutcome>,
     /// Bumped at every outcome, so the same outcome twice is still news.
     outcomes: u64,
+    /// The list shown may not be the daemon's: a change was made, or may
+    /// have been, and its list was not read back.
+    reread: bool,
 }
 
 impl TrustSettings {
@@ -97,7 +105,7 @@ impl TrustSettings {
                 self.propose_revoke(&peer);
                 None
             }
-            TrustInput::Confirm => self.confirm(),
+            TrustInput::Confirm(shown) => self.confirm(&shown),
             TrustInput::Cancel => {
                 self.cancel();
                 None
@@ -155,10 +163,10 @@ impl TrustSettings {
         }
     }
 
-    /// The person confirmed the change on show: the intent that makes
-    /// it. The only way to one.
-    pub fn confirm(&mut self) -> Option<Intent> {
-        if self.in_flight.is_some() {
+    /// The person confirmed `shown`, the change on screen: the intent that
+    /// makes it, if it is still the one waiting. The only way to one.
+    pub fn confirm(&mut self, shown: &TrustChange) -> Option<Intent> {
+        if self.in_flight.is_some() || self.pending.as_ref() != Some(shown) {
             return None;
         }
         let change = self.pending.take()?;
@@ -181,21 +189,49 @@ impl TrustSettings {
     }
 
     /// The daemon's answer to `change`: the allowlist read back, or why
-    /// nothing changed. The typed `PeerId` is cleared once it is trusted.
-    pub fn set(&mut self, change: TrustChange, answer: Result<TrustList, TrustProblem>) {
+    /// not -- and whether the change was made, which is what the person is
+    /// told: "nothing was changed" only when nothing was. A change made or
+    /// possibly made whose list was not read back is read again
+    /// ([`Self::take_reread`]). The typed `PeerId` is cleared once it is
+    /// trusted.
+    pub fn set(&mut self, change: TrustChange, answer: Result<TrustList, TrustSetFailure>) {
         if self.in_flight.as_ref() == Some(&change) {
             self.in_flight = None;
         }
         match answer {
             Ok(list) => {
-                if change.allowed && self.entry.trim() == change.peer.as_str() {
-                    self.entry.clear();
-                }
+                self.made(&change);
                 self.list = Some(list);
                 self.say(TrustOutcome::Changed(change));
             }
-            Err(problem) => self.say(TrustOutcome::Problem(problem)),
+            Err(TrustSetFailure::MadeNotReadBack(_)) => {
+                self.made(&change);
+                self.reread = true;
+                self.say(TrustOutcome::Changed(change));
+            }
+            Err(TrustSetFailure::Unconfirmed(_)) => {
+                self.reread = true;
+                self.say(TrustOutcome::Unconfirmed(change));
+            }
+            Err(TrustSetFailure::NotMade(problem)) => self.say(TrustOutcome::Problem(problem)),
         }
+    }
+
+    fn made(&mut self, change: &TrustChange) {
+        if change.allowed && self.entry.trim() == change.peer.as_str() {
+            self.entry.clear();
+        }
+    }
+
+    /// The read a change's answer left owed, once nothing else is on its
+    /// way: the root asks after applying the daemon's answers.
+    pub fn take_reread(&mut self) -> Option<Intent> {
+        if !self.reread || self.reading || self.in_flight.is_some() {
+            return None;
+        }
+        self.reread = false;
+        self.reading = true;
+        Some(Intent::ReadTrust)
     }
 
     fn say(&mut self, outcome: TrustOutcome) {
@@ -275,8 +311,8 @@ mod tests {
             allowed: true,
         };
         assert_eq!(s.pending(), Some(&change), "shown for confirmation");
-        assert_eq!(s.confirm(), Some(Intent::SetTrust(change.clone())));
-        assert_eq!(s.confirm(), None, "one change, once");
+        assert_eq!(s.confirm(&change), Some(Intent::SetTrust(change.clone())));
+        assert_eq!(s.confirm(&change), None, "one change, once");
         s.set(
             change.clone(),
             Ok(TrustList {
@@ -285,6 +321,7 @@ mod tests {
             }),
         );
         assert_eq!(s.outcome().0, Some(&TrustOutcome::Changed(change)));
+        assert_eq!(s.take_reread(), None, "read back: nothing owed");
         assert_eq!(s.entry(), "", "the trusted PeerId leaves the field");
         assert_eq!(s.in_flight(), None);
     }
@@ -301,7 +338,10 @@ mod tests {
             TrustInput::Cancel,
             TrustInput::ProposeAllow,
             TrustInput::ProposeRevoke(them.clone()),
-            TrustInput::Confirm,
+            TrustInput::Confirm(TrustChange {
+                peer: them.clone(),
+                allowed: true,
+            }),
         ] {
             if matches!(input, TrustInput::EntryChanged(_)) {
                 s.read(Ok(TrustList {
@@ -332,7 +372,11 @@ mod tests {
         assert!(s.pending().is_some());
         s.cancel();
         assert_eq!(s.pending(), None);
-        assert_eq!(s.confirm(), None, "nothing left to confirm");
+        let shown = TrustChange {
+            peer: them,
+            allowed: false,
+        };
+        assert_eq!(s.confirm(&shown), None, "nothing left to confirm");
     }
 
     #[test]
@@ -365,11 +409,15 @@ mod tests {
         let mut s = read(&me, &[]);
         s.entry_changed(them.as_str().to_owned());
         s.propose_allow();
-        let Some(Intent::SetTrust(change)) = s.confirm() else {
+        let shown = s.pending().cloned().expect("proposed");
+        let Some(Intent::SetTrust(change)) = s.confirm(&shown) else {
             panic!("a change");
         };
         let (_, before) = s.outcome();
-        s.set(change, Err(TrustProblem::Unavailable));
+        s.set(
+            change,
+            Err(TrustSetFailure::NotMade(TrustProblem::Unavailable)),
+        );
         assert_eq!(
             s.outcome(),
             (
@@ -379,5 +427,65 @@ mod tests {
         );
         assert_eq!(s.list().map(|l| l.allowed.len()), Some(0));
         assert_eq!(s.entry(), them.as_str(), "the field keeps what was typed");
+    }
+
+    #[test]
+    fn a_confirmation_makes_only_the_change_it_was_shown() {
+        let (me, x, y) = (peer(), peer(), peer());
+        let mut s = read(&me, &[x.clone(), y.clone()]);
+        s.propose_revoke(&x);
+        let shown = s.pending().cloned().expect("x shown");
+        // A removal of y pressed before the screen showed it, then the
+        // confirmation of what the screen asked: x.
+        s.propose_revoke(&y);
+        assert_eq!(s.confirm(&shown), None, "x is no longer the change waiting");
+        assert_eq!(
+            s.pending().map(|c| &c.peer),
+            Some(&y),
+            "y waits, for its own confirmation"
+        );
+    }
+
+    #[test]
+    fn a_failed_change_says_nothing_changed_only_when_nothing_did() {
+        let (me, them) = (peer(), peer());
+        for (failure, said, reread) in [
+            (
+                TrustSetFailure::NotMade(TrustProblem::Unavailable),
+                "problem",
+                false,
+            ),
+            (
+                TrustSetFailure::Unconfirmed(TrustProblem::Unavailable),
+                "unconfirmed",
+                true,
+            ),
+            (
+                TrustSetFailure::MadeNotReadBack(TrustProblem::Unavailable),
+                "changed",
+                true,
+            ),
+        ] {
+            let mut s = read(&me, &[]);
+            s.entry_changed(them.as_str().to_owned());
+            s.propose_allow();
+            let shown = s.pending().cloned().expect("proposed");
+            let Some(Intent::SetTrust(change)) = s.confirm(&shown) else {
+                panic!("a change");
+            };
+            s.set(change.clone(), Err(failure));
+            let got = match s.outcome().0 {
+                Some(TrustOutcome::Problem(_)) => "problem",
+                Some(TrustOutcome::Unconfirmed(c)) if *c == change => "unconfirmed",
+                Some(TrustOutcome::Changed(c)) if *c == change => "changed",
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(got, said, "{failure:?}");
+            assert_eq!(
+                s.take_reread(),
+                reread.then_some(Intent::ReadTrust),
+                "{failure:?}: the list read again when it may be stale"
+            );
+        }
     }
 }
