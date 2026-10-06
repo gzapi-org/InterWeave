@@ -25,8 +25,8 @@ use std::rc::Rc;
 
 use interweave_human_ui_model::{
     ConversationKey, Direction, Intent, ItemKey, ItemStatus, MessageItem, Reply, Retention,
-    SessionNotice, TrustInput, TrustOutcome, UiModel, UiText, fill, placeholder_en, short_peer,
-    visible_destination,
+    SessionNotice, TrustChange, TrustInput, TrustOutcome, UiModel, UiText, fill, placeholder_en,
+    short_peer, visible_destination,
 };
 use interweave_transport_api::TransportIdentity;
 use slint::{Model as _, ModelRc, SharedString, VecModel};
@@ -211,6 +211,9 @@ struct Shared {
     notice: Option<SessionNotice>,
     /// The trusted peers as rendered, by handle.
     trusted: HashMap<i32, TransportIdentity>,
+    /// The trust change the confirmation shows, as rendered: what a press
+    /// of Confirm names.
+    pending_shown: Option<TrustChange>,
     wake: Option<Rc<dyn Fn()>>,
 }
 
@@ -480,7 +483,12 @@ impl View {
             }
         });
         let s = Rc::clone(&shared);
-        window.on_trust_confirm(move || enqueue(&s, Input::Trust(TrustInput::Confirm)));
+        window.on_trust_confirm(move || {
+            let shown = s.borrow().pending_shown.clone();
+            if let Some(change) = shown {
+                enqueue(&s, Input::Trust(TrustInput::Confirm(change)));
+            }
+        });
         let s = Rc::clone(&shared);
         window.on_trust_cancel(move || enqueue(&s, Input::Trust(TrustInput::Cancel)));
 
@@ -723,8 +731,20 @@ impl View {
         self.render_conversations(model);
         self.render_messages(model);
         self.render_chrome(model);
-        self.render_announcement(model);
-        self.render_trust(model);
+        // One announcement per render: two would each clear the other's
+        // slot, and the first would never be heard (review F5).
+        let conversation = self.conversation_announcement(model);
+        let trust = self.render_trust(model);
+        let said = match (conversation, trust) {
+            (Some(first), Some(rest)) => Some(fill(
+                placeholder_en::text(UiText::AnnounceBoth),
+                &[("first", &first), ("rest", &rest)],
+            )),
+            (first, rest) => first.or(rest),
+        };
+        if let Some(said) = said {
+            self.announce(said);
+        }
         if let Some(key) = self.on_screen() {
             let unread = model
                 .conversations()
@@ -834,13 +854,13 @@ impl View {
     /// live region, or a list of fifty would speak fifty times. Two slots
     /// take turns, so an announcement equal to the last one is still a
     /// change a screen reader hears.
-    fn render_announcement(&mut self, model: &UiModel) {
-        let now = Seen::of(model, self.shown.as_ref());
+    /// What changed in the conversations since the last render, to
+    /// announce: what is on screen is "here", anything else "elsewhere".
+    fn conversation_announcement(&mut self, model: &UiModel) -> Option<String> {
+        let now = Seen::of(model, self.on_screen());
         let said = announcement(&self.seen, &now);
         self.seen = now;
-        if let Some(said) = said {
-            self.announce(said);
-        }
+        said
     }
 
     /// Say `said` in the window's one live region.
@@ -859,8 +879,8 @@ impl View {
     /// The trust settings (`human-client-ui.md` §8): the allowlist with
     /// each `PeerId` whole, the field, the change waiting for
     /// confirmation with its exact `PeerId` and scope, and the last
-    /// outcome, announced once.
-    fn render_trust(&mut self, model: &UiModel) {
+    /// outcome -- returned once, for the render's one announcement.
+    fn render_trust(&mut self, model: &UiModel) -> Option<String> {
         let window = &self.window;
         window.set_trust_page(self.page == Page::Trust);
         let settings = model.trust_settings();
@@ -902,6 +922,7 @@ impl View {
         if !typing && window.get_trust_entry().as_str() != settings.entry() {
             window.set_trust_entry(settings.entry().into());
         }
+        self.shared.borrow_mut().pending_shown = settings.pending().cloned();
         let pending = settings.pending().map(|change| {
             let template = placeholder_en::text(if change.allowed {
                 UiText::ConfirmAllow
@@ -915,12 +936,12 @@ impl View {
         let (outcome, count) = settings.outcome();
         let said = outcome.map(outcome_text).unwrap_or_default();
         window.set_trust_outcome(said.as_str().into());
-        if count != self.trust_announced {
+        if count == self.trust_announced || said.is_empty() {
             self.trust_announced = count;
-            if !said.is_empty() {
-                self.announce(said);
-            }
+            return None;
         }
+        self.trust_announced = count;
+        Some(said)
     }
 
     fn render_chrome(&self, model: &UiModel) {
@@ -1381,6 +1402,10 @@ fn outcome_text(outcome: &TrustOutcome) -> String {
             } else {
                 UiText::PeerUntrusted
             }),
+            &[("peer", change.peer.as_str())],
+        ),
+        TrustOutcome::Unconfirmed(change) => fill(
+            placeholder_en::text(UiText::TrustUnconfirmed),
             &[("peer", change.peer.as_str())],
         ),
         TrustOutcome::Problem(problem) => placeholder_en::trust_problem(*problem).to_owned(),

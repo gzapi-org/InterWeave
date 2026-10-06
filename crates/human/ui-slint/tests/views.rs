@@ -2149,3 +2149,82 @@ fn a_conversation_under_the_trust_settings_reads_nothing() {
         "only the conversation now shown is read: {raised:?}"
     );
 }
+
+/// The "Remove trust" control naming `peer`.
+fn removal_of(view: &View, peer: &TransportIdentity) -> ElementHandle {
+    labelled(view, text(UiText::RemoveTrust))
+        .into_iter()
+        .find(|e| e.accessible_description().as_deref() == Some(peer.as_str()))
+        .expect("a removal naming it")
+}
+
+/// A Confirm press names the change it was shown: a removal pressed after
+/// it was queued but before the screen showed it is not what the press
+/// confirms -- nothing is, and the new removal waits for its own.
+#[test]
+fn a_confirmation_confirms_only_the_change_it_showed() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let (me, x, y) = (peer(), peer(), peer());
+    trust_settings(&mut view, &mut model, &me, &[x.clone(), y.clone()]);
+    removal_of(&view, &x).invoke_accessible_default_action();
+    assert!(intents(&mut view, &mut model).is_empty());
+    view.render(&model);
+    // Y's removal and the confirmation of X's, both before a render.
+    removal_of(&view, &y).invoke_accessible_default_action();
+    the(&view, text(UiText::ConfirmChange)).invoke_accessible_default_action();
+    let raised = intents(&mut view, &mut model);
+    assert!(
+        !raised.iter().any(|i| matches!(i, Intent::SetTrust(_))),
+        "nothing confirmed: {raised:?}"
+    );
+    assert_eq!(
+        model.trust_settings().pending().map(|c| &c.peer),
+        Some(&y),
+        "Y waits for its own confirmation"
+    );
+}
+
+/// A message arriving and a trust outcome in one render are one
+/// announcement holding both: two would each clear the other's slot.
+#[test]
+fn an_arrival_and_a_trust_outcome_in_one_render_are_both_announced() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let (me, bob, carol) = (peer(), peer(), peer());
+    trust_settings(&mut view, &mut model, &me, std::slice::from_ref(&bob));
+    let removal = TrustChange {
+        peer: bob.clone(),
+        allowed: false,
+    };
+    let _ = model
+        .trust_settings_mut()
+        .input(interweave_human_ui_model::TrustInput::ProposeRevoke(
+            bob.clone(),
+        ));
+    let _ = model
+        .trust_settings_mut()
+        .input(interweave_human_ui_model::TrustInput::Confirm(
+            removal.clone(),
+        ));
+    model.trust_settings_mut().set(
+        removal,
+        Ok(TrustList {
+            local_peer: Some(me),
+            allowed: Vec::new(),
+        }),
+    );
+    model.received(received(1, &carol, "while the settings were open"));
+    view.render(&model);
+    let announced = [
+        view.window().get_announcement_a().to_string(),
+        view.window().get_announcement_b().to_string(),
+    ];
+    let said = announced.iter().find(|a| !a.is_empty()).expect("announced");
+    let outcome = fill(UiText::PeerUntrusted, &[("peer", bob.as_str())]);
+    assert!(said.contains(&outcome), "the outcome: {said}");
+    assert!(
+        said.len() > outcome.len(),
+        "and the arrival beside it: {said}"
+    );
+}
