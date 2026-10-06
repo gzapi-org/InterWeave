@@ -449,14 +449,19 @@ if (( PROVENANCE == 1 )); then
             # spikes/<id>/, since a run is a spike's, not one crate's.
             crate="${manifest%/Cargo.toml}"
             spike_dir="$( cut -d/ -f1-2 <<<"$manifest" )"
-            # The spike's OTHER crates: a commit that touches one of them
-            # and not this crate is that crate's run, and this crate's pin
+            # The spike's OTHER crates' AREAS: a crate's area is the first
+            # directory under the spike that holds it (`harness/`, and
+            # `phase-b/` for `phase-b/node`, whose run records sit beside
+            # the crate). A commit that touches another crate's area and
+            # not this crate's is that crate's run, and this crate's pin
             # may not borrow it (#211 review). A commit touching only the
-            # spike's own files (spike-004's README-only recording) stays
-            # attributable to any crate of it: which run it records is in
-            # its message, which this check does not read (below).
+            # spike's own top-level files (spike-004's README-only
+            # recording) stays attributable to any crate of it: which run
+            # it records is in its message, which this check does not read
+            # (below).
+            area="$( cut -d/ -f1-3 <<<"$crate" )"
             others="$( git ls-files -- "$spike_dir/**/Cargo.toml" "$spike_dir/*/Cargo.toml" \
-                       | sed 's#/Cargo.toml$##' | grep -vxF "$crate" | sort -u )"
+                       | cut -d/ -f1-3 | grep -vxF "$area" | sort -u )"
             # TWO PASSES, BECAUSE THEY ANSWER DIFFERENT QUESTIONS. Whether
             # a DEPENDENCY carries a revision is per dependency -- one
             # unpinned entry must not hide behind a pinned sibling. Where
@@ -554,7 +559,7 @@ if (( PROVENANCE == 1 )); then
                     files="$( git show --stat --format='' --name-only "$candidate" | grep -v '^$' )"
                     [[ -n "$files" ]] || continue
                     outside="$( printf '%s\n' "$files" | grep -cv "^$spike_dir/" )"
-                    if [[ -n "$others" ]] && ! printf '%s\n' "$files" | grep -q "^$crate/" \
+                    if [[ -n "$others" ]] && ! printf '%s\n' "$files" | grep -q "^$area/" \
                        && printf '%s\n' "$files" | grep -qF -f <( sed 's#$#/#' <<<"$others" ); then
                         continue
                     fi

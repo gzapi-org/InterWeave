@@ -580,6 +580,23 @@ assert_rc "a pin borrowed from another crate's run FAILS" 1
 assert_contains "and is refused as no recording" "no commit in that"
 rm -rf "$SANDBOX"; SANDBOX=""
 
+# …AND THAT RUN'S AREA, not only its crate: phase-b/node's run records
+# sit in phase-b/ beside the crate (spike-004). A commit touching only
+# phase-b/README.md is phase B's, and the harness pin may not borrow it.
+new_provenance_sandbox yes yes
+mkdir -p "$SANDBOX/spikes/spike-test/phase-b/node"
+printf '[package]\nname = "n"\nversion = "0.0.0"\n' > "$SANDBOX/spikes/spike-test/phase-b/node/Cargo.toml"
+git -C "$SANDBOX" add -A >/dev/null && git -C "$SANDBOX" commit -qm 'phase B crate' -- spikes/spike-test/phase-b
+borrowed="$( git -C "$SANDBOX" rev-parse HEAD )"
+echo 'phase B measured' > "$SANDBOX/spikes/spike-test/phase-b/README.md"
+git -C "$SANDBOX" add -A >/dev/null && git -C "$SANDBOX" commit -qm 'phase B run' -- spikes/spike-test/phase-b
+git -C "$SANDBOX" update-ref refs/remotes/origin/main HEAD
+sed -i "s/rev = \"[0-9a-f]*\" }/rev = \"$borrowed\" }/" "$SANDBOX/spikes/spike-test/harness/Cargo.toml"
+run_provenance_guard
+assert_rc "a pin borrowed from another crate's run area (its README) FAILS" 1
+assert_contains "and is refused as no recording" "no commit in that"
+rm -rf "$SANDBOX"; SANDBOX=""
+
 # `--no-provenance` SKIPS IT, for a clone without the history, and the
 # skip is visible.
 new_provenance_sandbox yes no
