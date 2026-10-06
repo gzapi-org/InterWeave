@@ -12,7 +12,7 @@
   },
   "x-contract": {
     "name": "ipc.trust-list-params",
-    "status": "approved",
+    "status": "active",
     "version": "1.0.0",
     "adr": [
       "0017",
