@@ -357,11 +357,19 @@ trap - EXIT
 # succeeded; a failure puts them back.
 # The profile is restored IN PLACE: on an AppVM $PROFILE is bind-mounted
 # from $pstore's inode, and a rename would leave the mount on the new text.
+# One this run wrote where there was none is taken away again.
+restore_profile() {
+    if [[ -e "$pstore.old" ]]; then
+        cat "$pstore.old" > "$pstore" && rm -f "$pstore.old"
+    elif [[ "${profile_written:-0}" == 1 && "${profile_before:-1}" == 0 ]]; then
+        { [[ "$persist" != bind ]] || ! mountpoint -q "$PROFILE" || umount "$PROFILE"; } && rm -f "$pstore"
+    fi
+}
 rollback() {  # rollback <message>
     [[ -e "$old" ]] || die "$1"
     if { [[ "$persist" != bind ]] || ! mountpoint -q "$SDK_DIR" || umount "$SDK_DIR"; } \
         && rm -rf "$store" && mv "$old" "$store" && mount_store \
-        && { [[ ! -e "$pstore.old" ]] || { cat "$pstore.old" > "$pstore" && rm -f "$pstore.old"; }; }; then
+        && restore_profile; then
         die "$1; the previous install is restored"
     fi
     die "$1; restoring the previous install FAILED as well: the previous tree is at ${old}, if not at ${store} (and its profile at ${pstore}.old)"
@@ -370,7 +378,9 @@ mount_store || rollback "the new install is in $store but cannot be bind-mounted
 
 ndk_path="$(pkgs | sed -n 's/^ndk;\([^@]*\)@.*/\1/p' | head -1)"
 mkdir -p "$(dirname "$pstore")" || rollback "cannot create $(dirname "$pstore")"
-rm -f "$pstore.old"; if [[ -e "$pstore" ]]; then cp -p "$pstore" "$pstore.old" || rollback "cannot keep a copy of $pstore"; fi
+profile_before=0
+if [[ -e "$pstore" ]]; then profile_before=1; cp -p "$pstore" "$pstore.old" || rollback "cannot keep a copy of $pstore"; fi
+profile_written=1
 {
     echo "# Written by InterWeave tools/host/android/android-toolchain.sh --install."
     printf 'export ANDROID_HOME=%q\n' "$SDK_DIR"

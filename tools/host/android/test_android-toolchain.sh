@@ -329,6 +329,14 @@ if unshare -rm true 2>/dev/null; then
     INST_AFTER=" && echo '# previous' >> '$SANDBOX/etc/android-sdk.sh' && ANDROID_TOOLCHAIN_BIND_CONF='$SANDBOX/conf-not-a-dir/50.conf' bash '$UNDER_TEST' --install '$SANDBOX/a.tar.gz'; echo \"rc=\$?\"; tail -1 '$SANDBOX/etc/android-sdk.sh'" inst rw-only
     [[ "$out" == *"the previous install is restored"*"rc=2"*"# previous" ]] \
         && pass "  a rollback on an AppVM restores the mounted profile in place" || fail "the mounted profile was not restored" "$out"
+    # A previous install with no profile beside it: a rollback after the
+    # profile is written takes that profile away again, rather than leave
+    # the new one behind and call the previous install restored.
+    rm -rf "$SANDBOX/rw" "$SANDBOX/opt"
+    pstore_file="$SANDBOX/rw/bind-dirs$SANDBOX/etc/android-sdk.sh"
+    INST_AFTER=" && umount '$SANDBOX/etc/android-sdk.sh' && rm -f '$pstore_file' && ANDROID_TOOLCHAIN_BIND_CONF='$SANDBOX/conf-not-a-dir/50.conf' bash '$UNDER_TEST' --install '$SANDBOX/a.tar.gz'; echo \"rc=\$?\"; [ -e '$pstore_file' ] && echo profile-present || echo profile-absent" inst rw-only
+    [[ "$out" == *"the previous install is restored"*"rc=2"*"profile-absent"* ]] \
+        && pass "  a rollback where no profile was takes the new one away" || fail "a rollback left a profile the previous install never had" "$out"
     rm -rf "$SANDBOX/rw" "$SANDBOX/opt"
 elif [[ -n "${CI:-}" ]]; then
     fail "unprivileged user and mount namespaces are unavailable under CI: the install would go untested"
