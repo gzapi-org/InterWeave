@@ -1890,14 +1890,32 @@ async fn a_send_to_a_known_unconnected_peer_dials_once_and_is_accepted() {
 /// 4. The receiver restarts, and a send dials and is accepted. Step 3's
 ///    gate row is what shows the reset; step 4 shows the send dialling.
 ///
-/// Step 4 restarts on a FRESH port. On its old port the first dial back
-/// hung for about ten seconds, five runs out of five, while a few
-/// microseconds' delay before the send avoided it: the dial reuses this
-/// node's listen port (`PortUse::Reuse`, libp2p-swarm's default), so it
-/// is the old connection's 4-tuple, which the restarted side's kernel
-/// may still hold. That is a finding of its own, not this test's.
+/// Step 4 runs twice. On the receiver's OLD port it is the proof of
+/// `CONNECTIVITY.md` §12's fresh-port redial (A 2026-10-07): bound to the
+/// listen port, as libp2p dials by default, the send's dial carried the
+/// reverse 4-tuple of step 3's connection, which this host's firewall
+/// still tracked as closing, and its SYN went unanswered for the 10 s of
+/// `nf_conntrack_tcp_timeout_close` (j23). On a FRESH port, which never
+/// carried that tuple, it is the control.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_restarted_peer_is_reachable_once_it_has_connected_in_and_held_off_before() {
+    restart_case(Step4::OldPort).await;
+}
+
+/// The control for the restart case's step 4: a fresh port.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_peer_restarted_on_a_fresh_port_is_reachable_the_same_way() {
+    restart_case(Step4::FreshPort).await;
+}
+
+/// Where the restart case's receiver comes back.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Step4 {
+    OldPort,
+    FreshPort,
+}
+
+async fn restart_case(step4: Step4) {
     let ip = interweave_test_support::net::require_private_interface_v4();
     let (sender_id, sender_peer) = who();
     let (receiver_id, receiver_peer) = who();
@@ -2036,7 +2054,7 @@ async fn a_restarted_peer_is_reachable_once_it_has_connected_in_and_held_off_bef
         }
     }
 
-    // 4. Restarted, on a fresh port (above), which the sender learns.
+    // 4. Restarted, on its old port or a fresh one (above).
     let receiver = SwarmRuntime::start(
         &receiver_id,
         SubstrateConfig::default(),
@@ -2048,23 +2066,37 @@ async fn a_restarted_peer_is_reachable_once_it_has_connected_in_and_held_off_bef
         .await
         .expect("endpoints install");
     let held = claim_all(&receiver, &["human", "claude"]).await;
-    let fresh = receiver
-        .listen(format!("/ip4/{ip}/tcp/0").parse().expect("valid"))
-        .await
-        .expect("the receiver listens");
-    assert_eq!(
-        sender
-            .learn(receiver_peer.clone(), [fresh.to_string()])
+    if step4 == Step4::OldPort {
+        let _ = receiver
+            .listen(receiver_address.parse().expect("valid"))
             .await
-            .expect("delivered"),
-        1
-    );
+            .expect("the receiver listens on its old port");
+    } else {
+        let fresh = receiver
+            .listen(format!("/ip4/{ip}/tcp/0").parse().expect("valid"))
+            .await
+            .expect("the receiver listens");
+        assert_eq!(
+            sender
+                .learn(receiver_peer.clone(), [fresh.to_string()])
+                .await
+                .expect("delivered"),
+            1
+        );
+    }
+    let asked = tokio::time::Instant::now();
     assert_eq!(
         send_restart(&sender, &leases, &receiver_peer, 113)
             .await
             .expect("delivered"),
         Ok(endpoint("claude")),
         "the inbound lifted the backoff, so the send dials"
+    );
+    // Not merely accepted: well inside the 10 s the reused tuple cost.
+    assert!(
+        asked.elapsed() < Duration::from_secs(5),
+        "step 4 took {:?}",
+        asked.elapsed()
     );
     let delivered = receiver
         .commander()
