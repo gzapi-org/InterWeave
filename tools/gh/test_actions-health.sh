@@ -125,7 +125,11 @@ if [[ "${1:-}" == "api" ]]; then
   # billing_public_mins is set: GitHub lists it in the same payload and
   # never counts it toward the included allowance.
   public_mins="$(cat "$MOCK_STATE/billing_public_mins" 2>/dev/null || echo 0)"
-  printf '{"usageItems":[{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":%s,"netAmount":%s,"date":"%s","repositoryName":"privrepo"},{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":%s,"netAmount":%s,"date":"%s","repositoryName":"privrepo"},{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":%s,"netAmount":0,"date":"%s","repositoryName":"openrepo"},{"product":"actions","sku":"Actions Storage","unitType":"GigabyteHours","quantity":10,"netAmount":%s,"date":"%s","repositoryName":"privrepo"}]}\n' \
+  # An older payload's row: neither a date nor a repositoryName. It is
+  # counted — the filters exclude other months and public repositories,
+  # they do not demand fields a payload may lack.
+  bare_mins="$(cat "$MOCK_STATE/billing_bare_mins" 2>/dev/null || echo 0)"
+  printf '{"usageItems":[{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":%s,"netAmount":%s,"date":"%s","repositoryName":"privrepo"},{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":%s,"netAmount":%s,"date":"%s","repositoryName":"privrepo"},{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":%s,"netAmount":0,"date":"%s","repositoryName":"openrepo"},{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":'"$bare_mins"',"netAmount":0},{"product":"actions","sku":"Actions Storage","unitType":"GigabyteHours","quantity":10,"netAmount":%s,"date":"%s","repositoryName":"privrepo"}]}\n' \
     "$mins" "$net" "$this_month" "$prev_mins" "$prev_net" "$prev_month" "$public_mins" "$this_month" "$stor" "$this_month"
   exit 0
 fi
@@ -245,6 +249,30 @@ printf '87.384\n' > "$SANDBOX/state/billing_net"
 invoke
 assert_rc        "a visibility that cannot be read is private: billed exits 1" 1
 assert_contains  "with the cost line"                "billing as overage"
+
+echo "actions-health: a row with no date and no repositoryName is counted"
+reset
+printf '100\n' > "$SANDBOX/state/billing_mins"
+printf '500\n' > "$SANDBOX/state/billing_bare_mins"
+invoke_with 3000
+assert_rc        "exits 0" 0
+assert_contains  "and the sum includes it"          "600 of 3000 minutes used"
+
+echo "actions-health: --help prints the whole header"
+reset
+invoke --help
+assert_rc        "exits 0" 0
+assert_contains  "down to the exit codes"           "2  invocation problem"
+assert_contains  "and the header's last line"       "would stop work for no reason."
+assert_lacks     "and no code after it"             "set -uo pipefail"
+
+echo "actions-health: a bad allowance is exit 2 before any network answer"
+for state in this_repo_public billing_unreadable; do
+    reset; touch "$SANDBOX/state/$state"
+    invoke_with abc
+    assert_rc       "$state: exits 2" 2
+    assert_contains "  and names the setting" "must be a positive number"
+done
 
 echo "actions-health: a degraded Actions component stops the work"
 reset

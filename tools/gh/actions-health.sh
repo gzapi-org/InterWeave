@@ -108,6 +108,14 @@ done
 
 say() { [[ "$QUIET" -eq 1 ]] || printf '%s\n' "$*"; }
 
+# A bad allowance is an invocation problem (exit 2) whatever the network
+# says, so it is judged before any call: validated only once billing had
+# answered, it vanished behind every earlier exit — an unreadable billing
+# API, or a public repository's OK line.
+if [[ -n "$INCLUDED" ]] && ! awk -v i="$INCLUDED" 'BEGIN { exit !(i + 0 > 0) }'; then
+    die "INTERWEAVE_ACTIONS_INCLUDED_MINUTES must be a positive number, got '$INCLUDED'"
+fi
+
 command -v jq >/dev/null 2>&1 || die "jq is required"
 
 reachable=0
@@ -232,9 +240,6 @@ if command -v gh >/dev/null 2>&1; then
                 fi
                 say "OK — ${ops_phrase}; ${mins} minutes used this period. (Remaining unknown: set INTERWEAVE_ACTIONS_INCLUDED_MINUTES in .claude/settings.json.)"
                 exit 0
-            fi
-            if ! awk -v i="$INCLUDED" 'BEGIN { exit !(i + 0 > 0) }'; then
-                die "INTERWEAVE_ACTIONS_INCLUDED_MINUTES must be a positive number, got '$INCLUDED'"
             fi
 
             left="$(awk -v i="$INCLUDED" -v m="$mins" 'BEGIN { printf "%.0f", i - m }')"
