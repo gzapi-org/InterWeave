@@ -70,12 +70,12 @@ struct Seen {
 /// A recording proxy standing at a daemon socket's path: the daemon's
 /// socket moves aside, and every connection made to the path is passed
 /// through to it, recording who connected and what they sent.
-struct Tap {
+pub(crate) struct Tap {
     seen: Arc<Mutex<Vec<Seen>>>,
 }
 
 impl Tap {
-    fn install(socket: &Path) -> Self {
+    pub(crate) fn install(socket: &Path) -> Self {
         let real = PathBuf::from(format!("{}.real", socket.display()));
         std::fs::rename(socket, &real).expect("the daemon's socket moves aside");
         let listener = UnixListener::bind(socket).expect("the tap listens at the path");
@@ -128,7 +128,7 @@ impl Tap {
     }
 
     /// What `pid`'s connections sent, each connection's bytes apart.
-    fn from(&self, pid: i32) -> Vec<Vec<u8>> {
+    pub(crate) fn from(&self, pid: i32) -> Vec<Vec<u8>> {
         self.seen
             .lock()
             .expect("the record")
@@ -143,13 +143,13 @@ impl Tap {
 /// requested, and every request method it sent. The IPC frame is a
 /// four-byte big-endian length and that many bytes of JSON.
 #[derive(Debug, Default)]
-struct Asked {
-    capabilities: BTreeSet<String>,
-    endpoint: Option<String>,
-    methods: BTreeSet<String>,
+pub(crate) struct Asked {
+    pub(crate) capabilities: BTreeSet<String>,
+    pub(crate) endpoint: Option<String>,
+    pub(crate) methods: BTreeSet<String>,
 }
 
-fn asked(connections: &[Vec<u8>]) -> Asked {
+pub(crate) fn asked(connections: &[Vec<u8>]) -> Asked {
     let mut asked = Asked::default();
     for mut rest in connections.iter().map(Vec::as_slice) {
         while rest.len() >= 4 {
