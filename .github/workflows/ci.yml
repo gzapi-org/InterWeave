@@ -194,9 +194,7 @@ jobs:
         ~/.cargo/registry
         ~/.cargo/git
         ~/.rustup
-        spikes/spike-002/harness/target
-        spikes/spike-003/harness/target
-        spikes/spike-004/harness/target
+        spikes/**/target
     steps:
       # Pinned to a commit, for the reason given in the `rust` job.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -267,9 +265,13 @@ jobs:
       # Keyed on EVERY spike LOCK FILE, which carry the pinned revisions
       # of this repository's own crates: a pin that moves changes the
       # lock, which changes the key, which is exactly when the rebuild
-      # should be paid. Every lock, not only harness/: the guard below
-      # resolves and builds the phase-b and node crates too, and keyed on
-      # the harness locks alone their registry changes were never saved. `restore-keys` on the prefix means an unrelated
+      # should be paid. Every lock, and every spike crate's target/, not
+      # only harness/: the guard below resolves and builds every locked
+      # crate (eight today), and with three listed by name the other five
+      # compiled cold on every run, while keyed on the harness locks alone,
+      # their registry changes were never saved.
+      #
+      # `restore-keys` on the prefix means an unrelated
       # lock change warms from the previous build rather than starting
       # cold; cargo rebuilds only what actually differs.
       #
@@ -299,7 +301,7 @@ jobs:
       # evicting main's.
       #
       # Pinned to a commit for the reason given in the `rust` job.
-      - name: Restore the cargo registry and the spike harness builds
+      - name: Restore the cargo registry and the spike crate builds
         id: cargo-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
