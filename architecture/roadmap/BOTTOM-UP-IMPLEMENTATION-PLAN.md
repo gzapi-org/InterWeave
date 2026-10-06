@@ -4791,15 +4791,9 @@ SPIKE-001's PASS) and the same day Stage 15 closed (#202), on the steps
 above in order: step 2 (#194: `crates/claude/channel-core` — the event
 → notification conversion, the reply-token table moved from the
 runtime with its eight ledger rows cleared, the tool surface and result
-wording, the `meta` grammar test, against the fake), step 3 (#199:
-`apps/claude-channel` — the stdio MCP server in the 2025-11-25 era over
-`ipc-client` with the bounded reconnect, fresh claim and fresh joins,
-SIGINT release, the plugin manifest; devex-tooling's
-`check_claude_layering.sh` supplied), steps 4 and 5 (#203: the shipped
+wording, the `meta` grammar test, against the fake; devex-tooling's `check_claude_layering.sh` supplied there), step 3 (#199: `apps/claude-channel` — the stdio MCP server in the 2025-11-25 era over `ipc-client` with the bounded reconnect, fresh claim and fresh joins, SIGINT release, the plugin manifest), steps 4 and 5 (#203: the shipped
 bridge against two real daemons, then inside the installed Claude Code),
-and the contract texts supplied on the way (the `;ce=br` non-UTF-8 drop,
-`local_peer`, the status facts, the refused re-join as a status row) —
-p2p-network-dev's lane throughout. The exit gate: (a) the required
+— p2p-network-dev's lane throughout, with the contract texts architect-cto supplied on the way (the `;ce=br` non-UTF-8 drop, `local_peer`, the status facts, the refused re-join as a status row). The exit gate: (a) the required
 integration tests are green against the daemon harness —
 `tests/desktop-e2e/tests/claude_channel.rs`'s
 `a_direct_message_is_notified_and_replied_to_across_two_daemons`,
@@ -4818,10 +4812,7 @@ in the legacy era, B's message arrived as a `<channel
 source="plugin:interweave:interweave" …>` tag with `meta` in the table's
 order and no second `source`, the model reported it verbatim when asked
 and did not act unprompted, loaded `reply` through ToolSearch and called
-it, and B's bridge received `ack` on its route, the transcript holding the read-back, the call and the tool's result to the turn's end (`s16-host-run-2`, the first authenticated attempt, replied too — B's bridge recorded `ack` — but its transcript ends at the ToolSearch: the driver's `/exit` cut the turn about 1.3 s after the ack, 9005cdc6's correction; `s16-host-run` is the unauthenticated attempt, kept); (c) `check_bridge_default_features.sh` (no CommonMark parser
-under default features, 34 packages) and `check_claude_layering.sh` (no
-`crates/transport/*`, `crates/discovery/*` or libp2p crate, 24 runtime
-dependencies) pass with both packages members; (d) P3's test is
+it, and B's bridge received `ack` on its route, the transcript holding the read-back, the call and the tool's result to the turn's end (`s16-host-run-2`, the first authenticated attempt, replied too — B's bridge recorded `ack` — but its transcript ends at the ToolSearch: the driver's `/exit` cut the turn about 1.3 s after the ack, 9005cdc6's correction; `s16-host-run` is the unauthenticated attempt, kept); (c) `check_bridge_default_features.sh` (no CommonMark parser under default features: 34 packages in `channel-core`'s tree, 98 in `claude-channel`'s) and `check_claude_layering.sh` (no `crates/transport/*`, `crates/discovery/*` or libp2p crate: 24 and 76 runtime dependencies walked) pass with both packages members; (d) P3's test is
 `no_administrative_request_leaves_the_bridge` — it drives every tool,
 `identity` among them, and every inbound body naming an administrative
 act, reading §What is not a Claude tool from the contract — which is
@@ -4849,8 +4840,7 @@ the reader marks the connection ended, so a re-join or leave in that
 window is kept as a refusal that Claude clears by joining again; the
 conformance suite pins `events(0)` on a live session only; a daemon
 whose runtime stopped while its connection stays open answers a join
-with a refusal the bridge records, untraced. Everything SPIKE-001 left not established stays carried by
-name in the paragraph above: marketplace distribution and `--channels`
+with a refusal the bridge records, untraced. Everything SPIKE-001 left not established stays carried by name in the paragraph below ("Carried by name, from SPIKE-001"): marketplace distribution and `--channels`
 (Stage 19, §22), `userConfig` substitution, organisation-policy gating,
 permission relay, size limits and behaviour under load, the 2026-07-28
 revision, non-interactive delivery and the untried `-p` timings; and
