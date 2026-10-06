@@ -51,6 +51,9 @@ members = [
     "crates/human/ui-slint",
     "crates/transport/runtime",
     "crates/api/trust-api",
+    # Stage 16 batch 2, beside Stage 15: the Claude Code Channel bridge
+    # (plan section 19).
+    "crates/claude/channel-core",
     "tests/human-chat",
     "tests/human-retention",
     "tests/interoperability",

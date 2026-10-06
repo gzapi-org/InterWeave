@@ -138,16 +138,10 @@ impl ReplyTokenTable {
         }
     }
 
-    /// Live tokens.
+    /// Live tokens, expired ones included until the next `expire`.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.tokens.len()
-    }
-
-    /// Whether the table is empty.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.tokens.is_empty()
     }
 
     /// Store a route under a caller-supplied opaque token.
@@ -245,12 +239,6 @@ impl ReplyTokenTable {
                 self.order.remove(pos);
             }
         }
-    }
-
-    /// Drop every token, as a process restart would.
-    pub fn clear(&mut self) {
-        self.tokens.clear();
-        self.order.clear();
     }
 }
 
@@ -382,18 +370,6 @@ mod tests {
             t.resolve("c", Some(&epoch("e")), &joined, 3),
             ReplyResolution::Route(_)
         ));
-    }
-
-    #[test]
-    fn a_restart_drops_every_token() {
-        let mut t = ReplyTokenTable::default();
-        t.mint("tok", direct_route("e"), 0).expect("fresh token");
-        t.clear();
-        assert!(t.is_empty());
-        assert_eq!(
-            t.resolve("tok", Some(&epoch("e")), &joined, 0),
-            ReplyResolution::Unknown
-        );
     }
 
     #[test]

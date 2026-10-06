@@ -4619,11 +4619,7 @@ Each is met by a test or check that records it, in the shape §15 set.
   none is `source`.
 - **P2 — layering is a check.** `check_bridge_default_features.sh`
   passes for both packages once they are members (it reports them
-  planned until then and fails if they are neither); the bridge names
-  nothing under `crates/transport/*` and no `libp2p*` — devex-tooling
-  extends `check_ipc_layering.sh`'s pattern to `crates/claude/*` and
-  `apps/claude-channel` (the human guard is the precedent), binding from
-  its landing.
+  planned until then and fails if they are neither); the bridge names nothing under `crates/transport/*`, `crates/discovery/*` (the Rule) and no `libp2p*` — devex-tooling's guard for `crates/claude/*` and `apps/claude-channel` landed as a new `tools/checks/check_claude_layering.sh` on `check_ipc_layering.sh`'s pattern (the human guard is the precedent; supplied on #194, 7d63953e and e672e91a), binding from its landing.
 - **P3 — the authority split is asserted from the bridge.** A test
   drives every tool and every inbound body that names an administrative
   act (TOOL-SURFACE.md §What is not a Claude tool; SECURITY.md
@@ -4706,9 +4702,7 @@ host run of (5) is recorded with its Claude Code build and the tag read
 back; (c) `check_bridge_default_features.sh` and the bridge layering
 guard pass with both packages members; (d) P3's test exists and
 enumerates TOOL-SURFACE.md §What is not a Claude tool, and the three
-carried-in tests below exist by name; (e) the ledger holds no
-`stage-16` entry — the eight `ReplyTokenTable`/`ReplyResolution` rows
-clear with batch 2's move, not by deletion alone; (f) if Stage 15 is still open at the close,
+carried-in tests below exist by name; (e) the ledger holds no `stage-16` entry — the eight `ReplyTokenTable`/`ReplyResolution` rows clear with batch 2's move, not by deletion alone (as read at step 2, #194: five — `as_error`, `new`, `mint`, `resolve`, `expire` — have callers in channel-core's bridge.rs; `len` is called by `BridgeState::live_tokens` and is `pub(crate)`; `clear` and `is_empty` were deleted as uncalled, a restart dropping every token by construction since the table is neither `Clone` nor serialisable — six clear by a caller, two by a deletion the record justifies); (f) if Stage 15 is still open at the close,
 the status does not move (it names the lowest open stage) and the
 closing record says so.
 
