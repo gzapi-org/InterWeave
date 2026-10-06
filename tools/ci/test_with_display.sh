@@ -130,7 +130,40 @@ exit "\${1:-0}"
 EOF
 chmod +x "$CMD"
 
-reset() { rm -f "$SANDBOX"/{xvfb-dies,xvfb-mute,bus-fails,set-fails,no-address,registry-down,cmd-ran,bus-ran,a11y-on,xvfb-pid,xvfb-terminated,sleeper-pid,spawn-denied,launcher-mute,launcher-hangs,launcher-pid,launcher-ran,launcher-started,registryd-started}; ATSPI_DIRS="$ATSPI"; }
+# What the bus activated, outliving the command: `late` starts a service
+# in the bus's group that, on TERM, takes half a second and then writes
+# into the runtime directory (the document portal unmounting its FUSE
+# mount there); `mounted` lists a mount under the runtime directory (and
+# one elsewhere) in the mountinfo the wrapper reads; `locked` leaves a
+# file rm cannot remove. Each records the runtime directory.
+CMD2="$SANDBOX/cmd2"
+cat > "$CMD2" <<EOF
+#!/usr/bin/env bash
+echo "\$XDG_RUNTIME_DIR" > "$SANDBOX/rundir"
+case "\${1:-}" in
+  late)
+    ( trap 'sleep 0.5; mkdir -p "\$XDG_RUNTIME_DIR/doc"; touch "\$XDG_RUNTIME_DIR/doc/late"; exit 0' TERM
+      sleep 30 & wait ) >/dev/null 2>&1 &
+    sleep 0.2 ;;
+  mounted)
+    mkdir -p "\$XDG_RUNTIME_DIR/doc/by-app"
+    { echo "36 25 0:32 / \$XDG_RUNTIME_DIR/doc rw - fuse.portal portal rw"
+      echo "37 36 0:33 / \$XDG_RUNTIME_DIR/doc/by-app rw - fuse.portal portal rw"
+      echo "38 25 0:34 / /run/user/1000/doc rw - fuse.portal portal rw"; } > "$SANDBOX/mountinfo" ;;
+  locked)
+    mkdir -p "\$XDG_RUNTIME_DIR/locked" && touch "\$XDG_RUNTIME_DIR/locked/x" && chmod 500 "\$XDG_RUNTIME_DIR/locked" ;;
+esac
+exit 0
+EOF
+chmod +x "$CMD2"
+# fusermount3: records each unmount it was asked for.
+cat > "$BIN/fusermount3" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >> "$SANDBOX/unmounted"
+EOF
+chmod +x "$BIN/fusermount3"
+
+reset() { rm -f "$SANDBOX"/{xvfb-dies,xvfb-mute,bus-fails,set-fails,no-address,registry-down,cmd-ran,bus-ran,a11y-on,xvfb-pid,xvfb-terminated,sleeper-pid,spawn-denied,launcher-mute,launcher-hangs,launcher-pid,launcher-ran,launcher-started,registryd-started,rundir,mountinfo,unmounted}; ATSPI_DIRS="$ATSPI"; }
 
 # run [<arg>…]: the wrapper under the stubs, from a Wayland desktop.
 run() {
@@ -318,6 +351,36 @@ done
 
 help_out="$(bash "$UNDER_TEST" --help 2>/dev/null)"
 [[ "$help_out" == *"Plan §18 (Stage 15)"* ]] && pass "--help prints the help block" || fail "--help should print the help block" "$help_out"
+
+
+# The scratch goes only once the bus's group has ended: a service it
+# activated may still write or unmount under the runtime directory as it
+# exits (a run left <scratch>/run/doc behind, 2026-10-06).
+reset; run "$CMD2" late
+# Look after the writer's half second: a wrapper that removed the scratch
+# without waiting would see it come back only then.
+sleep 1
+rundir="$(cat "$SANDBOX/rundir" 2>/dev/null)"
+if [[ "$got" -eq 0 && -n "$rundir" && ! -e "$rundir" && ! -e "${rundir%/run}" ]]; then
+    pass "a service writing into the runtime directory after TERM leaves nothing behind"
+else fail "the scratch outlived a late writer (exit $got): ${rundir:-none}" "$(ls -R "${rundir%/run}" 2>&1 | head -5)"; rm -rf "${rundir%/run}"; fi
+
+# A mount a service left up is unmounted, lazily and deepest first, before
+# rm; a mount outside the scratch is not touched.
+reset; export WITH_DISPLAY_MOUNTINFO="$SANDBOX/mountinfo"; run "$CMD2" mounted; unset WITH_DISPLAY_MOUNTINFO
+rundir="$(cat "$SANDBOX/rundir" 2>/dev/null)"
+if [[ "$(cat "$SANDBOX/unmounted" 2>/dev/null)" == "-u -z $rundir/doc/by-app"$'\n'"-u -z $rundir/doc" ]]; then
+    pass "mounts under the scratch are unmounted (-u -z), deepest first, and no other"
+else fail "the unmounts were wrong" "$(cat "$SANDBOX/unmounted" 2>/dev/null || echo none)"; fi
+[[ ! -e "${rundir%/run}" ]] && pass "  and the scratch is removed" || { fail "the scratch was left after the unmounts"; rm -rf "${rundir%/run}"; }
+
+# What cannot be removed is said, never silent.
+reset; run "$CMD2" locked
+rundir="$(cat "$SANDBOX/rundir" 2>/dev/null)"
+if [[ "$got" -eq 0 && "$out" == *"could not remove its scratch ${rundir%/run} — left behind"* ]]; then
+    pass "a scratch that cannot be removed is reported, and the command's status kept"
+else fail "a leftover scratch was not reported (exit $got)" "$out"; fi
+chmod -R u+w "${rundir%/run}" 2>/dev/null; rm -rf "${rundir%/run}"
 
 echo
 if (( failures > 0 )); then

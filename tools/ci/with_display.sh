@@ -40,7 +40,10 @@
 #      nothing" when the platform under it was what was missing.
 # Each step that fails ends the run, named, before the command starts.
 # Xvfb is terminated when the wrapper returns; the bus and what it
-# activated end with dbus-run-session. The bus runs in a process group of
+# activated end with dbus-run-session, and the scratch is removed only
+# once that group has ended (bounded by WITH_DISPLAY_STOP_SECONDS, then
+# KILL), with any mount left under it unmounted first; what cannot be
+# removed is reported. The bus runs in a process group of
 # its own (setsid), and INT, TERM or HUP sent to the wrapper — `kill`, or
 # Ctrl-C in its terminal — ends that whole group, the command included,
 # at once rather than once the command has finished: TERM to the group,
@@ -168,14 +171,41 @@ bus_pid=""
 # would cut TERM's grace to nothing for a signal at a second's end.
 stop_by=""
 now_ms() { local t="${EPOCHREALTIME//[.,]/}"; echo $((t / 1000)); }
+# Mount points under $1, deepest first, from mountinfo's fifth field
+# (octal-escaped: a space is \040).
+mounts_under() {
+    local mp
+    while read -r _ _ _ _ mp _; do
+        mp="$(printf '%b' "$mp")"
+        [[ "$mp" == "$1"/* ]] && printf '%s\n' "$mp"
+    done <"${WITH_DISPLAY_MOUNTINFO:-/proc/self/mountinfo}" 2>/dev/null | sort -r
+}
 cleanup() {
     # The bus's process group, on every exit and not only on a signal: a
     # launcher or registry the wrapper started directly (step 3) that hung
     # before it connected would not end with the bus, and would outlive a
-    # refusal. On a normal end the group is already empty.
-    if [[ -n "$bus_pid" ]]; then kill -TERM -- "-$bus_pid" 2>/dev/null; fi
+    # refusal. Then WAITED FOR, bounded like a signal's stop, before the
+    # scratch goes: what the bus activated may write or unmount under the
+    # runtime directory on its way out, and the document portal's FUSE
+    # mount at $XDG_RUNTIME_DIR/doc was still up when rm reached it.
+    if [[ -n "$bus_pid" ]]; then
+        kill -TERM -- "-$bus_pid" 2>/dev/null
+        local until=$(($(now_ms) + STOP_SECONDS * 1000))
+        while kill -0 -- "-$bus_pid" 2>/dev/null && (($(now_ms) < until)); do sleep 0.1; done
+        kill -KILL -- "-$bus_pid" 2>/dev/null
+    fi
     if [[ -n "$xvfb_pid" ]]; then kill "$xvfb_pid" 2>/dev/null; wait "$xvfb_pid" 2>/dev/null; fi
-    rm -rf "$scratch"
+    # A mount a KILLed service never took down: rm cannot remove a mount
+    # point, and --one-file-system keeps it from deleting through one.
+    local mp fuse
+    fuse="$(command -v fusermount3 || command -v fusermount)"
+    while read -r mp; do
+        [[ -n "$mp" ]] || continue
+        if [[ -n "$fuse" ]]; then "$fuse" -u -z "$mp" 2>/dev/null; else umount -l "$mp" 2>/dev/null; fi
+    done < <(mounts_under "$scratch")
+    rm -rf --one-file-system "$scratch" 2>/dev/null
+    [[ -e "$scratch" ]] && echo "with_display: could not remove its scratch $scratch — left behind" >&2
+    return 0
 }
 trap cleanup EXIT
 # A signal ends the bus's whole process group, then the wrapper through
