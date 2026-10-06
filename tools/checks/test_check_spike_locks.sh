@@ -502,6 +502,7 @@ rm -rf "$SANDBOX"; SANDBOX=""
 new_provenance_sandbox no first-run
 run_provenance_guard
 assert_rc "a branch commit that also changes production is still refused" 1
+assert_contains "and refused as no recording, not for another reason" "no commit in that"
 rm -rf "$SANDBOX"; SANDBOX=""
 
 # NOT AN ANCESTOR: a feature-branch tip that never merged, which is what
