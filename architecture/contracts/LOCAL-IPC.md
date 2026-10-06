@@ -308,8 +308,9 @@ with their schemas and the Rust mirror, in the batch that implements
 them; the list method's params were `none` there and are a page cursor
 here (architect-cto's ruling of 2026-10-04, below).
 
-`admin.trust.list` answers the profile's allowlist as `trust-api`'s
-`PeerTrustPolicy` holds it, ONE PAGE at a time: the allowed peers in the
+A fourth administrative read is decided and not yet in the table — it joins it with the batch that implements it, as `admin.trust.*` did: `admin.peers.list` (2.2, A 2026-10-06, `CONNECTIVITY.md` §19) under the `admin.status` capability, the dial gate's state per peer — `{peer, connected, backoff_until?, quarantined_until?, last_outcome}`, never an address — paged as `admin.trust.list` is (`{after?: peer-id}` → `{peers, next?}`, at most 1024 rows, canonical order), its schemas `peer-list-params` and `peer-list` landing `approved` with that batch and the Rust mirror. A client requests it only on a connection that negotiated minor 2.2 or later (§Version negotiation).
+
+`admin.trust.list` answers the profile's allowlist as `trust-api`'s `PeerTrustPolicy` holds it, ONE PAGE at a time: the allowed peers in the
 ascending order of their canonical strings, at most 1024 a page, with
 `persisted: false` on every row, and `next` — the last row's peer — when
 more remain; `trust-list-params.after` names the previous page's `next`,
