@@ -45,7 +45,7 @@ Both halves of `$id` must match the file's own directory and name; the validator
 - **`approved`** — an authoritative **implementation target**. Never a claim that anything implements it.
 - **`proposed`** — a review artifact. Must not drive implementation.
 
-**Most contracts here are `active`** since the Stage 13 close (2026-10-01: every `ipc` concept, `endpoints/message-received`, `common/channel-id`) and the Stage 14 close (2026-10-03: `human-chat/envelope`); `approved` is an implementation target, not a description of current behaviour, and only `endpoints/endpoint-config` still carries it. Among the first to turn `active` with a completed stage were the direct-routing shapes `endpoints/endpoint-id` and `endpoints/direct-destination` (Stage 6), and `endpoints/directory-response` (Stage 8). A status flips to `active` in the same change that lands its wire.
+**Most contracts here are `active`** since the Stage 13 close (2026-10-01: every `ipc` concept, `endpoints/message-received`, `common/channel-id`) and the Stage 14 close (2026-10-03: `human-chat/envelope`) and the Stage 15 close (2026-10-06: `ipc/trust-list-params`, `ipc/trust-list`, `ipc/trust-set-params`, `ipc/path-changed`); `approved` is an implementation target, not a description of current behaviour, and only `endpoints/endpoint-config` still carries it. Among the first to turn `active` with a completed stage were the direct-routing shapes `endpoints/endpoint-id` and `endpoints/direct-destination` (Stage 6), and `endpoints/directory-response` (Stage 8). A status flips to `active` in the same change that lands its wire.
 
 ## Adding a contract
 

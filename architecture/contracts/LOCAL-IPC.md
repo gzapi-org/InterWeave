@@ -353,7 +353,7 @@ same runtime overlay as `admin.endpoints.*` — never written to
 `trust-list-params`, `trust-list` and `trust-set-params`, are `approved`,
 and the method and capability enums carry their minor bumps (`ipc/method`
 1.1.0, `ipc/capability` 1.2.0, `ipc/request` 1.1.0), as every 2.0 shape
-did (plan §16 (3)); they flip `active` with Stage 15's close. Discovery and
+did (plan §16 (3)); they flipped `active` with Stage 15's close (2026-10-06, with `ipc/path-changed`). Discovery and
 bootstrap administration still have no method; they stay Stage 15's.
 
 ## Event catalogue
