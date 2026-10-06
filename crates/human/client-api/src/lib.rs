@@ -332,3 +332,31 @@ pub struct Diagnostics {
     /// store, shown from there rather than from `drain`.
     pub held_overflow: u64,
 }
+
+/// The profile's trust allowlist as the daemon holds it now
+/// (`human-client-ui.md` §8): every peer not listed is denied. A runtime
+/// overlay over the profile's configuration, lost when the daemon
+/// restarts (ADR-0028), which a settings view says.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TrustList {
+    /// This profile's own identity, never a peer to trust; `None` when
+    /// the daemon reports none.
+    pub local_peer: Option<TransportIdentity>,
+    /// The allowed remote peers, in the daemon's order.
+    pub allowed: Vec<TransportIdentity>,
+}
+
+/// Why reading or changing trust did nothing. A class, for a settings
+/// view: the raw code stays in diagnostics (`human-client-ui.md` §12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TrustProblem {
+    /// The daemon cannot be reached, or is stopping.
+    Unavailable,
+    /// This client may not administer trust on this daemon.
+    NotPermitted,
+    /// The daemon refused the change: this profile's own identity, or a
+    /// new peer past the allowlist's ceiling.
+    Refused,
+    /// Anything else.
+    Internal,
+}
