@@ -4787,8 +4787,7 @@ closing record says so.
 word of 2026-10-06 — given on the arming of the pull request that lands
 this record, which is its approval on record, as Stage 15's was — three
 days after it opened beside Stage 15 by record (#174, 2026-10-03, on
-SPIKE-001's PASS) and the same day Stage 15 closed (#202), on the steps
-above in order: step 2 (#194: `crates/claude/channel-core` — the event
+SPIKE-001's PASS) and the same day Stage 15 closed (#202), on the steps above in order — step 4 with one recorded deviation (Measured, below): step 2 (#194: `crates/claude/channel-core` — the event
 → notification conversion, the reply-token table moved from the
 runtime with its eight ledger rows cleared, the tool surface and result
 wording, the `meta` grammar test, against the fake; devex-tooling's `check_claude_layering.sh` supplied there), step 3 (#199: `apps/claude-channel` — the stdio MCP server in the 2025-11-25 era over `ipc-client` with the bounded reconnect, fresh claim and fresh joins, SIGINT release, the plugin manifest), steps 4 and 5 (#203: the shipped
@@ -4828,12 +4827,7 @@ stage, its prerequisites SPIKE-008 and SPIKE-009 its first work and no
 contract flipped: CHANNEL-EVENT.md is prose under ADR-0049 and no
 `channel-event` family was authored.
 
-**Measured, and carried as limits.** The proofs ran on one host's
-private address only; a second network is Stage 18's (§21). B's far end
-in both proofs is plain IPC sessions, not the human client's facade —
-the facade sits on those same sessions and adds the envelope the bridge
-forwards unparsed, so the facade-to-bridge exchange is carried to Stage
-18 (§21) as an integration proof. The risks #199 carried stand, named
+**Measured, and carried as limits.** The proofs ran on one host's private address only; a second network is Stage 18's (§21). Deviation from step 4: B's far end in both proofs is plain IPC sessions with untyped payloads, not Stage 14's facade, which step 4 names; the exit gate's (a)–(f) do not condition the close on it, and the owner's word on this record accepts the deviation. The facade adds a HumanChatV2 media type and, over the payload bound, `;ce=br`, which the bridge decodes before classifying (CHANNEL-EVENT.md) — proved by `channel-core`'s `content.rs` unit tests, not across daemons; facade-to-facade across two daemons is Stage 14's `human_chat.rs`. The facade-to-bridge exchange, plain and compressed, is carried to Stage 18 (§21). The risks #199 carried stand, named
 there: ipc-client's writer can fail `BackendUnavailable` a moment before
 the reader marks the connection ended, so a re-join or leave in that
 window is kept as a refusal that Claude clears by joining again; the
@@ -4969,7 +4963,7 @@ Carried here from Stage 13 (§16): SPIKE-005 (a hostile same-uid process); the f
 
 Carried here from Stage 15 (§18): the Windows binding behind the non-Unix stub (§18 (12), §16's named pipe, its ACL model and peer identity) and the BSL-1.0 decision that waits for it (§18 (14): `clipboard-win` and `error-code` through `arboard`, admitted nowhere until Windows is built); a real relayed path reaching the human client's route indicator, if §20 has not proved it first.
 
-Carried here from Stage 16 (§19): the Claude Code Channel bridge proved on one host's private address only — a second network, and the bridge exchanging with the human client's facade as the far end (both §19 proofs used plain IPC sessions there), are this gate's integration proofs.
+Carried here from Stage 16 (§19): the Claude Code Channel bridge proved on one host's private address only — a second network, and the bridge exchanging with the human client's facade as the far end, plain and `;ce=br` (both §19 proofs used plain IPC sessions with untyped payloads there — step 4's recorded deviation), are this gate's integration proofs.
 
 
 
