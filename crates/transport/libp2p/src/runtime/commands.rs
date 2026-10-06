@@ -68,6 +68,7 @@ pub(super) fn handle_command(
     head_start_ms: u64,
     operator: &crate::operator_set::OperatorSet,
     stores: &crate::store_refusals::StoreRefusals,
+    held_sends: &mut super::held_sends::HeldSends,
     command: SwarmCommand,
 ) {
     match command {
@@ -613,43 +614,16 @@ pub(super) fn handle_command(
             } else {
                 DialOrigin::Manual
             };
-            let candidates = manager.dial_candidates(&peer, now_ms);
-            if candidates.is_empty() {
-                let _ = reply.send(Err(DialRefusal::NoKnownAddress));
-                return;
-            }
-            let plan = super::path_race::plan(candidates);
-            let mut answer = Err(DialRefusal::NoKnownAddress);
-            for address in &plan.direct {
-                answer = attempt_dial(swarm, manager, in_flight, &peer, address, origin, now_ms);
-                if answer.is_ok() {
-                    break;
-                }
-            }
-            if !plan.relayed.is_empty() {
-                if answer.is_ok() {
-                    races.defer(
-                        peer.clone(),
-                        now_ms.saturating_add(head_start_ms),
-                        plan.relayed,
-                    );
-                } else {
-                    for address in &plan.relayed {
-                        answer = attempt_dial(
-                            swarm,
-                            manager,
-                            in_flight,
-                            &peer,
-                            address,
-                            DialOrigin::RelayCircuit,
-                            now_ms,
-                        );
-                        if answer.is_ok() {
-                            break;
-                        }
-                    }
-                }
-            }
+            let answer = dial_peer(
+                swarm,
+                manager,
+                in_flight,
+                races,
+                head_start_ms,
+                &peer,
+                origin,
+                now_ms,
+            );
             let _ = reply.send(answer);
         }
         SwarmCommand::SetTrust { trust, reply } => {
@@ -899,20 +873,72 @@ pub(super) fn handle_command(
             // the map is bounded at 128 by the line below, so the scan is
             // bounded too, and one source of truth cannot disagree with
             // itself.
-            if let Err(refused) = admit_outbound(pending_direct.values().map(|p| &p.peer), &peer) {
+            if let Err(refused) = admit_outbound(
+                pending_direct
+                    .values()
+                    .map(|p| &p.peer)
+                    .chain(held_sends.peers()),
+                &peer,
+            ) {
                 let _ = reply.send(Err(refused));
                 return;
             }
 
+            // NOT CONNECTED: DIAL ONCE AND HOLD THE SEND (relay seq 13444).
+            // `DIRECT.md` separates two cases:
+            //
+            //   no usable candidate addresses -> `PeerUnknown`,
+            //     without ad hoc discovery;
+            //   usable candidates -> could not reach it now.
+            //
+            // The distinction is what an operator acts on: nothing to
+            // dial is a configuration or discovery problem, something to
+            // dial that did not answer is a network one. The contract
+            // also lets the runtime dial a known path under the command
+            // deadline, and this now does: the peer is dialled under
+            // `Manual` (a person asked for this peer) through `DialPeer`'s
+            // own selection, or joins the dial already in flight to it,
+            // and the send waits in `held_sends` for the connection. THE
+            // GATE STILL DECIDES: a dial it refuses -- the peer in backoff,
+            // every address quarantined, a limit -- answers
+            // `PeerUnreachable` at once, and no second copy of its rules
+            // stands here to disagree with it (an untried address, which
+            // the gate admits once whatever the peer's backoff, is its to
+            // admit). Asked before `send_direct`, which consumes the frame.
+            if !swarm.is_connected(&peer_id) {
+                if manager.known_addresses(&peer) == 0 {
+                    let _ = reply.send(Err(DirectError::PeerUnknown));
+                    return;
+                }
+                if !in_flight.dials_peer(&peer)
+                    && dial_peer(
+                        swarm,
+                        manager,
+                        in_flight,
+                        races,
+                        head_start_ms,
+                        &peer,
+                        DialOrigin::Manual,
+                        now_ms,
+                    )
+                    .is_err()
+                {
+                    let _ = reply.send(Err(DirectError::PeerUnreachable));
+                    return;
+                }
+                held_sends.hold(super::held_sends::HeldSend {
+                    peer,
+                    frame,
+                    reply,
+                    until_ms: now_ms.saturating_add(super::held_sends::SEND_DIAL_HORIZON_MS),
+                });
+                return;
+            }
             // CAPTURED BEFORE THE FRAME IS MOVED. The answer is checked
             // against what was asked, and after `send_direct` takes the
             // frame there is nothing left to compare with.
             let message_id = frame.message_id;
             let requested = frame.destination_endpoint.clone();
-            #[expect(
-                clippy::single_match_else,
-                reason = "each arm carries the comment naming its case"
-            )]
             match swarm.send_direct(&peer_id, *frame) {
                 Ok(request_id) => {
                     pending_direct.insert(
@@ -925,38 +951,11 @@ pub(super) fn handle_command(
                         },
                     );
                 }
-                // NOT CONNECTED, and `DIRECT.md` separates two cases
-                // that this used to collapse. Its comment claimed the
-                // layer "knows only that there is no connection" — but
-                // the manager is right here and knows whether any
-                // address was ever recorded:
-                //
-                //   no usable candidate addresses -> `PeerUnknown`,
-                //     without ad hoc discovery;
-                //   usable candidates -> could not reach it now.
-                //
-                // The distinction is what an operator acts on. Nothing
-                // to dial is a configuration or discovery problem;
-                // something to dial that did not answer is a network
-                // one, and telling them apart is the difference between
-                // adding an address and chasing a firewall.
-                //
-                // The contract also allows the ConnectionManager to dial
-                // under the command deadline — "may", not must — and
-                // this does not. Sequencing a gated dial and then the
-                // exchange means holding the caller's reply across a
-                // connection outcome, which is a deferred-reply state
-                // machine the command loop has nowhere to put yet. The
-                // retry scheduler already re-dials known peers, so a
-                // send after an idle disconnect recovers on the next
-                // tick rather than staying broken.
+                // Connected a moment ago (checked above, in this same
+                // turn of the task), so unreachable: nothing between the
+                // check and the call can close a connection.
                 Err(NotConnected) => {
-                    let known = manager.known_addresses(&peer);
-                    let _ = reply.send(Err(if known == 0 {
-                        DirectError::PeerUnknown
-                    } else {
-                        DirectError::PeerUnreachable
-                    }));
+                    let _ = reply.send(Err(DirectError::PeerUnreachable));
                 }
             }
         }
@@ -1517,6 +1516,109 @@ fn buffer_kademlia_event(
     }
     outbox.push_back(SwarmEvent::Kademlia { event });
     true
+}
+
+/// Dial `peer` from the book: its direct candidates first, recently good
+/// first and each admitted individually (a quarantined address is left
+/// out by `preferred_addresses`, and every remaining one still passes the
+/// gate); a circuit route waits out the head-start behind them and is
+/// dialled only if no direct connection has landed by then -- or at once
+/// when there is no direct candidate to give a head-start to.
+///
+/// The one dial `DialPeer` and a held send share, so the two cannot
+/// disagree on what "dial a known path" means.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn dial_peer(
+    swarm: &mut GatedSwarm,
+    manager: &mut ConnectionManager,
+    in_flight: &InFlightTickets,
+    races: &mut super::path_race::Races,
+    head_start_ms: u64,
+    peer: &TransportIdentity,
+    origin: DialOrigin,
+    now_ms: u64,
+) -> Result<(), DialRefusal> {
+    let candidates = manager.dial_candidates(peer, now_ms);
+    if candidates.is_empty() {
+        return Err(DialRefusal::NoKnownAddress);
+    }
+    let plan = super::path_race::plan(candidates);
+    let mut answer = Err(DialRefusal::NoKnownAddress);
+    for address in &plan.direct {
+        answer = attempt_dial(swarm, manager, in_flight, peer, address, origin, now_ms);
+        if answer.is_ok() {
+            break;
+        }
+    }
+    if !plan.relayed.is_empty() {
+        if answer.is_ok() {
+            races.defer(
+                peer.clone(),
+                now_ms.saturating_add(head_start_ms),
+                plan.relayed,
+            );
+        } else {
+            for address in &plan.relayed {
+                answer = attempt_dial(
+                    swarm,
+                    manager,
+                    in_flight,
+                    peer,
+                    address,
+                    DialOrigin::RelayCircuit,
+                    now_ms,
+                );
+                if answer.is_ok() {
+                    break;
+                }
+            }
+        }
+    }
+    answer
+}
+
+/// Put a held send on the wire now that its peer is connected, asking
+/// again what the command asked when it arrived: a drain or a revocation
+/// can land while a send waits for its dial.
+pub(super) fn dispatch_held(
+    swarm: &mut GatedSwarm,
+    manager: &ConnectionManager,
+    pending_direct: &mut HashMap<libp2p::request_response::OutboundRequestId, PendingDirect>,
+    send: super::held_sends::HeldSend,
+) {
+    let super::held_sends::HeldSend {
+        peer, frame, reply, ..
+    } = send;
+    if manager.is_draining() {
+        let _ = reply.send(Err(DirectError::ShuttingDown));
+        return;
+    }
+    if manager.classify(&peer) != ConnectionClass::DataPlaneTrusted {
+        let _ = reply.send(Err(DirectError::UnauthorizedPeer));
+        return;
+    }
+    let Ok(peer_id) = to_peer_id(&peer) else {
+        let _ = reply.send(Err(DirectError::InvalidArgument));
+        return;
+    };
+    let message_id = frame.message_id;
+    let requested = frame.destination_endpoint.clone();
+    match swarm.send_direct(&peer_id, *frame) {
+        Ok(request_id) => {
+            pending_direct.insert(
+                request_id,
+                PendingDirect {
+                    message_id,
+                    requested,
+                    reply,
+                    peer,
+                },
+            );
+        }
+        Err(NotConnected) => {
+            let _ = reply.send(Err(DirectError::PeerUnreachable));
+        }
+    }
 }
 
 #[cfg(test)]

@@ -326,6 +326,14 @@ impl GatedSwarm {
         self.inner.listen_on(address)
     }
 
+    /// Whether `peer` holds a live connection, the precondition
+    /// [`Self::send_direct`] checks -- asked first by a caller that must
+    /// keep the frame when the answer is no.
+    #[must_use]
+    pub fn is_connected(&self, peer: &libp2p::PeerId) -> bool {
+        self.inner.is_connected(peer)
+    }
+
     /// Close one connection.
     ///
     /// Ungated on purpose: refusing a connection is never the operation
