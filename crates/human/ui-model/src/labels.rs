@@ -274,6 +274,10 @@ ui_texts! {
     /// list is read again. `{peer}` the exact `PeerId`, whole. Never says
     /// that nothing changed (TRANSPORT.md's outcome-unknown class).
     TrustUnconfirmed => "The transport daemon did not confirm the change for {peer}; it may have been made. The list is read again.",
+    /// The list a made or possibly made change left to read again could
+    /// not be read: it may not show that change. Never says that nothing
+    /// changed. Opening the settings again reads it.
+    TrustNotReadAgain => "The trust list could not be read again, so it may not show the latest change. Open the trust settings again to read it.",
 }
 
 /// The English shown until real copy exists.

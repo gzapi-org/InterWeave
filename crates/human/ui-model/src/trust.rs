@@ -46,6 +46,10 @@ pub enum TrustOutcome {
     Unconfirmed(TrustChange),
     /// Reading or changing did nothing.
     Problem(TrustProblem),
+    /// The list a change left to read again could not be read: it may
+    /// not show that change. Never "nothing was changed", which may be
+    /// false here.
+    NotReadAgain(TrustProblem),
     /// The typed `PeerId` was not proposed.
     Entry(EntryProblem),
 }
@@ -85,6 +89,8 @@ pub struct TrustSettings {
     /// The list shown may not be the daemon's: a change was made, or may
     /// have been, and its list was not read back.
     reread: bool,
+    /// The read on its way is that owed re-read.
+    rereading: bool,
 }
 
 impl TrustSettings {
@@ -179,11 +185,14 @@ impl TrustSettings {
         self.pending = None;
     }
 
-    /// The daemon's answer to a read.
+    /// The daemon's answer to a read. A re-read a change left owed that
+    /// fails says the list may be stale, never that nothing changed.
     pub fn read(&mut self, answer: Result<TrustList, TrustProblem>) {
         self.reading = false;
+        let rereading = std::mem::take(&mut self.rereading);
         match answer {
             Ok(list) => self.list = Some(list),
+            Err(problem) if rereading => self.say(TrustOutcome::NotReadAgain(problem)),
             Err(problem) => self.say(TrustOutcome::Problem(problem)),
         }
     }
@@ -231,6 +240,7 @@ impl TrustSettings {
         }
         self.reread = false;
         self.reading = true;
+        self.rereading = true;
         Some(Intent::ReadTrust)
     }
 
@@ -485,6 +495,30 @@ mod tests {
                 s.take_reread(),
                 reread.then_some(Intent::ReadTrust),
                 "{failure:?}: the list read again when it may be stale"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_reread_never_says_nothing_changed() {
+        let (me, them) = (peer(), peer());
+        for failure in [
+            TrustSetFailure::MadeNotReadBack(TrustProblem::Unavailable),
+            TrustSetFailure::Unconfirmed(TrustProblem::Unavailable),
+        ] {
+            let mut s = read(&me, std::slice::from_ref(&them));
+            s.propose_revoke(&them);
+            let shown = s.pending().cloned().expect("proposed");
+            let Some(Intent::SetTrust(change)) = s.confirm(&shown) else {
+                panic!("a change");
+            };
+            s.set(change, Err(failure));
+            assert_eq!(s.take_reread(), Some(Intent::ReadTrust));
+            s.read(Err(TrustProblem::Unavailable));
+            assert_eq!(
+                s.outcome().0,
+                Some(&TrustOutcome::NotReadAgain(TrustProblem::Unavailable)),
+                "{failure:?}: the list may be stale, and nothing says it was not changed"
             );
         }
     }

@@ -272,7 +272,8 @@ pub enum Intent {
     Reopen,
     /// Re-check storage now.
     RecheckStorage,
-    /// Read the trust allowlist: the trust settings opened.
+    /// Read the trust allowlist: the trust settings opened, or a change's
+    /// list was not read back ([`crate::TrustSettings::take_reread`]).
     ReadTrust,
     /// Make a trust change the person confirmed in the trust settings,
     /// which showed its exact `PeerId` and scope (`human-client-ui.md` §8).
