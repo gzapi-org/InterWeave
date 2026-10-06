@@ -23,7 +23,13 @@ pub(crate) const fn classify_send(error: TransportError) -> AttemptFailure {
     use AttemptFailure::{NeedsAttention, Retry};
     match error {
         TransportError::Timeout | TransportError::CancellationRaced => Retry(None),
-        TransportError::PeerUnreachable => Retry(Some(SendProblem::NoNetworkPath)),
+        // `PeerUnknown` is no address known yet for an authorized target
+        // (`TRANSPORT.md` §send_direct) -- a daemon just started, before
+        // its static routes seed the address book -- so it is a missing
+        // path, retried, never the person's to act on as trust is.
+        TransportError::PeerUnreachable | TransportError::PeerUnknown => {
+            Retry(Some(SendProblem::NoNetworkPath))
+        }
         TransportError::Overloaded => Retry(Some(SendProblem::Busy)),
         TransportError::RemoteEndpointUnavailable => Retry(Some(SendProblem::RouteUnavailable)),
         // The session's runtime went, or the session lost its lease or a
@@ -36,9 +42,7 @@ pub(crate) const fn classify_send(error: TransportError) -> AttemptFailure {
         | TransportError::EndpointNotRegistered
         | TransportError::ChannelNotJoined
         | TransportError::CancelledBeforeDispatch => Retry(Some(SendProblem::ServiceUnavailable)),
-        TransportError::UnauthorizedPeer | TransportError::PeerUnknown => {
-            NeedsAttention(SendProblem::PeerUntrusted)
-        }
+        TransportError::UnauthorizedPeer => NeedsAttention(SendProblem::PeerUntrusted),
         TransportError::ProtocolUnsupported
         | TransportError::VersionIncompatible
         | TransportError::ProtocolViolation => NeedsAttention(SendProblem::Incompatible),
@@ -245,6 +249,18 @@ mod tests {
                 "{error:?}: NotConfigured is the configuration check's alone"
             );
         }
+    }
+
+    #[test]
+    fn a_peer_with_no_address_yet_is_a_missing_path_retried_not_an_untrusted_one() {
+        assert_eq!(
+            classify_send(TransportError::PeerUnknown),
+            AttemptFailure::Retry(Some(SendProblem::NoNetworkPath))
+        );
+        assert!(
+            !may_have_reached(TransportError::PeerUnknown),
+            "not dispatched (TRANSPORT.md, dispatch state)"
+        );
     }
 
     #[test]

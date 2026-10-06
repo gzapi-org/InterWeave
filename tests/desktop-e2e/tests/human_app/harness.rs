@@ -84,6 +84,17 @@ impl App {
     pub(crate) fn running(&mut self) -> bool {
         self.child.try_wait().expect("a status").is_none()
     }
+
+    /// For a failure message: how the client ended, if it has, then its
+    /// log -- an early exit and a crash read alike in the log alone.
+    pub(crate) fn report(&mut self) -> String {
+        let status = match self.child.try_wait() {
+            Ok(Some(status)) => format!("exited: {status}"),
+            Ok(None) => "still running".to_owned(),
+            Err(e) => format!("status unknown: {e}"),
+        };
+        format!("{status}\n{}", self.log())
+    }
 }
 
 impl Drop for App {

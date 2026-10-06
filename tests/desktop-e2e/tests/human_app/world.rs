@@ -18,7 +18,8 @@ use interweave_human_transport_client::{
 };
 use interweave_ipc_client::IpcBinding;
 use interweave_transport_api::{
-    DirectDestination, EndpointId, MAX_PAYLOAD_BYTES, MediaType, MessageId, TransportIdentity,
+    DirectDestination, EndpointId, MAX_PAYLOAD_BYTES, MediaType, MessageId, TransportError,
+    TransportIdentity,
 };
 
 use crate::common::{Daemon, Home, PATIENCE, example, free_port, human};
@@ -32,6 +33,14 @@ pub(crate) struct World {
     pub(crate) b_daemon: Daemon,
     pub(crate) b_peer: TransportIdentity,
 }
+
+/// How long B may take to reach A after A's daemon restarted. B's dial
+/// to A while A was down failed, and the root gate waits 30 s before the
+/// next (`CONNECTIVITY.md`'s retry cadence, doubling from 30 s; A is down
+/// for seconds, far under 30, so at most one failure); B's facade, retrying its send from
+/// 1 s doubling, may then be up to 32 s from its next attempt. Measured
+/// past the suite's `PATIENCE` under load (1 in 48).
+pub(crate) const AFTER_A_RESTART: Duration = Duration::from_secs(90);
 
 /// Two daemons from the shipped desktop example on this host's private
 /// address, each with a static route to the other.
@@ -55,10 +64,19 @@ pub(crate) async fn two_daemons() -> World {
         &at(b_port),
         Some(&route_to(a_port, &a_peer)),
     ));
+    // B is started only once A's runtime is up, so B's start-up dial of
+    // its static route finds A listening and the connection it makes
+    // serves both ways. Without that, either start-up dial can land on a
+    // daemon not yet listening and hold that peer off for the retry
+    // base, 30 s (p2p-network-dev, 01a10db9-0be3): `serving()` sees the
+    // IPC sockets, bound before the runtime starts, while the "serving"
+    // line is logged after it.
     let mut a_daemon = a.start(&[]);
     a_daemon.serving(&a).await;
+    runtime_up(&mut a_daemon).await;
     let mut b_daemon = b.start(&[]);
     b_daemon.serving(&b).await;
+    runtime_up(&mut b_daemon).await;
     World {
         a,
         a_daemon,
@@ -66,6 +84,26 @@ pub(crate) async fn two_daemons() -> World {
         b,
         b_daemon,
         b_peer,
+    }
+}
+
+/// Until `daemon` has logged that it serves, which it does once its
+/// runtime has started; a daemon that exited instead fails at once.
+async fn runtime_up(daemon: &mut Daemon) {
+    let deadline = Instant::now() + PATIENCE;
+    while !daemon.log().contains("serving") {
+        if let Some(status) = daemon.child.try_wait().expect("a status") {
+            panic!(
+                "the daemon exited ({status}) before its runtime came up:\n{}",
+                daemon.log()
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the runtime never came up:\n{}",
+            daemon.log()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -106,6 +144,9 @@ pub(crate) struct Peer {
     clock: Instant,
     pub(crate) received: Vec<Received>,
     pub(crate) outbound: BTreeMap<String, OutboundStatus>,
+    /// Each row's last raw failure code, for a failure message: a status
+    /// class can stand for more than one code.
+    codes: BTreeMap<String, TransportError>,
     _store_dir: tempfile::TempDir,
 }
 
@@ -136,6 +177,7 @@ impl Peer {
             clock: Instant::now(),
             received: Vec::new(),
             outbound: BTreeMap::new(),
+            codes: BTreeMap::new(),
             _store_dir: store_dir,
         }
     }
@@ -152,8 +194,11 @@ impl Peer {
         self.received.extend(drained);
         while let Some(event) = self.client.next_event() {
             if let ClientEvent::Outbound(update) = event {
-                self.outbound
-                    .insert(update.app_message_id.as_str().to_owned(), update.status);
+                let id = update.app_message_id.as_str().to_owned();
+                if let Some(code) = update.last_code {
+                    self.codes.insert(id.clone(), code);
+                }
+                self.outbound.insert(id, update.status);
             }
         }
     }
@@ -166,7 +211,19 @@ impl Peer {
         logs: impl Fn() -> String,
         done: impl Fn(&Self) -> bool,
     ) {
-        let deadline = Instant::now() + PATIENCE;
+        self.until_within(PATIENCE, what, logs, done).await;
+    }
+
+    /// [`Peer::until`] with a patience of its own, for a wait whose bound
+    /// is not the suite's (`AFTER_A_RESTART`).
+    pub(crate) async fn until_within(
+        &mut self,
+        patience: Duration,
+        what: &str,
+        logs: impl Fn() -> String,
+        done: impl Fn(&Self) -> bool,
+    ) {
+        let deadline = Instant::now() + patience;
         loop {
             self.step().await;
             if done(self) {
@@ -174,11 +231,25 @@ impl Peer {
             }
             assert!(
                 Instant::now() < deadline,
-                "{what} did not happen\n{}",
+                "{what} did not happen\n{}\n{}",
+                self.state(),
                 logs()
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
+
+    /// B's side of a wait that timed out: its session and each outbound
+    /// row's last status (attempts, next retry, the problem's class) and
+    /// last raw failure code, by application id -- what the daemons' logs
+    /// do not record.
+    pub(crate) fn state(&self) -> String {
+        format!(
+            "B's facade: {:?}, outbound {:?}, last codes {:?}",
+            self.client.session_state(),
+            self.outbound,
+            self.codes
+        )
     }
 
     pub(crate) fn is_ready(&self) -> bool {
@@ -203,6 +274,40 @@ impl Peer {
         ))
         .await
         .expect("the facade commits it");
+    }
+
+    /// Send `envelope` and step B until A's daemon has admitted it
+    /// (`Accepted`). A send makes one attempt at once and every retry
+    /// waits for B's next step, so a case that then waits on A alone --
+    /// its store, its lease, its window -- delivers through here, or a
+    /// first attempt refused while the daemons were still connecting is
+    /// never retried.
+    pub(crate) async fn deliver(
+        &mut self,
+        peer: &TransportIdentity,
+        endpoint: Option<EndpointId>,
+        envelope: &HumanChatV2,
+        logs: impl Fn() -> String,
+    ) {
+        self.deliver_within(PATIENCE, peer, endpoint, envelope, logs)
+            .await;
+    }
+
+    /// [`Peer::deliver`] with a patience of its own (`AFTER_A_RESTART`).
+    pub(crate) async fn deliver_within(
+        &mut self,
+        patience: Duration,
+        peer: &TransportIdentity,
+        endpoint: Option<EndpointId>,
+        envelope: &HumanChatV2,
+        logs: impl Fn() -> String,
+    ) {
+        self.send(peer, endpoint, envelope).await;
+        let id = envelope.app_message_id.clone();
+        self.until_within(patience, "B's send admitted at A", logs, |p| {
+            p.accepted(&id)
+        })
+        .await;
     }
 
     pub(crate) fn accepted(&self, app_message_id: &str) -> bool {

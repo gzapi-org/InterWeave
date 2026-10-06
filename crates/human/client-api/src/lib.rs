@@ -23,12 +23,12 @@ use interweave_transport_api::{
 /// Why a send has not (yet) reached a terminal state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SendProblem {
-    /// The peer is not trusted for this profile, or not known to it.
+    /// The peer is not trusted for this profile (`UnauthorizedPeer`).
     PeerUntrusted,
     /// The remote answered with the coarse no-route class: the selected
     /// route is currently unavailable. Kept coarse on purpose (ADR-0030).
     RouteUnavailable,
-    /// No usable network path to the peer.
+    /// No usable network path to the peer, or no address known for it yet.
     NoNetworkPath,
     /// The remote or the local transport is temporarily busy.
     Busy,

@@ -35,7 +35,8 @@ async fn unread_inbound_persists_across_a_restart_of_the_client() {
     peer.until("B ready", || world.logs(), Peer::is_ready).await;
 
     let message = envelope(21, "unread until someone reads it");
-    peer.send(&world.a_peer, Some(human()), &message).await;
+    peer.deliver(&world.a_peer, Some(human()), &message, || world.logs())
+        .await;
     until_rows(&world.a, "unread_inbound", 1, || client.log()).await;
     assert!(client.terminate().success(), "{}", client.log());
     assert_eq!(
@@ -80,7 +81,7 @@ async fn a_pending_send_survives_a_restart_and_leaves_the_store_once_accepted() 
     let mut peer = Peer::new(&world.b);
     peer.until(
         "the pending send reaching B",
-        || world.logs(),
+        || format!("{}\n{}", again.log(), world.logs()),
         |p| p.got(&message.app_message_id),
     )
     .await;
@@ -105,10 +106,11 @@ async fn a_process_kill_keeps_pending_outbound_and_unread_inbound_and_not_a_term
     peer.until("B ready", || world.logs(), Peer::is_ready).await;
 
     let unread = envelope(43, "unread at the kill");
-    peer.send(&world.a_peer, Some(human()), &unread).await;
+    peer.deliver(&world.a_peer, Some(human()), &unread, || world.logs())
+        .await;
     peer.until(
         "the accepted send reaching B",
-        || world.logs(),
+        || format!("{}\n{}", client.log(), world.logs()),
         |p| p.got(&done.app_message_id),
     )
     .await;
@@ -140,7 +142,7 @@ async fn a_process_kill_keeps_pending_outbound_and_unread_inbound_and_not_a_term
     until_lease(&world.a.binding(), true, &again).await;
     peer.until(
         "the new client's send reaching B",
-        || world.logs(),
+        || format!("{}\n{}", again.log(), world.logs()),
         |p| p.got(&after.app_message_id),
     )
     .await;

@@ -47,10 +47,11 @@ async fn the_tree_read_over_atspi_labels_message_route_and_connectivity_controls
     // the conversation, and the row says what it is and how much is
     // unread, and can be pressed.
     let destination = "https://example.org/docs";
-    peer.send(
+    peer.deliver(
         &world.a_peer,
         Some(human()),
         &envelope(71, &format!("see [the docs]({destination})")),
+        || world.logs(),
     )
     .await;
     heard
@@ -146,8 +147,13 @@ async fn the_tree_read_over_atspi_labels_message_route_and_connectivity_controls
 
     // A message arriving in the open conversation: who sent it, never
     // what it says.
-    peer.send(&world.a_peer, Some(human()), &envelope(72, "private words"))
-        .await;
+    peer.deliver(
+        &world.a_peer,
+        Some(human()),
+        &envelope(72, "private words"),
+        || world.logs(),
+    )
+    .await;
     let said = heard
         .until(
             &fill(text(UiText::AnnounceArrival), &[("author", &short)]),
