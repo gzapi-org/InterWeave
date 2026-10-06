@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# The Claude Code Channel bridge (plan §19 step 3): a stdio MCP server
+# over the daemon's data socket. A composition root: channel-core holds
+# the rules, ipc-client the connection. It names nothing under
+# crates/transport/* or crates/discovery/* and no libp2p crate
+# (check_claude_layering.sh), and no CommonMark parser by default
+# (check_bridge_default_features.sh).
+[package]
+name = "interweave-claude-channel"
+version = "0.0.0"
+publish = false
+description = "The InterWeave Claude Code Channel bridge: a stdio MCP server over the transport daemon's data socket."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "claude-channel"
+path = "src/main.rs"
+
+[dependencies]
+interweave-claude-channel-core = { path = "../../crates/claude/channel-core" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }

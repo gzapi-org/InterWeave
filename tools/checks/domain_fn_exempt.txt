@@ -110,7 +110,6 @@ BridgeState::reply_route               stage-16  apps/claude-channel resolves a 
 BridgeState::live_tokens               stage-16  apps/claude-channel reports the token count in status
 ChannelMeta::entries                   stage-16  apps/claude-channel serializes a notification
 ChannelMeta::get                       stage-16  apps/claude-channel reads a notification's token
-ToolName::as_str                       stage-16  apps/claude-channel lists the tools
 ToolName::parse                        stage-16  apps/claude-channel dispatches a call
 
 # --- stage-9 -----------------------------------------------------
