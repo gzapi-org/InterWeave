@@ -182,11 +182,15 @@ if [[ "$MODE" == check ]]; then
     # A symlink's own mode is always rwxrwxrwx and means nothing: not counted.
     writable="$(find "$SDK_DIR" ! -type l -perm /022 -print -quit 2>/dev/null)"
     special="$(find "$SDK_DIR" -perm /6000 -print -quit 2>/dev/null)"
-    if [[ "$(stat -c %U "$SDK_DIR" 2>/dev/null)" == "${ANDROID_TOOLCHAIN_OWNER:-root}" && -z "$writable" && -z "$special" ]]; then ok "owned by root, read-only to accounts, no setuid or setgid"
-    else bad "$SDK_DIR must be root's, writable by no group or other, with no setuid/setgid bit (first offender: ${writable:-${special:-$(stat -c '%U' "$SDK_DIR")}})"; fi
+    # Every entry, links included: an account owning any of them can change it.
+    foreign="$(find "$SDK_DIR" ! -user "${ANDROID_TOOLCHAIN_OWNER:-root}" -print -quit 2>/dev/null)"
+    if [[ -z "$foreign" && -z "$writable" && -z "$special" ]]; then ok "owned by root throughout, read-only to accounts, no setuid or setgid"
+    else bad "$SDK_DIR must be root's throughout, writable by no group or other, with no setuid/setgid bit (first offender: ${foreign:-${writable:-$special}})"; fi
     if [[ "$(persistence)" == rw-only ]]; then
-        if grep -qF "'$SDK_DIR'" "$BIND_CONF" 2>/dev/null && mountpoint -q "$SDK_DIR"; then ok "kept across reboots by bind-dirs ($BIND_CONF)"
-        else bad "this AppVM does not keep $SDK_DIR: no bind-dirs entry in $BIND_CONF, or it is not mounted — it goes at the next shutdown"; fi
+        for kept in "$SDK_DIR" "$PROFILE"; do
+            if grep -qxF "binds+=( '$kept' )" "$BIND_CONF" 2>/dev/null && mountpoint -q "$kept"; then ok "$kept kept across reboots by bind-dirs ($BIND_CONF)"
+            else bad "this AppVM does not keep $kept: no bind-dirs entry in $BIND_CONF, or it is not mounted — it goes at the next shutdown"; fi
+        done
     fi
     if grep -qx "export ANDROID_HOME=$SDK_DIR" "$PROFILE" 2>/dev/null; then ok "$PROFILE sets ANDROID_HOME"
     else bad "$PROFILE does not export ANDROID_HOME=$SDK_DIR"; fi
@@ -340,11 +344,22 @@ if [[ "$persist" == bind ]] && mountpoint -q "$SDK_DIR"; then umount "$SDK_DIR" 
 [[ -e "$store" ]] && { mv "$store" "$old" || { mount_store; die "cannot move the old $store aside"; }; }
 mv "$new" "$store" || { [[ -e "$old" ]] && mv "$old" "$store"; mount_store; die "cannot move the new tree into place; the old install is restored"; }
 trap - EXIT
-rm -rf "$old"
-mount_store || die "the new install is in $store but cannot be bind-mounted onto $SDK_DIR"
+# The previous tree (and profile) stay until every step below has
+# succeeded; a failure puts them back.
+rollback() {  # rollback <message>
+    if [[ -e "$old" ]]; then
+        if [[ "$persist" == bind ]] && mountpoint -q "$SDK_DIR"; then umount "$SDK_DIR"; fi
+        rm -rf "$store" && mv "$old" "$store" && mount_store
+        [[ -e "$pstore.old" ]] && mv "$pstore.old" "$pstore"
+        die "$1; the previous install is restored"
+    fi
+    die "$1"
+}
+mount_store || rollback "the new install is in $store but cannot be bind-mounted onto $SDK_DIR"
 
 ndk_path="$(pkgs | sed -n 's/^ndk;\([^@]*\)@.*/\1/p' | head -1)"
-mkdir -p "$(dirname "$pstore")" || die "cannot create $(dirname "$pstore")"
+mkdir -p "$(dirname "$pstore")" || rollback "cannot create $(dirname "$pstore")"
+rm -f "$pstore.old"; if [[ -e "$pstore" ]]; then cp -p "$pstore" "$pstore.old" || rollback "cannot keep a copy of $pstore"; fi
 {
     echo "# Written by InterWeave tools/host/android/android-toolchain.sh --install."
     printf 'export ANDROID_HOME=%q\n' "$SDK_DIR"
@@ -352,20 +367,21 @@ mkdir -p "$(dirname "$pstore")" || die "cannot create $(dirname "$pstore")"
     printf 'export ANDROID_NDK_HOME=%q\n' "$SDK_DIR/ndk/$ndk_path"
     printf 'export ANDROID_NDK_ROOT=%q\n' "$SDK_DIR/ndk/$ndk_path"
     printf 'export ANDROID_JDK_HOME=%q\n' "$SDK_DIR/jdk"
-} > "$pstore" && chmod 0644 "$pstore" || die "cannot write $pstore"
+} > "$pstore" && chmod 0644 "$pstore" || rollback "cannot write $pstore"
 
 if [[ "$persist" == bind ]]; then
     mkdir -p "$(dirname "$BIND_CONF")" \
         && printf "# Written by InterWeave tools/host/android/android-toolchain.sh --install.\nbinds+=( '%s' )\nbinds+=( '%s' )\n" \
             "$SDK_DIR" "$PROFILE" > "$BIND_CONF" \
-        || die "cannot write $BIND_CONF: the install is in $store but will not be mounted after a reboot"
+        || rollback "cannot write $BIND_CONF"
     # Now, without a restart: what Qubes does at the next boot (the SDK is
     # mounted already, just after the swap).
     if ! mountpoint -q "$PROFILE"; then
         mkdir -p "$(dirname "$PROFILE")" && touch "$PROFILE" && mount --bind "$pstore" "$PROFILE" \
-            || die "cannot bind-mount $pstore onto $PROFILE"
+            || rollback "cannot bind-mount $pstore onto $PROFILE"
     fi
 fi
+rm -rf "$old" "$pstore.old"
 say "== installed =="
 say "Each Android account runs, once: bash tools/host/android/rust-android.sh"
 say "Any account, any time:            bash tools/host/android/android-toolchain.sh --check"

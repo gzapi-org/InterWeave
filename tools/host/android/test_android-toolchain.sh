@@ -182,6 +182,17 @@ expect "a setuid file in the SDK is named" 1 "no setuid/setgid bit"
 chmod u-s "$SANDBOX/opt/android-sdk/jdk/release"
 ANDROID_TOOLCHAIN_OWNER=nobody run bash "$UNDER_TEST" --check
 expect "an SDK not owned by root is named" 1 "must be root's"
+# A nested entry another account owns (its own mode 0644 is not writable to
+# group or other): only a subordinate uid can make one without root.
+if unshare --map-root-user --map-auto chown 1000 "$SANDBOX/opt/android-sdk/jdk/release" 2>/dev/null; then
+    run bash "$UNDER_TEST" --check
+    expect "a nested entry another account owns is named" 1 "first offender: $SANDBOX/opt/android-sdk/jdk/release"
+    unshare --map-root-user --map-auto chown 0 "$SANDBOX/opt/android-sdk/jdk/release"
+elif [[ -n "${CI:-}" ]]; then
+    fail "unshare --map-auto is unavailable under CI: the nested-owner case would go untested"
+else
+    echo "  - (skipped: no subordinate uids for unshare --map-auto here)"
+fi
 # qubesdb-read, stubbed: answers each key from $SANDBOX/qdb/<key>, or nothing.
 mkdir -p "$SANDBOX/qdb"
 printf '#!/bin/sh\ncat "%s/qdb/$(basename "$1")" 2>/dev/null\n' "$SANDBOX" > "$SANDBOX/bin/qubesdb-read"; chmod +x "$SANDBOX/bin/qubesdb-read"
@@ -244,9 +255,9 @@ if unshare -rm true 2>/dev/null; then
         local extra=""
         [[ "$1" == rw-only ]] && extra=" && bash '$UNDER_TEST' --check"
         run unshare -rm env ANDROID_TOOLCHAIN_PINS="$PINS" ANDROID_TOOLCHAIN_PERSISTENCE="$1" \
-            ANDROID_TOOLCHAIN_PROFILE="$SANDBOX/etc/android-sdk.sh" ANDROID_TOOLCHAIN_BIND_ROOT="$SANDBOX/rw/bind-dirs" \
+            ANDROID_TOOLCHAIN_PROFILE="${INST_PROFILE:-$SANDBOX/etc/android-sdk.sh}" ANDROID_TOOLCHAIN_BIND_ROOT="$SANDBOX/rw/bind-dirs" \
             ANDROID_TOOLCHAIN_BIND_CONF="$SANDBOX/rw/config/50_android-sdk.conf" ANDROID_TOOLCHAIN_OWNER=root \
-            bash -c "bash '$UNDER_TEST' --install '$SANDBOX/a.tar.gz'$extra"
+            bash -c "bash '$UNDER_TEST' --install '$SANDBOX/a.tar.gz'$extra${INST_AFTER:-}"
     }
     # In place (a template, a StandaloneVM, any other host): the previous
     # install is there, and must survive every failed attempt below.
@@ -266,6 +277,12 @@ if unshare -rm true 2>/dev/null; then
     inst full
     [[ "$out" == *"restored the previous install"* && -e "$SANDBOX/opt/android-sdk/previous-install" ]] \
         && pass "an interrupted swap (.old, nothing in place) is restored before anything else" || fail "the interrupted swap was not restored" "$out"
+    # A step after the swap fails (the profile's directory is a file): the
+    # previous tree comes back.
+    pack "$SANDBOX/staged"; : > "$SANDBOX/not-a-dir"
+    INST_PROFILE="$SANDBOX/not-a-dir/android-sdk.sh" inst full
+    [[ "$got" -eq 2 && "$out" == *"the previous install is restored"* && -e "$SANDBOX/opt/android-sdk/previous-install" && "$(ls -A "$SANDBOX/opt")" == android-sdk ]] \
+        && pass "a failure after the swap restores the previous install, nothing left beside it" || fail "a post-swap failure lost the previous install" "$out"$'\n'"$(ls -a "$SANDBOX/opt")"
     mkdir -p "$SANDBOX/opt/.android-sdk.new.killed/x"
     pack_hostile "$SANDBOX/staged" setuid
     inst full
@@ -289,6 +306,8 @@ if unshare -rm true 2>/dev/null; then
     grep -qx "binds+=( '$SANDBOX/opt/android-sdk' )" "$SANDBOX/rw/config/50_android-sdk.conf" \
         && grep -qx "binds+=( '$SANDBOX/etc/android-sdk.sh' )" "$SANDBOX/rw/config/50_android-sdk.conf" \
         && pass "  and the bind-dirs entry names the SDK and the profile" || fail "the bind-dirs entry is wrong" "$(cat "$SANDBOX/rw/config/50_android-sdk.conf" 2>&1)"
+    INST_AFTER=" && sed -i '/android-sdk.sh/d' '$SANDBOX/rw/config/50_android-sdk.conf'; bash '$UNDER_TEST' --check" inst rw-only
+    expect "  a profile bind-dirs does not keep is named, though the file is there now" 1 "does not keep $SANDBOX/etc/android-sdk.sh"
     rm -rf "$SANDBOX/rw" "$SANDBOX/opt"
 elif [[ -n "${CI:-}" ]]; then
     fail "unprivileged user and mount namespaces are unavailable under CI: the install would go untested"
