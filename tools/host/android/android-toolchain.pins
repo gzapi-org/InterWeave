@@ -12,9 +12,9 @@
 # target API 36 from 2026-08-31; AGP 9.4 needs JDK 17 and Gradle 9.6.0
 # and defaults to build-tools 36.0.0 and NDK 28.2.13676358.
 
-# Where and for whom.
+# Where. Read-only to every account: nothing writes the SDK after the
+# install, so it needs no shared group.
 SDK_DIR=/opt/android-sdk
-SDK_GROUP=androiddev
 
 # The SDK, installed by sdkmanager from Google's repository (which
 # verifies each archive's sha1). PKG_<n>=<sdkmanager path>@<revision>; the

@@ -212,6 +212,25 @@ if [ -n "$REAL" ]; then
         || bad "real repo has unwired guards: $(run "$REAL")"
 fi
 
+# ── tools/host/android: person-run scripts whose self-tests CI runs ──────
+# A host script is like a tools/gh one: it needs a self-test, the self-test
+# needs a workflow, and the script itself needs none.
+R="$TMP/host"; make_tree "$R"; mkdir -p "$R/tools/host/android"
+printf '#!/usr/bin/env bash\n' > "$R/tools/host/android/provision.sh"
+printf '#!/usr/bin/env bash\n' > "$R/tools/host/android/test_provision.sh"
+sed -i 's#tools/checks/test_\*.sh; do#tools/checks/test_*.sh tools/host/android/test_*.sh; do#' "$R/.github/workflows/ci.yml"
+[ "$(run_code "$R")" = "0" ] && ok "a host script with a wired self-test passes, though no workflow runs the script" \
+    || bad "a host script should need no workflow of its own: $(run "$R")"
+rm "$R/tools/host/android/test_provision.sh"
+out="$(run "$R")"
+[[ "$(run_code "$R")" = "1" && "$out" == *"tools/host/android/provision.sh: no self-test beside it"* ]] \
+    && ok "a host script with no self-test fails, named" || bad "a host script's missing self-test went unnoticed: $out"
+printf '#!/usr/bin/env bash\n' > "$R/tools/host/android/test_provision.sh"
+sed -i 's# tools/host/android/test_\*.sh; do#; do#' "$R/.github/workflows/ci.yml"
+out="$(run "$R")"
+[[ "$(run_code "$R")" = "1" && "$out" == *"tools/host/android/test_provision.sh: no workflow runs it"* ]] \
+    && ok "a host self-test no workflow runs fails, named" || bad "an unwired host self-test went unnoticed: $out"
+
 # ── usage ────────────────────────────────────────────────────────────────
 [ "$(run_code "$TMP/nothing-here")" = "2" ] && ok "a tree with no workflows exits 2" || bad "missing workflows should exit 2"
 help_out="$(bash "$CHECK" --help 2>/dev/null)"

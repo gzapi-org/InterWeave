@@ -606,6 +606,16 @@ jobs:
           echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
           "${RUNNER_TEMP}/bin/cargo-machete" --version
 
+      # tools/host/android's install cases run as uid 0 in user and mount
+      # namespaces (`unshare -rm`) and FAIL under CI where those are
+      # unavailable, never skip; the same AppArmor restriction as the rust
+      # job's mdns_bounds step, lifted the same way, probed the same way.
+      - name: Allow unprivileged user namespaces (android-toolchain install cases)
+        run: |
+          f=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [ -e "$f" ]; then sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0; fi
+          unshare -rm sh -c 'mkdir -p /tmp/ns-probe && mount -t tmpfs none /tmp/ns-probe && umount /tmp/ns-probe'
+
       # The `gh` suites mock `gh` and `curl` on PATH, so no token is used.
       # They do need jq and coreutils `timeout`, both present on
       # ubuntu-latest. `test_check_vendored_advisories.sh` is the one

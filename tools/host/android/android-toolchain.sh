@@ -12,22 +12,27 @@
 #                         install the SDK packages into a staging tree with
 #                         sdkmanager, check every revision, write the
 #                         manifest, pack one archive + its .sha256
-#   --install ARCHIVE     in the TEMPLATE (or a StandaloneVM), as root:
-#                         verify the archive and its manifest against the
-#                         pins, create the group, install to SDK_DIR with
-#                         group-write and setgid, write /etc/profile.d
+#   --install ARCHIVE     as root: verify the archive and its manifest
+#                         against the pins, install SDK_DIR read-only for
+#                         every account, write /etc/profile.d
 #   --check               any host, read-only: is SDK_DIR what the pins say
 #
-# WHY TWO STAGES. On a Qubes AppVM /opt is on the root volume, discarded at
-# shutdown and re-derived from the template, so an install made there
-# vanishes at the next reboot. The template persists but reaches only the
-# updates proxy, so it cannot download. The AppVM downloads and verifies;
-# the archive travels with a sha256 sidecar (qvm-copy); the template
-# installs it offline. (The same split as gzapp's Flutter SDK refresh.)
+# ON A QUBES AppVM, /opt and /etc are on the root volume, which is
+# discarded at shutdown. --install keeps them with Qubes bind-dirs: the
+# tree lives in /rw/bind-dirs/opt/android-sdk, a file in
+# /rw/config/qubes-bind-dirs.d/ has Qubes bind-mount it onto
+# /opt/android-sdk (and the profile file onto /etc/profile.d) at every
+# boot, and --install mounts both at once so no restart is needed. In a
+# TemplateVM, a StandaloneVM or any other Linux host, SDK_DIR persists and
+# is written directly.
 #
-# WHAT EACH ACCOUNT STILL DOES. Join the group (the template's /etc/group,
-# by the owner; then restart the AppVM), and run rust-android.sh once for
-# rustup, the Android Rust target and cargo-ndk, which live in the home.
+# READ-ONLY, NO GROUP. Every package is installed and every licence
+# accepted at staging, so a build only reads the SDK; owned by root, it
+# needs no shared group (a group made in an AppVM would not survive its
+# reboot either).
+#
+# WHAT EACH ACCOUNT STILL DOES. Run rust-android.sh once for rustup, the
+# Android Rust target and cargo-ndk, which live in the home.
 #
 # WHAT IS NOT CHANGED. Nobody's JAVA_HOME or PATH: the host JDK stays the
 # default (a Gradle build names $ANDROID_JDK_HOME), and the SDK's adb is
@@ -66,17 +71,34 @@ done
 
 # ── the pins: KEY=VALUE lines, read and never sourced ────────────────
 declare -A PIN
+# Each value has a form, checked before anything uses it: --install runs
+# as root and writes SDK_DIR and the NDK's path into a profile every login
+# sources, so a value is never trusted to be only what it looks like.
+valid_pin() {
+    local k="$1" v="$2"
+    case "$k" in
+        SDK_DIR)  [[ "$v" =~ ^/[A-Za-z0-9._/-]+$ && "/$v/" != */../* ]] ;;
+        *_URL)    [[ "$v" =~ ^https://[A-Za-z0-9._~:/?\&=+%@-]+$ ]] ;;
+        *_SHA1)   [[ "$v" =~ ^[0-9a-f]{40}$ ]] ;;
+        *_SHA256) [[ "$v" =~ ^[0-9a-f]{64}$ ]] ;;
+        PKG_*)    [[ "$v" =~ ^[A-Za-z0-9._-]+(\;[A-Za-z0-9._-]+)*@[0-9]+(\.[0-9]+)*$ ]] ;;
+        *)        [[ "$v" =~ ^[A-Za-z0-9._+-]+$ ]] ;;
+    esac
+}
 read_pins() {
-    local line n=0
+    local line key value n=0
     [[ -r "$1" ]] || die "cannot read the pins at $1"
     while IFS= read -r line || [[ -n "$line" ]]; do
         n=$((n + 1))
         [[ -z "$line" || "$line" == \#* ]] && continue
         [[ "$line" =~ ^([A-Z][A-Z0-9_]*)=(.+)$ ]] || die "$1:$n is not KEY=VALUE: $line"
-        PIN["${BASH_REMATCH[1]}"]="${BASH_REMATCH[2]}"
+        # Taken before valid_pin, whose own matches overwrite BASH_REMATCH.
+        key="${BASH_REMATCH[1]}" value="${BASH_REMATCH[2]}"
+        valid_pin "$key" "$value" || die "$1:$n: the value of $key is not of its form"
+        PIN["$key"]="$value"
     done < "$1"
     local k
-    for k in SDK_DIR SDK_GROUP CMDLINE_TOOLS_URL CMDLINE_TOOLS_SHA1 CMDLINE_TOOLS_REVISION JDK_VERSION JDK_URL JDK_SHA256 PKG_1; do
+    for k in SDK_DIR CMDLINE_TOOLS_URL CMDLINE_TOOLS_SHA1 CMDLINE_TOOLS_REVISION JDK_VERSION JDK_URL JDK_SHA256 PKG_1; do
         [[ -n "${PIN[$k]:-}" ]] || die "$1 has no $k"
     done
 }
@@ -84,13 +106,23 @@ read_pins() {
 pkgs() { local k; for k in $(printf '%s\n' "${!PIN[@]}" | grep -E '^PKG_[0-9]+$' | LC_ALL=C sort -t_ -k2 -n); do printf '%s\n' "${PIN[$k]}"; done; }
 # The pins as the manifest records them: every KEY=VALUE line, sorted
 # bytewise. Never the locale's order: the AppVM that stages and the
-# template that installs need not share a locale, and a different order
+# host that installs need not share a locale, and a different order
 # would refuse a good archive as "staged from other pins".
 pins_canonical() { local k; for k in "${!PIN[@]}"; do printf '%s=%s\n' "$k" "${PIN[$k]}"; done | LC_ALL=C sort; }
 
 read_pins "$PINS_FILE"
 SDK_DIR="${ANDROID_TOOLCHAIN_SDK_DIR:-${PIN[SDK_DIR]}}"
-GROUP="${PIN[SDK_GROUP]}"
+BIND_ROOT="${ANDROID_TOOLCHAIN_BIND_ROOT:-/rw/bind-dirs}"
+BIND_CONF="${ANDROID_TOOLCHAIN_BIND_CONF:-/rw/config/qubes-bind-dirs.d/50_android-sdk.conf}"
+# The Qubes VM type; empty where this is not Qubes. Set (even empty) in
+# the environment, that value is used (tests). On Qubes, a type that cannot
+# be read is "?" — never guessed as "not Qubes", which would install onto
+# a root volume an AppVM discards.
+vm_type() {
+    if [[ -n "${ANDROID_TOOLCHAIN_VM_TYPE+set}" ]]; then printf '%s' "$ANDROID_TOOLCHAIN_VM_TYPE"; return; fi
+    command -v qubesdb-read >/dev/null || return 0
+    local t; t="$(qubesdb-read /qubes-vm-type 2>/dev/null || true)"; printf '%s' "${t:-?}"
+}
 MANIFEST_NAME=".android-toolchain.manifest"
 
 # A package's revision as sdkmanager records it in <dir>/package.xml:
@@ -142,12 +174,16 @@ if [[ "$MODE" == check ]]; then
     say "== $me --check: $SDK_DIR against $(basename "$PINS_FILE") =="
     [[ -d "$SDK_DIR" ]] || { bad "$SDK_DIR is not installed on this host"; say "== 1 problem =="; exit 1; }
     verify_tree "$SDK_DIR"
-    if [[ "$(stat -c %G "$SDK_DIR" 2>/dev/null)" == "$GROUP" && -g "$SDK_DIR" ]]; then ok "group $GROUP, setgid"
-    else bad "$SDK_DIR is not group $GROUP with setgid (it is $(stat -c '%G %A' "$SDK_DIR" 2>/dev/null))"; fi
+    writable="$(find "$SDK_DIR" -perm /022 -print -quit 2>/dev/null)"
+    special="$(find "$SDK_DIR" -perm /6000 -print -quit 2>/dev/null)"
+    if [[ "$(stat -c %U "$SDK_DIR" 2>/dev/null)" == "${ANDROID_TOOLCHAIN_OWNER:-root}" && -z "$writable" && -z "$special" ]]; then ok "owned by root, read-only to accounts, no setuid or setgid"
+    else bad "$SDK_DIR must be root's, writable by no group or other, with no setuid/setgid bit (first offender: ${writable:-${special:-$(stat -c '%U' "$SDK_DIR")}})"; fi
+    if [[ "$(vm_type)" == AppVM ]]; then
+        if grep -qF "'$SDK_DIR'" "$BIND_CONF" 2>/dev/null && mountpoint -q "$SDK_DIR"; then ok "kept across reboots by bind-dirs ($BIND_CONF)"
+        else bad "this AppVM does not keep $SDK_DIR: no bind-dirs entry in $BIND_CONF, or it is not mounted — it goes at the next shutdown"; fi
+    fi
     if grep -qx "export ANDROID_HOME=$SDK_DIR" "$PROFILE" 2>/dev/null; then ok "$PROFILE sets ANDROID_HOME"
     else bad "$PROFILE does not export ANDROID_HOME=$SDK_DIR"; fi
-    if id -nG 2>/dev/null | tr ' ' '\n' | grep -qx "$GROUP"; then ok "$(id -un) is in $GROUP"
-    else say "  NOTE  $(id -un) is not in $GROUP: it can read the SDK, not write it (the owner adds it in the template)"; fi
     if [[ "$PROBLEMS" -eq 0 ]]; then say "== the install matches the pins =="; exit 0; fi
     say "== $PROBLEMS problem(s) =="; exit 1
 fi
@@ -197,66 +233,97 @@ if [[ "$MODE" == stage ]]; then
     tar -C "$root" -czf "$archive" . || die "cannot write $archive"
     ( cd "$STAGE_DIR" && sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256" )
     say "== staged: $archive ($(du -h "$archive" | cut -f1)) =="
-    say "Next, from this AppVM:"
-    say "  qvm-copy-to-vm <template> $archive $archive.sha256"
-    say "then in the template, as root, from a checkout of this repository:"
-    say "  sudo bash tools/host/android/android-toolchain.sh --install ~/QubesIncoming/$(hostname -s 2>/dev/null || echo '<appvm>')/$(basename "$archive")"
+    say "Next, as root on the host that gets it (here, or a copy of the archive and its .sha256):"
+    say "  sudo bash tools/host/android/android-toolchain.sh --install $archive"
     exit 0
 fi
 
 # ── --install ────────────────────────────────────────────────────────
 # Refusals first, every one before anything is written.
-vm_type="${ANDROID_TOOLCHAIN_VM_TYPE:-$(qubesdb-read /qubes-vm-type 2>/dev/null || true)}"
-case "$vm_type" in
-    TemplateVM|StandaloneVM) ;;
-    AppVM|DispVM) die "this is a Qubes $vm_type: /opt is discarded at its next shutdown. Stage here, install in the template." ;;
-    "") die "cannot tell whether this is a Qubes template (qubesdb-read /qubes-vm-type gave nothing); refusing rather than guessing" ;;
-    *) die "unknown Qubes VM type '$vm_type'; refusing" ;;
+case "$(vm_type)" in
+    AppVM)   persist=bind ;;
+    DispVM)  die "this is a Qubes DispVM: nothing it installs outlives it" ;;
+    "?")     die "this is Qubes, but its VM type cannot be read (qubesdb-read /qubes-vm-type); refusing rather than guessing where a write persists" ;;
+    *)       persist=direct ;;   # TemplateVM, StandaloneVM, or not Qubes at all
 esac
 [[ -r "$ARCHIVE" && -r "$ARCHIVE.sha256" ]] || die "need $ARCHIVE and $ARCHIVE.sha256 side by side"
-( cd "$(dirname "$ARCHIVE")" && sha256sum --check --quiet "$(basename "$ARCHIVE").sha256" ) >/dev/null 2>&1 \
-    || die "$ARCHIVE does not match its .sha256 — copy it again"
+# The sidecar's hash and name are both held to THIS archive: `sha256sum
+# --check` would verify whatever file the sidecar names.
+read -r want_sum want_name < "$ARCHIVE.sha256"
+[[ "${want_name#\*}" == "$(basename "$ARCHIVE")" ]] || die "$ARCHIVE.sha256 names ${want_name:-nothing}, not $(basename "$ARCHIVE")"
+[[ "$(sha256sum "$ARCHIVE" | cut -d' ' -f1)" == "$want_sum" ]] || die "$ARCHIVE does not match its .sha256 — copy it again"
 manifest="$(tar -xzOf "$ARCHIVE" "./$MANIFEST_NAME" 2>/dev/null)" || die "$ARCHIVE holds no $MANIFEST_NAME"
 [[ "$manifest" == "$(pins_canonical)" ]] \
     || die "$ARCHIVE was staged from other pins than this checkout's: stage again, or check out the commit it was staged from"
-[[ "$(id -u)" -eq 0 ]] || die "--install writes $SDK_DIR, $PROFILE and /etc/group: run it as root"
-for tool in setfacl groupadd tar; do command -v "$tool" >/dev/null || die "$tool is required to install"; done
+[[ "$(id -u)" -eq 0 ]] || die "--install writes $SDK_DIR and $PROFILE: run it as root"
+command -v python3 >/dev/null || die "python3 is required to install"
+[[ "$persist" == direct ]] || command -v mountpoint >/dev/null || die "mountpoint is required on a Qubes AppVM"
 
-say "== $me --install into $SDK_DIR =="
-getent group "$GROUP" >/dev/null || groupadd --system "$GROUP" || die "cannot create group $GROUP"
-new="$SDK_DIR.new" old="$SDK_DIR.old"
-rm -rf "$new" "$old"
-# --no-same-owner: as root, tar would otherwise give every file the
-# staging account's uid from the archive; ownership is set below, once.
-mkdir -p "$new" && tar --no-same-owner -xzf "$ARCHIVE" -C "$new" || die "cannot unpack into $new"
-# Group-writable with setgid and a default ACL, as /opt/flutter is: setgid
-# keeps the group on new files, the ACL keeps their group write. Without
-# both, the first account to let Gradle add a package leaves files the next
-# account cannot touch.
-chown -R root:"$GROUP" "$new" \
-    && chmod -R g+rwX "$new" \
-    && find "$new" -type d -exec chmod g+s {} + \
-    && setfacl -R -m g:"$GROUP":rwX "$new" \
-    && find "$new" -type d -exec setfacl -d -m g:"$GROUP":rwX {} + \
-    || die "cannot set the group, mode or ACL on $new (nothing installed yet)"
-PROBLEMS=0; verify_tree "$new" >/dev/null
-[[ "$PROBLEMS" -eq 0 ]] || die "the unpacked tree does not verify ($PROBLEMS problem(s)); $SDK_DIR is untouched"
-[[ -e "$SDK_DIR" ]] && { mv "$SDK_DIR" "$old" || die "cannot move the old $SDK_DIR aside"; }
-mv "$new" "$SDK_DIR" || { [[ -e "$old" ]] && mv "$old" "$SDK_DIR"; die "cannot move $new into place; the old install is restored"; }
+# Where the tree is really written: SDK_DIR itself, or, on an AppVM, its
+# bind-dirs store under /rw, which Qubes mounts onto SDK_DIR at boot.
+if [[ "$persist" == bind ]]; then store="$BIND_ROOT$SDK_DIR" pstore="$BIND_ROOT$PROFILE"; else store="$SDK_DIR" pstore="$PROFILE"; fi
+old="$store.old"
+say "== $me --install into $SDK_DIR${persist/bind/ (kept by bind-dirs in $store)}${persist/direct/} =="
+# A run killed between moving the old tree aside and moving the new one in
+# left the old one at .old and nothing in place: put it back first, so
+# this run's failure cannot leave the host with no install at all.
+if [[ -e "$old" && ! -e "$store" ]]; then mv "$old" "$store" && say "  restored the previous install from $old"; fi
 rm -rf "$old"
+mkdir -p "$(dirname "$store")" || die "cannot create $(dirname "$store")"
+new="$(mktemp -d "$(dirname "$store")/.android-sdk.new.XXXXXX")" || die "cannot make a staging directory beside $store"
+trap 'rm -rf "$new"' EXIT
+# THE ARCHIVE IS NOT TRUSTED. It was staged by an unprivileged account and
+# is unpacked here as root, so it is unpacked by Python's tarfile with the
+# `data` filter: only files, directories and symlinks; no absolute path, no
+# `..` out of the tree, no link pointing outside it; setuid, setgid and
+# sticky bits dropped; owners not taken from the archive. Anything else
+# refuses the whole archive, before the old install is touched. The scan
+# before it is stricter than the filter in one way: it refuses a hard link
+# even inside the tree, which no SDK archive holds (staged ones have none).
+python3 - "$ARCHIVE" "$new" <<'PY' || die "the archive holds something an SDK must not (above); nothing installed"
+import sys, tarfile
+with tarfile.open(sys.argv[1], 'r:gz') as t:
+    for m in t.getmembers():
+        if not (m.isfile() or m.isdir() or m.issym()):
+            sys.exit(f"refused: {m.name} is a {'hard link' if m.islnk() else 'device or special file'}")
+    t.extractall(sys.argv[2], filter='data')
+PY
+chown -R root:root "$new" \
+    && chmod -R u+rwX,go+rX,go-w "$new" \
+    && chmod 0755 "$new" \
+    || die "cannot set the owner or modes on $new (nothing installed yet)"
+PROBLEMS=0; verify_tree "$new" >&2
+[[ "$PROBLEMS" -eq 0 ]] || die "the unpacked tree does not verify ($PROBLEMS problem(s), above); $SDK_DIR is untouched"
+if [[ "$persist" == bind ]] && mountpoint -q "$SDK_DIR"; then umount "$SDK_DIR" || die "cannot unmount the old $SDK_DIR to replace it"; fi
+[[ -e "$store" ]] && { mv "$store" "$old" || die "cannot move the old $store aside"; }
+mv "$new" "$store" || { [[ -e "$old" ]] && mv "$old" "$store"; die "cannot move the new tree into place; the old install is restored"; }
+trap - EXIT
+rm -rf "$old"
+
 ndk_path="$(pkgs | sed -n 's/^ndk;\([^@]*\)@.*/\1/p' | head -1)"
-cat > "$PROFILE" <<EOF
-# Written by InterWeave tools/host/android/android-toolchain.sh --install.
-export ANDROID_HOME=$SDK_DIR
-export ANDROID_SDK_ROOT=$SDK_DIR
-export ANDROID_NDK_HOME=$SDK_DIR/ndk/$ndk_path
-export ANDROID_NDK_ROOT=$SDK_DIR/ndk/$ndk_path
-export ANDROID_JDK_HOME=$SDK_DIR/jdk
-EOF
-chmod 0644 "$PROFILE"
+mkdir -p "$(dirname "$pstore")" || die "cannot create $(dirname "$pstore")"
+{
+    echo "# Written by InterWeave tools/host/android/android-toolchain.sh --install."
+    printf 'export ANDROID_HOME=%q\n' "$SDK_DIR"
+    printf 'export ANDROID_SDK_ROOT=%q\n' "$SDK_DIR"
+    printf 'export ANDROID_NDK_HOME=%q\n' "$SDK_DIR/ndk/$ndk_path"
+    printf 'export ANDROID_NDK_ROOT=%q\n' "$SDK_DIR/ndk/$ndk_path"
+    printf 'export ANDROID_JDK_HOME=%q\n' "$SDK_DIR/jdk"
+} > "$pstore" && chmod 0644 "$pstore" || die "cannot write $pstore"
+
+if [[ "$persist" == bind ]]; then
+    mkdir -p "$(dirname "$BIND_CONF")" \
+        && printf "# Written by InterWeave tools/host/android/android-toolchain.sh --install.\nbinds+=( '%s' )\nbinds+=( '%s' )\n" \
+            "$SDK_DIR" "$PROFILE" > "$BIND_CONF" \
+        || die "cannot write $BIND_CONF: the install is in $store but will not be mounted after a reboot"
+    # Now, without a restart: what Qubes does at the next boot.
+    mkdir -p "$SDK_DIR" && mount --bind "$store" "$SDK_DIR" || die "cannot bind-mount $store onto $SDK_DIR"
+    if ! mountpoint -q "$PROFILE"; then
+        mkdir -p "$(dirname "$PROFILE")" && touch "$PROFILE" && mount --bind "$pstore" "$PROFILE" \
+            || die "cannot bind-mount $pstore onto $PROFILE"
+    fi
+fi
 say "== installed =="
-say "Next: add each Android account to $GROUP in this template"
-say "  usermod -aG $GROUP <account>"
-say "then shut the template down and restart the AppVM; each account then runs"
-say "  bash tools/host/android/android-toolchain.sh --check"
+say "Each Android account runs, once: bash tools/host/android/rust-android.sh"
+say "Any account, any time:            bash tools/host/android/android-toolchain.sh --check"
 exit 0

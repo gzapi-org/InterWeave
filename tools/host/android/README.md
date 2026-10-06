@@ -38,28 +38,44 @@ two adb servers of different versions fight over the device. Use
 A Gradle wrapper pins `distributionUrl=…/gradle-9.6.0-bin.zip` with
 `distributionSha256Sum=` the `GRADLE_DIST_SHA256` in the pins file.
 
-## Installing it on a host (Qubes)
+## Installing it on a host
 
-`/opt` is on the AppVM's root volume, which is discarded at shutdown, so
-the install happens in the TemplateVM. The template has no network, so the
-work is in two stages:
+The install is read-only to every account: every package is installed and
+every licence accepted when it is staged, so a build only reads the SDK.
+Root owns it, and no shared group is needed.
 
 ```sh
-# 1. In an AppVM (has network), as any account: download, verify, stage.
+# 1. As any account, where there is network: download, verify, stage.
 bash tools/host/android/android-toolchain.sh --stage
-#    It prints the qvm-copy-to-vm line for the archive and its .sha256.
-
-# 2. In the TemplateVM, as root, from a checkout at the same commit:
-sudo bash tools/host/android/android-toolchain.sh --install ~/QubesIncoming/<appvm>/android-toolchain-<id>.tar.gz
-sudo usermod -aG androiddev <each Android account>
-#    then shut the template down and restart the AppVM.
+# 2. As root on the same host, from a checkout at the same commit:
+sudo bash tools/host/android/android-toolchain.sh --install ~/android-staging/android-toolchain-<id>.tar.gz
 ```
 
-`--stage` accepts the SDK licences on behalf of the host, once. `--install`
-refuses before writing anything:
-- in an AppVM;
-- on an archive that does not match its `.sha256`;
-- on an archive staged from other pins than the checkout's.
+**On a Qubes AppVM**, `/opt` and `/etc` are discarded at shutdown.
+`--install` keeps them with Qubes bind-dirs:
+- the tree lives in `/rw/bind-dirs/opt/android-sdk`, on the persistent
+  volume;
+- `/rw/config/qubes-bind-dirs.d/50_android-sdk.conf` has Qubes bind-mount
+  it onto `/opt/android-sdk`, and the profile onto
+  `/etc/profile.d/android-sdk.sh`, at every boot;
+- `--install` mounts both at once, so no restart is needed.
+
+In a TemplateVM, a StandaloneVM or any other host, `/opt/android-sdk` is
+written directly.
+
+The archive is treated as untrusted, since it was staged by an
+unprivileged account and is unpacked as root. Before writing anything,
+`--install` refuses:
+- a DispVM, and a Qubes VM whose type cannot be read;
+- an archive not matching its `.sha256`, or whose `.sha256` names another
+  file;
+- an archive staged from other pins than the checkout's;
+- any member that is not a file, directory or symlink, a hard link, an
+  absolute or `..` path, or a link out of the tree.
+
+Setuid and setgid bits are dropped. A failed install leaves the previous
+one in place, and an interrupted earlier swap is restored first. Every
+pins value must match its form, and nothing in the file is ever executed.
 
 Then each Android account, once:
 
