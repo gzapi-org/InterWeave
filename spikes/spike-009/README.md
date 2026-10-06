@@ -4,7 +4,7 @@ Android Keystore wrapping, invalidation and background/user-presence behavior.
 
 Do not treat experiments placed here as production implementation. Evidence and final decision must be recorded against [`architecture/roadmap/SPIKES.md`](../../architecture/roadmap/SPIKES.md); the verdict is architect-cto's to write there, not this file's.
 
-**Status: the HOST HALF has run (2026-10-06); the DEVICE HALF has run (2026-10-06: D1–D7, three recorded parts), with D6b's attribution limited by the device (below).** No verdict is recorded; the verdict is architect-cto's.
+**Status: the HOST HALF has run (2026-10-06); the DEVICE HALF has run (2026-10-06: D1–D7, four recorded parts; D6b repeated in part 4 with an addition only).** No verdict is recorded; the verdict is architect-cto's.
 
 ## The host half: what was established
 
@@ -92,11 +92,23 @@ The recorded run is [`device/REPRODUCTION-2026-10-06c.log`](./device/REPRODUCTIO
 | D6a | Fresh keys of both modes, each first shown to wrap and unwrap. The person changes the screen lock to Swipe (`device_secure: false`). The background keys, fresh and old, still unwrap: the control. Both user-presence keys, fresh and old, are **invalidated**. With the PIN set again, they stay invalidated: it is permanent. **On this device the invalidation surfaces as `UnrecoverableKeyException` from `KeyStore.getKey`**, before any cipher, and not as the `KeyPermanentlyInvalidatedException` this plan expected; `KeyInfo` cannot be read for the key either. A production check written for the latter alone would miss it. |
 | D6b | With one Class-3 fingerprint enrolled: a fresh per-operation key (biometric, every use; `invalidated_by_biometric_enrollment: true`) wraps and unwraps through `BiometricPrompt`, one touch each. A fresh timed key wraps and unwraps inside the 60 s a touch opens. These are the controls. Then the enrollment changed. **This device's Settings offered no way to add a fingerprint without re-enrolling the first** (the person went through Screen lock type; two enrolled after). After the change, BOTH keys are invalidated (`UnrecoverableKeyException: User changed or deleted their auth credentials`), and the background key still unwraps. |
 
-**What D6b did not establish:** that adding a fingerprint, and only that, invalidates the per-operation key and spares the timed one. The event this device's Settings allowed included re-enrolling the first fingerprint, and possibly a pass through the credential flow. So the timed key's invalidation cannot be attributed: Android documents enrollment invalidation for per-operation keys only, and a credential change or an emptied fingerprint set invalidates both. A device whose Settings can add a fingerprint on its own is needed to close it. What holds either way: no key that was invalidated ever gave back a seed, and the background-compatible key was untouched by every credential and biometric change.
+**What D6b did not establish:** that adding a fingerprint, and only that, invalidates the per-operation key and spares the timed one. The event this device's Settings allowed included re-enrolling the first fingerprint, and possibly a pass through the credential flow. So the timed key's invalidation cannot be attributed: Android documents enrollment invalidation for per-operation keys only, and a credential change or an emptied fingerprint set invalidates both. Part 4 repeated it with an addition only. What holds either way: no key that was invalidated ever gave back a seed, and the background-compatible key was untouched by every credential and biometric change.
+
+## The device half: what was established (part 4)
+
+The recorded run is [`device/REPRODUCTION-2026-10-06d.log`](./device/REPRODUCTION-2026-10-06d.log). It is D6b again, with an addition only: the Fingerprints page did offer "add" once two were enrolled.
+
+| id | observation |
+|---|---|
+| D6b (repeat) | Fresh keys made with two fingerprints enrolled. The person ADDS a third from Settings → Biometrics and security → Fingerprints, without changing the credential (count 2 → 3). The **timed key survives**: its `KeyInfo` reads and it wraps inside the window the person's PIN entry opened. The **per-operation key is invalidated**: its `KeyInfo` still reads, but `Cipher.init` throws **`KeyPermanentlyInvalidatedException`**. The background key unwraps: the control. This is Android's documented behaviour, and it attributes part 3's loss of the timed key to the re-enrollment path, not to the addition. |
+
+**Two invalidation signals, both seen on this device:** `UnrecoverableKeyException` from `KeyStore.getKey` after a credential change (D6a, part 3), and `KeyPermanentlyInvalidatedException` from `Cipher.init` after a biometric enrollment (part 4). Recovery has to be entered on either.
+
+**Limit:** the per-operation key in part 4 was never used before the event. Its prompt went unanswered, so its pre-event health rests on its generation and `KeyInfo`, not on a completed unwrap. Part 3's per-operation key did complete one, and the same configuration is used here.
 
 ## The device half: the plan
 
-[`device/`](./device), above. Every row has run (parts 1–3 above). D6b ran with the attribution limit stated in part 3. Results are written to app-private storage and read back over adb (`run-as`). The fixture seed is the TEST-ONLY public vector only.
+[`device/`](./device), above. Every row has run (parts 1–4 above). Results are written to app-private storage and read back over adb (`run-as`). The fixture seed is the TEST-ONLY public vector only.
 
 | id | what | recorded |
 |---|---|---|
