@@ -1,0 +1,341 @@
+{
+  "$comment": "Render-parity golden (human-client-ui.md section 13; plan section 20). NON-NORMATIVE test data: what crates/human/ui-slint draws for each text, compared by its tests/render_parity.rs and, at Stage 17, by Android's instrumented test. RENDER_PARITY_WRITE=1 rewrites 'drawn'; review every change before committing.",
+  "cases": [
+    {
+      "drawn": {
+        "lines": [
+          {
+            "depth": 0,
+            "kind": "Text",
+            "level": 0,
+            "marker": "",
+            "quoted": false,
+            "text": "A plain paragraph with emphasis, strong, inline code and struck text."
+          }
+        ],
+        "links": []
+      },
+      "name": "paragraph-and-inline",
+      "text": "A plain paragraph with *emphasis*, **strong**, `inline code` and ~~struck~~ text."
+    },
+    {
+      "drawn": {
+        "lines": [
+          {
+            "depth": 0,
+            "kind": "Heading",
+            "level": 1,
+            "marker": "",
+            "quoted": false,
+            "text": "Heading one"
+          },
+          {
+            "depth": 0,
+            "kind": "Heading",
+            "level": 2,
+            "marker": "",
+            "quoted": false,
+            "text": "Heading two"
+          },
+          {
+            "depth": 0,
+            "kind": "Heading",
+            "level": 6,
+            "marker": "",
+            "quoted": false,
+            "text": "Heading six"
+          }
+        ],
+        "links": []
+      },
+      "name": "headings",
+      "text": "# Heading one\n\n## Heading two\n\n###### Heading six"
+    },
+    {
+      "drawn": {
+        "lines": [
+          {
+            "depth": 1,
+            "kind": "Text",
+            "level": 0,
+            "marker": "•",
+            "quoted": false,
+            "text": "first"
+          },
+          {
+            "depth": 1,
+            "kind": "Text",
+            "level": 0,
+            "marker": "•",
+            "quoted": false,
+            "text": "second"
+          },
+          {
+            "depth": 2,
+            "kind": "Text",
+            "level": 0,
+            "marker": "•",
+            "quoted": false,
+            "text": "nested one"
+          },
+          {
+            "depth": 2,
+            "kind": "Text",
+            "level": 0,
+            "marker": "•",
+            "quoted": false,
+            "text": "nested two"
+          },
+          {
+            "depth": 1,
+            "kind": "Text",
+            "level": 0,
+            "marker": "•",
+            "quoted": false,
+            "text": "third"
+          }
+        ],
+        "links": []
+      },
+      "name": "bullet-list-nested",
+      "text": "- first\n- second\n  - nested one\n  - nested two\n- third"
+    },
+    {
+      "drawn": {
+        "lines": [
+          {
+            "depth": 1,
+            "kind": "Text",
+            "level": 0,
+            "marker": "1.",
+            "quoted": false,
+            "text": "one"
+          },
+          {
+            "depth": 1,
+            "kind": "Text",
+            "level": 0,
+            "marker": "2.",
+            "quoted": false,
+            "text": "two"
+          },
+          {
+            "depth": 1,
+            "kind": "Text",
+            "level": 0,
+            "marker": "3.",
+            "quoted": false,
+            "text": "three"
+          }
+        ],
+        "links": []
+      },
+      "name": "ordered-list",
+      "text": "1. one\n2. two\n3. three"
+    },
+    {
+      "drawn": {
+        "lines": [
+          {
+            "depth": 1,
+            "kind": "Text",
+            "level": 0,
+            "marker": "",
+            "quoted": true,
+            "text": "quoted line second quoted line"
+          },
+          {
+            "depth": 0,
+            "kind": "Text",
+            "level": 0,
+            "marker": "",
+            "quoted": false,
+            "text": "after the quote"
+          }
+        ],
+        "links": []
+      },
+      "name": "blockquote",
+      "text": "> quoted line\n> second quoted line\n\nafter the quote"
+    },
+    {
+      "drawn": {
+        "lines": [
+          {
+            "depth": 0,
+            "kind": "Code",
+            "level": 0,
+            "marker": "",
+            "quoted": false,
+            "text": "fn main() {\n    println!(\"hi\");\n}"
+          }
+        ],
+        "links": []
+      },
+      "name": "code-block",
+      "text": "```\nfn main() {\n    println!(\"hi\");\n}\n```"
+    },
+    {
+      "drawn": {
+        "lines": [
+          {
+            "depth": 0,
+            "kind": "Text",
+            "level": 0,
+            "marker": "",
+            "quoted": false,
+            "text": "above"
+          },
+          {
+            "depth": 0,
+            "kind": "Rule",
+            "level": 0,
+            "marker": "",
+            "quoted": false,
+            "text": ""
+          },
+          {
+            "depth": 0,
+            "kind": "Text",
+            "level": 0,
+            "marker": "",
+            "quoted": false,
+            "text": "below"
+          }
+        ],
+        "links": []
+      },
+      "name": "thematic-rule",
+      "text": "above\n\n---\n\nbelow"
+    },
+    {
+      "drawn": {
+        "lines": [
+          {
+            "depth": 0,
+            "kind": "TableHeader",
+            "level": 0,
+            "marker": "",
+            "quoted": false,
+            "text": "a | b"
+          },
+          {
+            "depth": 0,
+            "kind": "TableRow",
+            "level": 0,
+            "marker": "",
+            "quoted": false,
+            "text": "1 | 2"
+          },
+          {
+            "depth": 0,
+            "kind": "TableRow",
+            "level": 0,
+            "marker": "",
+            "quoted": false,
+            "text": "3 | 4"
+          }
+        ],
+        "links": []
+      },
+      "name": "table",
+      "text": "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |"
+    },
+    {
+      "drawn": {
+        "lines": [
+          {
+            "depth": 0,
+            "kind": "Text",
+            "level": 0,
+            "marker": "",
+            "quoted": false,
+            "text": "see the docs or mail"
+          }
+        ],
+        "links": [
+          "Open link: https://example.org/docs",
+          "Open link: mailto:someone@example.org"
+        ]
+      },
+      "name": "links-allowed",
+      "text": "see [the docs](https://example.org/docs) or [mail](mailto:someone@example.org)"
+    },
+    {
+      "drawn": {
+        "lines": [
+          {
+            "depth": 0,
+            "kind": "Text",
+            "level": 0,
+            "marker": "",
+            "quoted": false,
+            "text": "run and file"
+          }
+        ],
+        "links": []
+      },
+      "name": "link-disallowed-scheme",
+      "text": "[run](javascript:alert(1)) and [file](file:///etc/passwd)"
+    },
+    {
+      "drawn": {
+        "lines": [
+          {
+            "depth": 0,
+            "kind": "Text",
+            "level": 0,
+            "marker": "",
+            "quoted": false,
+            "text": "[Image not shown: a picture]"
+          }
+        ],
+        "links": []
+      },
+      "name": "image-not-fetched",
+      "text": "![a picture](https://example.org/p.png)"
+    },
+    {
+      "drawn": {
+        "lines": [
+          {
+            "depth": 0,
+            "kind": "Text",
+            "level": 0,
+            "marker": "",
+            "quoted": false,
+            "text": "<b>not bold</b> <script>alert(1)</script>"
+          }
+        ],
+        "links": []
+      },
+      "name": "raw-html-literal",
+      "text": "<b>not bold</b> <script>alert(1)</script>"
+    },
+    {
+      "drawn": {
+        "lines": [
+          {
+            "depth": 0,
+            "kind": "Text",
+            "level": 0,
+            "marker": "",
+            "quoted": false,
+            "text": "https://example.org/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "links": []
+      },
+      "name": "long-unbroken-word",
+      "text": "https://example.org/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "drawn": {
+        "lines": [],
+        "links": []
+      },
+      "name": "empty",
+      "text": ""
+    }
+  ]
+}

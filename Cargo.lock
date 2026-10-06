@@ -3518,6 +3518,7 @@ dependencies = [
  "interweave-human-ui-model",
  "interweave-profile-identity",
  "interweave-transport-api",
+ "serde_json",
  "slint",
  "slint-build",
  "yeslogic-fontconfig-sys",
