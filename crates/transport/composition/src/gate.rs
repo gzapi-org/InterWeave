@@ -170,6 +170,18 @@ impl LastOutcome {
         }
     }
 
+    /// The neutral port's name for this outcome (`AdminPort::peers`).
+    #[must_use]
+    pub const fn to_view(self) -> interweave_local_client_api::PeerOutcome {
+        use interweave_local_client_api::PeerOutcome as O;
+        match self {
+            Self::Connected => O::Connected,
+            Self::DialFailed => O::DialFailed,
+            Self::IdentityMismatch => O::IdentityMismatch,
+            Self::Denied => O::Denied,
+        }
+    }
+
     /// The outcome a failed dial's class is.
     #[must_use]
     pub const fn of_class(class: DialFailureClass) -> Self {
