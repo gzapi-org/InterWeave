@@ -326,8 +326,11 @@ lock="${ANDROID_TOOLCHAIN_LOCK:-/run/lock/android-toolchain.lock}"
 # this run's failure cannot leave the host with no install at all.
 if [[ -e "$old" && ! -e "$store" ]]; then mv "$old" "$store" && say "  restored the previous install from $old"; fi
 rm -rf "$old"
-# Staging trees a killed run left (random names, so nothing else finds them).
-rm -rf "$(dirname "$store")"/.android-sdk.new.* 2>/dev/null
+# Staging trees a killed run left (random names, so nothing else finds
+# them), and its copy of the profile: a killed run either never rewrote
+# the profile or got as far as the new tree it now matches, so the copy is
+# never the one to put back.
+rm -rf "$(dirname "$store")"/.android-sdk.new.* "$pstore.old" 2>/dev/null
 new="$(mktemp -d "$(dirname "$store")/.android-sdk.new.XXXXXX")" || die "cannot make a staging directory beside $store"
 trap 'rm -rf "$new"' EXIT
 # Unpacked with the same `data` filter the scan judged it by, which also
