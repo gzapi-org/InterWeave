@@ -17,7 +17,8 @@
 # anything will ever call it again. Verifying the artifact is not
 # verifying its reachability.
 #
-# Checks, for every guard under tools/checks/, tools/gh/ and tools/ci/:
+# Checks, for every guard under tools/checks/, tools/gh/, tools/ci/ and
+# tools/host/android/:
 #   1. a self-test exists beside it — tools/<dir>/test_<name>.<ext> —
 #      unless the guard is listed in tools/checks/selftest_exempt.txt;
 #   2. every self-test is itself named in some .github/workflows/*.yml,
@@ -115,7 +116,7 @@ wired() {
 problems=0
 report() { printf '%s\n' "$1"; problems=$((problems + 1)); }
 
-for dir in checks gh ci; do
+for dir in checks gh ci host/android; do
     d="$REPO_ROOT/tools/$dir"
     [ -d "$d" ] || continue
 
@@ -145,9 +146,10 @@ for dir in checks gh ci; do
         fi
 
         # ...and, in tools/checks and tools/ci, must itself be run by a
-        # workflow. The tools/gh scripts are interactive PR helpers a
-        # person invokes; their self-tests are what CI runs.
-        if [ "$dir" != "gh" ] && ! is_exempt "$rel"; then
+        # workflow. The tools/gh scripts are interactive PR helpers, and
+        # tools/host/ ones host provisioning, that a person invokes; their
+        # self-tests are what CI runs.
+        if [ "$dir" != "gh" ] && [ "${dir%%/*}" != "host" ] && ! is_exempt "$rel"; then
             wired "$base" "tools/$dir" \
                 || report "$rel: no workflow runs it — it cannot fail a pull request"
         fi

@@ -11,11 +11,13 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
 - `third_party/` holds **vendored dependency sources**, each under its own licence and each the subject of an ADR saying why a registry release would not do (ADR-0051 for `libp2p-autonat`; ADR-0053 for `libp2p-mdns`; ADR-0054 for `wasm-bindgen-futures`, decided 2026-10-03 and vendored before Stage 15's batch 4: a wasm-only crate whose three exact pins are relaxed so the desktop client's windowing backend resolves, compiled on no target this repository builds). Every vendored file is listed with its provenance in `tools/checks/license_exempt.txt`; a subdirectory without entries is an unreviewed import, which for a Rust tree `check_license_headers.sh` catches mechanically and for other shapes a reviewer has to. **The guards split two ways** (ADR-0051): those deciding whether FIRST-PARTY code is wired exclude it, for the reason they exclude `spikes/` — a vendored dependency is not a consumer and must never vouch for this repository's own code; those asking what the shipped binary CONTAINS do not, because a `[patch.crates-io]` tree is compiled in and editable here. And a vendored crate is invisible to `cargo-deny` and to Dependabot alike, so `check_vendored_advisories.sh` is the only warning one will ever get.
 - `tools/` is repository tooling — PR/review scripts (`gh/`), tree checks (`checks/`) and the session wrappers CI jobs run under (`ci/`) — not an implementation landing zone. It is live now and not gated by stage discipline. Each script has a self-test beside it (`test_*.sh`) that must stay green, run through `tools/checks/run_suite.sh` (bare, a call to an undefined helper passes silently).
 - `.claude/` is committed shared agent configuration: `settings.json` (§9), plus `skills/` — task-scoped procedures loaded on demand, see §10. Only `settings.local.json` and `CLAUDE.local.md` are per-developer and gitignored.
-- Stages 0-15 are **complete** and **Stage 16 is open**
-  (`stage-16-claude-code-channel`: the Claude Code Channel bridge, plan
-  §19, which ran beside Stage 15 under its record since SPIKE-001's PASS
-  of 2026-10-03 and became the lowest open stage — the one the status
-  names — at Stage 15's close on 2026-10-06). **Stage 15 closed
+- Stages 0-16 are **complete** and **Stage 17 is open**
+  (`stage-17-android-human-client`: the Android human client, plan
+  §20, whose prerequisites SPIKE-008 and SPIKE-009 are its first work;
+  no §20 package before they close and its record lands). **Stage 16
+  closed 2026-10-06** on the plan record (#174), steps 2–3 (#194, #199)
+  and steps 4–5 (#203): the Claude Code Channel bridge against two
+  daemons and inside Claude Code 2.1.288. **Stage 15 closed
   2026-10-06** on the plan record (#175) and the batches B1–B9 (#176,
   #178, #181, #183, #187, #191, #200) over R1 and R2 (#180, #184, #186,
   #190): the desktop human client as one shipped binary, proved against
