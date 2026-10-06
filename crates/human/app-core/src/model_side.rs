@@ -210,9 +210,20 @@ impl<S: Surface, O: Opener> ModelSide<S, O> {
         // never writes over text it is still holding.
         self.surface.render(&self.model);
         let mut commands = Vec::new();
+        // A trust input changes what the settings show -- a proposal to
+        // confirm, why a typed value was not proposed -- and may ask the
+        // facade nothing, so no update would bring another turn: the
+        // view would sit on its press. One more render once the takes
+        // drain, then takes until empty again (the shipped client over
+        // AT-SPI showed a removal never reaching its confirmation).
+        let mut trust_unrendered = false;
         loop {
             let events = self.surface.take_events(&self.model);
             if events.is_empty() {
+                if std::mem::take(&mut trust_unrendered) {
+                    self.surface.render(&self.model);
+                    continue;
+                }
                 return commands;
             }
             for event in events {
@@ -221,6 +232,7 @@ impl<S: Surface, O: Opener> ModelSide<S, O> {
                         self.model.draft_changed(key, draft);
                     }
                     ViewEvent::Trust(input) => {
+                        trust_unrendered = true;
                         if let Some(intent) = self.model.trust_settings_mut().input(input)
                             && let Some(command) = self.command_for(intent)
                         {

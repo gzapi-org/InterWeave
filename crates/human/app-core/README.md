@@ -7,7 +7,7 @@ The human client's headless root (Stage 15, plan §18; architect-cto's Q1 ruling
 ## The two sides
 
 - **`FacadeSide`** owns the facade, and through it the store. Each `turn(now)` ticks the facade, hands over what it received and reports its events. `execute(command, now)` carries out a `Command` against the facade or the store. Every command ends with `Update::Done`, or `Update::Failed` with a `Failure` class (never content): the copy is gone, no such row, storage unavailable, refused, or corrupt.
-- **`ModelSide`** owns the `UiModel` and a view behind `Surface`. `apply(update)` applies what the facade side did. Each `turn()` renders once, then takes the view's events until a take comes back empty: the drain `ui-slint`'s queue bound depends on. It returns the commands the person's intents ask for.
+- **`ModelSide`** owns the `UiModel` and a view behind `Surface`. `apply(update)` applies what the facade side did. Each `turn()` renders once, then takes the view's events until a take comes back empty: the drain `ui-slint`'s queue bound depends on. A take that applied a trust input renders once more and takes again, since a proposal may ask the facade nothing and would otherwise wait on screen for an unrelated event (`tests/root.rs`: `a_trust_proposal_is_rendered_in_the_turn_that_took_it`). It returns the commands the person's intents ask for.
 
 What crosses between them (`Command`, `Update`, `Listing`) is plain values, so the two sides can run on different threads. On the desktop the facade side runs on its own runtime, because a session whose events go undrained loses its lease.
 

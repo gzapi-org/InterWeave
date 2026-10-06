@@ -76,6 +76,8 @@ fn memory() -> HumanStore {
 struct Scripted {
     batches: VecDeque<Vec<ViewEvent>>,
     renders: usize,
+    /// Whether each render was shown a trust change to confirm.
+    pending_shown: Vec<bool>,
 }
 
 impl Scripted {
@@ -85,8 +87,10 @@ impl Scripted {
 }
 
 impl Surface for Scripted {
-    fn render(&mut self, _model: &UiModel) {
+    fn render(&mut self, model: &UiModel) {
         self.renders += 1;
+        self.pending_shown
+            .push(model.trust_settings().pending().is_some());
     }
 
     fn take_events(&mut self, _model: &UiModel) -> Vec<ViewEvent> {
@@ -643,5 +647,24 @@ async fn a_trust_change_reaches_the_daemon_only_once_confirmed() {
             .list()
             .is_some_and(|l| !l.allowed.contains(b.peer())),
         "revoked, read back"
+    );
+}
+
+/// A trust input that asks the facade nothing still changes what the
+/// settings show, so the same turn renders it: a proposal is on screen
+/// to confirm without waiting for an unrelated event.
+#[tokio::test]
+async fn a_trust_proposal_is_rendered_in_the_turn_that_took_it() {
+    let (a, b) = FakeNetwork::pair(node(), node());
+    let (mut root, _) = Root::new(facade(&a, memory()));
+    root.will(trust(TrustInput::Opened));
+    root.pump(0).await;
+    root.pump(1).await;
+    root.will(trust(TrustInput::ProposeRevoke(b.peer().clone())));
+    root.model.turn();
+    assert_eq!(
+        root.model.surface().pending_shown.last(),
+        Some(&true),
+        "the turn's last render showed the proposal"
     );
 }
