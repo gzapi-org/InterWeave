@@ -220,6 +220,12 @@ impl<S: Surface, O: Opener> ModelSide<S, O> {
         loop {
             let events = self.surface.take_events(&self.model);
             if events.is_empty() {
+                // A change's answer may have left the list to read again.
+                if let Some(intent) = self.model.trust_settings_mut().take_reread()
+                    && let Some(command) = self.command_for(intent)
+                {
+                    commands.push(command);
+                }
                 if std::mem::take(&mut trust_unrendered) {
                     self.surface.render(&self.model);
                     continue;
@@ -239,6 +245,11 @@ impl<S: Surface, O: Opener> ModelSide<S, O> {
                             commands.push(command);
                         }
                     }
+                    // Trust reaches the daemon only through the settings'
+                    // inputs, which confirm the change shown: a trust
+                    // intent handed over bare, by any surface, is dropped
+                    // (`a_trust_intent_handed_over_bare_reaches_nothing`).
+                    ViewEvent::Intent(Intent::ReadTrust | Intent::SetTrust(_)) => {}
                     ViewEvent::Intent(intent) => {
                         if let Some(command) = self.command_for(intent) {
                             commands.push(command);

@@ -9,6 +9,7 @@
 use interweave_human_chat_protocol::HumanChatV2;
 use interweave_human_client_api::{
     ClientEvent, Destination, Diagnostics, Received, SendError, TrustList, TrustProblem,
+    TrustSetFailure,
 };
 use interweave_human_store::RowId;
 use interweave_human_ui_model::{
@@ -128,12 +129,12 @@ pub enum Update {
     /// the settings view's to say, not a command's: the command is `Done`.
     TrustRead(Result<TrustList, TrustProblem>),
     /// The daemon's answer to a trust change: the allowlist read back, or
-    /// why nothing changed.
+    /// why not and whether the change was made.
     TrustSet {
         /// The change.
         change: TrustChange,
         /// The answer.
-        answer: Result<TrustList, TrustProblem>,
+        answer: Result<TrustList, TrustSetFailure>,
     },
     /// A command finished. Every command ends with this or `Failed`, so
     /// the model side can offer the same action again.
