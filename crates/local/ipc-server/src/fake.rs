@@ -60,6 +60,8 @@ pub(crate) struct Script {
     /// When set, `shutdown` panics after stopping the server: a binding
     /// bug whose task has finished when the stop arrives.
     pub(crate) panic_shutdown: bool,
+    /// The rows `peers()` answers with.
+    pub(crate) peers: Vec<interweave_local_client_api::PeerGateView>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -305,6 +307,13 @@ impl AdminPort for FakeAdmin {
             local_peer: Some(peer()),
             allowed: self.fake.script().trusted.clone(),
         })
+    }
+
+    async fn peers(
+        &self,
+    ) -> Result<Vec<interweave_local_client_api::PeerGateView>, TransportError> {
+        self.fake.call("peers".to_owned());
+        Ok(self.fake.script().peers.clone())
     }
 
     async fn set_trust(

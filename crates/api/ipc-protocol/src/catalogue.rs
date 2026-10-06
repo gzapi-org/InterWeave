@@ -61,6 +61,10 @@ pub enum Method {
     /// Allow a peer or revoke it (2.1, runtime overlay).
     #[serde(rename = "admin.trust.set")]
     AdminTrustSet,
+    /// One page of the dial gate's per-peer state (2.2, under
+    /// `admin.status`).
+    #[serde(rename = "admin.peers.list")]
+    AdminPeersList,
 }
 
 /// One row of the catalogue.
@@ -80,7 +84,7 @@ impl Method {
     /// Every method, in catalogue order. `tests/schema_agreement.rs`
     /// holds this list to the enum's own variants, so a variant missing
     /// here fails a test rather than escaping one.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::ChannelJoin,
         Self::ChannelLeave,
         Self::BroadcastPublish,
@@ -94,6 +98,7 @@ impl Method {
         Self::AdminShutdown,
         Self::AdminTrustList,
         Self::AdminTrustSet,
+        Self::AdminPeersList,
     ];
 
     /// THE table: an exhaustive match, so a new method does not compile
@@ -107,7 +112,7 @@ impl Method {
                 (Data, C::Commands)
             }
             Self::EndpointsQuery => (Data, C::EndpointsQuery),
-            Self::AdminStatus => (Admin, C::AdminStatus),
+            Self::AdminStatus | Self::AdminPeersList => (Admin, C::AdminStatus),
             Self::AdminEndpointsList
             | Self::AdminEndpointsRevoke
             | Self::AdminEndpointsSetEnabled
@@ -117,6 +122,7 @@ impl Method {
         };
         let since_minor = match self {
             Self::AdminTrustList | Self::AdminTrustSet => 1,
+            Self::AdminPeersList => 2,
             _ => 0,
         };
         MethodEntry {
@@ -143,6 +149,7 @@ impl Method {
             Self::AdminShutdown => "admin.shutdown",
             Self::AdminTrustList => "admin.trust.list",
             Self::AdminTrustSet => "admin.trust.set",
+            Self::AdminPeersList => "admin.peers.list",
         }
     }
 
@@ -221,21 +228,38 @@ mod tests {
         assert_eq!(Method::AdminShutdown.entry().since_minor, 0, "the control");
     }
 
-    /// A method arrives with its capability, never before it: one stated
-    /// at a lower minor than its capability could be asked on a
-    /// connection that could not hold it, and one stated above it would be
-    /// refused to a connection holding what it needs. The two minors are
-    /// written in two places, so this ties them.
+    /// A method never arrives before its capability: one stated at a
+    /// lower minor than its capability could be asked on a connection
+    /// that could not hold it. It may arrive AFTER it -- a later read
+    /// under an existing capability, as `admin.peers.list` (2.2) is under
+    /// `admin.status` (2.0) -- since a connection below the method's minor
+    /// is answered as for an unknown method whatever it holds
+    /// (`available_at`). Until 2.2 the two minors were equal for every
+    /// method, which this test then pinned.
     #[test]
-    fn every_method_arrives_at_its_capabilitys_minor() {
+    fn no_method_arrives_before_its_capability() {
         for method in Method::ALL {
             let entry = method.entry();
-            assert_eq!(
-                entry.since_minor,
-                entry.capability.since_minor(),
+            assert!(
+                entry.since_minor >= entry.capability.since_minor(),
                 "{}",
                 method.as_str()
             );
         }
+    }
+
+    #[test]
+    fn the_peers_read_is_admin_under_status_and_arrives_at_two_two() {
+        let entry = Method::AdminPeersList.entry();
+        assert_eq!(entry.domain, AuthorityDomain::Admin);
+        assert_eq!(entry.capability, RequestedCapability::AdminStatus);
+        assert_eq!(entry.since_minor, 2);
+        let at = |minor| IpcVersion { major: 2, minor };
+        assert!(
+            !Method::AdminPeersList.available_at(at(1)),
+            "unknown at 2.1"
+        );
+        assert!(Method::AdminPeersList.available_at(at(2)));
+        assert!(Method::AdminStatus.available_at(at(0)), "the control");
     }
 }

@@ -1028,8 +1028,9 @@ async fn until_ok(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_method_is_answered_ok_and_held_to_its_schemas() {
     use interweave_ipc_protocol::{
-        ChannelParams, EndpointParams, PublishParams, QueryParams, Request, SendParams,
-        SetDefaultParams, SetEnabledParams, ShutdownParams, TrustListParams, TrustSetParams,
+        ChannelParams, EndpointParams, PeerListParams, PublishParams, QueryParams, Request,
+        SendParams, SetDefaultParams, SetEnabledParams, ShutdownParams, TrustListParams,
+        TrustSetParams,
     };
     use interweave_transport_api::{ChannelId, EndpointId, MessageId, Payload};
     let ip = interweave_test_support::net::require_private_interface_v4();
@@ -1073,7 +1074,7 @@ async fn every_method_is_answered_ok_and_held_to_its_schemas() {
     let mut admin = Client::connect(&subject.paths.admin).await;
     admin
         .hello(
-            r#"{"type":"hello","ipc_version":{"major":2,"minor":1},
+            r#"{"type":"hello","ipc_version":{"major":2,"minor":2},
             "client":{"kind":"transportctl"},
             "requested_capabilities":["admin.status","admin.endpoints","admin.shutdown",
                 "admin.trust"]}"#,
@@ -1122,10 +1123,11 @@ async fn every_method_is_answered_ok_and_held_to_its_schemas() {
     })
     .await;
 
-    let admin_requests: [(&str, Request); 9] = [
+    let admin_requests: [(&str, Request); 10] = [
         ("status", Request::AdminStatus),
         ("list", Request::AdminEndpointsList),
         ("trust", Request::AdminTrustList(TrustListParams::default())),
+        ("peers", Request::AdminPeersList(PeerListParams::default())),
         // Allowing a peer already allowed: answered `ok`, changing
         // nothing, so the exchange above stays undisturbed. The revocation
         // has its own test.

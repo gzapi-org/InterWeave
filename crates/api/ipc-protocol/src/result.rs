@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 
 use interweave_local_client_api::{
     AdminStatus, EndpointAdminView, Generation, IngressCounts, LeaseRecord, MAX_CLIENT_KIND_CHARS,
-    PreAuthCounts, TrustAdminView,
+    PeerGateView, PeerOutcome, PreAuthCounts, TrustAdminView,
 };
 use interweave_transport_api::{
     ConnectivitySummary, EndpointDirectoryV1, EndpointId, Health, MAX_DIRECTORY_ENTRIES,
@@ -31,6 +31,13 @@ pub const MAX_ENDPOINT_ROWS: usize = 64;
 /// the first page's `local_peer` (architect-cto's ruling of 2026-10-04,
 /// LOCAL-IPC.md `admin.trust.list`).
 pub const MAX_TRUST_PAGE_ROWS: usize = 1024;
+
+/// Rows on one `ipc/peer-list` page: a row is up to 194 bytes, so 1024
+/// would overflow the 128 KiB body and 512 is about 100 KB; a full
+/// allowlist of 4096 is eight pages (architect-cto's ruling of
+/// 2026-10-07, LOCAL-IPC.md `admin.peers.list`).
+/// `a_full_page_of_the_largest_rows_fits_the_body`.
+pub const MAX_PEER_PAGE_ROWS: usize = 512;
 
 /// `ipc/empty-result`: the `{}` of a method with nothing to say.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -451,6 +458,162 @@ impl<'de> Deserialize<'de> for TrustList {
     }
 }
 
+/// `ipc/peer-list` (2.2): one page of the dial gate's state per
+/// allowlisted peer, in the ascending order of each peer's canonical
+/// string (`CONNECTIVITY.md` §19). Never an address.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PeerList {
+    /// At most [`MAX_PEER_PAGE_ROWS`], strictly ascending by peer.
+    pub peers: Vec<PeerRow>,
+    /// The last row's peer, when more remain: the next page's `after`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next: Option<TransportIdentity>,
+}
+
+impl PeerList {
+    /// The page of `rows` that follows `after` (the first when `None`):
+    /// sorted and deduplicated by peer here, whatever order the port gave,
+    /// so the cursor is a position as [`TrustList::page`]'s is.
+    /// `a_peer_list_pages_in_order_and_says_when_more_remain`.
+    #[must_use]
+    pub fn page(mut rows: Vec<PeerGateView>, after: Option<&TransportIdentity>) -> Self {
+        rows.sort_by(|a, b| a.peer.cmp(&b.peer));
+        rows.dedup_by(|a, b| a.peer == b.peer);
+        let mut rest = rows
+            .into_iter()
+            .filter(|row| after.is_none_or(|after| &row.peer > after))
+            .peekable();
+        let peers: Vec<PeerRow> = rest
+            .by_ref()
+            .take(MAX_PEER_PAGE_ROWS)
+            .map(PeerRow::from)
+            .collect();
+        let next = rest
+            .peek()
+            .is_some()
+            .then(|| peers.last().map(|row| row.peer.clone()))
+            .flatten();
+        Self { peers, next }
+    }
+}
+
+impl<'de> Deserialize<'de> for PeerList {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            peers: Vec<PeerRow>,
+            #[serde(default, deserialize_with = "absent_or_identity")]
+            next: Option<TransportIdentity>,
+        }
+        let wire = Wire::deserialize(d)?;
+        if wire.peers.len() > MAX_PEER_PAGE_ROWS {
+            return Err(serde::de::Error::custom(format!(
+                "at most {MAX_PEER_PAGE_ROWS} rows, got {}",
+                wire.peers.len()
+            )));
+        }
+        if wire
+            .peers
+            .windows(2)
+            .any(|pair| pair[0].peer >= pair[1].peer)
+        {
+            return Err(serde::de::Error::custom(
+                "rows must be unique and in ascending peer order",
+            ));
+        }
+        Ok(Self {
+            peers: wire.peers,
+            next: wire.next,
+        })
+    }
+}
+
+/// One `peer-list` row: what the dial gate holds against an allowlisted
+/// peer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerRow {
+    /// The peer.
+    pub peer: TransportIdentity,
+    /// Whether any connection to it is open.
+    pub connected: bool,
+    /// Dials to it are refused until then, milliseconds since the Unix
+    /// epoch.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "absent_or_millis"
+    )]
+    pub backoff_until: Option<u64>,
+    /// At least one of its addresses is quarantined until then.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "absent_or_millis"
+    )]
+    pub quarantined_until: Option<u64>,
+    /// How the last dial or connection ended; absent until the first.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "outcome")]
+    pub last_outcome: Option<PeerOutcome>,
+}
+
+impl From<PeerGateView> for PeerRow {
+    fn from(view: PeerGateView) -> Self {
+        Self {
+            peer: view.peer,
+            connected: view.connected,
+            backoff_until: view.backoff_until,
+            quarantined_until: view.quarantined_until,
+            last_outcome: view.last_outcome,
+        }
+    }
+}
+
+fn absent_or_millis<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    u64::deserialize(d).map(Some)
+}
+
+/// `last_outcome` on the wire: the neutral `PeerOutcome` by the names
+/// `CONNECTIVITY.md` §19 gives it; an explicit `null` is refused, as the
+/// schema does.
+mod outcome {
+    use interweave_local_client_api::PeerOutcome;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    const ALL: [PeerOutcome; 4] = [
+        PeerOutcome::Connected,
+        PeerOutcome::DialFailed,
+        PeerOutcome::IdentityMismatch,
+        PeerOutcome::Denied,
+    ];
+
+    #[expect(
+        clippy::ref_option,
+        clippy::trivially_copy_pass_by_ref,
+        reason = "serde's `with` hands the field by reference, whatever its size"
+    )]
+    pub(super) fn serialize<S: Serializer>(
+        value: &Option<PeerOutcome>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(outcome) => s.serialize_str(outcome.as_str()),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<PeerOutcome>, D::Error> {
+        let name = String::deserialize(d)?;
+        ALL.into_iter()
+            .find(|o| o.as_str() == name)
+            .map(Some)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown last_outcome {name:?}")))
+    }
+}
+
 /// One `trust-list` row: an allowed peer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -837,6 +1000,140 @@ mod tests {
     fn synthetic_peer(i: usize) -> TransportIdentity {
         let tail = format!("{i:044}").replace('0', "a");
         TransportIdentity::parse(format!("Qm{}", &tail[..44])).expect("peer")
+    }
+
+    fn gate_row(i: usize) -> PeerGateView {
+        PeerGateView {
+            peer: synthetic_peer(i),
+            connected: i.is_multiple_of(2),
+            backoff_until: i.is_multiple_of(3).then_some(1_791_329_950_227),
+            quarantined_until: None,
+            last_outcome: (!i.is_multiple_of(5)).then_some(PeerOutcome::Denied),
+        }
+    }
+
+    /// The bound is what the body holds: a full page of the largest rows
+    /// the schema admits -- every optional field, u64-maximum times, the
+    /// longest outcome -- and a `next` serializes within `MAX_BODY_BYTES`
+    /// with room for the response frame around it.
+    #[test]
+    fn a_full_page_of_the_largest_rows_fits_the_body() {
+        let page = PeerList {
+            peers: (0..MAX_PEER_PAGE_ROWS)
+                .map(|i| PeerRow {
+                    peer: synthetic_peer(i),
+                    connected: false,
+                    backoff_until: Some(u64::MAX),
+                    quarantined_until: Some(u64::MAX),
+                    last_outcome: Some(PeerOutcome::IdentityMismatch),
+                })
+                .collect(),
+            next: Some(synthetic_peer(MAX_PEER_PAGE_ROWS)),
+        };
+        let bytes = serde_json::to_vec(&page).expect("serializes").len();
+        assert!(
+            bytes + 1_024 <= crate::framing::MAX_BODY_BYTES,
+            "{bytes} bytes for {MAX_PEER_PAGE_ROWS} rows"
+        );
+        // And twice the bound does not: the reason the bound is 512.
+        assert!(2 * bytes > crate::framing::MAX_BODY_BYTES);
+    }
+
+    #[test]
+    fn a_peer_list_pages_in_order_and_says_when_more_remain() {
+        // Two full pages and one row, offered out of order and with one
+        // peer doubled.
+        let mut rows: Vec<_> = (0..=2 * MAX_PEER_PAGE_ROWS).map(gate_row).collect();
+        rows.push(gate_row(7));
+        rows.reverse();
+        let mut peers: Vec<_> = (0..=2 * MAX_PEER_PAGE_ROWS).map(synthetic_peer).collect();
+        peers.sort();
+
+        let mut after = None;
+        let mut read = Vec::new();
+        let mut pages = 0;
+        loop {
+            let page = PeerList::page(rows.clone(), after.as_ref());
+            pages += 1;
+            assert!(page.peers.len() <= MAX_PEER_PAGE_ROWS);
+            read.extend(page.peers.iter().map(|row| row.peer.clone()));
+            match page.next {
+                Some(next) => {
+                    assert_eq!(Some(&next), read.last(), "the last row is the cursor");
+                    after = Some(next);
+                }
+                None => break,
+            }
+        }
+        assert_eq!(pages, 3);
+        assert_eq!(read, peers, "every peer once, ascending");
+
+        // A row says what the view said, and the cursor is a position.
+        let page = PeerList::page(vec![gate_row(3)], None);
+        assert_eq!(page.peers, vec![PeerRow::from(gate_row(3))]);
+        assert_eq!(page.next, None);
+        let gone = peers[10].clone();
+        let without: Vec<_> = rows.iter().filter(|r| r.peer != gone).cloned().collect();
+        let page = PeerList::page(without, Some(&gone));
+        assert_eq!(page.peers[0].peer, peers[11]);
+    }
+
+    #[test]
+    fn a_peer_list_is_held_to_its_bound_its_order_and_its_names() {
+        let row = |i: usize| json!({"peer": synthetic_peer(i).as_str(), "connected": true});
+        let sorted = |n: usize| {
+            let mut rows: Vec<_> = (0..n).map(row).collect();
+            rows.sort_by(|a, b| a["peer"].as_str().cmp(&b["peer"].as_str()));
+            rows
+        };
+        assert!(
+            serde_json::from_value::<PeerList>(json!({"peers": sorted(MAX_PEER_PAGE_ROWS)}))
+                .is_ok()
+        );
+        assert!(
+            serde_json::from_value::<PeerList>(json!({"peers": sorted(MAX_PEER_PAGE_ROWS + 1)}))
+                .is_err()
+        );
+        let mut unordered = sorted(3);
+        unordered.swap(0, 2);
+        assert!(serde_json::from_value::<PeerList>(json!({"peers": unordered})).is_err());
+        let doubled = vec![row(1), row(1)];
+        assert!(serde_json::from_value::<PeerList>(json!({"peers": doubled})).is_err());
+        assert!(serde_json::from_value::<PeerList>(json!({"peers": [], "next": null})).is_err());
+        // Every outcome by its section 19 name, both ways, and nothing else.
+        for outcome in [
+            PeerOutcome::Connected,
+            PeerOutcome::DialFailed,
+            PeerOutcome::IdentityMismatch,
+            PeerOutcome::Denied,
+        ] {
+            let mut r = row(1);
+            r["last_outcome"] = json!(outcome.as_str());
+            let page: PeerList =
+                serde_json::from_value(json!({"peers": [r.clone()]})).expect("valid");
+            assert_eq!(page.peers[0].last_outcome, Some(outcome));
+            assert_eq!(
+                serde_json::to_value(&page).expect("serializes")["peers"][0],
+                r
+            );
+        }
+        for bad in [json!("refused"), json!("timeout"), json!(null), json!(3)] {
+            let mut r = row(1);
+            r["last_outcome"] = bad;
+            assert!(serde_json::from_value::<PeerList>(json!({"peers": [r]})).is_err());
+        }
+        let mut r = row(1);
+        r["backoff_until"] = json!(null);
+        assert!(
+            serde_json::from_value::<PeerList>(json!({"peers": [r]})).is_err(),
+            "a null time"
+        );
+        let mut r = row(1);
+        r["address"] = json!("/ip4/10.0.0.1/tcp/1");
+        assert!(
+            serde_json::from_value::<PeerList>(json!({"peers": [r]})).is_err(),
+            "no address field"
+        );
     }
 
     #[test]

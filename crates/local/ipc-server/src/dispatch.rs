@@ -11,7 +11,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use interweave_ipc_protocol::{
-    AdminStatusResult, DirectoryResult, EmptyResult, EndpointList, Request, RequestId,
+    AdminStatusResult, DirectoryResult, EmptyResult, EndpointList, PeerList, Request, RequestId,
     ResponseFrame, SendResult, SetEnabledResult, TrustList,
 };
 use interweave_local_client_api::{AdminPort, DataSessionPort};
@@ -73,7 +73,10 @@ pub(crate) async fn data<S: DataSessionPort>(
         | Request::AdminEndpointsSetDefault(_)
         | Request::AdminShutdown(_)
         | Request::AdminTrustList(_)
-        | Request::AdminTrustSet(_) => ResponseFrame::failure(id, TransportError::CapabilityDenied),
+        | Request::AdminTrustSet(_)
+        | Request::AdminPeersList(_) => {
+            ResponseFrame::failure(id, TransportError::CapabilityDenied)
+        }
     }
 }
 
@@ -127,6 +130,12 @@ pub(crate) async fn admin<A: AdminPort>(
             Err(code) => ResponseFrame::failure(id, code),
         },
         Request::AdminTrustSet(p) => empty(id, port.set_trust(p.peer, p.allowed).await),
+        // The dial gate's rows, paged as the trust list is: the cursor is
+        // a position in their order, so nothing is held between pages.
+        Request::AdminPeersList(p) => match port.peers().await {
+            Ok(rows) => ResponseFrame::success(id, &PeerList::page(rows, p.after.as_ref())),
+            Err(code) => ResponseFrame::failure(id, code),
+        },
         // The data domain on the admin socket: admission's to refuse, as
         // above.
         Request::ChannelJoin(_)
@@ -308,6 +317,7 @@ mod tests {
                 "shutdown 7",
             ),
             (Method::AdminTrustList, serde_json::json!({}), "trust"),
+            (Method::AdminPeersList, serde_json::json!({}), "peers"),
             (
                 Method::AdminTrustSet,
                 serde_json::json!({"peer": crate::fake::peer().as_str(), "allowed": false}),
@@ -345,6 +355,47 @@ mod tests {
         let answer = body(admin(&port, &Counters::default(), Duration::ZERO, id(), join).await);
         assert!(answer.contains("CapabilityDenied"), "{answer}");
         assert_eq!(fake.script().calls.len(), before);
+    }
+
+    /// `admin.peers.list` answers the port's rows one page at a time, as
+    /// the trust list does: one past a page is two requests, the second
+    /// named by the first's `next`.
+    #[tokio::test]
+    async fn the_peer_list_is_paged_through_its_cursor() {
+        use interweave_ipc_protocol::{MAX_PEER_PAGE_ROWS, PeerList};
+        let fake = Fake::default();
+        fake.script().peers = (0..=MAX_PEER_PAGE_ROWS)
+            .map(|i| {
+                let tail = format!("{i:044}").replace('0', "a");
+                interweave_local_client_api::PeerGateView {
+                    peer: interweave_transport_api::TransportIdentity::parse(format!(
+                        "Qm{}",
+                        &tail[..44]
+                    ))
+                    .expect("peer"),
+                    connected: false,
+                    backoff_until: Some(1),
+                    quarantined_until: None,
+                    last_outcome: Some(interweave_local_client_api::PeerOutcome::Denied),
+                }
+            })
+            .collect();
+        let port = fake.admin([].into()).await.expect("port");
+        let counters = Counters::default();
+        let grace = Duration::from_secs(1);
+        let page = |params: serde_json::Value| {
+            let request = request(Method::AdminPeersList, &params);
+            async {
+                let frame = admin(&port, &counters, grace, id(), request).await;
+                frame.outcome::<PeerList>().expect("a page")
+            }
+        };
+        let first = page(serde_json::json!({})).await;
+        assert_eq!(first.peers.len(), MAX_PEER_PAGE_ROWS);
+        let next = first.next.expect("one more remains");
+        let second = page(serde_json::json!({"after": next.as_str()})).await;
+        assert_eq!(second.peers.len(), 1);
+        assert_eq!(second.next, None, "the last page");
     }
 
     /// `admin.trust.list` answers the port's policy one page at a time:
