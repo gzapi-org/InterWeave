@@ -24,7 +24,8 @@
 #     cannot hold a run: its runs on standard GitHub-hosted runners bill nothing
 #     and draw on no allowance. The answer says so, quotes the private
 #     repositories' usage as context, and exits 0 unless the platform is
-#     down.
+#     down — or unless minutes of its OWN bill (a larger runner is
+#     charged even in a public repository), which exits 1 as a cost.
 #
 #     The billing API reports usage, never the plan's limit, so the limit
 #     is CONFIGURED, not discovered: $INTERWEAVE_ACTIONS_INCLUDED_MINUTES,
@@ -58,7 +59,7 @@
 #
 # Exit codes:
 #   0  healthy — Actions operational and the allowance not exhausted,
-#      or this repository is public (its runs cost nothing)
+#      or this repository is public and none of its own minutes bill
 #   1  degraded — spending minutes now is likely wasted (reason on stdout)
 #   2  invocation problem, or neither source could be read
 #

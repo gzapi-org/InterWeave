@@ -142,7 +142,8 @@ if [[ "${1:-}" == "api" ]]; then
   qpub_mins="$(cat "$MOCK_STATE/qualified_public_mins" 2>/dev/null || echo 0)"
   self_net="$(cat "$MOCK_STATE/self_net" 2>/dev/null || echo 0)"
   self_mins="$( [[ -f "$MOCK_STATE/self_net" ]] && echo 5 || echo 0 )"
-  printf '{"usageItems":[{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":%s,"netAmount":%s,"date":"%s","repositoryName":"privrepo"},{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":%s,"netAmount":%s,"date":"%s","repositoryName":"privrepo"},{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":%s,"netAmount":0,"date":"%s","repositoryName":"openrepo"},{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":'"$bare_mins"',"netAmount":0},{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":'"$qpub_mins"',"netAmount":0,"date":"'"$this_month"'","repositoryName":"testorg/openrepo"},{"product":"actions","sku":"Actions Linux 16-core","unitType":"Minutes","quantity":'"$self_mins"',"netAmount":'"$self_net"',"date":"'"$this_month"'","repositoryName":"openrepo"},{"product":"actions","sku":"Actions Storage","unitType":"GigabyteHours","quantity":10,"netAmount":%s,"date":"%s","repositoryName":"privrepo"}]}\n' \
+  self_row_name="$(cat "$MOCK_STATE/self_row_name" 2>/dev/null || echo openrepo)"
+  printf '{"usageItems":[{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":%s,"netAmount":%s,"date":"%s","repositoryName":"privrepo"},{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":%s,"netAmount":%s,"date":"%s","repositoryName":"privrepo"},{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":%s,"netAmount":0,"date":"%s","repositoryName":"openrepo"},{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":'"$bare_mins"',"netAmount":0},{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":'"$qpub_mins"',"netAmount":0,"date":"'"$this_month"'","repositoryName":"testorg/openrepo"},{"product":"actions","sku":"Actions Linux 16-core","unitType":"Minutes","quantity":'"$self_mins"',"netAmount":'"$self_net"',"date":"'"$this_month"'","repositoryName":"'"$self_row_name"'"},{"product":"actions","sku":"Actions Storage","unitType":"GigabyteHours","quantity":10,"netAmount":%s,"date":"%s","repositoryName":"privrepo"}]}\n' \
     "$mins" "$net" "$this_month" "$prev_mins" "$prev_net" "$prev_month" "$public_mins" "$this_month" "$stor" "$this_month"
   exit 0
 fi
@@ -309,6 +310,10 @@ invoke
 assert_rc        "its own billed minutes: exits 1" 1
 assert_contains  "names the cost"                   "\$0.75 of its own minutes bill this period"
 assert_lacks     "never the free-runs line"         "cost nothing"
+printf 'testorg/openrepo\n' > "$SANDBOX/state/self_row_name"
+invoke
+assert_rc        "…also when its row names it owner-qualified: exits 1" 1
+rm -f "$SANDBOX/state/self_row_name"
 printf 'otherrepo\n' > "$SANDBOX/state/this_repo_name"
 invoke
 assert_rc        "another repository's billed row is not this one's: exits 0" 0
