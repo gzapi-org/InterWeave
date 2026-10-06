@@ -547,7 +547,12 @@ if (( PROVENANCE == 1 )); then
                             recording="$candidate"; shape="itself,"; break
                         fi
                     fi
-                done < <( git rev-list --no-merges origin/main -- "$spike_dir/" 2>/dev/null )
+                # FROM origin/main AND HEAD. A spike's FIRST recorded run
+                # is on the pull request that adds it, and in the merge
+                # queue's build of that request, before origin/main holds
+                # it; walking origin/main alone refused every first run.
+                # Rule 1 above still holds the pin itself to origin/main.
+                done < <( git rev-list --no-merges origin/main HEAD -- "$spike_dir/" 2>/dev/null )
                 if [[ -z "$recording" ]]; then
                     echo "check_spike_locks: $spike_dir pins $rev, which no commit in that" >&2
                     echo "  spike's history points at. The pin is the tree the last recorded run" >&2
@@ -559,7 +564,9 @@ if (( PROVENANCE == 1 )); then
                     bad=$((bad + 1))
                     continue
                 fi
-                echo "check_spike_locks: $spike_dir pins $rev — on origin/main, $shape ${recording:0:7}."
+                if git merge-base --is-ancestor "$recording" origin/main 2>/dev/null; then where="on origin/main"
+                else where="recorded on this branch (not yet on origin/main)"; fi
+                echo "check_spike_locks: $spike_dir pins $rev — $where, $shape ${recording:0:7}."
             # ONE READER, NOT A PILE OF GREPS. Everything above about a
             # pin -- is this dependency ours, does it carry a revision,
             # where is it written -- is answered by one pass over the
