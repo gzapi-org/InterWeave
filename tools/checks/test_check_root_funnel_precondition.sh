@@ -78,7 +78,90 @@ T="$R/crates/transport/libp2p/tests/root_funnel.rs"
 scaffold "$R"; expect "the tree: passes, and says the listing is the rust job's" 0 "$R" "OK (tree)"
 scaffold "$R"; rm "$T"; expect "the test file missing: refused" 1 "$R" "root_funnel.rs is missing"
 scaffold "$R"; sed -i 's/RootFunnel::new(/Composite::new(/' "$T"
-expect "no Swarm built through RootFunnel::new: refused" 1 "$R" "never builds a Swarm through RootFunnel::new("
+expect "no Swarm built through RootFunnel::new: refused" 1 "$R" "never builds its Swarm through RootFunnel::new("
+# The funnel used only by OTHER tests: each prune test is judged by its own
+# body (#134's review: a file-wide grep let both prunes drop it).
+scaffold "$R"; printf '#[tokio::test]\nasync fn an_operators_address_passes() {\n    let _ = RootFunnel::new(a, b);\n}\n' >> "$T"
+python3 - "$T" <<'PY'
+import re, sys
+p = sys.argv[1]; s = open(p).read()
+for n in ("the_root_funnel_prunes_what_a_behaviour_extends_a_dial_with", "the_root_funnel_prunes_a_stacked_address"):
+    s = s.replace(f"async fn {n}() {{\n    let _ = RootFunnel::new(a, b);", f"async fn {n}() {{\n    let _ = composite(a);")
+open(p, "w").write(s)
+PY
+expect "the funnel only in an unpinned test: refused, naming the prune" 1 "$R" "the_root_funnel_prunes_a_stacked_address never builds its Swarm"
+expect "  …and naming the first prune too" 1 "$R" "the_root_funnel_prunes_what_a_behaviour_extends_a_dial_with never builds its Swarm"
+# The body ends at the fn's own closing brace: a use in the NEXT function
+# does not count for this one.
+scaffold "$R"; python3 - "$T" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+s = s.replace("async fn the_root_funnel_prunes_a_stacked_address() {\n    let _ = RootFunnel::new(a, b);\n}",
+              "async fn the_root_funnel_prunes_a_stacked_address() {\n    let _ = composite(a);\n}\n\nfn helper() {\n    let _ = RootFunnel::new(a, b);\n}")
+open(p, "w").write(s)
+PY
+expect "a use after the prune's closing brace: refused" 1 "$R" "the_root_funnel_prunes_a_stacked_address never builds its Swarm"
+scaffold "$R"; sed -i 's/fn the_root_funnel_prunes_a_stacked_address/fn renamed_prune/' "$T"
+expect "a prune test gone by its name: refused" 1 "$R" "defines no fn the_root_funnel_prunes_a_stacked_address"
+# Inside a module, indented: the closing brace is found at the fn's indent.
+scaffold "$R"; python3 - "$T" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+s = s.replace("#[tokio::test]\nasync fn the_root_funnel_prunes_a_stacked_address() {\n    let _ = RootFunnel::new(a, b);\n}",
+              "mod stacked {\n    #[tokio::test]\n    async fn the_root_funnel_prunes_a_stacked_address() {\n        if x {\n        }\n        let _ = RootFunnel::new(a, b);\n    }\n}")
+open(p, "w").write(s)
+PY
+expect "an indented prune in a module, the funnel after an inner block: passes" 0 "$R" "OK (tree)"
+# …and its body ends at ITS brace: the module's next fn does not lend it one.
+scaffold "$R"; python3 - "$T" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+s = s.replace("#[tokio::test]\nasync fn the_root_funnel_prunes_a_stacked_address() {\n    let _ = RootFunnel::new(a, b);\n}",
+              "mod stacked {\n    #[tokio::test]\n    async fn the_root_funnel_prunes_a_stacked_address() {\n        let _ = composite(a);\n    }\n\n    fn helper() {\n        let _ = RootFunnel::new(a, b);\n    }\n}")
+open(p, "w").write(s)
+PY
+expect "an indented prune without the funnel, a helper after it with it: refused" 1 "$R" "the_root_funnel_prunes_a_stacked_address never builds its Swarm"
+# A commented-out call is no call.
+scaffold "$R"; python3 - "$T" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+s = s.replace("async fn the_root_funnel_prunes_a_stacked_address() {\n    let _ = RootFunnel::new(a, b);",
+              "async fn the_root_funnel_prunes_a_stacked_address() {\n    // let _ = RootFunnel::new(a, b);\n    let _ = composite(a); // was RootFunnel::new(a, b)")
+open(p, "w").write(s)
+PY
+expect "the funnel only in comments in the prune: refused" 1 "$R" "the_root_funnel_prunes_a_stacked_address never builds its Swarm"
+# The closing brace with a trailing comment, or a CR, still ends the body.
+for close in '} // end of the prune' $'}\r'; do
+    scaffold "$R"; python3 - "$T" "$close" <<'PY'
+import sys
+p, close = sys.argv[1], sys.argv[2]; s = open(p).read()
+s = s.replace("async fn the_root_funnel_prunes_what_a_behaviour_extends_a_dial_with() {\n    let _ = RootFunnel::new(a, b);\n}",
+              "async fn the_root_funnel_prunes_what_a_behaviour_extends_a_dial_with() {\n    let _ = composite(a);\n" + close)
+open(p, "w").write(s)
+PY
+    expect "a prune closed by '${close//$'\r'/\\r}' without the funnel: refused" 1 "$R" "the_root_funnel_prunes_what_a_behaviour_extends_a_dial_with never builds its Swarm"
+done
+# Generics on the fn, and a comment naming the prune before it: neither
+# misplaces the body.
+scaffold "$R"; python3 - "$T" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+s = s.replace("async fn the_root_funnel_prunes_a_stacked_address() {",
+              "async fn the_root_funnel_prunes_a_stacked_address<T>() {")
+open(p, "w").write(s)
+PY
+expect "a generic prune fn with the funnel: passes" 0 "$R" "OK (tree)"
+scaffold "$R"; python3 - "$T" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+# The comment above ANOTHER test that uses the funnel: a body started at
+# the comment would end at that test's brace and borrow its call.
+s = s.replace("async fn the_root_funnel_prunes_a_stacked_address() {\n    let _ = RootFunnel::new(a, b);",
+              "async fn the_root_funnel_prunes_a_stacked_address() {\n    let _ = composite(a);")
+s = s.replace("#[tokio::test]\n", "// see fn the_root_funnel_prunes_a_stacked_address() further down\n#[tokio::test]\n", 1)
+open(p, "w").write(s)
+PY
+expect "a comment naming the prune does not start its body: refused" 1 "$R" "the_root_funnel_prunes_a_stacked_address never builds its Swarm"
 scaffold "$R"; printf 'autotests = false\n' >> "$R/crates/transport/libp2p/Cargo.toml"
 expect "autotests = false with no [[test]] for it: refused" 1 "$R" "autotests = false"
 scaffold "$R"; printf 'autotests = false\n\n[[test]]\nname = "root_funnel"\n' >> "$R/crates/transport/libp2p/Cargo.toml"
