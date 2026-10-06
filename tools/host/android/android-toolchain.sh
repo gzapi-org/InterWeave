@@ -314,6 +314,13 @@ if [[ "$persist" == bind ]]; then store="$BIND_ROOT$SDK_DIR" pstore="$BIND_ROOT$
 old="$store.old"
 if [[ "$persist" == bind ]]; then say "== $me --install into $SDK_DIR (kept by bind-dirs in $store) =="
 else say "== $me --install into $SDK_DIR =="; fi
+mkdir -p "$(dirname "$store")" || die "cannot create $(dirname "$store")"
+# ONE INSTALL AT A TIME: everything below treats .old, .new.* and the
+# profile copy as a killed run's leftovers, and a second run would take
+# the first's live state for them. Held until this process exits; the
+# file lives in /run/lock (a tmpfs, never beside the SDK).
+lock="${ANDROID_TOOLCHAIN_LOCK:-/run/lock/android-toolchain.lock}"
+{ exec 9>"$lock" && flock -n 9; } || die "another --install is running on this host (it holds $lock)"
 # A run killed between moving the old tree aside and moving the new one in
 # left the old one at .old and nothing in place: put it back first, so
 # this run's failure cannot leave the host with no install at all.
@@ -321,7 +328,6 @@ if [[ -e "$old" && ! -e "$store" ]]; then mv "$old" "$store" && say "  restored 
 rm -rf "$old"
 # Staging trees a killed run left (random names, so nothing else finds them).
 rm -rf "$(dirname "$store")"/.android-sdk.new.* 2>/dev/null
-mkdir -p "$(dirname "$store")" || die "cannot create $(dirname "$store")"
 new="$(mktemp -d "$(dirname "$store")/.android-sdk.new.XXXXXX")" || die "cannot make a staging directory beside $store"
 trap 'rm -rf "$new"' EXIT
 # Unpacked with the same `data` filter the scan judged it by, which also

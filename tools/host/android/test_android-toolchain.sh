@@ -34,6 +34,8 @@ expect() {  # expect <label> <want-rc> <substring>
 # This host may be a Qubes AppVM; the cases that want a persistence say so.
 export ANDROID_TOOLCHAIN_PERSISTENCE=""
 SANDBOX="$(realpath -- "$(mktemp -d)")"; trap 'chmod -R u+w "$SANDBOX" 2>/dev/null; rm -rf "$SANDBOX"' EXIT
+# --install's one-at-a-time lock, in the sandbox rather than /run/lock.
+export ANDROID_TOOLCHAIN_LOCK="$SANDBOX/install.lock"
 PINS="$SANDBOX/pins"
 
 write_pins() {
@@ -269,8 +271,17 @@ if unshare -rm true 2>/dev/null; then
             pass "an archive with a $kind member is refused; the previous install stays, nothing beside it"
         else fail "a $kind member was not refused cleanly (exit $got)" "$out"$'\n'"$(ls -a "$SANDBOX/opt")"; fi
     done
+    # One --install at a time: while another holds the lock, refused before
+    # anything is touched.
+    pack "$SANDBOX/staged"
+    exec 8>"$ANDROID_TOOLCHAIN_LOCK"; flock 8
+    inst full
+    exec 8>&-
+    [[ "$got" -eq 2 && "$out" == *"another --install is running"* && -e "$SANDBOX/opt/android-sdk/previous-install" && "$(ls -A "$SANDBOX/opt")" == android-sdk ]] \
+        && pass "a second --install while one runs is refused, and touches nothing" || fail "a concurrent install was not refused cleanly" "$out"
     make_tree "$SANDBOX/bad" "platforms;android-30@9"; pack "$SANDBOX/bad"
     inst full
+    [[ ! -e "$SANDBOX/etc/android-sdk.sh.old" ]] && pass "a killed run's profile copy is swept, even by a refused install" || fail "the stale profile copy survived" "$(ls -a "$SANDBOX/etc")"
     [[ "$got" -eq 2 && "$out" == *"platforms;android-30: 9, pinned 3"* && -e "$SANDBOX/opt/android-sdk/previous-install" ]] \
         && pass "a tree that fails verification is refused, named, and the previous install stays" || fail "a failing tree was not refused cleanly" "$out"
     mv "$SANDBOX/opt/android-sdk" "$SANDBOX/opt/android-sdk.old"
