@@ -49,6 +49,7 @@ SubscriptionRegistry::set_desired     call  broadcast_state.subs.set_desired(
 PolicySnapshot::address_dialable      call  .address_dialable(&peer, &used, self.now_ms())
 SubscriptionRegistry::holds_any       call  broadcast_state.subs.holds_any(
 SessionQueues::set_bound              call  broadcast_state.queues.set_bound(
+LocalDataSession::local_peer          call  .session().local_peer()
 
 # --- stage 7 wired these; the ledger cannot attribute a call through a
 # --- field, so each names the expression that reaches it.
