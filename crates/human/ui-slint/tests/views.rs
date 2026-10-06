@@ -2228,3 +2228,24 @@ fn an_arrival_and_a_trust_outcome_in_one_render_are_both_announced() {
         "and the arrival beside it: {said}"
     );
 }
+
+/// The add row is offered only once the allowlist has been read: before
+/// it, a typed `PeerId` could not be checked.
+#[test]
+fn the_add_row_waits_for_the_list() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    the(&view, text(UiText::TrustSettings)).invoke_accessible_default_action();
+    assert_eq!(intents(&mut view, &mut model), vec![Intent::ReadTrust]);
+    view.render(&model);
+    assert!(
+        labelled(&view, text(UiText::TrustPeer)).is_empty(),
+        "not while reading"
+    );
+    model.trust_settings_mut().read(Ok(TrustList {
+        local_peer: Some(peer()),
+        allowed: Vec::new(),
+    }));
+    view.render(&model);
+    let _ = the(&view, text(UiText::TrustPeer));
+}

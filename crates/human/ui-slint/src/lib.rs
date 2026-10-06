@@ -885,6 +885,7 @@ impl View {
         window.set_trust_page(self.page == Page::Trust);
         let settings = model.trust_settings();
         let list = settings.list();
+        window.set_trust_list_read(list.is_some());
         window.set_own_peer_id(
             list.and_then(|l| l.local_peer.as_ref())
                 .map_or("", TransportIdentity::as_str)

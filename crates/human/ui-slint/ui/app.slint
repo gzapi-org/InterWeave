@@ -225,6 +225,9 @@ export component AppWindow inherits Window {
     // Said in place of the list: reading it, or that it holds no peer.
     in property <string> trust-placeholder;
     in property <[TrustRow]> trusted;
+    // The allowlist has been read: only then can a typed PeerId be
+    // checked, so only then is the add row offered.
+    in property <bool> trust-list-read;
     in property <string> remove-label;
     in property <string> entry-label;
     in-out property <string> trust-entry;
@@ -397,13 +400,13 @@ export component AppWindow inherits Window {
             }
             // The add row under the explanation, above the list it adds to,
             // with a visible caption (the field's own accessible label).
-            Text {
+            if root.trust-list-read: Text {
                 text: root.entry-label;
                 font-size: 12px;
                 font-weight: 700;
                 accessible-role: none;
             }
-            HorizontalLayout {
+            if root.trust-list-read: HorizontalLayout {
                 spacing: 8px;
                 height: 36px;
                 Rectangle {
