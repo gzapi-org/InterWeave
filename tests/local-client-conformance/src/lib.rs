@@ -133,6 +133,20 @@ fn is_state(event: &SessionEvent) -> bool {
     )
 }
 
+/// `LOCAL-CLIENT.md` §2 (A 2026-10-06): a session's creation context
+/// carries the profile's `PeerId`, the identity a data-plane client
+/// reports as its own. `local` is the profile `binding` serves; `other`,
+/// the far node's, is the control that the answer is not just any peer.
+pub async fn a_session_reports_its_profile_peer<B: DataSessionBinding>(
+    binding: &B,
+    local: &TransportIdentity,
+    other: &TransportIdentity,
+) {
+    assert_ne!(local, other, "the control needs two peers");
+    let session = binding.open(full(None)).await.expect("opens");
+    assert_eq!(session.session().local_peer(), local);
+}
+
 /// Item 10, the state's half: a session is owed exactly one `ServerState`
 /// at open, and no second while nothing changed -- the runtime's state is
 /// a notice owed on change, not a stream (`LOCAL-CLIENT.md`, A

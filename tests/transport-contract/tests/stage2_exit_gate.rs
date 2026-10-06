@@ -84,6 +84,7 @@ fn client_kind_cannot_widen_the_admin_data_intersection() {
     //    is DataCapability, which has no admin variant.
     let session = LocalDataSession::new(
         generation("sess"),
+        peer("12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN"),
         "admin",
         Some(EndpointLease {
             endpoint: ep("human"),

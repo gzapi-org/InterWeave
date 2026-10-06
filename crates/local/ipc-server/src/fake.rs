@@ -118,6 +118,7 @@ impl DataSessionBinding for Fake {
         };
         let session = LocalDataSession::new(
             Generation::parse("session_000000001").expect("id"),
+            peer(),
             request.client_kind(),
             lease,
             request.capabilities().iter().copied(),

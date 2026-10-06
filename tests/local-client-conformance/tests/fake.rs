@@ -74,6 +74,12 @@ async fn item_1_the_source_endpoint_is_the_senders_lease() {
 }
 
 #[tokio::test]
+async fn a_session_reports_its_profile_peer() {
+    let p = pair();
+    suite::a_session_reports_its_profile_peer(&p.a, &p.a_peer, &p.b_peer).await;
+}
+
+#[tokio::test]
 async fn items_2_and_5_a_lease_is_exclusive_and_released_on_close() {
     let p = pair();
     suite::a_lease_is_exclusive_and_released_on_close(&p.a, &human()).await;

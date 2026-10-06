@@ -40,6 +40,14 @@ async fn item_1_the_source_endpoint_is_the_senders_lease() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_reports_its_profile_peer() {
+    let pair = Pair::start().await;
+    let (a, _) = pair.bindings();
+    suite::a_session_reports_its_profile_peer(&a, &pair.a_peer, &pair.b_peer).await;
+    pair.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn items_2_and_5_a_lease_is_exclusive_and_released_on_close() {
     let pair = Pair::start().await;
     let (a, _) = pair.bindings();

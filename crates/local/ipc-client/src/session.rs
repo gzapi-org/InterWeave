@@ -171,6 +171,7 @@ impl DataSessionBinding for IpcBinding {
         };
         let session = LocalDataSession::new(
             mint(),
+            response.peer.clone(),
             request.client_kind(),
             lease,
             response
