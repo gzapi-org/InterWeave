@@ -95,7 +95,9 @@ fn every_case_draws_as_the_golden_says() {
         serde_json::from_str(&std::fs::read_to_string(&path).expect("the golden")).expect("JSON");
     let cases = golden["cases"].as_array().expect("cases");
     assert!(!cases.is_empty(), "a golden with no case proves nothing");
-    let write = std::env::var_os("RENDER_PARITY_WRITE").is_some();
+    // Exactly `1`: a `0` or an empty value set to be explicit must compare,
+    // not rewrite the golden and pass.
+    let write = std::env::var("RENDER_PARITY_WRITE").is_ok_and(|v| v == "1");
     let mut rewritten = golden.clone();
     let mut differ = Vec::new();
     for (i, case) in cases.iter().enumerate() {
