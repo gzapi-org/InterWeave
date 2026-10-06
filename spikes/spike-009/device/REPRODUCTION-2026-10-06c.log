@@ -5,7 +5,8 @@
 # D4 reboot: adb reboot; a person unlocked and re-enabled wireless debugging (adb on a new port); unwrap bg; unwrap up
 #   (refused: the unlock was over 60 s earlier); then a person locked and unlocked (21:44:31Z) and, inside the window,
 #   unwrap up -- the user-presence key made before the reboot
-# D6a: fresh keys bg6a and up6a generated, wrapped and unwrapped inside that window; then a person changed the screen
+# D6a: fresh keys bg6a and up6a generated and wrapped inside that window, and up6a unwrapped (bg6a was not unwrapped
+#   before the event -- this line corrected after PR #210's review; the records below are unchanged); then a person changed the screen
 #   lock to Swipe in Settings (device_secure false); unwrap bg6a, up6a, up, bg; keyinfo up6a; then the person set a
 #   PIN again (device_secure true); unwrap up6a, up, bg6a
 # D6b: a person enrolled one fingerprint (BiometricManager BIOMETRIC_STRONG: success, so Class 3); fresh keys up6b
