@@ -69,6 +69,8 @@ struct Record {
     die_on_join: AtomicBool,
     /// Leaves are refused by a live daemon.
     refuse_leave: AtomicBool,
+    /// The next leave ends the session, answering `ShuttingDown`.
+    die_on_leave: AtomicBool,
     /// When each open was asked, on the test's clock.
     opens: Mutex<Vec<tokio::time::Instant>>,
     /// Every open succeeds and the session it gives has already ended:
@@ -147,6 +149,10 @@ impl DataSessionPort for RecordedSession {
         self.record.down()?;
         if self.record.refuse_leave.load(Ordering::SeqCst) {
             return Err(TransportError::Overloaded);
+        }
+        if self.record.die_on_leave.swap(false, Ordering::SeqCst) {
+            self.record.down.store(true, Ordering::SeqCst);
+            return Err(TransportError::ShuttingDown);
         }
         self.inner.leave(channel).await
     }
@@ -831,4 +837,66 @@ async fn a_daemon_that_accepts_and_closes_is_retried_on_a_growing_backoff() {
     let gaps: Vec<Duration> = opens.windows(2).map(|p| p[1] - p[0]).collect();
     let last = gaps.len() - 1;
     assert!(gaps[last] >= gaps[last - 2] * 3, "the gaps grow: {gaps:?}");
+}
+
+/// A leave whose session ends before the daemon answers is left: the join
+/// went with the session, and the reconnect does not re-take it.
+#[tokio::test]
+async fn a_leave_whose_session_ends_is_left_and_not_retaken() {
+    let mut w = World::start().await;
+    w.tool("join", json!({"channel": "general"})).await;
+    w.record.die_on_leave.store(true, Ordering::SeqCst);
+    let (text, error) = w.tool("leave", json!({"channel": "general"})).await;
+    assert!(!error, "{text}");
+    assert_eq!(text, "left general");
+    let joins_before = w.record.calls().iter().filter(|c| *c == "join").count();
+    w.record.down.store(false, Ordering::SeqCst);
+    w.wait_connected().await;
+    let status = w.status().await;
+    assert_eq!(status["joined_channels"], json!([]));
+    assert_eq!(
+        w.record.calls().iter().filter(|c| *c == "join").count(),
+        joins_before,
+        "the reconnect re-took nothing"
+    );
+}
+
+/// After a session that stayed up a whole ceiling, the backoff starts
+/// again from the first delay: a long outage's first retry is not a
+/// leftover 30 s.
+#[tokio::test(start_paused = true)]
+async fn the_backoff_starts_over_after_a_session_that_lasted() {
+    let w = World::start().await;
+    // Grow the backoff first: a daemon that accepts and closes.
+    w.record.accept_and_close.store(true, Ordering::SeqCst);
+    let grown = loop {
+        let opens = w.record.opens.lock().expect("lock").clone();
+        if opens.len() >= 6 {
+            break opens[opens.len() - 1] - opens[opens.len() - 2];
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(
+        grown >= Duration::from_secs(4),
+        "the control: grown to {grown:?}"
+    );
+    // Then a session that lives past the ceiling, then ends.
+    w.record.accept_and_close.store(false, Ordering::SeqCst);
+    let held = w.record.opens.lock().expect("lock").len();
+    while w.record.opens.lock().expect("lock").len() == held {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(31)).await;
+    w.record.accept_and_close.store(true, Ordering::SeqCst);
+    let ended_at = tokio::time::Instant::now();
+    let after = held + 1;
+    while w.record.opens.lock().expect("lock").len() <= after {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let next = w.record.opens.lock().expect("lock")[after];
+    assert!(
+        next - ended_at < Duration::from_secs(1),
+        "the first retry after a lasting session is the first delay, not {:?}",
+        next - ended_at
+    );
 }

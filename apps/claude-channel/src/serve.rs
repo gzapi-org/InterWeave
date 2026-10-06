@@ -518,15 +518,22 @@ impl<B: DataSessionBinding> Bridge<B> {
             }
             ToolCall::Leave(channel) => {
                 let left = drive(session, session.leave(channel.clone()), &mut emit).await?;
-                // A live daemon that refused the leave still holds the
-                // join, so the bridge keeps it; an ended session took the
-                // join with it, and the intent to leave stands -- the next
-                // open does not re-take it.
-                if left.is_ok() || ended(session).await {
+                // A live daemon that refused the leave still holds the join,
+                // so the bridge keeps it. Taken, or the session ended and
+                // took the join with it: left, as the no-session branch
+                // answers, and the next open does not re-take it
+                // (`a_leave_whose_session_ends_is_left_and_not_retaken`).
+                let refused = match left {
+                    Ok(()) => None,
+                    Err(e) => (!ended(session).await).then_some(e),
+                };
+                if let Some(e) = refused {
+                    Err(e)
+                } else {
                     emit.state.left(&channel);
                     rejoin_refused.remove(&channel);
+                    Ok(format!("left {}", channel.as_str()))
                 }
-                left.map(|()| format!("left {}", channel.as_str()))
             }
             ToolCall::Broadcast { channel, payload } => {
                 let message = BroadcastMessageV1 {

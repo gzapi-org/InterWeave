@@ -149,53 +149,51 @@ async fn a_call_answered_behind_a_burst_of_events_completes() {
             }))
             .await;
     }
+    // The host reads concurrently and says how many notifications it
+    // has seen. The daemon WITHHOLDS the answer until the host has seen
+    // all but the queue's bound of them: a bridge that held drained events
+    // until the call answered would never get its answer, and fails here.
+    let (seen_tx, mut seen_rx) = tokio::sync::watch::channel(0_u64);
+    let host = tokio::spawn(async move {
+        let mut lines = BufReader::new(host_out).lines();
+        let (mut notified, mut answer, mut before) = (0_u64, None, 0_u64);
+        while answer.is_none() || notified < BURST {
+            let line = lines.next_line().await.expect("readable").expect("a line");
+            let value: Value = serde_json::from_str(&line).expect("json");
+            if value["id"] == json!(1) {
+                before = notified;
+                answer = Some(value);
+            } else if value["method"] == json!("notifications/claude/channel") {
+                notified += 1;
+                seen_tx.send_replace(notified);
+            }
+        }
+        (answer.expect("answered"), before, notified)
+    });
+    tokio::time::timeout(
+        PATIENCE,
+        seen_rx.wait_for(|seen| *seen >= BURST - u64::from(QUEUE)),
+    )
+    .await
+    .expect(
+        "the drained messages were written while the call was in flight, not held for its answer",
+    )
+    .expect("the host reader is alive");
     daemon
         .write(
             &json!({"type": "response", "id": request.id.as_str(), "ok": true,
                        "result": {"resolved_endpoint": "human"}}),
         )
         .await;
-
-    let mut lines = BufReader::new(host_out).lines();
-    let mut notified: u64 = 0;
-    let answer = tokio::time::timeout(PATIENCE, async {
-        loop {
-            let line = lines.next_line().await.expect("readable").expect("a line");
-            let value: Value = serde_json::from_str(&line).expect("json");
-            if value["id"] == json!(1) {
-                return value;
-            }
-            if value["method"] == json!("notifications/claude/channel") {
-                notified += 1;
-            }
-        }
-    })
-    .await
-    .expect("the send answers behind the burst, not never");
-    // The reader delivers the answer once it is past the burst, which
-    // can leave up to the queue's bound of events still buffered: those
-    // follow the answer. Everything else was drained AND written while
-    // the call was in flight, not held aside.
-    let before = notified;
+    let (answer, before, notified) = tokio::time::timeout(PATIENCE, host)
+        .await
+        .expect("the send answers and every message is notified")
+        .expect("the host reader did not panic");
     assert!(
         before >= BURST - u64::from(QUEUE),
         "{before} of {BURST} written before the answer"
     );
-    let rest = tokio::time::timeout(PATIENCE, async {
-        let mut n = 0;
-        while before + n < BURST {
-            let line = lines.next_line().await.expect("readable").expect("a line");
-            if serde_json::from_str::<Value>(&line).expect("json")["method"]
-                == json!("notifications/claude/channel")
-            {
-                n += 1;
-            }
-        }
-        n
-    })
-    .await
-    .expect("the rest follow");
-    assert_eq!(before + rest, BURST, "every message notified once");
+    assert_eq!(notified, BURST, "every message notified once");
     assert_eq!(
         answer["result"]["content"][0]["text"],
         json!("remote transport accepted at endpoint human")
