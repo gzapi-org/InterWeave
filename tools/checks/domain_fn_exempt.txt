@@ -97,20 +97,8 @@ Refusal::to_wire                                 call  refusal.to_wire(
 
 # --- stage 16 -- the Claude bridge's pure half, called by its MCP
 # --- server (apps/claude-channel, plan section 19 step 3).
-BridgeState::new                       stage-16  apps/claude-channel holds one per session
-BridgeState::leased                    stage-16  apps/claude-channel records the lease an open grants
-BridgeState::lease_lost                stage-16  apps/claude-channel follows a closed or revoked session
-BridgeState::lease                     stage-16  apps/claude-channel reports the lease in identity and status
-BridgeState::joined                    stage-16  apps/claude-channel records a join tool call
-BridgeState::left                      stage-16  apps/claude-channel records a leave tool call
-BridgeState::joined_channels           stage-16  apps/claude-channel reports joined_channels in status
-BridgeState::observe                   stage-16  apps/claude-channel feeds it each session notice
-BridgeState::notification              stage-16  apps/claude-channel converts each inbound message
-BridgeState::reply_route               stage-16  apps/claude-channel resolves a reply tool call
-BridgeState::live_tokens               stage-16  apps/claude-channel reports the token count in status
 ChannelMeta::entries                   stage-16  apps/claude-channel serializes a notification
 ChannelMeta::get                       stage-16  apps/claude-channel reads a notification's token
-ToolName::parse                        stage-16  apps/claude-channel dispatches a call
 
 # --- stage-9 -----------------------------------------------------
 # RE-DATED AT THE STAGE 9 CLOSURE, and the old reason was wrong rather

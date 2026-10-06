@@ -3192,8 +3192,11 @@ name = "interweave-claude-channel"
 version = "0.0.0"
 dependencies = [
  "interweave-claude-channel-core",
+ "interweave-local-client-api",
+ "interweave-transport-api",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

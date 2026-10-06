@@ -26,5 +26,8 @@ path = "src/main.rs"
 
 [dependencies]
 interweave-claude-channel-core = { path = "../../crates/claude/channel-core" }
+interweave-local-client-api = { path = "../../crates/api/local-client-api" }
+interweave-transport-api = { path = "../../crates/api/transport-api" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "io-std", "macros", "rt", "time"] }
