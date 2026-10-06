@@ -11,11 +11,12 @@
 //! A send now dials once and waits here for the outcome: flushed onto
 //! the wire when a connection to the peer is retained, failed when a dial
 //! to the peer fails with no other dial, race or connection left for it,
-//! and otherwise failed at [`SEND_DIAL_HORIZON_MS`] or as soon as its
-//! caller stops waiting, whichever comes first. Two ends reach only the
-//! horizon: a deferred circuit route the gate refuses when its head-start
-//! runs out, and a connection established but not retained -- neither is
-//! a failed dial event (#208 review F5).
+//! answered by current policy when its dial's connection was refused at
+//! retention, and otherwise failed at [`SEND_DIAL_HORIZON_MS`] -- the
+//! loop wakes at the earliest horizon -- or, at the next retry tick, once
+//! its caller has stopped waiting. One end reaches only the horizon: a
+//! deferred circuit route the gate refuses when its head-start runs out,
+//! which is not a failed dial event (#208 review F5).
 //!
 //! What it holds counts against the same bounds as an exchange already
 //! on the wire (`admit_outbound`), so holding moves no work outside them.
@@ -102,11 +103,19 @@ impl HeldSends {
         std::mem::take(&mut self.held)
     }
 
-    /// How many sends are held.
-    #[cfg(test)]
+    /// How many sends are held: each is owed Swarm progress, so the
+    /// polling allowance counts them (`polling_room`).
     #[must_use]
     pub(super) fn len(&self) -> usize {
         self.held.len()
+    }
+
+    /// The earliest horizon among the held sends, which the loop wakes
+    /// at -- not at the retry tick, which a configuration may set far
+    /// longer than the horizon (#208 bot thread, B2).
+    #[must_use]
+    pub(super) fn next_due_ms(&self) -> Option<u64> {
+        self.held.iter().map(|s| s.until_ms).min()
     }
 }
 
@@ -177,7 +186,9 @@ mod tests {
         let first = held.take_expired(9);
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].peer, TransportIdentity::parse(B).expect("valid"));
+        assert_eq!(held.next_due_ms(), Some(10), "the earliest horizon");
         assert_eq!(held.take_expired(10).len(), 1, "at the horizon");
+        assert_eq!(held.next_due_ms(), Some(20));
         assert_eq!(held.len(), 1);
         assert_eq!(held.take_all().len(), 1);
         assert_eq!(held.len(), 0);

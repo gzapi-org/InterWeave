@@ -1537,7 +1537,10 @@ impl SwarmRuntime {
                 // The slack stays bounded because `pending_direct` is
                 // bounded — `admit_outbound` caps it at 128 — so this
                 // cannot become the unbounded queue the capacity exists
-                // to rule out.
+                // to rule out. A HELD SEND counts too: its dial settles
+                // only by Swarm progress, and `admit_outbound` caps held
+                // sends and `pending_direct` together, outside the outbox,
+                // so they cannot earn their own room (#208 bot thread, B1).
                 // A GRACE THAT IS OVER ENDS THE LOOP. Checked before the
                 // select rather than inside it, so both ways out — the
                 // last exchange settling, and the deadline passing —
@@ -1579,6 +1582,10 @@ impl SwarmRuntime {
                 let race_due = races
                     .next_due_ms()
                     .map(|due| started + Duration::from_millis(due));
+                // The earliest held send's horizon, likewise.
+                let held_due = held_sends
+                    .next_due_ms()
+                    .map(|due| started + Duration::from_millis(due));
 
                 // THE BACKLOG IS THE DRIVER'S TO RESPECT, not a reason to
                 // stop polling (`KademliaState::set_backlogged`).
@@ -1590,7 +1597,7 @@ impl SwarmRuntime {
                     outbox.len(),
                     config.event_capacity,
                     listens.len(),
-                    pending_direct.len() + pending_endpoints.len(),
+                    pending_direct.len() + pending_endpoints.len() + held_sends.len(),
                     direct_state.answering() + directory_state.answering(),
                     outstanding_queries,
                     transactions,
@@ -1602,6 +1609,13 @@ impl SwarmRuntime {
                     // unless a direct connection to the peer landed
                     // meanwhile -- in which case the race is over and
                     // the relay stays a route in the book for later.
+                    // A HELD SEND'S HORIZON, on its own timer: the retry
+                    // tick may be far longer than the horizon.
+                    () = tokio::time::sleep_until(held_due.unwrap_or_else(tokio::time::Instant::now)), if held_due.is_some() => {
+                        for send in held_sends.take_expired(now_ms(started)) {
+                            let _ = send.reply.send(Err(DirectError::PeerUnreachable));
+                        }
+                    }
                     () = tokio::time::sleep_until(race_due.unwrap_or_else(tokio::time::Instant::now)), if race_due.is_some() => {
                         let now = now_ms(started);
                         for (peer, relayed) in races.take_due(now) {
@@ -2594,6 +2608,19 @@ impl SwarmRuntime {
                             } => to_transport_identity(peer_id).ok(),
                             _ => None,
                         };
+                        // An outbound establishment, which the settlement
+                        // may refuse at retention: then no connection
+                        // enters `open` and nothing else would answer a
+                        // send held for this dial (#208 bot thread, B3).
+                        let established = match &event {
+                            libp2p::swarm::SwarmEvent::ConnectionEstablished {
+                                peer_id,
+                                connection_id,
+                                endpoint: libp2p::core::ConnectedPoint::Dialer { .. },
+                                ..
+                            } => to_transport_identity(peer_id).ok().map(|p| (p, *connection_id)),
+                            _ => None,
+                        };
                         // REBUILT PER EVENT, not held: rule 3 asks what
                         // this node listens on NOW, and a node that
                         // binds a private interface between two Identify
@@ -2635,6 +2662,25 @@ impl SwarmRuntime {
                         {
                             for send in held_sends.take(peer) {
                                 let _ = send.reply.send(Err(DirectError::PeerUnreachable));
+                            }
+                        }
+                        // REFUSED AT RETENTION, with nothing else on its
+                        // way: answered now by current policy -- not put on
+                        // the wire, since the refused connection is closing.
+                        if let Some((peer, id)) = established.as_ref()
+                            && !open.contains_key(id)
+                            && held_sends.holds(peer)
+                            && !in_flight.dials_peer(peer)
+                            && !races.waits_for(peer)
+                            && !open.values().any(|c| &c.peer == peer)
+                        {
+                            let answer = if manager.classify(peer) == interweave_transport_runtime::ConnectionClass::DataPlaneTrusted {
+                                DirectError::PeerUnreachable
+                            } else {
+                                DirectError::UnauthorizedPeer
+                            };
+                            for send in held_sends.take(peer) {
+                                let _ = send.reply.send(Err(answer));
                             }
                         }
 
