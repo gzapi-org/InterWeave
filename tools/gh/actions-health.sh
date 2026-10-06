@@ -21,7 +21,7 @@
 #     repositories only, the minutes the allowance covers.
 #
 #     Run from a PUBLIC repository (InterWeave is one), the second check
-#     cannot hold a run: its runs on GitHub-hosted runners bill nothing
+#     cannot hold a run: its runs on standard GitHub-hosted runners bill nothing
 #     and draw on no allowance. The answer says so, quotes the private
 #     repositories' usage as context, and exits 0 unless the platform is
 #     down.
@@ -83,7 +83,10 @@ private_repos_json() {
     local org="$1" usage="$2" name priv out="[]"
     while read -r name; do
         [[ -n "$name" ]] || continue
-        priv="$(gh api "repos/$org/$name" --jq '.private' 2>/dev/null || echo "true")"
+        # Bare ("gzapp") as this organisation's payload sends it, or
+        # owner-qualified ("org/gzapp") as GitHub's documentation shows:
+        # the lookup takes either, and the list keeps the name as sent.
+        priv="$(gh api "repos/$org/${name#"$org"/}" --jq '.private' 2>/dev/null || echo "true")"
         [[ "$priv" == "false" ]] || out="$(jq -c --arg n "$name" '. + [$n]' <<<"$out")"
     done < <(printf '%s' "$usage" | jq -r '[.usageItems[]? | select(.product == "actions") | .repositoryName // empty] | unique | .[]' 2>/dev/null)
     printf '%s' "$out"
@@ -161,7 +164,7 @@ if command -v gh >/dev/null 2>&1; then
     if [[ -n "$ORG" ]]; then
         # THIS REPOSITORY'S VISIBILITY decides whether billing can say
         # anything about a run here. A public repository's runs on
-        # GitHub-hosted runners bill nothing and draw on no allowance,
+        # standard GitHub-hosted runners bill nothing and draw on no allowance,
         # so the organisation's spend — another repository's — is
         # context, never a reason to hold a run here. Reported as
         # "$87 billing as overage, every further minute is money", it
@@ -170,6 +173,7 @@ if command -v gh >/dev/null 2>&1; then
         # conservative side, the answer before this existed.
         public=""
         [[ "$(gh repo view --json isPrivate -q .isPrivate 2>/dev/null || true)" == "false" ]] && public="yes"
+        self="$(gh repo view --json name -q .name 2>/dev/null || true)"
         # THE CURRENT BILLING MONTH, and only it. Unfiltered, the usage
         # endpoint returns per-month items for more than one period —
         # after a rollover, last month's rows sit beside this month's —
@@ -221,9 +225,26 @@ if command -v gh >/dev/null 2>&1; then
             billed=""
             awk -v n="$net" 'BEGIN { exit !(n > 0) }' && billed="yes"
 
-            # A public repository: nothing above applies to a run here.
+            # A public repository: the allowance above does not apply to a
+            # run here, but its OWN billed minutes do. Standard runners
+            # are free in a public repository; a larger runner is charged
+            # there too, so money billed against this repository's minute
+            # rows is a cost like any other. Decided on netAmount, not on
+            # sku names, which the live payload does not show for larger
+            # runners (#197 review, finding 2).
             if [[ -n "$public" ]]; then
-                say "OK — ${ops_phrase}; this repository is public, so its runs bill nothing and draw on no allowance. (The organisation's private repositories: ${mins} minutes this period${billed:+, \$${net} billing as overage}.)"
+                selfnet="$(printf '%s' "$usage" \
+                    | jq -r --arg p "$period" --arg s "$self" --arg o "$ORG" '[.usageItems[]? | select(.product == "actions" and (.unitType == "Minutes") and (((.date // $p) | tostring)[0:7] == $p) and (.repositoryName == $s or .repositoryName == ($o + "/" + $s))) | .netAmount] | add // 0' \
+                    2>/dev/null || echo 0)"
+                if awk -v n="$selfnet" 'BEGIN { exit !(n > 0) }'; then
+                    say "DEGRADED — this repository is public, yet \$${selfnet} of its own minutes bill this period: runners beyond the free standard ones are charged here too. Runs still start, so this blocks nothing; every further minute on them is money."
+                    exit 1
+                fi
+                # Its name unread, its own rows were never matched: say so
+                # rather than claim they bill nothing.
+                own="none of its minutes bill"
+                [[ -n "$self" ]] || own="its own billing could not be checked (name unread)"
+                say "OK — ${ops_phrase}; this repository is public and ${own}, so its runs on standard runners cost nothing and draw on no allowance. (The organisation's private repositories: ${mins} minutes this period${billed:+, \$${net} billing as overage}.)"
                 exit 0
             fi
 
@@ -276,7 +297,7 @@ if [[ "$reachable" -eq 0 ]]; then
 fi
 
 if [[ -n "${public:-}" ]]; then
-    say "OK — ${ops_phrase}; this repository is public, so its runs bill nothing. (Billing API unreadable.)"
+    say "OK — ${ops_phrase}; this repository is public, so its runs on standard runners cost nothing. (Billing API unreadable: a larger runner's charges could not be checked.)"
     exit 0
 fi
 say "OK — ${ops_phrase}. (Allowance not checked: billing API unreadable.)"

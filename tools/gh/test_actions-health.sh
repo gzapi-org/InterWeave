@@ -85,6 +85,9 @@ set -uo pipefail
 if [[ "${1:-}" == "repo" ]]; then
   # THIS repository's visibility: private unless this_repo_public is set;
   # this_repo_unreadable makes the lookup fail as a network error would.
+  if [[ " $* " == *" name "* ]]; then
+    if [[ -f "$MOCK_STATE/this_repo_name" ]]; then cat "$MOCK_STATE/this_repo_name"; else echo "openrepo"; fi; exit 0
+  fi
   if [[ " $* " == *" isPrivate "* ]]; then
     [[ -f "$MOCK_STATE/this_repo_unreadable" ]] && exit 1
     [[ -f "$MOCK_STATE/this_repo_public" ]] && { echo false; exit 0; }
@@ -96,7 +99,10 @@ if [[ "${1:-}" == "api" && "${2:-}" == repos/* ]]; then
   # Another repository's visibility: public_repos names the public ones;
   # every other name is private; an unknown one is a 404 (gh prints the
   # error to stdout and exits 1, as the real CLI does).
-  name="${2##*/}"
+  # Only repos/testorg/<name> resolves: a doubled owner
+  # (repos/testorg/testorg/x) is a 404, as it is on GitHub.
+  name="${2#repos/testorg/}"
+  [[ "$name" == "$2" || "$name" == */* ]] && { echo '{"message":"Not Found","status":"404"}'; exit 1; }
   if grep -qx "$name" "$MOCK_STATE/public_repos" 2>/dev/null; then echo false; exit 0; fi
   if grep -qx "$name" "$MOCK_STATE/unknown_repos" 2>/dev/null; then echo '{"message":"Not Found","status":"404"}'; exit 1; fi
   # A lookup that fails with nothing on stdout (a dropped connection):
@@ -129,7 +135,14 @@ if [[ "${1:-}" == "api" ]]; then
   # counted — the filters exclude other months and public repositories,
   # they do not demand fields a payload may lack.
   bare_mins="$(cat "$MOCK_STATE/billing_bare_mins" 2>/dev/null || echo 0)"
-  printf '{"usageItems":[{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":%s,"netAmount":%s,"date":"%s","repositoryName":"privrepo"},{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":%s,"netAmount":%s,"date":"%s","repositoryName":"privrepo"},{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":%s,"netAmount":0,"date":"%s","repositoryName":"openrepo"},{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":'"$bare_mins"',"netAmount":0},{"product":"actions","sku":"Actions Storage","unitType":"GigabyteHours","quantity":10,"netAmount":%s,"date":"%s","repositoryName":"privrepo"}]}\n' \
+  # The documented owner-qualified shape of repositoryName, for a public
+  # repository's free minutes (qualified_public_mins), and THIS
+  # repository's own billed minutes (self_net), as a larger runner in a
+  # public repository bills.
+  qpub_mins="$(cat "$MOCK_STATE/qualified_public_mins" 2>/dev/null || echo 0)"
+  self_net="$(cat "$MOCK_STATE/self_net" 2>/dev/null || echo 0)"
+  self_mins="$( [[ -f "$MOCK_STATE/self_net" ]] && echo 5 || echo 0 )"
+  printf '{"usageItems":[{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":%s,"netAmount":%s,"date":"%s","repositoryName":"privrepo"},{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":%s,"netAmount":%s,"date":"%s","repositoryName":"privrepo"},{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":%s,"netAmount":0,"date":"%s","repositoryName":"openrepo"},{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":'"$bare_mins"',"netAmount":0},{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":'"$qpub_mins"',"netAmount":0,"date":"'"$this_month"'","repositoryName":"testorg/openrepo"},{"product":"actions","sku":"Actions Linux 16-core","unitType":"Minutes","quantity":'"$self_mins"',"netAmount":'"$self_net"',"date":"'"$this_month"'","repositoryName":"openrepo"},{"product":"actions","sku":"Actions Storage","unitType":"GigabyteHours","quantity":10,"netAmount":%s,"date":"%s","repositoryName":"privrepo"}]}\n' \
     "$mins" "$net" "$this_month" "$prev_mins" "$prev_net" "$prev_month" "$public_mins" "$this_month" "$stor" "$this_month"
   exit 0
 fi
@@ -225,7 +238,7 @@ printf '87.384\n' > "$SANDBOX/state/billing_net"
 printf '60000\n'  > "$SANDBOX/state/billing_mins"
 invoke
 assert_rc        "billed overage elsewhere, no allowance configured: exits 0" 0
-assert_contains  "says the repository is public"    "this repository is public, so its runs bill nothing"
+assert_contains  "says the repository is public"    "this repository is public and none of its minutes bill"
 assert_contains  "quotes the private usage as context" "60000 minutes this period, \$87.384 billing as overage"
 assert_lacks     "never DEGRADED"                   "DEGRADED"
 invoke_with 50000
@@ -242,7 +255,7 @@ reset
 touch "$SANDBOX/state/this_repo_public" "$SANDBOX/state/billing_unreadable"
 invoke
 assert_rc        "billing unreadable: still answers, exits 0" 0
-assert_contains  "and says why it can"               "this repository is public, so its runs bill nothing. (Billing API unreadable.)"
+assert_contains  "and says why it can"               "this repository is public, so its runs on standard runners cost nothing. (Billing API unreadable"
 reset
 touch "$SANDBOX/state/this_repo_unreadable"
 printf '87.384\n' > "$SANDBOX/state/billing_net"
@@ -277,6 +290,32 @@ for state in this_repo_public billing_unreadable major_outage; do
     assert_rc       "$state: exits 2" 2
     assert_contains "  and names the setting" "must be a positive number"
 done
+
+echo "actions-health: an owner-qualified repositoryName is looked up once, unprefixed"
+reset
+printf '42406\n' > "$SANDBOX/state/billing_mins"
+printf '8613\n'  > "$SANDBOX/state/qualified_public_mins"
+printf 'openrepo\n' > "$SANDBOX/state/public_repos"
+invoke_with 50000
+assert_rc        "a public repository named org/name is not counted: exits 0" 0
+assert_contains  "quotes the private sum only"      "42406 of 50000 minutes used"
+
+echo "actions-health: a public repository's OWN billed minutes are a cost"
+# Standard runners are free in a public repository; a larger runner is not.
+reset
+touch "$SANDBOX/state/this_repo_public"
+printf '0.75\n' > "$SANDBOX/state/self_net"
+invoke
+assert_rc        "its own billed minutes: exits 1" 1
+assert_contains  "names the cost"                   "\$0.75 of its own minutes bill this period"
+assert_lacks     "never the free-runs line"         "cost nothing"
+printf 'otherrepo\n' > "$SANDBOX/state/this_repo_name"
+invoke
+assert_rc        "another repository's billed row is not this one's: exits 0" 0
+printf '' > "$SANDBOX/state/this_repo_name"
+invoke
+assert_rc        "its name unread: exits 0" 0
+assert_contains  "and says its own billing was not checked" "its own billing could not be checked"
 
 echo "actions-health: a degraded Actions component stops the work"
 reset
