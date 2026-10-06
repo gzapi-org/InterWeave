@@ -164,6 +164,9 @@ for tool in Xvfb dbus-run-session dbus-daemon gdbus setsid; do
 done
 
 scratch="$(mktemp -d)" || die "cannot make a scratch directory"
+# Canonical, as mountinfo lists mount points: a TMPDIR reached through a
+# symlink (/home -> /var/home) would otherwise match no mount under it.
+scratch="$(realpath -- "$scratch")" || die "cannot resolve the scratch directory"
 xvfb_pid=""
 bus_pid=""
 # When the stop ends in KILL, in milliseconds: set by the first signal,
@@ -181,6 +184,10 @@ mounts_under() {
     done <"${WITH_DISPLAY_MOUNTINFO:-/proc/self/mountinfo}" 2>/dev/null | sort -r
 }
 cleanup() {
+    # Further signals are ignored here: a signal's trap ends in exit, and
+    # an exit inside the EXIT trap skips the rest of it, the scratch with
+    # it. The wait below is bounded, so ignoring them cannot hang.
+    trap '' INT TERM HUP
     # The bus's process group, on every exit and not only on a signal: a
     # launcher or registry the wrapper started directly (step 3) that hung
     # before it connected would not end with the bus, and would outlive a
@@ -198,7 +205,7 @@ cleanup() {
     # A mount a KILLed service never took down: rm cannot remove a mount
     # point, and --one-file-system keeps it from deleting through one.
     local mp fuse
-    fuse="$(command -v fusermount3 || command -v fusermount)"
+    fuse="${WITH_DISPLAY_FUSERMOUNT-$(command -v fusermount3 || command -v fusermount)}"
     while read -r mp; do
         [[ -n "$mp" ]] || continue
         if [[ -n "$fuse" ]]; then "$fuse" -u -z "$mp" 2>/dev/null; else umount -l "$mp" 2>/dev/null; fi

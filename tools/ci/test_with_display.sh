@@ -29,6 +29,7 @@ UNDER_TEST="$SCRIPT_DIR/with_display.sh"
 command -v python3 >/dev/null || { echo "test_with_display: python3 is needed (the signal cases and the setsid stub)" >&2; exit 1; }
 
 failures=0
+SANDBOX_TMPDIR="${TMPDIR-}"
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
 BIN="$SANDBOX/bin"
@@ -147,23 +148,33 @@ case "\${1:-}" in
     sleep 0.2 ;;
   mounted)
     mkdir -p "\$XDG_RUNTIME_DIR/doc/by-app"
-    { echo "36 25 0:32 / \$XDG_RUNTIME_DIR/doc rw - fuse.portal portal rw"
-      echo "37 36 0:33 / \$XDG_RUNTIME_DIR/doc/by-app rw - fuse.portal portal rw"
+    # The kernel lists mount points canonically.
+    rd="\$(realpath "\$XDG_RUNTIME_DIR")"
+    { echo "36 25 0:32 / \$rd/doc rw - fuse.portal portal rw"
+      echo "37 36 0:33 / \$rd/doc/by-app rw - fuse.portal portal rw"
       echo "38 25 0:34 / /run/user/1000/doc rw - fuse.portal portal rw"; } > "$SANDBOX/mountinfo" ;;
+  stubborn)
+    ( trap '' TERM; sleep 30 ) >/dev/null 2>&1 &
+    echo \$! > "$SANDBOX/stubborn-pid" ;;
   locked)
     mkdir -p "\$XDG_RUNTIME_DIR/locked" && touch "\$XDG_RUNTIME_DIR/locked/x" && chmod 500 "\$XDG_RUNTIME_DIR/locked" ;;
 esac
 exit 0
 EOF
 chmod +x "$CMD2"
+# umount: the fallback where no fusermount is installed.
+cat > "$BIN/umount" <<EOF
+#!/usr/bin/env bash
+echo "umount \$*" >> "$SANDBOX/unmounted"
+EOF
 # fusermount3: records each unmount it was asked for.
 cat > "$BIN/fusermount3" <<EOF
 #!/usr/bin/env bash
 echo "\$*" >> "$SANDBOX/unmounted"
 EOF
-chmod +x "$BIN/fusermount3"
+chmod +x "$BIN/fusermount3" "$BIN/umount"
 
-reset() { rm -f "$SANDBOX"/{xvfb-dies,xvfb-mute,bus-fails,set-fails,no-address,registry-down,cmd-ran,bus-ran,a11y-on,xvfb-pid,xvfb-terminated,sleeper-pid,spawn-denied,launcher-mute,launcher-hangs,launcher-pid,launcher-ran,launcher-started,registryd-started,rundir,mountinfo,unmounted}; ATSPI_DIRS="$ATSPI"; }
+reset() { rm -f "$SANDBOX"/{xvfb-dies,xvfb-mute,bus-fails,set-fails,no-address,registry-down,cmd-ran,bus-ran,a11y-on,xvfb-pid,xvfb-terminated,sleeper-pid,spawn-denied,launcher-mute,launcher-hangs,launcher-pid,launcher-ran,launcher-started,registryd-started,rundir,mountinfo,unmounted,stubborn-pid,rm-args}; ATSPI_DIRS="$ATSPI"; }
 
 # run [<arg>â€¦]: the wrapper under the stubs, from a Wayland desktop.
 run() {
@@ -381,6 +392,59 @@ if [[ "$got" -eq 0 && "$out" == *"could not remove its scratch ${rundir%/run} â€
     pass "a scratch that cannot be removed is reported, and the command's status kept"
 else fail "a leftover scratch was not reported (exit $got)" "$out"; fi
 chmod -R u+w "${rundir%/run}" 2>/dev/null; rm -rf "${rundir%/run}"
+
+
+# A service that ignores TERM: the wait is bounded by
+# WITH_DISPLAY_STOP_SECONDS, then KILL, and the scratch still goes.
+reset; start=$SECONDS; export WITH_DISPLAY_STOP_SECONDS=1; run "$CMD2" stubborn; unset WITH_DISPLAY_STOP_SECONDS
+took=$((SECONDS - start)); spid="$(cat "$SANDBOX/stubborn-pid" 2>/dev/null)"; rundir="$(cat "$SANDBOX/rundir" 2>/dev/null)"
+if [[ "$got" -eq 0 && "$took" -le 4 && -n "$spid" ]] && ! kill -0 "$spid" 2>/dev/null && [[ ! -e "${rundir%/run}" ]]; then
+    pass "a service ignoring TERM is KILLed after the bound (${took}s), and the scratch goes"
+else fail "a TERM-ignoring service: exit $got, ${took}s, pid ${spid:-?} alive=$(kill -0 "$spid" 2>/dev/null && echo yes || echo no)" "$out"
+     kill -KILL "$spid" 2>/dev/null; rm -rf "${rundir%/run}"; fi
+
+# A signal while cleanup waits does not abandon it: the scratch goes and
+# the command's status stands.
+reset
+PATH="$BIN:$PATH" WITH_DISPLAY_READY_SECONDS=1 WITH_DISPLAY_STOP_SECONDS=2 WITH_DISPLAY_ATSPI_DIRS="$ATSPI_DIRS" \
+    bash "$UNDER_TEST" "$CMD2" stubborn >/dev/null 2>&1 &
+wp=$!
+for ((i = 0; i < 50; i++)); do [[ -s "$SANDBOX/stubborn-pid" ]] && break; sleep 0.1; done
+sleep 0.5; kill -TERM "$wp" 2>/dev/null; wait "$wp"; got=$?
+spid="$(cat "$SANDBOX/stubborn-pid" 2>/dev/null)"; rundir="$(cat "$SANDBOX/rundir" 2>/dev/null)"
+if [[ "$got" -eq 0 && -n "$rundir" && ! -e "${rundir%/run}" ]]; then
+    pass "TERM during cleanup's wait: the scratch still goes, and the status is the command's"
+else fail "TERM during cleanup: exit $got, scratch ${rundir%/run} left=$([[ -e "${rundir%/run}" ]] && echo yes || echo no)"
+     kill -KILL "$spid" 2>/dev/null; rm -rf "${rundir%/run}"; fi
+kill -KILL "$spid" 2>/dev/null
+
+# The removal never deletes through a mount point.
+reset
+printf '#!/usr/bin/env bash\necho "$*" >> "%s/rm-args"\nexec /usr/bin/rm "$@"\n' "$SANDBOX" > "$BIN/rm"; chmod +x "$BIN/rm"
+run "$CMD2"; rm -f "$BIN/rm"
+rundir="$(cat "$SANDBOX/rundir" 2>/dev/null)"
+grep -qxF -- "-rf --one-file-system ${rundir%/run}" "$SANDBOX/rm-args" 2>/dev/null \
+    && pass "the scratch is removed with --one-file-system" \
+    || fail "the scratch's rm lacked --one-file-system" "$(cat "$SANDBOX/rm-args" 2>/dev/null)"
+
+# No fusermount installed: umount -l, deepest first.
+reset; export WITH_DISPLAY_MOUNTINFO="$SANDBOX/mountinfo" WITH_DISPLAY_FUSERMOUNT=""
+run "$CMD2" mounted; unset WITH_DISPLAY_MOUNTINFO WITH_DISPLAY_FUSERMOUNT
+rundir="$(cat "$SANDBOX/rundir" 2>/dev/null)"
+if [[ "$(cat "$SANDBOX/unmounted" 2>/dev/null)" == "umount -l $rundir/doc/by-app"$'\n'"umount -l $rundir/doc" ]]; then
+    pass "with no fusermount, umount -l takes the mounts down, deepest first"
+else fail "the umount fallback was wrong" "$(cat "$SANDBOX/unmounted" 2>/dev/null || echo none)"; fi
+
+# A TMPDIR reached through a symlink: mountinfo is canonical, so the
+# scratch must be too, or no mount under it matches.
+reset; mkdir -p "$SANDBOX/realtmp"; ln -sfn "$SANDBOX/realtmp" "$SANDBOX/tmplink"
+export TMPDIR="$SANDBOX/tmplink" WITH_DISPLAY_MOUNTINFO="$SANDBOX/mountinfo"
+run "$CMD2" mounted; unset WITH_DISPLAY_MOUNTINFO
+if [[ -n "$SANDBOX_TMPDIR" ]]; then export TMPDIR="$SANDBOX_TMPDIR"; else unset TMPDIR; fi
+rundir="$(cat "$SANDBOX/rundir" 2>/dev/null)"
+if [[ "$rundir" == "$SANDBOX/realtmp/"* && "$(wc -l < "$SANDBOX/unmounted" 2>/dev/null)" -eq 2 ]]; then
+    pass "a symlinked TMPDIR: the scratch is canonical and its mounts are found"
+else fail "a symlinked TMPDIR hid the mounts (runtime dir ${rundir:-none})" "$(cat "$SANDBOX/unmounted" 2>/dev/null || echo none)"; fi
 
 echo
 if (( failures > 0 )); then
