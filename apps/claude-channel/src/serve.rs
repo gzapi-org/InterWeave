@@ -22,6 +22,7 @@
 //! **One task, so one writer.** Answers and notifications are written by
 //! this loop alone, a line each, so they never interleave.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use interweave_claude_channel_core::{
@@ -34,7 +35,7 @@ use interweave_local_client_api::{
 };
 use interweave_transport_api::{
     BroadcastMessageV1, ChannelId, ConnectivitySummary, DirectDestination, EndpointId, Health,
-    MessageId, Payload, TransportError,
+    MessageId, Payload, TransportError, TransportIdentity,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, AsyncWrite, AsyncWriteExt as _};
@@ -65,6 +66,11 @@ pub struct Config {
     /// The local endpoint it claims; never a substitute (LIFECYCLE.md
     /// §Endpoint conflict).
     pub endpoint: EndpointId,
+    /// `status.profile_desired_channels`: the profile document's desired
+    /// channels AS CONFIGURED, or the class of the error that kept them
+    /// from being read -- unknown, never an empty list (TOOL-SURFACE.md
+    /// §Status visibility).
+    pub desired_channels: Result<Vec<ChannelId>, String>,
 }
 
 /// The bridge's clock and entropy: the caller's, so a test runs on its
@@ -90,6 +96,11 @@ struct Bridge<B: DataSessionBinding> {
     env: Env,
     state: BridgeState,
     session: Option<B::Session>,
+    /// The profile's `PeerId`, as the last session's open reported it.
+    local_peer: Option<TransportIdentity>,
+    /// Re-joins the daemon refused at a reconnect, each until the next
+    /// join or leave of that channel (LIFECYCLE.md step 6).
+    rejoin_refused: BTreeMap<ChannelId, TransportError>,
     /// Why the last open failed, for `status`.
     last_open_error: Option<TransportError>,
     attempt: u32,
@@ -120,6 +131,8 @@ where
         env,
         state: BridgeState::new(),
         session: None,
+        local_peer: None,
+        rejoin_refused: BTreeMap::new(),
         last_open_error: None,
         attempt: 0,
         reconnect_at: Instant::now(),
@@ -182,14 +195,16 @@ impl<B: DataSessionBinding> Bridge<B> {
         };
         match opened {
             Ok(session) => {
+                self.local_peer = Some(session.session().local_peer().clone());
                 if let Some(lease) = session.session().endpoint_lease() {
                     self.state
                         .leased(lease.endpoint.clone(), lease.epoch.clone());
                 }
                 let joined: Vec<ChannelId> = self.state.joined_channels().cloned().collect();
                 for channel in joined {
-                    if session.join(channel.clone()).await.is_err() {
+                    if let Err(e) = session.join(channel.clone()).await {
                         self.state.left(&channel);
+                        self.rejoin_refused.insert(channel, e);
                     }
                 }
                 self.session = Some(session);
@@ -303,10 +318,13 @@ impl<B: DataSessionBinding> Bridge<B> {
                     session.leave(channel.clone()).await?;
                 }
                 self.state.left(&channel);
+                self.rejoin_refused.remove(&channel);
                 Ok(format!("left {}", channel.as_str()))
             }
             ToolCall::Join(channel) => {
-                self.connected()?.join(channel.clone()).await?;
+                let joined = self.connected()?.join(channel.clone()).await;
+                self.rejoin_refused.remove(&channel);
+                joined?;
                 self.state.joined(channel.clone());
                 Ok(format!("joined {}", channel.as_str()))
             }
@@ -373,21 +391,34 @@ impl<B: DataSessionBinding> Bridge<B> {
 
     fn identity(&self) -> String {
         json!({
+            "local_peer_id": self.local_peer.as_ref().map(TransportIdentity::as_str),
             "local_endpoint": self.config.endpoint.as_str(),
-            "endpoint_lease_held": self.state.lease().is_some(),
         })
         .to_string()
     }
 
     fn status(&mut self) -> String {
         let now = (self.env.now_ms)();
-        let lease = self.state.lease().map(
-            |(endpoint, epoch)| json!({"endpoint": endpoint.as_str(), "epoch": epoch.as_str()}),
-        );
+        let (lease_state, epoch) = match (self.session.is_some(), self.state.lease()) {
+            (_, Some((_, epoch))) => ("held", Some(epoch.as_str().to_owned())),
+            (true, None) => ("not held", None),
+            (false, None) => ("daemon unavailable", None),
+        };
         let joined: Vec<&str> = self
             .state
             .joined_channels()
             .map(ChannelId::as_str)
+            .collect();
+        let desired = match &self.config.desired_channels {
+            Ok(channels) => json!({
+                "as_configured": channels.iter().map(ChannelId::as_str).collect::<Vec<_>>()
+            }),
+            Err(class) => json!({"unknown": class}),
+        };
+        let refused: Vec<Value> = self
+            .rejoin_refused
+            .iter()
+            .map(|(channel, error)| json!({"channel": channel.as_str(), "error": format!("{error:?}")}))
             .collect();
         let (health, connectivity) = match &self.health {
             Some((health, connectivity)) => (
@@ -400,14 +431,17 @@ impl<B: DataSessionBinding> Bridge<B> {
             None => (Value::Null, Value::Null),
         };
         json!({
-            "daemon_connected": self.session.is_some(),
-            "last_connect_error": self.last_open_error.map(|e| format!("{e:?}")),
+            "local_peer_id": self.local_peer.as_ref().map(TransportIdentity::as_str),
             "local_endpoint": self.config.endpoint.as_str(),
-            "endpoint_lease": lease,
+            "endpoint_lease_state": lease_state,
+            "endpoint_lease_epoch": epoch,
             "joined_channels": joined,
-            "reply_tokens": self.state.live_tokens(now),
+            "profile_desired_channels": desired,
+            "rejoin_refused": refused,
             "transport_health": health,
             "connectivity": connectivity,
+            "last_connect_error": self.last_open_error.map(|e| format!("{e:?}")),
+            "reply_tokens": self.state.live_tokens(now),
         })
         .to_string()
     }

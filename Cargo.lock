@@ -3193,6 +3193,8 @@ version = "0.0.0"
 dependencies = [
  "interweave-claude-channel-core",
  "interweave-local-client-api",
+ "interweave-local-client-fake",
+ "interweave-profile-identity",
  "interweave-transport-api",
  "serde",
  "serde_json",

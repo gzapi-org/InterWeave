@@ -31,3 +31,7 @@ interweave-transport-api = { path = "../../crates/api/transport-api" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "io-std", "macros", "rt", "time"] }
+
+[dev-dependencies]
+interweave-local-client-fake = { path = "../../tests/local-client-fake" }
+interweave-profile-identity = { path = "../../crates/identity/profile-identity" }
