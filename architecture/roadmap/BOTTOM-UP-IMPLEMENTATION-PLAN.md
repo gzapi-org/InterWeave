@@ -4484,6 +4484,91 @@ holds no `stage-15` entry (`DirectoryCache::forget` is this stage's, by
 §16's carry), and the status moves to the lowest open stage — Stage 16
 if it is still open, else the next.
 
+**Met (2026-10-06; the closing record).** Stage 15 closed on the owner's
+word of 2026-10-06 — given on the arming of the pull request that lands
+this record, which is its approval on record, as Stage 14's was — on the
+record (#175, with ADR-0054 accepted on its arming and ADR-0037 A
+2026-10-03), Stage 16 opened beside it by record (#174, 2026-10-03), and
+the batches merged in the order above: B1 (#176: `app-core`, `ViewEvent`
+to `ui-model`, the session-scoped re-keep), B2+B3 (#178: the desktop app
+up to the window, `human-store` v7's `read_pairs`, the key-file refusal
+from p2p-network-dev's contributor branch), B4 (#181: winit, the software
+renderer and the accessibility backend, after ADR-0054's vendoring in
+#179), B5 (#183: the desktop E2E without a person, the shipped client
+against real daemons), B6+B7 (#187: the markdown subset drawn from the
+client's own block tree, one announcement, the read/Keep/accessibility
+E2E over AT-SPI), B8 (#191: `ServerState` drives connectivity, a peer's
+path change the route indicator, on R1a #180 and R1b #184), B9 (#200:
+the trust settings over `admin.trust.*` with the exact PeerId over the
+admin socket only, on R2 #186 and #190), the external review's fixes
+(#192: the key file judged on disk, the key directory's owner, the
+selected minor checked), the E2E load fixes (#196), and the contract
+texts after R2 (#189) — the `rust-ui-dev` lane for the batches,
+`p2p-network-dev`'s for R1, R2 and the substrate. The exit gate: (a)
+every bullet of the required desktop E2E has its named test in
+`tests/desktop-e2e/tests/human_app/` —
+`human_and_claude_share_one_peer_id_under_different_endpoint_ids`,
+`direct_messages_route_to_exactly_one_endpoint_with_no_fan_out`,
+`unread_inbound_persists_across_a_restart_of_the_client`,
+`a_message_read_and_not_kept_leaves_the_store`,
+`a_message_kept_after_reading_stays_across_a_restart`,
+`a_pending_send_survives_a_restart_and_leaves_the_store_once_accepted`,
+`the_client_takes_its_lease_again_after_its_daemon_restarts_and_receives`,
+`the_client_keeps_data_and_admin_apart_on_their_own_sockets`,
+`a_full_store_gives_up_the_endpoint_rather_than_accept_unread_content`,
+`a_process_kill_keeps_pending_outbound_and_unread_inbound_and_not_a_terminal_send`,
+`a_read_message_re_sent_after_a_restart_does_not_come_back_unread`,
+`a_trust_removal_shows_the_exact_peer_id_and_reaches_the_daemon_only_over_admin`
+(exact PeerId over AT-SPI; the admin socket tapped, the data socket
+carrying no mutation) — green in CI at the close; (b)
+`the_shipped_binary_carries_human_chat_direct_and_broadcast_plain_and_compressed`
+in `chat.rs`: two shipped binaries, direct and broadcast, plain and
+`;ce=br`, both ways, the receive half observed in the receiving binary's
+store; (c) `check_human_layering.sh` holds with `app-core` guarded (67
+runtime dependencies walked at the close) and `cargo deny` is green with
+the delta the owner decided in (14) — the Slint Royalty-free 2.0
+exceptions, RUSTSEC-2026-0192 ignored with its reason and the next Slint
+bump as the revisit, BSL-1.0 admitted nowhere; (d) the accessibility
+bullet ran on a real adapter —
+`the_tree_read_over_atspi_labels_message_route_and_connectivity_controls`,
+AT-SPI under Xvfb in CI (devex-tooling's `with_display.sh`, #188), the
+trust leg included — so no release-test record is named as a limit; (e)
+(13)'s four schemas — `ipc/trust-list-params`, `ipc/trust-list`,
+`ipc/trust-set-params`, `ipc/path-changed` — flipped `active` in the
+pull request that lands this record, their mirrors in
+`schema_agreement.rs` and `check_schemas_are_tested.sh` covering the
+`ipc` family (30 schemas named); (f) the ledger holds no `stage-15`
+entry — `DirectoryCache::forget`'s production caller is the `SetTrust`
+arm of the libp2p runtime's commands (B9 through R2) — and the status
+moves to `stage-16-claude-code-channel`, Stage 16 being the lowest open
+stage.
+
+**Measured, and carried as limits.** A real relayed path reaching the
+route indicator was not proved: the desktop harness has no relay pair,
+so the indicator was read over AT-SPI and inspected in the rendered
+window with a scripted relayed path only — Stage 17 (§20) or the relay
+work of Stage 18 (§21) proves it live. Windows and macOS were not built
+(12). The copy is placeholder: read by architect-cto against
+human-client-ui.md's vocabulary (§3, §5, §8, §11, §12, §13) and not yet
+finalised by language-culture, since English has no holder — the first
+English holder reads every `UiText` once. The trust allowlist change is
+a runtime overlay lost on restart (ADR-0028), said in the copy;
+persistence stays the owner's. The "human lease never became held"
+timeout B5 first saw was never reproduced (288 runs under load, #196);
+the session-timing log (#191) is in the binary for the next occurrence.
+LOCAL-CLIENT.md item 10's end-of-route clause is proved by the
+in-process tests only, not by the shared suite the IPC adapter runs
+(p2p-network-dev's gap, named on #190). The carries of the paragraph
+above stand where it sends them: the Windows binding and BSL-1.0 to
+Stage 18 (§21); the Slint badge and client autostart to Stage 19 (§22);
+the accessibility reach and the Android PeerId copy to Stage 17 (§20);
+persistence of `admin.*` changes, the diagnostics-client configuration
+and discovery administration, and the CPU cost of software rendering to
+the owner; the `PeerUnreachable` split and the fake's migration to
+p2p-network-dev's next transport PR; a standalone forget-directory
+command, endpoint narrowing and a new conversation by PeerId (11) to a
+later stage's record; inline styling to the next Slint bump.
+
 Carried here from Stage 13 (§16): the Windows named-pipe binding, its ACL model and peer identity; ADR-0032's trust and discovery/bootstrap administration methods; persisting admin endpoint changes; the data-socket diagnostics-client configuration; `DirectoryCache::forget`; client autostart of the daemon.
 
 Carried here from Stage 14 (§17): the shipped binary re-running the two-daemon HumanChatV2 proof; the real process-kill restart case; the trust read and human-client-ui.md §13's trust-mutation bullet, with the trust administration above; the `server_state` surfacing as a `SessionEvent::Local` variant (a LOCAL-CLIENT.md amendment and the in-process binding) and the per-peer path event on the local-client surface (a LOCAL-IPC.md and LOCAL-CLIENT.md amendment); the reach of `ui-slint`'s accessibility-tree tests (they read Slint's own tree through the testing backend: a platform adapter exporting it, live-region announcement, contrast, scaling, reduced motion and PeerId copy are unproved — §17's closing record); the ipc-server fake's migration to `tests/local-client-fake`; a read-pair record for the after-restart duplicate — bounded, content-free (origin, `app_message_id`) pairs, which RETENTION.md §5 already allows "for bounded duplicate suppression", so that a late re-send of a message read and not kept does not reappear as unread after a restart (human-store schema work within the contract; raised on #168, A 2026-10-02); drawing the markdown subset with activation-only links (a body shows its source as literal text since #170); the Slint Royalty-free licence's attribution duty; the fontconfig startup check (fonts are opened at run time and a host without the library runs with none, silently); the `PeerUnreachable` split into a pre-dispatch code and an outcome-unknown one, and the local and remote halves of the shared refusal codes (TRANSPORT.md §Error model, Dispatch state, A 2026-10-02 — vocabulary changes on an active contract, p2p-network-dev's substrate); the root's drain contract — the composition root drains `ui-slint`'s event queue at each `take_events`, the 4 × cap + 3 bound holding only under it; human-client-ui.md §13 bullet 9's trust leg, which travels with the trust-mutation bullet above (no trust control exists to label until the trust administration does).
@@ -4566,8 +4651,7 @@ only on the owner's word in the tree or in a message to architect-cto.
 ADR-0046's allowance for parallel workstreams once neutral contracts and
 persistence are stable, by this record and not by the status value:
 `workspace.metadata.interweave.status` stays one value and names the
-LOWEST open stage — `stage-15-desktop-human-client` until Stage 15
-closes — because three guards read it as a number
+LOWEST open stage — `stage-15-desktop-human-client` until Stage 15 closed, `stage-16-claude-code-channel` since 2026-10-06 (§18's closing record) — because three guards read it as a number
 (`check_stage_status.sh`, `check_domain_fns_are_called.sh`'s deadlines,
 `error_contract_matrix.rs`'s `open_stage`). Two constraints follow: no
 `Proof::Stage(16)` deferral is written while 16 runs beside 15 (the
@@ -4609,9 +4693,7 @@ Each is met by a test or check that records it, in the shape §15 set.
 
 - **P0 — the record and the spike.** This section as written, and
   SPIKES.md's SPIKE-001 verdict, both on `main` before the first code
-  batch; the status reads `stage-15-…` (Stage 15 is the lowest open
-  stage) and `check_stage_status.sh` is green with Stage 16 named as
-  running beside it.
+  batch; the status read `stage-15-…` while Stage 15 was the lowest open stage and `check_stage_status.sh` was green with Stage 16 named as running beside it (met 2026-10-03; since Stage 15's close on 2026-10-06 the status reads `stage-16-claude-code-channel`).
 - **P1 — the contract is the spike's.** CHANNEL-EVENT.md,
   CLAUDE-CODE-CHANNEL.md, LIFECYCLE.md and PACKAGING.md carry the
   A 2026-10-03 amendments (landed with this record); a `channel-core`
@@ -4827,6 +4909,9 @@ Android key/backup/recovery failure cases
 ```
 
 Carried here from Stage 13 (§16): SPIKE-005 (a hostile same-uid process); the foreign-uid peer refused on a real OS (Stage 13 unit-tests it with an injected uid); `HandshakeSlot::source`.
+
+Carried here from Stage 15 (§18): the Windows binding behind the non-Unix stub (§18 (12), §16's named pipe, its ACL model and peer identity) and the BSL-1.0 decision that waits for it (§18 (14): `clipboard-win` and `error-code` through `arboard`, admitted nowhere until Windows is built); a real relayed path reaching the human client's route indicator, if §20 has not proved it first.
+
 
 ### Exit gate
 
