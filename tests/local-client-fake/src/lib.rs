@@ -535,6 +535,7 @@ impl DataSessionBinding for FakeNode {
             .map(|l| (l.endpoint.clone(), l.epoch.clone()));
         let session = LocalDataSession::new(
             session_id.clone(),
+            self.0.peer.clone(),
             request.client_kind(),
             lease,
             request.capabilities().iter().copied(),

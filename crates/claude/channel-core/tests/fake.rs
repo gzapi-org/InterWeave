@@ -9,7 +9,7 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
-use interweave_claude_channel_core::{BridgeState, ChannelNotification, MetaKey, ReplyRoute};
+use interweave_claude_channel_core::{BridgeState, ChannelNotification, ReplyRoute};
 use interweave_local_client_api::{
     DataCapability, DataSessionBinding as _, DataSessionPort as _, SessionEvent, SessionRequest,
 };
@@ -76,6 +76,15 @@ fn id(n: u8) -> MessageId {
     MessageId::parse_hex(&format!("{n:032x}")).expect("id")
 }
 
+/// `key` of `n`'s meta, read the way a host reads it: from its
+/// serialization.
+fn meta(n: &ChannelNotification, key: &str) -> Option<String> {
+    serde_json::to_value(&n.meta)
+        .expect("meta serializes")
+        .get(key)
+        .and_then(|v| v.as_str().map(str::to_owned))
+}
+
 /// The one message waiting for `session`, as the bridge notifies it.
 async fn notified(
     session: &FakeSession,
@@ -119,11 +128,12 @@ async fn a_direct_message_is_notified_and_a_reply_takes_its_exact_route() {
         .expect("accepted");
     let n = notified(&claude, &mut bridge, 1).await;
     assert_eq!(n.content, "hello claude");
-    assert_eq!(n.meta.get(MetaKey::SourcePeer), Some(b.peer().as_str()));
-    assert_eq!(n.meta.get(MetaKey::SourceEndpoint), Some("human"));
-    assert_eq!(n.meta.get(MetaKey::DestinationEndpoint), Some("claude"));
+    assert_eq!(meta(&n, "source_peer").as_deref(), Some(b.peer().as_str()));
+    assert_eq!(meta(&n, "source_endpoint").as_deref(), Some("human"));
+    assert_eq!(meta(&n, "destination_endpoint").as_deref(), Some("claude"));
 
-    let token = n.meta.get(MetaKey::ReplyToken).expect("a token");
+    let token = meta(&n, "reply_token").expect("a token");
+    let token = token.as_str();
     let ReplyRoute::Direct {
         remote_peer,
         remote_endpoint,
@@ -174,7 +184,7 @@ async fn a_token_from_an_earlier_lease_fails_after_reconnecting() {
         .await
         .expect("accepted");
     let n = notified(&claude, &mut bridge, 2).await;
-    let token = n.meta.get(MetaKey::ReplyToken).expect("a token").to_owned();
+    let token = meta(&n, "reply_token").expect("a token");
     assert!(bridge.reply_route(&token, NOW).is_ok(), "the control");
 
     claude.close().await.expect("closed");
@@ -212,8 +222,8 @@ async fn a_broadcast_reply_needs_the_join_and_never_recreates_it() {
         .await
         .expect("accepted");
     let n = notified(&claude, &mut bridge, 3).await;
-    assert_eq!(n.meta.get(MetaKey::Channel), Some("general"));
-    let token = n.meta.get(MetaKey::ReplyToken).expect("a token").to_owned();
+    assert_eq!(meta(&n, "channel").as_deref(), Some("general"));
+    let token = meta(&n, "reply_token").expect("a token");
     assert_eq!(
         bridge.reply_route(&token, NOW),
         Ok(ReplyRoute::Broadcast { channel: general() })

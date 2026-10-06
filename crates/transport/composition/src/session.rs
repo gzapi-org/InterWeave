@@ -286,6 +286,7 @@ impl DataSessionBinding for InProcessBinding {
         };
         let session = LocalDataSession::new(
             session_id,
+            self.peer.clone(),
             request.client_kind(),
             lease.clone(),
             request.capabilities().iter().copied(),

@@ -408,6 +408,7 @@ fn a_data_session_never_carries_an_admin_capability() {
     let validator = validator_for("ipc/capability.schema.json");
     let session = LocalDataSession::new(
         Generation::parse("session_generation").expect("valid"),
+        interweave_transport_api::TransportIdentity::parse(TEST_PEER).expect("valid"),
         "human-client",
         Some(EndpointLease {
             endpoint: EndpointId::parse("human").expect("valid"),

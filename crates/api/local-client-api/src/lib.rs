@@ -242,6 +242,9 @@ pub struct EndpointLease {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LocalDataSession {
     session_id: Generation,
+    /// The profile's `PeerId`, learned at open: the identity a data-plane
+    /// client reports as its own (`LOCAL-CLIENT.md` §2, A 2026-10-06).
+    local_peer: TransportIdentity,
     client_kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     endpoint_lease: Option<EndpointLease>,
@@ -253,6 +256,7 @@ pub struct LocalDataSession {
 #[derive(Deserialize)]
 struct LocalDataSessionRepr {
     session_id: Generation,
+    local_peer: TransportIdentity,
     client_kind: String,
     #[serde(default)]
     endpoint_lease: Option<EndpointLease>,
@@ -271,6 +275,7 @@ impl<'de> Deserialize<'de> for LocalDataSession {
         let raw = LocalDataSessionRepr::deserialize(d)?;
         Self::new(
             raw.session_id,
+            raw.local_peer,
             raw.client_kind,
             raw.endpoint_lease,
             raw.capabilities,
@@ -288,6 +293,7 @@ impl LocalDataSession {
     /// [`MAX_GRANTED_CAPABILITIES`], or a zero-length event queue.
     pub fn new(
         session_id: Generation,
+        local_peer: TransportIdentity,
         client_kind: impl Into<String>,
         endpoint_lease: Option<EndpointLease>,
         capabilities: impl IntoIterator<Item = DataCapability>,
@@ -312,6 +318,7 @@ impl LocalDataSession {
         }
         Ok(Self {
             session_id,
+            local_peer,
             client_kind,
             endpoint_lease,
             capabilities,
@@ -323,6 +330,13 @@ impl LocalDataSession {
     #[must_use]
     pub const fn session_id(&self) -> &Generation {
         &self.session_id
+    }
+
+    /// The profile's `PeerId`, as the binding learned it at open: from
+    /// `hello_response` over IPC, from the runtime's identity in process.
+    #[must_use]
+    pub const fn local_peer(&self) -> &TransportIdentity {
+        &self.local_peer
     }
 
     /// The local label the client presented.
@@ -537,6 +551,11 @@ mod tests {
         Generation::parse(format!("{seed:_<16}")).expect("valid generation")
     }
 
+    fn peer() -> TransportIdentity {
+        TransportIdentity::parse("12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN")
+            .expect("valid peer")
+    }
+
     fn endpoint(name: &str) -> EndpointId {
         EndpointId::parse(name).expect("valid endpoint")
     }
@@ -544,6 +563,7 @@ mod tests {
     fn session(lease: Option<EndpointLease>, caps: &[DataCapability]) -> LocalDataSession {
         LocalDataSession::new(
             generation("sess"),
+            peer(),
             "human-client",
             lease,
             caps.iter().copied(),
@@ -596,6 +616,7 @@ mod tests {
 
         let pretender = LocalDataSession::new(
             generation("sess"),
+            peer(),
             "admin",
             Some(leased()),
             [DataCapability::Commands, DataCapability::Events],
@@ -686,7 +707,7 @@ mod tests {
         // It reads like "unbounded" and behaves like "closed": every direct
         // message to the session would be refused.
         assert_eq!(
-            LocalDataSession::new(generation("sess"), "k", None, [], 0),
+            LocalDataSession::new(generation("sess"), peer(), "k", None, [], 0),
             Err(SessionError::ZeroEventQueue)
         );
     }
@@ -694,7 +715,14 @@ mod tests {
     #[test]
     fn an_event_queue_past_the_ceiling_is_refused() {
         assert_eq!(
-            LocalDataSession::new(generation("sess"), "k", None, [], MAX_EVENT_QUEUE + 1),
+            LocalDataSession::new(
+                generation("sess"),
+                peer(),
+                "k",
+                None,
+                [],
+                MAX_EVENT_QUEUE + 1
+            ),
             Err(SessionError::EventQueueTooDeep {
                 got: MAX_EVENT_QUEUE + 1
             }),
@@ -707,7 +735,10 @@ mod tests {
         // A CEILING REACHED, not one approached — otherwise the test
         // above would pass against an off-by-one that also refuses the
         // largest legal depth.
-        assert!(LocalDataSession::new(generation("sess"), "k", None, [], MAX_EVENT_QUEUE).is_ok());
+        assert!(
+            LocalDataSession::new(generation("sess"), peer(), "k", None, [], MAX_EVENT_QUEUE)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -730,18 +761,20 @@ mod tests {
     #[test]
     fn client_kind_is_bounded() {
         assert!(matches!(
-            LocalDataSession::new(generation("s"), "", None, [], 8),
+            LocalDataSession::new(generation("s"), peer(), "", None, [], 8),
             Err(SessionError::InvalidClientKind { got: 0 })
         ));
         assert!(matches!(
-            LocalDataSession::new(generation("s"), "k".repeat(65), None, [], 8),
+            LocalDataSession::new(generation("s"), peer(), "k".repeat(65), None, [], 8),
             Err(SessionError::InvalidClientKind { got: 65 })
         ));
         // In characters: 64 two-byte characters (128 bytes) is at the
         // bound; one more is past it.
-        assert!(LocalDataSession::new(generation("s"), "é".repeat(64), None, [], 8).is_ok());
+        assert!(
+            LocalDataSession::new(generation("s"), peer(), "é".repeat(64), None, [], 8).is_ok()
+        );
         assert!(matches!(
-            LocalDataSession::new(generation("s"), "é".repeat(65), None, [], 8),
+            LocalDataSession::new(generation("s"), peer(), "é".repeat(65), None, [], 8),
             Err(SessionError::InvalidClientKind { got: 65 })
         ));
     }

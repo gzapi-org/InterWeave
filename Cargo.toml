@@ -53,6 +53,7 @@ members = [
     "crates/api/trust-api",
     # Stage 16 batch 2, beside Stage 15: the Claude Code Channel bridge
     # (plan section 19).
+    "apps/claude-channel",
     "crates/claude/channel-core",
     "tests/human-chat",
     "tests/human-retention",
