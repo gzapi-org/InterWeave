@@ -19,10 +19,12 @@ use i_slint_backend_testing::ElementHandle;
 use interweave_human_chat_protocol::{HumanChatV2, MessageKind};
 use interweave_human_client_api::{
     ClientEvent, Connectivity, Destination, Origin, OutboundStatus, OutboundUpdate, Received,
-    SessionProblem, SessionState,
+    SessionProblem, SessionState, TrustList,
 };
 use interweave_human_core::{AppMessageId, RowId};
-use interweave_human_ui_model::{ConversationKey, Intent, UiModel, UiText, placeholder_en};
+use interweave_human_ui_model::{
+    ConversationKey, Intent, TrustChange, UiModel, UiText, placeholder_en,
+};
 use interweave_human_ui_slint::{INPUT_CAP, View, ViewEvent};
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::{ChannelId, EndpointId, TransportIdentity};
@@ -114,6 +116,7 @@ fn intents(view: &mut View, model: &mut UiModel) -> Vec<Intent> {
             match event {
                 ViewEvent::Intent(intent) => out.push(intent),
                 ViewEvent::DraftChanged { key, draft } => model.draft_changed(key, draft),
+                ViewEvent::Trust(input) => out.extend(model.trust_settings_mut().input(input)),
             }
         }
     }
@@ -649,9 +652,9 @@ fn open_link(destination: &str) -> String {
 /// §13 bullet 5 and HUMAN-CHAT.md: remote text is drawn, never obeyed.
 /// The body's text is plain text with no control of its own; the only
 /// controls are the client's -- Keep, Send, Show source -- and one per
-/// allowlisted link, labelled with its destination; and nothing but the
-/// focused read is raised until a person activates one. Stage 15 has no
-/// trust control yet (batch 9).
+/// allowlisted link, labelled with its destination, and the trust
+/// settings' own entry, apart from every message; and nothing but the
+/// focused read is raised until a person activates one.
 #[test]
 fn remote_text_is_drawn_and_raises_nothing_but_the_read() {
     let mut view = view();
@@ -674,6 +677,7 @@ fn remote_text_is_drawn_and_raises_nothing_but_the_read() {
                 text(UiText::Keep),
                 text(UiText::Send),
                 text(UiText::ShowSource),
+                text(UiText::TrustSettings),
                 open_link("https://example.org").as_str(),
             ]
             .contains(&control.as_str()),
@@ -1902,5 +1906,179 @@ fn the_source_view_has_no_link_controls() {
         labelled(&view, &control).len(),
         1,
         "back with the drawn body"
+    );
+}
+
+/// The trust settings opened from their own control, the daemon's
+/// allowlist read in: this profile's `PeerId` and every trusted one shown
+/// whole.
+fn trust_settings(
+    view: &mut View,
+    model: &mut UiModel,
+    me: &TransportIdentity,
+    allowed: &[TransportIdentity],
+) {
+    the(view, text(UiText::TrustSettings)).invoke_accessible_default_action();
+    assert_eq!(intents(view, model), vec![Intent::ReadTrust]);
+    model.trust_settings_mut().read(Ok(TrustList {
+        local_peer: Some(me.clone()),
+        allowed: allowed.to_vec(),
+    }));
+    view.render(model);
+}
+
+/// human-client-ui.md section 8 and section 13's trust bullet, at the
+/// view: each `PeerId` is shown exactly, its removal names it, and nothing
+/// reaches the daemon but a confirmation of the exact `PeerId` shown.
+#[test]
+fn a_removal_names_the_exact_peer_id_and_is_asked_only_once_confirmed() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let (me, bob, carol) = (peer(), peer(), peer());
+    trust_settings(&mut view, &mut model, &me, &[bob.clone(), carol.clone()]);
+    let own = the(&view, text(UiText::OwnPeerId));
+    assert_eq!(own.accessible_value().as_deref(), Some(me.as_str()));
+    for p in [&bob, &carol] {
+        let shown = the(&view, p.as_str());
+        assert_eq!(
+            shown.accessible_value().as_deref(),
+            Some(p.as_str()),
+            "whole"
+        );
+    }
+    let removes = labelled(&view, text(UiText::RemoveTrust));
+    let bobs = removes
+        .iter()
+        .find(|e| e.accessible_description().as_deref() == Some(bob.as_str()))
+        .expect("bob's removal names bob");
+    bobs.invoke_accessible_default_action();
+    assert!(
+        intents(&mut view, &mut model).is_empty(),
+        "a proposal asks nothing"
+    );
+    view.render(&model);
+    let question = fill(UiText::ConfirmRevoke, &[("peer", bob.as_str())]);
+    let _ = the(&view, &question);
+    let confirm = the(&view, text(UiText::ConfirmChange));
+    assert_eq!(
+        confirm.accessible_description().as_deref(),
+        Some(question.as_str())
+    );
+    // Focus lands on "do not change": a Return pressed as the question
+    // appears -- a second press of the one that asked it -- drops it.
+    let enter: slint::SharedString = Key::Return.into();
+    view.window()
+        .window()
+        .dispatch_event(WindowEvent::KeyPressed {
+            text: enter.clone(),
+        });
+    view.window()
+        .window()
+        .dispatch_event(WindowEvent::KeyReleased { text: enter });
+    assert!(
+        intents(&mut view, &mut model).is_empty(),
+        "Return confirms nothing"
+    );
+    assert_eq!(
+        model.trust_settings().pending(),
+        None,
+        "it said 'do not change'"
+    );
+    bobs.invoke_accessible_default_action();
+    let _ = intents(&mut view, &mut model);
+    view.render(&model);
+    the(&view, text(UiText::ConfirmChange)).invoke_accessible_default_action();
+    assert_eq!(
+        intents(&mut view, &mut model),
+        vec![Intent::SetTrust(TrustChange {
+            peer: bob,
+            allowed: false
+        })]
+    );
+}
+
+/// A typed `PeerId` is trusted only through its confirmation, which shows
+/// it whole with the scope; the outcome is announced once.
+#[test]
+fn a_typed_peer_id_is_confirmed_whole_and_its_outcome_announced() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let (me, dave) = (peer(), peer());
+    trust_settings(&mut view, &mut model, &me, &[]);
+    let _ = the(&view, text(UiText::NoTrustedPeer));
+    view.window().set_trust_entry(dave.as_str().into());
+    view.window()
+        .invoke_trust_entry_edited(dave.as_str().into());
+    the(&view, text(UiText::TrustPeer)).invoke_accessible_default_action();
+    assert!(intents(&mut view, &mut model).is_empty());
+    view.render(&model);
+    let _ = the(
+        &view,
+        &fill(UiText::ConfirmAllow, &[("peer", dave.as_str())]),
+    );
+    the(&view, text(UiText::ConfirmChange)).invoke_accessible_default_action();
+    let change = TrustChange {
+        peer: dave.clone(),
+        allowed: true,
+    };
+    assert_eq!(
+        intents(&mut view, &mut model),
+        vec![Intent::SetTrust(change.clone())]
+    );
+    model.trust_settings_mut().set(
+        change,
+        Ok(TrustList {
+            local_peer: Some(me),
+            allowed: vec![dave.clone()],
+        }),
+    );
+    view.render(&model);
+    let said = fill(UiText::PeerTrusted, &[("peer", dave.as_str())]);
+    let announced = [
+        view.window().get_announcement_a(),
+        view.window().get_announcement_b(),
+    ];
+    assert!(
+        announced.iter().any(|a| a.as_str() == said),
+        "announced: {announced:?}"
+    );
+    view.render(&model);
+    let again = [
+        view.window().get_announcement_a(),
+        view.window().get_announcement_b(),
+    ];
+    assert_eq!(again, announced, "once, not at every render");
+    assert_eq!(
+        view.window().get_trust_entry().as_str(),
+        "",
+        "the field cleared"
+    );
+}
+
+/// A change waiting for confirmation is dropped by leaving the settings,
+/// and a typed value that is not a `PeerId` says so and proposes nothing.
+#[test]
+fn leaving_drops_a_waiting_change_and_a_non_peer_id_is_said() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let (me, bob) = (peer(), peer());
+    trust_settings(&mut view, &mut model, &me, std::slice::from_ref(&bob));
+    view.window().invoke_trust_entry_edited("alice".into());
+    the(&view, text(UiText::TrustPeer)).invoke_accessible_default_action();
+    let _ = intents(&mut view, &mut model);
+    view.render(&model);
+    assert_eq!(
+        view.window().get_trust_outcome().as_str(),
+        text(UiText::NotAPeerId)
+    );
+    labelled(&view, text(UiText::RemoveTrust))[0].invoke_accessible_default_action();
+    let _ = intents(&mut view, &mut model);
+    assert!(model.trust_settings().pending().is_some());
+    the(&view, text(UiText::BackToConversations)).invoke_accessible_default_action();
+    assert!(intents(&mut view, &mut model).is_empty());
+    assert_eq!(
+        model.trust_settings().pending(),
+        None,
+        "dropped, never made"
     );
 }

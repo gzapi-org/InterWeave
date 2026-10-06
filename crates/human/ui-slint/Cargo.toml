@@ -22,6 +22,9 @@ interweave-human-client-api = { path = "../client-api" }
 # is ui-model's already, the feature is the same.
 interweave-human-chat-protocol = { path = "../chat-protocol", features = ["markdown"] }
 interweave-human-ui-model = { path = "../ui-model" }
+# The `PeerId` a trust list's press names, held by identity as an item's
+# press is: a neutral type, no transport behind it.
+interweave-transport-api = { path = "../../api/transport-api" }
 slint = { workspace = true }
 # fontconfig opened at run time, not linked at build time (the workspace
 # manifest says why); and, under `desktop`, the font stack `code_font`

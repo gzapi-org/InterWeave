@@ -25,8 +25,10 @@ use std::rc::Rc;
 
 use interweave_human_ui_model::{
     ConversationKey, Direction, Intent, ItemKey, ItemStatus, MessageItem, Reply, Retention,
-    SessionNotice, UiModel, UiText, fill, placeholder_en, short_peer, visible_destination,
+    SessionNotice, TrustInput, TrustOutcome, UiModel, UiText, fill, placeholder_en, short_peer,
+    visible_destination,
 };
+use interweave_transport_api::TransportIdentity;
 use slint::{Model as _, ModelRc, SharedString, VecModel};
 
 mod body;
@@ -50,7 +52,7 @@ mod generated {
 }
 
 pub use generated::AppWindow;
-use generated::{ActionRow, BodyLine, ConversationRow, LineKind, LinkRow, MessageRow};
+use generated::{ActionRow, BodyLine, ConversationRow, LineKind, LinkRow, MessageRow, TrustRow};
 
 /// The view's window, to run the event loop on: shows it, and returns
 /// once the person closes it or [`quit_event_loop`] is called.
@@ -165,6 +167,11 @@ enum Input {
     Link(String),
     Send(ConversationKey),
     Draft(ConversationKey, String),
+    /// The trust settings opened (`true`) or closed.
+    TrustPage(bool),
+    /// What the person did in the trust settings: a removal names its
+    /// peer by identity, as rendered.
+    Trust(TrustInput),
 }
 
 /// What a press on an item resolves against: the item, its actions and
@@ -202,6 +209,8 @@ struct Shared {
     /// has focus (rust-ui-dev F1). Resolved last, it can only read fewer.
     viewed: bool,
     notice: Option<SessionNotice>,
+    /// The trusted peers as rendered, by handle.
+    trusted: HashMap<i32, TransportIdentity>,
     wake: Option<Rc<dyn Fn()>>,
 }
 
@@ -230,6 +239,23 @@ impl Shared {
             }
             return self.wake.clone();
         }
+        // The trust settings' PeerId field is state as the composer is:
+        // never refused, and it replaces a queued edit of the field only
+        // while no later trust input follows it, so a proposal reads what
+        // was typed before it.
+        if let Input::Trust(TrustInput::EntryChanged(text)) = &input {
+            let last_trust = self
+                .inputs
+                .iter_mut()
+                .rev()
+                .find(|i| matches!(i, Input::Trust(_) | Input::TrustPage(_)));
+            if let Some(Input::Trust(TrustInput::EntryChanged(queued))) = last_trust {
+                queued.clone_from(text);
+            } else {
+                self.inputs.push_back(input);
+            }
+            return self.wake.clone();
+        }
         // A focus change is STATE, not a press: refusing it would leave the
         // view believing it still had focus, and a later selection would
         // read while unfocused (review F2). So it is never refused. It
@@ -246,7 +272,12 @@ impl Shared {
         let presses = self
             .inputs
             .iter()
-            .filter(|i| !matches!(i, Input::Focus(_) | Input::Draft(..)))
+            .filter(|i| {
+                !matches!(
+                    i,
+                    Input::Focus(_) | Input::Draft(..) | Input::Trust(TrustInput::EntryChanged(_))
+                )
+            })
             .count();
         if presses >= INPUT_CAP {
             self.refused += 1;
@@ -297,6 +328,15 @@ impl<K: Ord + Clone> Handles<K> {
     }
 }
 
+/// What the right-hand pane shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Page {
+    /// The conversation selected, or none.
+    Conversation,
+    /// The trust settings, in its place.
+    Trust,
+}
+
 /// The reference view: one window, bound to a [`UiModel`].
 pub struct View {
     window: AppWindow,
@@ -324,6 +364,13 @@ pub struct View {
     selection_unrendered: bool,
     shown: Option<ConversationKey>,
     focused: bool,
+    /// What the right-hand pane shows.
+    page: Page,
+    trusted: Rc<VecModel<TrustRow>>,
+    trusted_keys: Vec<TransportIdentity>,
+    trusted_handles: Handles<TransportIdentity>,
+    /// The trust settings' outcome count last announced.
+    trust_announced: u64,
     shared: Rc<RefCell<Shared>>,
 }
 
@@ -336,8 +383,10 @@ impl View {
         let window = AppWindow::new()?;
         let conversations = Rc::new(VecModel::<ConversationRow>::default());
         let messages = Rc::new(VecModel::<MessageRow>::default());
+        let trusted = Rc::new(VecModel::<TrustRow>::default());
         window.set_conversations(ModelRc::from(Rc::clone(&conversations)));
         window.set_messages(ModelRc::from(Rc::clone(&messages)));
+        window.set_trusted(ModelRc::from(Rc::clone(&trusted)));
         let text = |t| SharedString::from(placeholder_en::text(t));
         window.set_window_title(text(UiText::AppTitle));
         window.set_conversations_heading(text(UiText::Conversations));
@@ -348,6 +397,17 @@ impl View {
         window.set_show_source_label(text(UiText::ShowSource));
         window.set_show_formatted_label(text(UiText::ShowFormatted));
         window.set_code_font(code_font());
+        window.set_trust_settings_label(text(UiText::TrustSettings));
+        window.set_back_label(text(UiText::BackToConversations));
+        window.set_trust_heading(text(UiText::TrustHeading));
+        window.set_trust_explanation(text(UiText::TrustExplanation));
+        window.set_own_peer_id_label(text(UiText::OwnPeerId));
+        window.set_trusted_heading(text(UiText::TrustedPeers));
+        window.set_remove_label(text(UiText::RemoveTrust));
+        window.set_entry_label(text(UiText::PeerIdToTrust));
+        window.set_add_label(text(UiText::TrustPeer));
+        window.set_confirm_label(text(UiText::ConfirmChange));
+        window.set_cancel_label(text(UiText::CancelChange));
         let shared = Rc::new(RefCell::new(Shared::default()));
 
         let s = Rc::clone(&shared);
@@ -402,6 +462,28 @@ impl View {
             }
         });
 
+        let s = Rc::clone(&shared);
+        window.on_open_trust(move || enqueue(&s, Input::TrustPage(true)));
+        let s = Rc::clone(&shared);
+        window.on_close_trust(move || enqueue(&s, Input::TrustPage(false)));
+        let s = Rc::clone(&shared);
+        window.on_trust_entry_edited(move |text| {
+            enqueue(&s, Input::Trust(TrustInput::EntryChanged(text.to_string())));
+        });
+        let s = Rc::clone(&shared);
+        window.on_trust_add(move || enqueue(&s, Input::Trust(TrustInput::ProposeAllow)));
+        let s = Rc::clone(&shared);
+        window.on_trust_remove(move |handle| {
+            let peer = s.borrow().trusted.get(&handle).cloned();
+            if let Some(peer) = peer {
+                enqueue(&s, Input::Trust(TrustInput::ProposeRevoke(peer)));
+            }
+        });
+        let s = Rc::clone(&shared);
+        window.on_trust_confirm(move || enqueue(&s, Input::Trust(TrustInput::Confirm)));
+        let s = Rc::clone(&shared);
+        window.on_trust_cancel(move || enqueue(&s, Input::Trust(TrustInput::Cancel)));
+
         Ok(Self {
             window,
             conversations,
@@ -417,6 +499,11 @@ impl View {
             selection_unrendered: false,
             shown: None,
             focused: false,
+            page: Page::Conversation,
+            trusted,
+            trusted_keys: Vec::new(),
+            trusted_handles: Handles::new(),
+            trust_announced: 0,
             shared,
         })
     }
@@ -552,6 +639,28 @@ impl View {
                     out.push(ViewEvent::DraftChanged { key, draft });
                     return out;
                 }
+                // The root applies a trust input before the next take, as
+                // it does an edit. Leaving the settings drops a change still
+                // waiting for confirmation: none is made from a page the
+                // person left.
+                Input::TrustPage(open) => {
+                    self.page = if open {
+                        Page::Trust
+                    } else {
+                        Page::Conversation
+                    };
+                    self.selection_unrendered = true;
+                    out.push(ViewEvent::Trust(if open {
+                        TrustInput::Opened
+                    } else {
+                        TrustInput::Cancel
+                    }));
+                    return out;
+                }
+                Input::Trust(input) => {
+                    out.push(ViewEvent::Trust(input));
+                    return out;
+                }
             }
         }
         // A selection is shown by the take that resolves it. A root renders
@@ -595,6 +704,7 @@ impl View {
         self.render_messages(model);
         self.render_chrome(model);
         self.render_announcement(model);
+        self.render_trust(model);
         if let Some(key) = &self.shown {
             let unread = model
                 .conversations()
@@ -708,7 +818,13 @@ impl View {
         let now = Seen::of(model, self.shown.as_ref());
         let said = announcement(&self.seen, &now);
         self.seen = now;
-        let Some(said) = said else { return };
+        if let Some(said) = said {
+            self.announce(said);
+        }
+    }
+
+    /// Say `said` in the window's one live region.
+    fn announce(&mut self, said: String) {
         let (said, cleared) = (SharedString::from(said), SharedString::new());
         if self.next_slot_b {
             self.window.set_announcement_a(cleared);
@@ -718,6 +834,73 @@ impl View {
             self.window.set_announcement_a(said);
         }
         self.next_slot_b = !self.next_slot_b;
+    }
+
+    /// The trust settings (`human-client-ui.md` §8): the allowlist with
+    /// each `PeerId` whole, the field, the change waiting for
+    /// confirmation with its exact `PeerId` and scope, and the last
+    /// outcome, announced once.
+    fn render_trust(&mut self, model: &UiModel) {
+        let window = &self.window;
+        window.set_trust_page(self.page == Page::Trust);
+        let settings = model.trust_settings();
+        let list = settings.list();
+        window.set_own_peer_id(
+            list.and_then(|l| l.local_peer.as_ref())
+                .map_or("", TransportIdentity::as_str)
+                .into(),
+        );
+        let placeholder = match list {
+            None if settings.reading() => placeholder_en::text(UiText::TrustReading),
+            Some(l) if l.allowed.is_empty() => placeholder_en::text(UiText::NoTrustedPeer),
+            _ => "",
+        };
+        window.set_trust_placeholder(placeholder.into());
+        let keys: Vec<TransportIdentity> = list.map(|l| l.allowed.clone()).unwrap_or_default();
+        self.trusted_handles.retain(&keys);
+        let rows: Vec<TrustRow> = keys
+            .iter()
+            .map(|peer| TrustRow {
+                handle: self.trusted_handles.of(peer),
+                peer: peer.as_str().into(),
+            })
+            .collect();
+        self.shared.borrow_mut().trusted = rows
+            .iter()
+            .zip(&keys)
+            .map(|(row, peer)| (row.handle, peer.clone()))
+            .collect();
+        update_by_key(&*self.trusted, &mut self.trusted_keys, &keys, &rows);
+        // Never over typing the model has not had yet, and only when it
+        // differs, as the composer.
+        let typing = self
+            .shared
+            .borrow()
+            .inputs
+            .iter()
+            .any(|i| matches!(i, Input::Trust(TrustInput::EntryChanged(_))));
+        if !typing && window.get_trust_entry().as_str() != settings.entry() {
+            window.set_trust_entry(settings.entry().into());
+        }
+        let pending = settings.pending().map(|change| {
+            let template = placeholder_en::text(if change.allowed {
+                UiText::ConfirmAllow
+            } else {
+                UiText::ConfirmRevoke
+            });
+            fill(template, &[("peer", change.peer.as_str())])
+        });
+        window.set_has_pending(pending.is_some());
+        window.set_pending_text(pending.unwrap_or_default().into());
+        let (outcome, count) = settings.outcome();
+        let said = outcome.map(outcome_text).unwrap_or_default();
+        window.set_trust_outcome(said.as_str().into());
+        if count != self.trust_announced {
+            self.trust_announced = count;
+            if !said.is_empty() {
+                self.announce(said);
+            }
+        }
     }
 
     fn render_chrome(&self, model: &UiModel) {
@@ -1150,7 +1333,8 @@ fn status_text(item: &MessageItem) -> &'static str {
 /// The control text for an intent a view offers as a button, or `None`
 /// for one it never offers that way: `MarkRead` comes from a focused
 /// view alone, `Send` from the composer, `OpenLink` from a link's own
-/// control, labelled with its destination.
+/// control, labelled with its destination, and the trust intents from the
+/// trust settings' own controls, never an item's.
 fn action_text(intent: &Intent) -> Option<&'static str> {
     let text = match intent {
         Intent::Retry(_) => UiText::Retry,
@@ -1159,9 +1343,29 @@ fn action_text(intent: &Intent) -> Option<&'static str> {
         Intent::Unkeep(_) => UiText::Unkeep,
         Intent::Reopen => UiText::TryAgain,
         Intent::RecheckStorage => UiText::RecheckStorage,
-        Intent::MarkRead(_) | Intent::Send { .. } | Intent::OpenLink(_) => return None,
+        Intent::MarkRead(_)
+        | Intent::Send { .. }
+        | Intent::OpenLink(_)
+        | Intent::ReadTrust
+        | Intent::SetTrust(_) => return None,
     };
     Some(placeholder_en::text(text))
+}
+
+/// What a trust settings outcome says.
+fn outcome_text(outcome: &TrustOutcome) -> String {
+    match outcome {
+        TrustOutcome::Changed(change) => fill(
+            placeholder_en::text(if change.allowed {
+                UiText::PeerTrusted
+            } else {
+                UiText::PeerUntrusted
+            }),
+            &[("peer", change.peer.as_str())],
+        ),
+        TrustOutcome::Problem(problem) => placeholder_en::trust_problem(*problem).to_owned(),
+        TrustOutcome::Entry(problem) => placeholder_en::entry_problem(*problem).to_owned(),
+    }
 }
 
 fn notice_text(notice: SessionNotice) -> String {
