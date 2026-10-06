@@ -4792,8 +4792,7 @@ above in order: step 2 (#194: `crates/claude/channel-core` — the event
 → notification conversion, the reply-token table moved from the
 runtime with its eight ledger rows cleared, the tool surface and result
 wording, the `meta` grammar test, against the fake; devex-tooling's `check_claude_layering.sh` supplied there), step 3 (#199: `apps/claude-channel` — the stdio MCP server in the 2025-11-25 era over `ipc-client` with the bounded reconnect, fresh claim and fresh joins, SIGINT release, the plugin manifest), steps 4 and 5 (#203: the shipped
-bridge against two real daemons, then inside the installed Claude Code),
-— p2p-network-dev's lane throughout, with the contract texts architect-cto supplied on the way (the `;ce=br` non-UTF-8 drop, `local_peer`, the status facts, the refused re-join as a status row). The exit gate: (a) the required
+bridge against two real daemons, then inside the installed Claude Code) — p2p-network-dev's lane apart from those supplies, with the contract texts architect-cto supplied on the way (the `;ce=br` non-UTF-8 drop, `local_peer`, the status facts, the refused re-join as a status row). The exit gate: (a) the required
 integration tests are green against the daemon harness —
 `tests/desktop-e2e/tests/claude_channel.rs`'s
 `a_direct_message_is_notified_and_replied_to_across_two_daemons`,
