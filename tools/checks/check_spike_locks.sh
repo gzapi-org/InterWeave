@@ -214,12 +214,13 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     }
     mapfile -t locks < <(printf '%s\n' "$tracked" | grep -v '^$' | sort -u)
     # A TRACKED SPIKE LOCK EXISTS, OR THE ENUMERATION IS WRONG. Inside a
-    # checkout with spike harnesses present, zero tracked locks means the
+    # checkout with spike crates present (any of them, as the provenance
+    # phase reads them, not only harness/), zero tracked locks means the
     # pathspec stopped matching rather than that the repository stopped
     # committing them -- the failure the OK line exists to prevent, and
     # invisible because it looks exactly like success.
-    if [[ ${#locks[@]} -eq 0 ]] && compgen -G 'spikes/*/harness/Cargo.toml' >/dev/null; then
-        echo "check_spike_locks: spike harnesses are present but git tracks no" >&2
+    if [[ ${#locks[@]} -eq 0 && -n "$( find spikes -name Cargo.toml -not -path '*/target/*' -print -quit 2>/dev/null )" ]]; then
+        echo "check_spike_locks: spike crates are present but git tracks no" >&2
         echo "  spikes/*/Cargo.lock. Either the pathspec here is wrong or the locks" >&2
         echo "  stopped being committed; both are findings, and neither is a pass." >&2
         exit 2
@@ -439,7 +440,15 @@ if (( PROVENANCE == 1 )); then
         bad=0
         while IFS= read -r manifest; do
             [[ -n "$manifest" ]] || continue
-            spike_dir="${manifest%/harness/Cargo.toml}"
+            # EVERY COMMITTED SPIKE MANIFEST, not only `<spike>/harness/`:
+            # the lock phases read every lock under spikes/, and a crate
+            # elsewhere in a spike (spike-004's phase-b node, spike-010's
+            # node) was compiled at its pins and then never traced, while
+            # the run said they were accounted for. The crate is named in
+            # each line; its recording is looked for in the whole spike,
+            # spikes/<id>/, since a run is a spike's, not one crate's.
+            crate="${manifest%/Cargo.toml}"
+            spike_dir="$( cut -d/ -f1-2 <<<"$manifest" )"
             # TWO PASSES, BECAUSE THEY ANSWER DIFFERENT QUESTIONS. Whether
             # a DEPENDENCY carries a revision is per dependency -- one
             # unpinned entry must not hide behind a pinned sibling. Where
@@ -462,14 +471,14 @@ if (( PROVENANCE == 1 )); then
                 [[ -n "$rev" ]] || continue
                 pinned=$((pinned + 1))
                 if ! git cat-file -e "${rev}^{commit}" 2>/dev/null; then
-                    echo "check_spike_locks: $spike_dir pins $rev, which this clone does not have." >&2
+                    echo "check_spike_locks: $crate pins $rev, which this clone does not have." >&2
                     echo "  The commit was never pushed, this is a partial clone, or the URL names" >&2
                     echo "  a repository that is not this one. A shallow clone is caught earlier and" >&2
                     echo "  says so; this is not that." >&2
                     exit 2
                 fi
                 if ! git merge-base --is-ancestor "$rev" origin/main 2>/dev/null; then
-                    echo "check_spike_locks: $spike_dir pins $rev, which is NOT an ancestor of origin/main." >&2
+                    echo "check_spike_locks: $crate pins $rev, which is NOT an ancestor of origin/main." >&2
                     echo "  A pin that never merged is a feature-branch tip, not a tree anyone can return to." >&2
                     bad=$((bad + 1))
                     continue
@@ -554,7 +563,7 @@ if (( PROVENANCE == 1 )); then
                 # Rule 1 above still holds the pin itself to origin/main.
                 done < <( git rev-list --no-merges origin/main HEAD -- "$spike_dir/" 2>/dev/null )
                 if [[ -z "$recording" ]]; then
-                    echo "check_spike_locks: $spike_dir pins $rev, which no commit in that" >&2
+                    echo "check_spike_locks: $crate pins $rev, which no commit in that" >&2
                     echo "  spike's history points at. The pin is the tree the last recorded run" >&2
                     echo "  built against — see SPIKES.md's preamble — reached from the spike's" >&2
                     echo "  OWN history: a recording commit that changes no crate points at its" >&2
@@ -566,7 +575,7 @@ if (( PROVENANCE == 1 )); then
                 fi
                 if git merge-base --is-ancestor "$recording" origin/main 2>/dev/null; then where="on origin/main"
                 else where="recorded on this branch (not yet on origin/main)"; fi
-                echo "check_spike_locks: $spike_dir pins $rev — $where, $shape ${recording:0:7}."
+                echo "check_spike_locks: $crate pins $rev — $where, $shape ${recording:0:7}."
             # ONE READER, NOT A PILE OF GREPS. Everything above about a
             # pin -- is this dependency ours, does it carry a revision,
             # where is it written -- is answered by one pass over the
@@ -605,12 +614,12 @@ if (( PROVENANCE == 1 )); then
                                  [[ -n "$r" ]] && git rev-parse --verify --quiet "${r}^{commit}"
                              done | sort -u | grep -c . )"
             if (( spike_revs > 1 )); then
-                echo "check_spike_locks: $spike_dir pins this repository at $spike_revs different" >&2
+                echo "check_spike_locks: $crate pins this repository at $spike_revs different" >&2
                 echo "  revisions. A harness builds against ONE tree; the evidence cannot name two." >&2
                 bad=$((bad + 1))
             fi
         done < <( if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-                      git ls-files -- 'spikes/*/harness/Cargo.toml'
+                      git ls-files -- 'spikes/**/Cargo.toml'
                   fi )
         if (( bad > 0 )); then
             echo "check_spike_locks: $bad pin(s) have provenance this repository cannot account for." >&2

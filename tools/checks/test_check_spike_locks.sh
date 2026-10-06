@@ -67,7 +67,9 @@ EOF
 # only the spike's directory -- which is the property the phase asks
 # about, so it must be the one thing the cases vary.
 new_provenance_sandbox() {
-    local spike_only="$1" merged="${2:-yes}"
+    # $3: where in the spike the crate sits (default harness/); a
+    # pinned crate anywhere in a spike is traced the same way.
+    local spike_only="$1" merged="${2:-yes}" crate="${3:-harness}"
     SANDBOX="$(mktemp -d)"
     mkdir -p "$SANDBOX/tools/checks"
     cp "$UNDER_TEST" "$SANDBOX/tools/checks/"
@@ -83,7 +85,7 @@ new_provenance_sandbox() {
     git -C "$SANDBOX" commit -qm 'production'
     PIN="$( git -C "$SANDBOX" rev-parse HEAD )"
 
-    mkdir -p "$SANDBOX/spikes/spike-test/harness/src"
+    mkdir -p "$SANDBOX/spikes/spike-test/$crate/src"
     # THE SHAPE THE REAL MANIFESTS CARRY: a dependency line naming this
     # repository by git and carrying its own rev. Two earlier versions of
     # this fixture were weaker and each hid a defect -- `# rev = "..."`
@@ -97,7 +99,7 @@ new_provenance_sandbox() {
     # first; these sandboxes are offline. Cargo ignores the table and the
     # guard greps the text, so the LINE is what the guard reads even
     # though the SECTION is not one cargo would resolve.
-    cat > "$SANDBOX/spikes/spike-test/harness/Cargo.toml" <<EOF
+    cat > "$SANDBOX/spikes/spike-test/$crate/Cargo.toml" <<EOF
 [package]
 name = "spike-test-harness"
 version = "0.0.0"
@@ -108,13 +110,20 @@ interweave-transport-libp2p = { git = "https://github.com/gzapi-org/InterWeave.g
 
 [dependencies]
 EOF
-    echo 'fn main() {}' > "$SANDBOX/spikes/spike-test/harness/src/main.rs"
-    ( cd "$SANDBOX/spikes/spike-test/harness" && cargo generate-lockfile -q --offline 2>/dev/null )
+    echo 'fn main() {}' > "$SANDBOX/spikes/spike-test/$crate/src/main.rs"
+    ( cd "$SANDBOX/spikes/spike-test/$crate" && cargo generate-lockfile -q --offline 2>/dev/null )
     if [[ "$spike_only" != "yes" ]]; then
         # THE ONE THING THAT VARIES: the recording commit also touches
         # production, so the crates it resolved by path are NOT its
         # parent's and the pin cannot be read off it.
         echo 'changed here too' >> "$SANDBOX/crates/lib.rs"
+    fi
+    if [[ "$crate" != harness ]]; then
+        # A crate beside others records its run in the SPIKE, the way
+        # spike-004 phase-b's README and spike-010's domains.sh ride in
+        # theirs: the recording is looked for in spikes/<id>/, not in
+        # the crate's own directory.
+        echo 'measured' > "$SANDBOX/spikes/spike-test/RESULTS.md"
     fi
     git -C "$SANDBOX" add -A -f >/dev/null
     git -C "$SANDBOX" commit -qm 'the run'
@@ -133,7 +142,7 @@ EOF
         PIN="$( git -C "$SANDBOX" commit-tree "HEAD^{tree}" -p HEAD -m 'never merged' )"
     fi
     sed -i "s/rev = \"[0-9a-f]*\" }/rev = \"$PIN\" }/" \
-        "$SANDBOX/spikes/spike-test/harness/Cargo.toml"
+        "$SANDBOX/spikes/spike-test/$crate/Cargo.toml"
 }
 
 # THE DEFAULT RUNNER OPTS OUT OF PROVENANCE, because these sandboxes are
@@ -522,6 +531,37 @@ run_provenance_guard
 assert_rc "a pin that parents no spike-only commit FAILS" 1
 assert_contains "and names what it looked for" "no commit in that"
 assert_contains "and names the date derivation as the way in" "DATE"
+rm -rf "$SANDBOX"; SANDBOX=""
+
+# A SPIKE CRATE AND NO TRACKED LOCK is a pathspec that stopped
+# matching, not a pass -- for a crate anywhere in a spike, as the
+# provenance phase reads them.
+for where in harness node; do
+    SANDBOX="$(mktemp -d)"
+    mkdir -p "$SANDBOX/tools/checks" "$SANDBOX/spikes/spike-test/$where"
+    cp "$UNDER_TEST" "$SANDBOX/tools/checks/"
+    printf '[package]\nname = "x"\nversion = "0.0.0"\n' > "$SANDBOX/spikes/spike-test/$where/Cargo.toml"
+    git -C "$SANDBOX" init -q
+    run_guard
+    assert_rc "a $where/ crate with no tracked lock anywhere is exit 2" 2
+    assert_contains "  and says the enumeration is in question" "git tracks no"
+    rm -rf "$SANDBOX"; SANDBOX=""
+done
+
+# NOT ONLY harness/: a pinned crate elsewhere in a spike (spike-004's
+# phase-b node, spike-010's node) is traced too. The provenance phase
+# read only spikes/*/harness/Cargo.toml, compiled such a crate at its
+# pins and called them accounted for without tracing one.
+new_provenance_sandbox yes no node
+run_provenance_guard
+assert_rc "a crate outside harness/ with a pin that never merged FAILS" 1
+assert_contains "and names the crate" "spikes/spike-test/node pins"
+assert_contains "and says it is not on origin/main" "NOT an ancestor of origin/main"
+rm -rf "$SANDBOX"; SANDBOX=""
+new_provenance_sandbox yes yes node
+run_provenance_guard
+assert_rc "a crate outside harness/ with an accounted pin passes" 0
+assert_contains "and its trace line is printed" "spikes/spike-test/node pins"
 rm -rf "$SANDBOX"; SANDBOX=""
 
 # `--no-provenance` SKIPS IT, for a clone without the history, and the
