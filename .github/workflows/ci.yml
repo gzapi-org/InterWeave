@@ -606,6 +606,14 @@ jobs:
           echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
           "${RUNNER_TEMP}/bin/cargo-machete" --version
 
+      # android-toolchain.sh --install refuses a Python whose tarfile
+      # `data` filter has known bypasses (before 3.12.11 / 3.13.4), and
+      # ubuntu-latest's own python3 is 3.12.3: every install case would be
+      # that refusal. The hosts it installs on run 3.14.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+
       # tools/host/android's install cases run as uid 0 in user and mount
       # namespaces (`unshare -rm`) and FAIL under CI where those are
       # unavailable, never skip; the same AppArmor restriction as the rust

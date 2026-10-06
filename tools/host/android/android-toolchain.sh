@@ -276,7 +276,11 @@ command -v python3 >/dev/null || die "python3 is required to install"
 # member (an SDK archive holds neither; links' TARGETS may use `..`).
 python3 - "$ARCHIVE" <<'PY' || die "the archive is refused (above); nothing was written"
 import os, sys, tarfile
-v = tuple(int(x) for x in os.environ['ANDROID_TOOLCHAIN_PYTHON_VERSION'].split('.')) if os.environ.get('ANDROID_TOOLCHAIN_PYTHON_VERSION') else sys.version_info
+# ANDROID_TOOLCHAIN_PYTHON_VERSION is a test hook, and it can only tighten:
+# the version judged is the lower of it and the real one.
+v = tuple(sys.version_info[:3])
+if os.environ.get('ANDROID_TOOLCHAIN_PYTHON_VERSION'):
+    v = min(v, (tuple(int(x) for x in os.environ['ANDROID_TOOLCHAIN_PYTHON_VERSION'].split('.')) + (0, 0))[:3])
 if not hasattr(tarfile, 'data_filter') or v < (3, 12, 11) or (3, 13) <= v[:2] < (3, 14) and v < (3, 13, 4):
     sys.exit(f"python {v[0]}.{v[1]}.{v[2]} has no trustworthy tarfile data filter (needs 3.12.11+, 3.13.4+ or 3.14+)")
 links = set()
