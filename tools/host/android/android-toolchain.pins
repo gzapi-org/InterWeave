@@ -1,0 +1,49 @@
+# tools/host/android/android-toolchain.pins
+#
+# The shared Android toolchain every host installs at /opt/android-sdk,
+# one KEY=VALUE per line. android-toolchain.sh reads this file strictly
+# (it is never sourced: --install runs as root), stages exactly this,
+# writes it into the install as its manifest, and --check compares a
+# host's install with it. Raising a version is a change here, and every
+# host then fails --check until it is re-installed.
+#
+# Chosen 2026-10-06 for SPIKE-008/009 (architecture/roadmap/SPIKES.md):
+# the device is API 30; Google Play requires new apps and updates to
+# target API 36 from 2026-08-31; AGP 9.4 needs JDK 17 and Gradle 9.6.0
+# and defaults to build-tools 36.0.0 and NDK 28.2.13676358.
+
+# Where and for whom.
+SDK_DIR=/opt/android-sdk
+SDK_GROUP=androiddev
+
+# The SDK, installed by sdkmanager from Google's repository (which
+# verifies each archive's sha1). PKG_<n>=<sdkmanager path>@<revision>; the
+# revision is checked against the package.xml sdkmanager writes.
+CMDLINE_TOOLS_URL=https://dl.google.com/android/repository/commandlinetools-linux-16111833_latest.zip
+CMDLINE_TOOLS_SHA1=e025545c62a8e64c7559119566a569fb1dec5f60
+CMDLINE_TOOLS_REVISION=23.0
+PKG_1=platform-tools@37.0.1
+PKG_2=platforms;android-30@3
+PKG_3=platforms;android-36@2
+PKG_4=build-tools;30.0.3@30.0.3
+PKG_5=build-tools;36.0.0@36.0.0
+PKG_6=ndk;28.2.13676358@28.2.13676358
+
+# The JDK the Android Gradle Plugin runs on (Eclipse Temurin 17), unpacked
+# at $SDK_DIR/jdk. It is not put on anyone's PATH or JAVA_HOME: the host
+# JDK stays the default, and a Gradle build names this one.
+JDK_VERSION=17.0.20.1+1
+JDK_URL=https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jdk_x64_linux_hotspot_17.0.20.1_1.tar.gz
+JDK_SHA256=3808d1d15e3ec6bd5b84057fb5d84c33d8a1536a258146bcea2e603fc726e08e
+
+# Per account, not in /opt (rust-android.sh): rustup, which honours
+# rust-toolchain.toml and adds the Android target, and cargo-ndk.
+RUSTUP_VERSION=1.29.1
+RUSTUP_INIT_SHA256=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
+RUST_ANDROID_TARGET=aarch64-linux-android
+CARGO_NDK_VERSION=4.1.2
+
+# For the Gradle wrapper of an Android project (gradle-wrapper.properties
+# distributionUrl and distributionSha256Sum); not installed here.
+GRADLE_VERSION=9.6.0
+GRADLE_DIST_SHA256=bbaeb2fef8710818cf0e261201dab964c572f92b942812df0c3620d62a529a01
