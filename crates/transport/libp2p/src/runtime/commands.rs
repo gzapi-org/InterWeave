@@ -1552,7 +1552,16 @@ pub(super) fn dial_peer(
 ) -> Result<(), DialRefusal> {
     let candidates = manager.dial_candidates(peer, now_ms);
     if candidates.is_empty() {
-        return Err(DialRefusal::NoKnownAddress);
+        // A BOOK WITH ADDRESSES AND NONE DIALABLE is the quarantine's
+        // doing (`preferred_addresses` leaves out only quarantined ones),
+        // and it is the gate holding the peer, not an empty book: told
+        // apart, the operator is not sent to add an address it already
+        // has (`CONNECTIVITY.md` §12, #208 review F2).
+        return Err(if manager.known_addresses(peer) == 0 {
+            DialRefusal::NoKnownAddress
+        } else {
+            DialRefusal::Policy(interweave_transport_runtime::DialDenial::AddressQuarantined)
+        });
     }
     let plan = super::path_race::plan(candidates);
     let mut answer = Err(DialRefusal::NoKnownAddress);
