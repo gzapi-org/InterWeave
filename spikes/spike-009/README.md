@@ -60,17 +60,18 @@ Everything that needs AndroidKeyStore or Android itself:
 
 | id | what | recorded |
 |---|---|---|
-| D1 | Generate an AndroidKeyStore AES-256-GCM key in each mode: background-compatible (no user authentication) and user-presence (`setUserAuthenticationRequired(true)`, with a timeout). | `KeyInfo.isInsideSecureHardware` (the API 30 report) and the key's properties; StrongBox requested and refused (`StrongBoxUnavailableException`), recorded as absent, not as tested |
+| D1 | Generate an AndroidKeyStore AES-256-GCM key in each mode: background-compatible (no user authentication); user-presence with a timeout (`setUserAuthenticationParameters(t > 0, …)`); and, only if the device's biometric is Class 3, per-operation biometric (`setUserAuthenticationParameters(0, AUTH_BIOMETRIC_STRONG)`, used through a `BiometricPrompt` `CryptoObject`), the one mode Android invalidates on enrollment. | `KeyInfo.isInsideSecureHardware` (the API 30 report) and the key's properties; StrongBox requested and refused (`StrongBoxUnavailableException`), recorded as absent, not as tested |
 | D2 | Wrap the fixture seed: the Keystore generates the IV, the header and PeerId go in through `updateAAD`; Rust frames the envelope. | the IV and tag lengths; the envelope byte-for-byte against the host layout; Rust unwrap with the AES key unavailable is impossible, so the check is the Keystore decrypt giving back the seed and Rust re-deriving the frozen PeerId |
 | D3 | Tamper with the stored envelope: H3's single-bit flips over adb, through the Keystore. | every flip refused (`AEADBadTagException` or a header refusal); none yields a seed |
 | D4 | Durability: process restart (`am kill`), screen lock and unlock, reboot. | unwrap succeeds after each in the background mode; in the user-presence mode, what is asked of the person and when |
 | D5 | Background restart in user-presence mode: the service restarts with no person present. | `UserNotAuthenticatedException`, surfaced as the diagnostic `background_restart_requires_user_authentication`, never as a new identity |
-| D6 | Invalidation: lock screen removed, then set again; a biometric enrolled (if the device has one). | `KeyPermanentlyInvalidatedException` on the next use; the app enters recovery and never makes a new key over the profile silently |
+| D6a | Lock screen removed, on FRESH keys of the background and timed modes, with no biometric involved. | `KeyPermanentlyInvalidatedException` on the timed key; the background key still unwraps (the control); the app enters recovery and never makes a new key over the profile silently |
+| D6b | A fingerprint enrolled with the secure lock screen kept throughout, on FRESH keys of the timed and (if Class 3) per-operation modes. Removing the lock screen deletes the enrolled biometrics and invalidates every auth-bound key itself, so it is never part of this row. | the timed key SURVIVES (Android documents enrollment invalidation for per-operation keys only, so its survival is recorded as the documented non-invalidation); the per-operation key throws `KeyPermanentlyInvalidatedException`; with no Class-3 biometric, only the timed key's survival is recorded |
 | D7 | The 24-word picker on a screen with `FLAG_SECURE`, entering the fixture's phrase. | `screencap` and `screenrecord` black; nothing in the clipboard (`cmd clipboard`/`dumpsys clipboard`); the IME sees a field that disables suggestions and learning; no autofill request (`dumpsys autofill`); `logcat` holds no word; no saved-instance or crash artifact holds one (`run-as` file search for each word) |
 
-**Each check has a control** that shows its observation was live: an envelope left intact unwraps (D3), a field without the flags DOES leak to the IME's suggestions and the screenshot (D7), and a background-mode key restarts unattended (D5).
+**Each check has a control** that shows its observation was live: an envelope left intact unwraps (D3), a field without the flags DOES leak to the IME's suggestions and the screenshot (D7), a background-mode key restarts unattended (D5), and a background-mode key survives the lock-screen removal that invalidates the timed one (D6a).
 
 **This device cannot answer:**
 - StrongBox: the device has none.
 - The current API's Keystore behaviour: it needs a newer device.
-- Class-3 biometric binding, if the device's biometric is not Class 3.
+- Class-3 biometric binding and enrollment invalidation of a per-operation key (D6b), if the device's biometric is not Class 3.
