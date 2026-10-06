@@ -29,11 +29,11 @@ A dedicated test device, reachable over adb, on which the owner allowed the full
 ## The harness (to be written)
 
 `spikes/spike-008/harness/`: one Android app, built at two target SDKs (30 and the current Play target).
-- A foreground service that holds a small Rust core: the production identity and a session stand-in. The service type is declared both ways, and the service writes a timestamped lifecycle trace to app-private storage.
+- A foreground service that holds a small Rust core: the production identity, the production human store (`interweave-human-store`, the store under test) and a session stand-in. The service type is declared both ways, and the service writes a timestamped lifecycle trace to app-private storage.
 - A launcher Activity, the only user-visible start path.
 - A non-exported recovery Activity with `android:excludeFromRecents="true"` and `FLAG_SECURE` set before any content is drawn.
 - Backup rules: `fullBackupContent` and `dataExtractionRules`. Both exclude the wrapped identity, the configuration, recovery temporary state and the human store. A marker file is deliberately left included, as the control.
-- A seeded human store: pending outbound, unread inbound, kept inbound, read-and-not-kept and transport-terminal rows. This tests ADR-0044's restart retention.
+- A seeded human store, through the store's own API: three pending outbound, three unread inbound and three kept inbound rows (the only states `RETENTION.md` §5 lets the store hold). Then, before any kill, the transitions are DRIVEN in-process: one unread row read without Keep, one kept row unkept, and one pending row taken to transport-terminal. Each transition deletes its durable copy. This tests ADR-0044's restart retention. Seeding a read-unkept or terminal row directly would test a start-up sweep the contract does not have.
 
 The trace and the store are read back over adb (`run-as`). No result rests on what the app says about itself where adb can observe it directly.
 
@@ -58,7 +58,7 @@ The trace and the store are read back over adb (`run-as`). No result rests on wh
 | B3 | restore into a fresh install | `bmgr restore`, or uninstall then reinstall | the app enters recovery-required onboarding; no new PeerId is made for an established profile; no identity is replaced |
 | B4 | device-to-device transfer | the GMS D2D path where it can be exercised; otherwise named as not run | as B3 |
 | B5 | Samsung Smart Switch | an OEM transfer to and from this device, if a second device or a PC can be used; otherwise named as not run | as B3, against an OEM path that does not read Android's rules |
-| S1 | ADR-0044 restart retention | `am kill`, and reboot, with the seeded store | pending, unread and kept rows survive; read-unkept and terminal rows do not |
+| S1 | ADR-0044 restart retention | the transitions above, then `am kill`, and separately reboot | the remaining pending, unread and kept rows survive with their content; the read-unkept, unkept and terminal rows' content is gone, read back over `run-as` with `sqlite3` as well as through the store (RETENTION conformance 11) |
 | P1 | target-SDK / service-type policy matrix | builds at targetSdk 30 and at the current target | the manifest, the service start result, any `ForegroundServiceTypeException`, and the Play policy text quoted against the date read |
 
 **Battery and network observations** (`dumpsys batterystats`, `dumpsys netstats`) are recorded for L2, L3 and L7 as measurements, not checks.
