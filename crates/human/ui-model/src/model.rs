@@ -22,6 +22,7 @@ use crate::labels::{
     ErrorClass, LabelKey, UiText, fill, outbound_label, placeholder_en, send_error_class,
     session_problem_class, short_peer,
 };
+use crate::trust::{TrustChange, TrustInput, TrustSettings};
 
 /// How many items the model holds that the store no longer does --
 /// read-and-unkept inbound and terminal outbound -- before it evicts the
@@ -71,18 +72,20 @@ impl From<&EndpointId> for RouteLabel {
     }
 }
 
-/// What trust the view may show for a peer. Stage 14 has no source for
-/// it (plan §17 (4)): every peer is "not verified by this client", never
-/// an invented value.
+/// What trust the view may show for a peer: every peer is "not verified
+/// by this client", never an invented value. The trust settings' allowlist
+/// says which peers this profile admits, not who a peer is, so it is no
+/// source for this.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trust {
     /// No verification by this client.
     NotVerifiedByThisClient,
 }
 
-/// What a view asks of the composition root: a legal intent, or an edit
-/// to a draft. It is the view's output, defined here rather than in the
-/// toolkit crate so a root that names no toolkit can handle it.
+/// What a view asks of the composition root: a legal intent, an edit to
+/// a draft, or an input to the trust settings. It is the view's output,
+/// defined here rather than in the toolkit crate so a root that names no
+/// toolkit can handle it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViewEvent {
     /// A legal intent, resolved against the model at take time.
@@ -95,6 +98,10 @@ pub enum ViewEvent {
         /// The draft as it now reads.
         draft: String,
     },
+    /// The person acted in the trust settings: the root passes it to
+    /// [`TrustSettings::input`] before taking the view's events again, and
+    /// carries out the intent it returns.
+    Trust(TrustInput),
 }
 
 /// Which table an item's row is in: a row id names a row within one.
@@ -265,6 +272,13 @@ pub enum Intent {
     Reopen,
     /// Re-check storage now.
     RecheckStorage,
+    /// Read the trust allowlist: the trust settings opened, or a change's
+    /// list was not read back ([`crate::TrustSettings::take_reread`]).
+    ReadTrust,
+    /// Make a trust change the person confirmed in the trust settings,
+    /// which showed its exact `PeerId` and scope (`human-client-ui.md` §8).
+    /// Only [`crate::TrustSettings::confirm`] makes one.
+    SetTrust(TrustChange),
 }
 
 /// How often a composer was edited, and at which count Send was pressed.
@@ -418,6 +432,7 @@ pub struct UiModel {
     paths: HashMap<TransportIdentity, PeerPath>,
     session: SessionState,
     diagnostics: Diagnostics,
+    trust: TrustSettings,
 }
 
 impl Default for UiModel {
@@ -452,6 +467,7 @@ impl UiModel {
                 next_at: 0,
             },
             diagnostics: Diagnostics::default(),
+            trust: TrustSettings::default(),
         }
     }
 
@@ -835,6 +851,18 @@ impl UiModel {
                 Some(SessionNotice::Refused(session_problem_class(*problem)))
             }
         }
+    }
+
+    /// The trust settings (`human-client-ui.md` §8).
+    #[must_use]
+    pub const fn trust_settings(&self) -> &TrustSettings {
+        &self.trust
+    }
+
+    /// The trust settings, for the settings view's inputs and the
+    /// daemon's answers.
+    pub const fn trust_settings_mut(&mut self) -> &mut TrustSettings {
+        &mut self.trust
     }
 
     /// What trust to show for `peer`.

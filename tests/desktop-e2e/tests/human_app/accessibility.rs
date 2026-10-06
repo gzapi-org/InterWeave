@@ -6,8 +6,8 @@
 //! message, route and connectivity controls, and its one announcement is
 //! raised to the screen reader as an AT-SPI `Announcement`.
 //!
-//! The trust controls the same bullet names do not exist yet: they are
-//! batch 9's, and their case is added with them.
+//! The trust controls the same bullet names are read in the
+//! trust-mutation case (`trust.rs`), where they are used.
 
 use interweave_human_transport_client::Connectivity;
 use interweave_human_ui_model::{UiText, fill, placeholder_en, short_peer};

@@ -181,6 +181,10 @@ impl<S: Surface, O: Opener> ModelSide<S, O> {
             Update::Read(row) => self.model.read(row),
             Update::Kept { item, row } => self.model.kept(item, row),
             Update::Unkept(row) => self.model.unkept(row),
+            Update::TrustRead(answer) => self.model.trust_settings_mut().read(answer),
+            Update::TrustSet { change, answer } => {
+                self.model.trust_settings_mut().set(change, answer);
+            }
             Update::Done(command) => {
                 self.in_flight.remove(&InFlight::of(&command));
             }
@@ -206,9 +210,26 @@ impl<S: Surface, O: Opener> ModelSide<S, O> {
         // never writes over text it is still holding.
         self.surface.render(&self.model);
         let mut commands = Vec::new();
+        // A trust input changes what the settings show -- a proposal to
+        // confirm, why a typed value was not proposed -- and may ask the
+        // facade nothing, so no update would bring another turn: the
+        // view would sit on its press. One more render once the takes
+        // drain, then takes until empty again (the shipped client over
+        // AT-SPI showed a removal never reaching its confirmation).
+        let mut trust_unrendered = false;
         loop {
             let events = self.surface.take_events(&self.model);
             if events.is_empty() {
+                // A change's answer may have left the list to read again.
+                if let Some(intent) = self.model.trust_settings_mut().take_reread()
+                    && let Some(command) = self.command_for(intent)
+                {
+                    commands.push(command);
+                }
+                if std::mem::take(&mut trust_unrendered) {
+                    self.surface.render(&self.model);
+                    continue;
+                }
                 return commands;
             }
             for event in events {
@@ -216,6 +237,19 @@ impl<S: Surface, O: Opener> ModelSide<S, O> {
                     ViewEvent::DraftChanged { key, draft } => {
                         self.model.draft_changed(key, draft);
                     }
+                    ViewEvent::Trust(input) => {
+                        trust_unrendered = true;
+                        if let Some(intent) = self.model.trust_settings_mut().input(input)
+                            && let Some(command) = self.command_for(intent)
+                        {
+                            commands.push(command);
+                        }
+                    }
+                    // Trust reaches the daemon only through the settings'
+                    // inputs, which confirm the change shown: a trust
+                    // intent handed over bare, by any surface, is dropped
+                    // (`a_trust_intent_handed_over_bare_reaches_nothing`).
+                    ViewEvent::Intent(Intent::ReadTrust | Intent::SetTrust(_)) => {}
                     ViewEvent::Intent(intent) => {
                         if let Some(command) = self.command_for(intent) {
                             commands.push(command);
@@ -247,6 +281,8 @@ impl<S: Surface, O: Opener> ModelSide<S, O> {
             Intent::Cancel(row) => Command::Cancel(row),
             Intent::Reopen => Command::Reopen,
             Intent::RecheckStorage => Command::RecheckStorage,
+            Intent::ReadTrust => Command::ReadTrust,
+            Intent::SetTrust(change) => Command::SetTrust(change),
         };
         if !self.in_flight.insert(InFlight::of(&command)) {
             return None;

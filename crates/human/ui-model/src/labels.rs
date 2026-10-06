@@ -5,9 +5,11 @@
 //! every exhaustive match below (agreed items 5, 6).
 
 use interweave_human_client_api::{
-    Connectivity, OutboundStatus, SendError, SendProblem, SessionProblem,
+    Connectivity, OutboundStatus, SendError, SendProblem, SessionProblem, TrustProblem,
 };
 use interweave_transport_api::PeerPath;
+
+use crate::trust::EntryProblem;
 
 /// One list makes the enum, [`LabelKey::ALL`] and the keys, so a label
 /// cannot exist outside the list P6's test walks (review F4): there is no
@@ -210,6 +212,72 @@ ui_texts! {
     TryAgain => "Try again",
     /// Re-check storage now.
     RecheckStorage => "Check storage again",
+    /// The control that opens the trust settings, at the foot of the
+    /// conversation list: a short button label.
+    TrustSettings => "Trust settings",
+    /// The control that leaves the trust settings for the conversations.
+    BackToConversations => "Back to conversations",
+    /// The trust settings' heading.
+    TrustHeading => "Trust",
+    /// Under the heading: what the list decides, and that a change lasts
+    /// only until the daemon restarts (ADR-0028: a runtime overlay). The
+    /// person's state: about to add or remove a peer; read once, so it
+    /// may run to two sentences.
+    TrustExplanation => "Only the peers listed here can exchange messages with this profile. A change made here lasts until the transport daemon restarts; to keep it, add it to the profile's configuration.",
+    /// The label of this profile's own `PeerId`, shown in full and
+    /// selectable to copy.
+    OwnPeerId => "This profile's PeerId, select to copy",
+    /// The heading of the trusted peers' list.
+    TrustedPeers => "Trusted peers",
+    /// Shown in place of the list while it is read.
+    TrustReading => "Reading the trust settings",
+    /// Shown in place of the list when it holds no peer.
+    NoTrustedPeer => "No peer is trusted",
+    /// The field a person types or pastes a `PeerId` into.
+    PeerIdToTrust => "PeerId to trust",
+    /// The control that proposes trusting the typed `PeerId`.
+    TrustPeer => "Trust this peer",
+    /// The control on a listed peer that proposes removing its trust.
+    RemoveTrust => "Remove trust",
+    /// The confirmation of an allow. `{peer}` is the exact `PeerId`,
+    /// whole: the person must be able to check every character.
+    ConfirmAllow => "Trust {peer} for this profile until the transport daemon restarts? It will be able to exchange messages with this profile.",
+    /// The confirmation of a removal. `{peer}` is the exact `PeerId`,
+    /// whole. The warning is human-client-ui.md section 8's: connections
+    /// close at once.
+    ConfirmRevoke => "Remove trust from {peer}? Its connections to this profile close now, and it cannot exchange messages with this profile until it is trusted again.",
+    /// Carry out the change on show.
+    ConfirmChange => "Confirm",
+    /// Drop the change on show.
+    CancelChange => "Do not change",
+    /// Said once the daemon allowed a peer. `{peer}` the exact `PeerId`.
+    PeerTrusted => "{peer} is trusted until the transport daemon restarts.",
+    /// Said once the daemon revoked a peer. `{peer}` the exact `PeerId`.
+    PeerUntrusted => "{peer} is no longer trusted.",
+    /// The typed text is not a `PeerId`.
+    NotAPeerId => "That is not a PeerId. A PeerId for this profile's network starts with 12D3KooW.",
+    /// The typed `PeerId` is this profile's own.
+    OwnIdentity => "That is this profile's own PeerId.",
+    /// The typed `PeerId` is already listed.
+    AlreadyTrusted => "That peer is already trusted.",
+    /// Trust could not be read or changed: the daemon is not reachable.
+    TrustUnavailable => "The transport daemon cannot be reached. Nothing was changed.",
+    /// This client may not administer trust on this daemon.
+    TrustNotPermitted => "This client may not change trust on this daemon. Nothing was changed.",
+    /// The daemon refused the change: its own identity, or the list is
+    /// full.
+    TrustRefused => "The transport daemon refused this change. Nothing was changed.",
+    /// Anything else went wrong, before anything was changed. No raw code
+    /// is kept, so the text points nowhere for details.
+    TrustFailed => "Trust could not be read or changed. Nothing was changed.",
+    /// The daemon did not confirm a change, which may have been made: the
+    /// list is read again. `{peer}` the exact `PeerId`, whole. Never says
+    /// that nothing changed (TRANSPORT.md's outcome-unknown class).
+    TrustUnconfirmed => "The transport daemon did not confirm the change for {peer}; it may have been made. The list is read again.",
+    /// The list a made or possibly made change left to read again could
+    /// not be read: it may not show that change. Never says that nothing
+    /// changed. Opening the settings again reads it.
+    TrustNotReadAgain => "The trust list could not be read again, so it may not show the latest change. Open the trust settings again to read it.",
 }
 
 /// The English shown until real copy exists.
@@ -224,7 +292,7 @@ ui_texts! {
 /// never reads as offline, and every template is filled by placeholder,
 /// never assembled by concatenation, so a translation may reorder it.
 pub mod placeholder_en {
-    use super::{Connectivity, ErrorClass, LabelKey, PeerPath, UiText};
+    use super::{Connectivity, EntryProblem, ErrorClass, LabelKey, PeerPath, TrustProblem, UiText};
 
     /// A status label.
     #[must_use]
@@ -292,6 +360,27 @@ pub mod placeholder_en {
     #[must_use]
     pub const fn text(text: UiText) -> &'static str {
         super::ui_text_en(text)
+    }
+
+    /// Why trust was not read or changed.
+    #[must_use]
+    pub const fn trust_problem(problem: TrustProblem) -> &'static str {
+        text(match problem {
+            TrustProblem::Unavailable => UiText::TrustUnavailable,
+            TrustProblem::NotPermitted => UiText::TrustNotPermitted,
+            TrustProblem::Refused => UiText::TrustRefused,
+            TrustProblem::Internal => UiText::TrustFailed,
+        })
+    }
+
+    /// Why a typed `PeerId` was not proposed.
+    #[must_use]
+    pub const fn entry_problem(problem: EntryProblem) -> &'static str {
+        text(match problem {
+            EntryProblem::NotAPeerId => UiText::NotAPeerId,
+            EntryProblem::OwnIdentity => UiText::OwnIdentity,
+            EntryProblem::AlreadyTrusted => UiText::AlreadyTrusted,
+        })
     }
 }
 

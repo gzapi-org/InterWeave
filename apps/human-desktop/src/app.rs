@@ -203,6 +203,13 @@ const fn command_name(command: &interweave_human_app_core::Command) -> &'static 
         Command::Cancel(_) => "cancel",
         Command::Reopen => "reopen",
         Command::RecheckStorage => "recheck storage",
+        // Named only because the match is whole: the failure line is the
+        // one place this is used, and a trust command never reaches it --
+        // its outcome is the settings' to say, and the daemon audits every
+        // set (LOCAL-CLIENT.md section 5). This client logs nothing of a
+        // trust change, the peer least of all.
+        Command::ReadTrust => "read trust",
+        Command::SetTrust(_) => "set trust",
     }
 }
 

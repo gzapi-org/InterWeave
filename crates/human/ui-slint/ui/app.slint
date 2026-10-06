@@ -72,13 +72,24 @@ export struct MessageRow {
     actions: [ActionRow],
 }
 
+// A trusted peer: its full PeerId, exact, and a handle the press names
+// it by.
+export struct TrustRow {
+    handle: int,
+    peer: string,
+}
+
 component ActionButton inherits FocusScope {
     in property <string> text;
     in property <string> focus-key;
+    // What the control acts on, when its label alone does not say it: a
+    // list's "Remove trust" names its peer here.
+    in property <string> detail;
     callback pressed();
     callback focused(string);
     accessible-role: button;
     accessible-label: text;
+    accessible-description: detail;
     accessible-action-default => { root.pressed(); }
     key-pressed(event) => {
         if (event.text == Key.Return || event.text == " ") {
@@ -201,12 +212,47 @@ export component AppWindow inherits Window {
     in property <string> announcement-b;
     out property <string> focus-id;
 
+    // The trust settings (human-client-ui.md section 8), shown in place of
+    // the conversation: every string from Rust, every press back to it.
+    in property <bool> trust-page;
+    in property <string> trust-settings-label;
+    in property <string> back-label;
+    in property <string> trust-heading;
+    in property <string> trust-explanation;
+    in property <string> own-peer-id-label;
+    in property <string> own-peer-id;
+    in property <string> trusted-heading;
+    // Said in place of the list: reading it, or that it holds no peer.
+    in property <string> trust-placeholder;
+    in property <[TrustRow]> trusted;
+    // The allowlist has been read: only then can a typed PeerId be
+    // checked, so only then is the add row offered.
+    in property <bool> trust-list-read;
+    in property <string> remove-label;
+    in property <string> entry-label;
+    in-out property <string> trust-entry;
+    in property <string> add-label;
+    in property <bool> has-pending;
+    in property <string> pending-text;
+    in property <string> confirm-label;
+    in property <string> cancel-label;
+    // The last outcome, shown where it happened; announced through the
+    // window's one announcement.
+    in property <string> trust-outcome;
+
     callback select(int);
     callback action(int, int);
     callback link(int, int);
     callback send();
     callback notice-pressed();
     callback draft-edited(string);
+    callback open-trust();
+    callback close-trust();
+    callback trust-entry-edited(string);
+    callback trust-add();
+    callback trust-remove(int);
+    callback trust-confirm();
+    callback trust-cancel();
 
     // The announcement, for a screen reader only: a sighted
     // person sees each change where it happened. Clipped to a
@@ -295,10 +341,184 @@ export component AppWindow inherits Window {
             }
             }
             }
+            // Trust is a settings action, apart from every conversation
+            // (human-client-ui.md section 8): nothing a message shows can
+            // reach it.
+            ActionButton {
+                text: root.trust-settings-label;
+                focus-key: "open-trust";
+                pressed => { root.open-trust(); }
+                focused(k) => { root.focus-id = k; }
+            }
         }
         }
         Rectangle { width: 1px; background: Palette.divider; }
-        VerticalLayout {
+        if root.trust-page: VerticalLayout {
+            padding: 12px;
+            spacing: 8px;
+            HorizontalLayout {
+                alignment: start;
+                ActionButton {
+                    text: root.back-label;
+                    focus-key: "close-trust";
+                    pressed => { root.close-trust(); }
+                    focused(k) => { root.focus-id = k; }
+                }
+            }
+            Text {
+                text: root.trust-heading;
+                font-weight: 700;
+                font-size: 16px;
+                accessible-role: text;
+                accessible-label: self.text;
+            }
+            Text {
+                text: root.trust-explanation;
+                wrap: word-wrap;
+                accessible-role: text;
+                accessible-label: self.text;
+            }
+            // A visible caption: without it this profile's own PeerId reads
+            // as one more trusted peer (seen in the rendered window). The
+            // field below carries the same words for a screen reader.
+            Text {
+                text: root.own-peer-id-label;
+                font-size: 12px;
+                font-weight: 700;
+                accessible-role: none;
+            }
+            // This profile's own identity, exact and selectable to copy
+            // (human-client-ui.md section 11). Read-only.
+            TextInput {
+                text: root.own-peer-id;
+                read-only: true;
+                single-line: true;
+                font-size: 12px;
+                color: Palette.muted-text;
+                accessible-label: root.own-peer-id-label;
+                accessible-value: self.text;
+            }
+            // The add row under the explanation, above the list it adds to,
+            // with a visible caption (the field's own accessible label).
+            if root.trust-list-read: Text {
+                text: root.entry-label;
+                font-size: 12px;
+                font-weight: 700;
+                accessible-role: none;
+            }
+            if root.trust-list-read: HorizontalLayout {
+                spacing: 8px;
+                height: 36px;
+                Rectangle {
+                    border-width: 1px;
+                    border-color: #444;
+                    border-radius: 4px;
+                    TextInput {
+                        x: 8px;
+                        width: parent.width - 16px;
+                        vertical-alignment: center;
+                        single-line: true;
+                        text <=> root.trust-entry;
+                        accessible-label: root.entry-label;
+                        edited => { root.trust-entry-edited(self.text); }
+                        changed has-focus => {
+                            if (self.has-focus) { root.focus-id = "trust-entry"; }
+                        }
+                    }
+                }
+                ActionButton {
+                    text: root.add-label;
+                    focus-key: "trust-add";
+                    pressed => { root.trust-add(); }
+                    focused(k) => { root.focus-id = k; }
+                }
+            }
+            Text {
+                text: root.trusted-heading;
+                font-weight: 700;
+                accessible-role: text;
+                accessible-label: self.text;
+            }
+            if root.trust-placeholder != "": Text {
+                text: root.trust-placeholder;
+                color: Palette.muted-text;
+                accessible-role: text;
+                accessible-label: self.text;
+            }
+            Flickable {
+                vertical-stretch: 1;
+                viewport-height: trusted-column.preferred-height;
+            trusted-column := VerticalLayout {
+                width: parent.width;
+                spacing: 6px;
+                alignment: start;
+            for row[index] in root.trusted: HorizontalLayout {
+                spacing: 8px;
+                // The exact PeerId: whole, never shortened, so a person can
+                // check every character (human-client-ui.md section 8).
+                TextInput {
+                    text: row.peer;
+                    read-only: true;
+                    single-line: true;
+                    horizontal-stretch: 1;
+                    accessible-label: row.peer;
+                    accessible-value: self.text;
+                }
+                ActionButton {
+                    text: root.remove-label;
+                    detail: row.peer;
+                    focus-key: "remove:" + row.handle;
+                    pressed => { root.trust-remove(row.handle); }
+                    focused(k) => { root.focus-id = k; }
+                }
+            }
+            }
+            }
+            // The change waiting for the person: its exact PeerId and scope,
+            // carried out only by Confirm. Focus lands on "do not change",
+            // so a second Return cannot confirm by accident.
+            if root.has-pending: Rectangle {
+                background: Palette.notice-background;
+                border-radius: 4px;
+            VerticalLayout {
+                padding: 8px;
+                spacing: 8px;
+                Text {
+                    text: root.pending-text;
+                    color: Palette.notice-text;
+                    wrap: word-wrap;
+                    accessible-role: text;
+                    accessible-label: self.text;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    ActionButton {
+                        text: root.confirm-label;
+                        detail: root.pending-text;
+                        focus-key: "trust-confirm";
+                        pressed => { root.trust-confirm(); }
+                        focused(k) => { root.focus-id = k; }
+                    }
+                    ActionButton {
+                        text: root.cancel-label;
+                        detail: root.pending-text;
+                        focus-key: "trust-cancel";
+                        pressed => { root.trust-cancel(); }
+                        focused(k) => { root.focus-id = k; }
+                        init => { self.focus(); }
+                    }
+                }
+            }
+            }
+            if root.trust-outcome != "": Text {
+                text: root.trust-outcome;
+                wrap: word-wrap;
+                accessible-role: text;
+                accessible-label: self.text;
+            }
+        }
+        if !root.trust-page: VerticalLayout {
             padding: 12px;
             spacing: 8px;
             Text {

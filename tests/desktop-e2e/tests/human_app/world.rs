@@ -18,8 +18,8 @@ use interweave_human_transport_client::{
 };
 use interweave_ipc_client::IpcBinding;
 use interweave_transport_api::{
-    DirectDestination, EndpointId, MAX_PAYLOAD_BYTES, MediaType, MessageId, TransportError,
-    TransportIdentity,
+    ChannelId, DirectDestination, EndpointId, MAX_PAYLOAD_BYTES, MediaType, MessageId,
+    TransportError, TransportIdentity,
 };
 
 use crate::common::{Daemon, Home, PATIENCE, example, free_port, human};
@@ -45,6 +45,13 @@ pub(crate) const AFTER_A_RESTART: Duration = Duration::from_secs(90);
 /// Two daemons from the shipped desktop example on this host's private
 /// address, each with a static route to the other.
 pub(crate) async fn two_daemons() -> World {
+    two_daemons_joining(None).await
+}
+
+/// [`two_daemons`], each profile also joining `channel` -- the shipped
+/// example joins none, and the desktop client joins what its profile
+/// desires.
+pub(crate) async fn two_daemons_joining(channel: Option<&ChannelId>) -> World {
     let ip = interweave_test_support::net::require_private_interface_v4();
     let (a, b) = (Home::new("human-desktop"), Home::new("human-desktop"));
     let (a_peer, b_peer) = (a.write_key(), b.write_key());
@@ -52,18 +59,29 @@ pub(crate) async fn two_daemons() -> World {
     let at = |port: u16| format!("/ip4/{ip}/tcp/{port}");
     let route_to =
         |port: u16, peer: &TransportIdentity| format!("{}/p2p/{}", at(port), peer.as_str());
-    a.write_config(&example(
+    let joining = |config: String| match channel {
+        None => config,
+        Some(channel) => {
+            let joined = format!("channels: {{ desired: [{}] }}", channel.as_str());
+            assert!(
+                config.contains("channels: { desired: [] }"),
+                "the example joins none"
+            );
+            config.replace("channels: { desired: [] }", &joined)
+        }
+    };
+    a.write_config(&joining(example(
         "human-desktop.yaml",
         &b_peer,
         &at(a_port),
         Some(&route_to(b_port, &b_peer)),
-    ));
-    b.write_config(&example(
+    )));
+    b.write_config(&joining(example(
         "human-desktop.yaml",
         &a_peer,
         &at(b_port),
         Some(&route_to(a_port, &a_peer)),
-    ));
+    )));
     // B is started only once A's runtime is up, so B's start-up dial of
     // its static route finds A listening and the connection it makes
     // serves both ways. Without that, either start-up dial can land on a
@@ -391,6 +409,24 @@ pub(crate) fn seed_pending(
     endpoint: &EndpointId,
     envelope: &HumanChatV2,
 ) {
+    seed_pending_to(
+        home,
+        OutboundDestination::Direct(DirectDestination {
+            peer: peer.clone(),
+            endpoint: Some(endpoint.clone()),
+        }),
+        envelope,
+    );
+}
+
+/// Commit `envelope` as pending outbound to `destination` in the app's
+/// store under `home`, encoded as the client encodes it: compressed when
+/// it does not fit the payload limit plain.
+pub(crate) fn seed_pending_to(
+    home: &Home,
+    destination: OutboundDestination,
+    envelope: &HumanChatV2,
+) {
     let mut store =
         HumanStore::open(&app_store(home), StoreOptions::default()).expect("the app's store");
     let encoded = encode_outbound(envelope, MAX_PAYLOAD_BYTES).expect("it fits");
@@ -399,13 +435,46 @@ pub(crate) fn seed_pending(
         .commit_pending_outbound(&NewOutbound {
             app_message_id: AppMessageId::parse(envelope.app_message_id.clone()).expect("an id"),
             transport_message_id: MessageId::from_bytes(serial.to_be_bytes()),
-            destination: OutboundDestination::Direct(DirectDestination {
-                peer: peer.clone(),
-                endpoint: Some(endpoint.clone()),
-            }),
+            destination,
             media_type: Some(MediaType::parse(encoded.media_type).expect("a media type")),
             payload: encoded.bytes,
             created_at: wall_ms(),
         })
         .expect("committed");
+}
+
+/// One unread row of the app's store under `home`, as the receiving
+/// binary committed it: whose, on which channel if any, and how it was
+/// encoded on the wire -- never its content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UnreadRow {
+    pub(crate) app_message_id: String,
+    pub(crate) source_peer: String,
+    pub(crate) channel_id: Option<String>,
+    pub(crate) media_type: Option<String>,
+}
+
+/// The app's unread rows under `home`, read-only, while it may run.
+pub(crate) fn unread_rows(home: &Home) -> Vec<UnreadRow> {
+    let conn = rusqlite::Connection::open_with_flags(
+        app_store(home),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("the app's store opens read-only");
+    conn.busy_timeout(Duration::from_secs(5))
+        .expect("a timeout");
+    let mut stmt = conn
+        .prepare("SELECT app_message_id, source_peer, channel_id, media_type FROM unread_inbound")
+        .expect("a select");
+    stmt.query_map([], |r| {
+        Ok(UnreadRow {
+            app_message_id: r.get(0)?,
+            source_peer: r.get(1)?,
+            channel_id: r.get(2)?,
+            media_type: r.get(3)?,
+        })
+    })
+    .expect("rows")
+    .map(|r| r.expect("a row"))
+    .collect()
 }

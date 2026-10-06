@@ -38,7 +38,8 @@ Agreed with the client's role before it was built (relay seqs 10630, 10639 and 1
 - `connectivity()`, always present: `Unknown` is never shown as `Offline`.
 - `session_notice()`, each notice with the `Intent` that resolves it.
 - `composer(key)`.
-- `trust(peer)`: always "not verified by this client" in Stage 14, since it has no source until Stage 15.
+- `trust(peer)`: always "not verified by this client": the allowlist says which peers this profile admits, not who a peer is, so it does not answer this.
+- `trust_settings()`: the trust settings (`human-client-ui.md` §8) -- the allowlist as the daemon last said, the PeerId being typed, the change waiting for confirmation, the change on its way, and the last outcome with a count that changes at each.
 - `diagnostics()`, and `item_diagnostics(key)`: an outbound row's raw failure code. It is kept off `MessageItem` so a view cannot render it by accident (`human-client-ui.md` §12).
 
 **Intents** (`actions(item)` returns only the legal ones):
@@ -49,11 +50,13 @@ Agreed with the client's role before it was built (relay seqs 10630, 10639 and 1
 - `Send` (`send_draft`);
 - `OpenLink`, only on a person's activation of an allowlisted scheme;
 - `Reopen`;
-- `RecheckStorage`.
+- `RecheckStorage`;
+- `ReadTrust`, when the trust settings open, or after a change whose list was not read back (`take_reread`) -- a re-read that then fails says the list may be stale, never that nothing changed;
+- `SetTrust(change)`, only from `TrustSettings::confirm(shown)` of the change the person proposed in the settings -- the typed PeerId, or a listed peer's removal -- and was shown with its exact PeerId, while it is still the change waiting: a press never confirms a proposal that replaced the one on screen. A change's answer says whether it was made; "nothing was changed" is said only when nothing was, and a change made, or possibly made, whose list was not read back is read again (`take_reread`).
 
-**`ViewEvent`** is what a view hands the root: an `Intent`, or a draft edit the root applies with `draft_changed` before it takes the view's events again. It lives here, not in the toolkit crate, so a root that names no toolkit can handle it; `ui-slint` re-exports it.
+**`ViewEvent`** is what a view hands the root: an `Intent`; a draft edit the root applies with `draft_changed`; or a trust settings input (`TrustInput`) the root applies with `TrustSettings::input`, which returns `ReadTrust` on opening and `SetTrust` on confirmation only. The root applies an edit or an input before it takes the view's events again. It lives here, not in the toolkit crate, so a root that names no toolkit can handle it; `ui-slint` re-exports it.
 
-None touches trust, administration or recovery. Read is a retention act, so `MarkRead` comes only from `conversation_viewed(key, focused: true)`: never on receipt, never from a notification, never while unfocused, and never from `actions()`.
+Only the trust settings' two touch administration, and nothing touches recovery: no intent a message or a conversation offers reaches trust (`tests/section_13.rs`, s13_4 and s13_5). Read is a retention act, so `MarkRead` comes only from `conversation_viewed(key, focused: true)`: never on receipt, never from a notification, never while unfocused, and never from `actions()`.
 
 **Labels and errors:**
 - `LabelKey` is a closed enum of stable keys. P6's test enumerates it, and no delivery label reads as read, seen or processed. "May have been received" has its own keys.

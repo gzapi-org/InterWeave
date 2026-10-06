@@ -16,6 +16,7 @@
 
 mod labels;
 mod model;
+mod trust;
 
 pub use labels::{
     ErrorClass, LabelKey, UiText, fill, outbound_label, placeholder_en, send_error_class,
@@ -26,3 +27,4 @@ pub use model::{
     ItemDiagnostics, ItemKey, ItemStatus, ListedInbound, ListedOutbound, MessageItem, Reply,
     Retention, RouteLabel, SESSION_ITEM_CAP, SessionNotice, Table, Trust, UiModel, ViewEvent,
 };
+pub use trust::{EntryProblem, TrustChange, TrustInput, TrustOutcome, TrustSettings};

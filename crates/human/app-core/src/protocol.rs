@@ -7,9 +7,14 @@
 //! crosses is a plain value.
 
 use interweave_human_chat_protocol::HumanChatV2;
-use interweave_human_client_api::{ClientEvent, Destination, Diagnostics, Received, SendError};
+use interweave_human_client_api::{
+    ClientEvent, Destination, Diagnostics, Received, SendError, TrustList, TrustProblem,
+    TrustSetFailure,
+};
 use interweave_human_store::RowId;
-use interweave_human_ui_model::{ConversationKey, ItemKey, ListedInbound, ListedOutbound, Table};
+use interweave_human_ui_model::{
+    ConversationKey, ItemKey, ListedInbound, ListedOutbound, Table, TrustChange,
+};
 
 /// A person's intent, resolved by the model, for the facade side to carry
 /// out against the facade and the store.
@@ -42,6 +47,10 @@ pub enum Command {
     Reopen,
     /// Re-check storage now.
     RecheckStorage,
+    /// Read the trust allowlist.
+    ReadTrust,
+    /// Make a trust change the person confirmed.
+    SetTrust(TrustChange),
 }
 
 /// The store's rows at start, decoded for the model.
@@ -116,6 +125,17 @@ pub enum Update {
     },
     /// A kept row was unkept.
     Unkept(RowId),
+    /// The daemon's answer to reading the trust allowlist. A failure is
+    /// the settings view's to say, not a command's: the command is `Done`.
+    TrustRead(Result<TrustList, TrustProblem>),
+    /// The daemon's answer to a trust change: the allowlist read back, or
+    /// why not and whether the change was made.
+    TrustSet {
+        /// The change.
+        change: TrustChange,
+        /// The answer.
+        answer: Result<TrustList, TrustSetFailure>,
+    },
     /// A command finished. Every command ends with this or `Failed`, so
     /// the model side can offer the same action again.
     Done(Command),
