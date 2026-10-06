@@ -691,6 +691,17 @@ impl ConnectionPolicy {
         self.peers.get(peer)
     }
 
+    /// The latest moment any of `peer`'s addresses stays quarantined, if
+    /// one is quarantined at `now_ms`. Reads only `peer`'s own keys.
+    #[must_use]
+    pub fn quarantined_until(&self, peer: &TransportIdentity, now_ms: u64) -> Option<u64> {
+        self.addresses
+            .range((peer.clone(), String::new())..)
+            .take_while(|((p, _), _)| p == peer)
+            .filter_map(|(_, state)| state.quarantined_until_ms.filter(|until| now_ms < *until))
+            .max()
+    }
+
     /// Forget `peer`'s peer-scoped backoff, keeping every address record.
     ///
     /// For a peer that has just shown itself up -- an inbound connection

@@ -1368,11 +1368,15 @@ impl ConnectionManager {
     /// cannot dial at all -- is [`Self::record_permanent_failure`], and
     /// answering "will retrying help" is the caller's job because only
     /// the backend knows which `DialError` it received.
-    pub fn record_failure(&mut self, ticket: DialTicket, now_ms: u64) {
+    ///
+    /// Returns the retry it scheduled, for the caller to report, or `None`
+    /// when it scheduled none: a ticket not issued here, a placeholder,
+    /// or a hole-punch dial.
+    pub fn record_failure(&mut self, ticket: DialTicket, now_ms: u64) -> Option<RetryScheduled> {
         let now_ms = ticket.settled_at(now_ms);
         self.observe(now_ms);
         if !self.issued_here(&ticket) {
-            return;
+            return None;
         }
         // A PLACEHOLDER NAMES NO ROUTE. A behaviour dial is admitted
         // with an empty address (F9) and rebound to the real one at the
@@ -1384,7 +1388,7 @@ impl ConnectionManager {
         if ticket.address().is_empty() {
             self.settle(ticket);
             self.publish();
-            return;
+            return None;
         }
         // A HOLE-PUNCH DIAL IS NOT A ROUTE. Its address is a candidate
         // the far end named for THIS attempt -- a NAT mapping, a port
@@ -1404,8 +1408,9 @@ impl ConnectionManager {
         if ticket.origin() == DialOrigin::DcutrHolePunch {
             self.settle(ticket);
             self.publish();
-            return;
+            return None;
         }
+        let mut scheduled = None;
         if let Some(peer) = ticket.peer().cloned() {
             // ONE delay, used for both. The address-scoped backoff and
             // the reconnect schedule disagreeing would mean the manager
@@ -1414,8 +1419,9 @@ impl ConnectionManager {
             // another failure -- a peer talking itself into permanent
             // backoff without the remote end doing anything.
             let delay = self.retry_delay_ms(&peer);
-            self.policy
-                .record_address_failure(&peer, ticket.address(), now_ms, delay);
+            let peer_backoff =
+                self.policy
+                    .record_address_failure(&peer, ticket.address(), now_ms, delay);
             // REMEMBER THE ADDRESS WE JUST TRIED, or the retry we are
             // about to schedule has nothing to dial.
             //
@@ -1449,10 +1455,16 @@ impl ConnectionManager {
             // claiming exists to prevent.
             let held_by_another = !ticket.owns_scheduler_claim()
                 && self.retries.get(&peer).is_some_and(|entry| entry.claimed);
-            self.schedule_retry(peer, now_ms, delay, held_by_another);
+            let attempt = self.schedule_retry(peer, now_ms, delay, held_by_another);
+            scheduled = Some(RetryScheduled {
+                attempt,
+                delay_ms: delay,
+                peer_backoff,
+            });
         }
         self.settle(ticket);
         self.publish();
+        scheduled
     }
 
     /// Score an address-scoped failure with no ticket and no admission.
@@ -2040,7 +2052,14 @@ impl ConnectionManager {
 
     /// `claimed` carries a claim forward that this failure did not own;
     /// see [`Self::record_failure`].
-    fn schedule_retry(&mut self, peer: TransportIdentity, now_ms: u64, delay: u64, claimed: bool) {
+    /// Returns the attempt number the retry will be.
+    fn schedule_retry(
+        &mut self,
+        peer: TransportIdentity,
+        now_ms: u64,
+        delay: u64,
+        claimed: bool,
+    ) -> u32 {
         let attempts = self.retries.get(&peer).map_or(0, |r| r.attempts);
 
         if !self.retries.contains_key(&peer) && self.retries.len() >= self.max_retry_entries {
@@ -2058,15 +2077,58 @@ impl ConnectionManager {
             }
         }
 
+        let attempt = attempts.saturating_add(1);
         self.retries.insert(
             peer,
             Retry {
                 due_at_ms: now_ms.saturating_add(delay),
-                attempts: attempts.saturating_add(1),
+                attempts: attempt,
                 claimed,
             },
         );
+        attempt
     }
+
+    /// What the gate holds against `peer` at `now_ms`, for diagnostics:
+    /// its peer-scoped backoff, its latest live address quarantine and its
+    /// scheduled retry. Times only -- no address leaves the manager.
+    #[must_use]
+    pub fn peer_gate_state(&self, peer: &TransportIdentity, now_ms: u64) -> PeerGateState {
+        PeerGateState {
+            backoff_until_ms: self
+                .policy
+                .peer(peer)
+                .and_then(|b| b.until_ms)
+                .filter(|until| now_ms < *until),
+            quarantined_until_ms: self.policy.quarantined_until(peer, now_ms),
+            retry_due_at_ms: self.retries.get(peer).map(|r| r.due_at_ms),
+        }
+    }
+}
+
+/// A retry [`ConnectionManager::record_failure`] scheduled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryScheduled {
+    /// Which retry this will be: 1 for the first after a run of successes.
+    pub attempt: u32,
+    /// How long until it is due.
+    pub delay_ms: u64,
+    /// Whether the failure also put the peer itself in backoff, which it
+    /// does only when no other known-good address remains.
+    pub peer_backoff: bool,
+}
+
+/// The gate's hold on one peer, as [`ConnectionManager::peer_gate_state`]
+/// reports it. Every field is `None` for a peer the gate holds nothing
+/// against.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PeerGateState {
+    /// Dials to the peer are refused until then.
+    pub backoff_until_ms: Option<u64>,
+    /// At least one of the peer's addresses is quarantined until then.
+    pub quarantined_until_ms: Option<u64>,
+    /// The scheduled retry comes due then.
+    pub retry_due_at_ms: Option<u64>,
 }
 
 /// `CONNECTIVITY.md`'s first retry delay for a peer not yet verified:
@@ -3307,6 +3369,68 @@ mod tests {
     }
 
     #[test]
+    fn a_failure_reports_the_retry_it_scheduled_and_the_gate_state_follows() {
+        let mut m = manager(8);
+        assert_eq!(m.peer_gate_state(&peer(P1), 0), PeerGateState::default());
+        let t = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 0)
+            .expect("admitted");
+        assert_eq!(
+            m.record_failure(t, 0),
+            Some(RetryScheduled {
+                attempt: 1,
+                delay_ms: 30_000,
+                peer_backoff: true
+            })
+        );
+        assert_eq!(
+            m.peer_gate_state(&peer(P1), 1_000),
+            PeerGateState {
+                backoff_until_ms: Some(30_000),
+                quarantined_until_ms: None,
+                retry_due_at_ms: Some(30_000),
+            }
+        );
+        let t = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 30_000)
+            .expect("past the backoff");
+        assert_eq!(
+            m.record_failure(t, 30_000),
+            Some(RetryScheduled {
+                attempt: 2,
+                delay_ms: 60_000,
+                peer_backoff: true
+            })
+        );
+        // A quarantine is reported by its own deadline, and lapses.
+        let q = m
+            .handle()
+            .load()
+            .admit(&request(P2, "/q"), 0)
+            .expect("admitted");
+        assert!(m.record_identity_mismatch(q, 0));
+        let held = m.peer_gate_state(&peer(P2), 1_000);
+        assert_eq!(held.quarantined_until_ms, Some(30 * 60 * 1_000));
+        assert_eq!(held.backoff_until_ms, None, "a mismatch is not a backoff");
+        assert_eq!(
+            m.peer_gate_state(&peer(P2), 30 * 60 * 1_000)
+                .quarantined_until_ms,
+            None
+        );
+        // A hole-punch dial schedules nothing and says so.
+        let punch = m
+            .handle()
+            .load()
+            .admit(&request_at(P2, "/p", DialOrigin::DcutrHolePunch), 0)
+            .expect("admitted");
+        assert_eq!(m.record_failure(punch, 0), None);
+    }
+
+    #[test]
     fn a_success_clears_the_retry_and_republishes() {
         let mut m = manager(8);
         let t = m
@@ -3536,7 +3660,9 @@ mod tests {
             .admit(&request(P1, "/ip4/198.51.100.1/tcp/1"), 0)
             .expect("admitted");
         assert_eq!(
-            held_at_install(&mut m, |m| m.record_failure(ticket, 0)),
+            held_at_install(&mut m, |m| {
+                let _ = m.record_failure(ticket, 0);
+            }),
             Some(1),
             "the settled ticket's unit is held until the install"
         );
