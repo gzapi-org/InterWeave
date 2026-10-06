@@ -16,7 +16,15 @@
 #
 #   * the Actions component on githubstatus.com — unauthenticated, so it
 #     answers even when the token is the problem;
-#   * whether the INCLUDED Actions allowance is already spent.
+#   * whether the INCLUDED Actions allowance is already spent — counted
+#     over the current billing month and the organisation's PRIVATE
+#     repositories only, the minutes the allowance covers.
+#
+#     Run from a PUBLIC repository (InterWeave is one), the second check
+#     cannot hold a run: its runs on GitHub-hosted runners bill nothing
+#     and draw on no allowance. The answer says so, quotes the private
+#     repositories' usage as context, and exits 0 unless the platform is
+#     down.
 #
 #     The billing API reports usage, never the plan's limit, so the limit
 #     is CONFIGURED, not discovered: $INTERWEAVE_ACTIONS_INCLUDED_MINUTES,
@@ -49,7 +57,8 @@
 #   tools/gh/actions-health.sh --included N # override the configured allowance
 #
 # Exit codes:
-#   0  healthy — Actions operational and the allowance not exhausted
+#   0  healthy — Actions operational and the allowance not exhausted,
+#      or this repository is public (its runs cost nothing)
 #   1  degraded — spending minutes now is likely wasted (reason on stdout)
 #   2  invocation problem, or neither source could be read
 #
@@ -66,6 +75,20 @@ INCLUDED="${INTERWEAVE_ACTIONS_INCLUDED_MINUTES:-}"
 
 die() { echo "actions-health: $*" >&2; exit 2; }
 
+# The names, as a JSON array, of the repositories in a usage payload that
+# are PRIVATE — the only ones whose minutes count toward the included
+# allowance. One lookup per distinct repositoryName; a lookup that fails
+# keeps the repository (counted — the conservative side).
+private_repos_json() {
+    local org="$1" usage="$2" name priv out="[]"
+    while read -r name; do
+        [[ -n "$name" ]] || continue
+        priv="$(gh api "repos/$org/$name" --jq '.private' 2>/dev/null || echo "true")"
+        [[ "$priv" == "false" ]] || out="$(jq -c --arg n "$name" '. + [$n]' <<<"$out")"
+    done < <(printf '%s' "$usage" | jq -r '[.usageItems[]? | select(.product == "actions") | .repositoryName // empty] | unique | .[]' 2>/dev/null)
+    printf '%s' "$out"
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --org)   ORG="${2:-}"; [[ -n "$ORG" ]] || die "--org needs a value"; shift 2 ;;
@@ -75,7 +98,9 @@ while [[ $# -gt 0 ]]; do
             shift 2 ;;
         --quiet) QUIET=1; shift ;;
         -h|--help)
-            sed -n '3,46p' "$0" | sed 's/^# \{0,1\}//'
+            # The whole header comment, however long it grows: a fixed
+            # line range had already cut the usage and the exit codes.
+            awk 'NR > 3 && !/^#/ { exit } NR > 3 { sub(/^# ?/, ""); print }' "$0"
             exit 0 ;;
         *) die "unknown option: $1 (try --help)" ;;
     esac
@@ -126,19 +151,51 @@ fi
 if command -v gh >/dev/null 2>&1; then
     [[ -n "$ORG" ]] || ORG="$(gh repo view --json owner -q .owner.login 2>/dev/null || true)"
     if [[ -n "$ORG" ]]; then
-        usage="$(gh api "/organizations/$ORG/settings/billing/usage" 2>/dev/null || true)"
+        # THIS REPOSITORY'S VISIBILITY decides whether billing can say
+        # anything about a run here. A public repository's runs on
+        # GitHub-hosted runners bill nothing and draw on no allowance,
+        # so the organisation's spend — another repository's — is
+        # context, never a reason to hold a run here. Reported as
+        # "$87 billing as overage, every further minute is money", it
+        # held a reviewed InterWeave PR whose run billed 0 ms (#194,
+        # 2026-10-06). A visibility that cannot be read is private: the
+        # conservative side, the answer before this existed.
+        public=""
+        [[ "$(gh repo view --json isPrivate -q .isPrivate 2>/dev/null || true)" == "false" ]] && public="yes"
+        # THE CURRENT BILLING MONTH, and only it. Unfiltered, the usage
+        # endpoint returns per-month items for more than one period —
+        # after a rollover, last month's rows sit beside this month's —
+        # and a sum across everything reported two months as "this
+        # period" (gzapp's copy, 5c735d88f). The request names the month
+        # (UTC, which is what the billing dates are), and the sum keeps
+        # only rows dated in it, so a server that ignored the parameters
+        # could not put the previous month back.
+        period="$(date -u +%Y-%m)"
+        usage="$(gh api "/organizations/$ORG/settings/billing/usage?year=${period%-*}&month=$((10#${period#*-}))" 2>/dev/null || true)"
         if [[ -n "$usage" ]]; then
             reachable=1
             # THE MINUTE SKU, not every Actions charge. `mins` already
             # filters on unitType, so summing netAmount across the whole
             # product compared two different things: a billed Actions
             # STORAGE line would read as "runner overage is being paid
-            # for" while minute runners had actually stopped.
+            # for" while minute runners had actually stopped. A row with
+            # no date at all is counted: the filter excludes OTHER months,
+            # it does not demand a field older payloads may lack.
+            # PRIVATE repositories only. The included minutes cover
+            # private repositories; a public repository's minutes are
+            # free and ride in the same payload with a discountAmount
+            # equal to their grossAmount. Summed in, they read as
+            # allowance spent while every job runs (gzapp's copy,
+            # fda5604d9: 51 049 of 50 000 reported with the private
+            # repositories at 42 406). Each repositoryName is looked up
+            # once; one that cannot be read counts (the conservative
+            # side); a row with no repositoryName counts (older payloads).
+            priv="$(private_repos_json "$ORG" "$usage")"
             net="$(printf '%s' "$usage" \
-                | jq -r '[.usageItems[]? | select(.product == "actions" and (.unitType == "Minutes")) | .netAmount] | add // 0' \
+                | jq -r --arg p "$period" --argjson priv "$priv" '[.usageItems[]? | select(.product == "actions" and (.unitType == "Minutes") and (((.date // $p) | tostring)[0:7] == $p) and (.repositoryName as $r | ($r == null) or ($priv | index($r) != null))) | .netAmount] | add // 0' \
                 2>/dev/null || echo 0)"
             mins="$(printf '%s' "$usage" \
-                | jq -r '[.usageItems[]? | select(.product == "actions" and (.unitType == "Minutes")) | .quantity] | add // 0' \
+                | jq -r --arg p "$period" --argjson priv "$priv" '[.usageItems[]? | select(.product == "actions" and (.unitType == "Minutes") and (((.date // $p) | tostring)[0:7] == $p) and (.repositoryName as $r | ($r == null) or ($priv | index($r) != null))) | .quantity] | add // 0' \
                 2>/dev/null || echo 0)"
 
             # A NONZERO net IS NOT A BLOCK, and reading it as one halted
@@ -155,6 +212,12 @@ if command -v gh >/dev/null 2>&1; then
             # billed. Billed overage is reported as a COST instead.
             billed=""
             awk -v n="$net" 'BEGIN { exit !(n > 0) }' && billed="yes"
+
+            # A public repository: nothing above applies to a run here.
+            if [[ -n "$public" ]]; then
+                say "OK — ${ops_phrase}; this repository is public, so its runs bill nothing and draw on no allowance. (The organisation's private repositories: ${mins} minutes this period${billed:+, \$${net} billing as overage}.)"
+                exit 0
+            fi
 
             # No allowance configured: usage alone cannot say what is left,
             # so report the usage and decline to guess at the remainder.
@@ -207,5 +270,9 @@ if [[ "$reachable" -eq 0 ]]; then
     die "could not read githubstatus.com or the billing API — health unknown"
 fi
 
+if [[ -n "${public:-}" ]]; then
+    say "OK — ${ops_phrase}; this repository is public, so its runs bill nothing. (Billing API unreadable.)"
+    exit 0
+fi
 say "OK — ${ops_phrase}. (Allowance not checked: billing API unreadable.)"
 exit 0

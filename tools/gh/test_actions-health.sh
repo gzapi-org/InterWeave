@@ -3,7 +3,9 @@
 # Copyright 2026 Andrea Benetton
 # tools/gh/test_actions-health.sh
 #
-# Behavioural tests for actions-health.sh.
+# Behavioural tests for actions-health.sh: the platform status, the
+# allowance (this month, private repositories only), and a public
+# repository's runs, which no billing figure can hold.
 #
 # The value of this tool is a decision — spend minutes, or don't — so
 # what matters is that each state produces the RIGHT exit code, and in
@@ -47,6 +49,11 @@ assert_lacks() {
     if [[ "$RUN_OUT" != *"$2"* ]]; then pass "$1"
     else fail "$1 — output unexpectedly contained '$2'" "$RUN_OUT"; fi
 }
+assert_requested() {
+    local req; req="$(cat "$SANDBOX/state/last_request" 2>/dev/null || true)"
+    if [[ "$req" == *"$2"* ]]; then pass "$1"
+    else fail "$1 — request lacked '$2'" "$req"; fi
+}
 
 SANDBOX="$(mktemp -d)"
 mkdir -p "$SANDBOX/bin" "$SANDBOX/state"
@@ -70,20 +77,56 @@ printf ']}\n'
 CURLMOCK
 chmod +x "$SANDBOX/bin/curl"
 
-# gh: repo owner + billing usage, both from fixtures.
+# gh: repo owner, this repository's visibility, other repositories'
+# visibility, and billing usage — all from fixtures.
 cat > "$SANDBOX/bin/gh" <<'GHMOCK'
 #!/usr/bin/env bash
 set -uo pipefail
-if [[ "${1:-}" == "repo" ]]; then echo "testorg"; exit 0; fi
+if [[ "${1:-}" == "repo" ]]; then
+  # THIS repository's visibility: private unless this_repo_public is set;
+  # this_repo_unreadable makes the lookup fail as a network error would.
+  if [[ " $* " == *" isPrivate "* ]]; then
+    [[ -f "$MOCK_STATE/this_repo_unreadable" ]] && exit 1
+    [[ -f "$MOCK_STATE/this_repo_public" ]] && { echo false; exit 0; }
+    echo true; exit 0
+  fi
+  echo "testorg"; exit 0
+fi
+if [[ "${1:-}" == "api" && "${2:-}" == repos/* ]]; then
+  # Another repository's visibility: public_repos names the public ones;
+  # every other name is private; an unknown one is a 404 (gh prints the
+  # error to stdout and exits 1, as the real CLI does).
+  name="${2##*/}"
+  if grep -qx "$name" "$MOCK_STATE/public_repos" 2>/dev/null; then echo false; exit 0; fi
+  if grep -qx "$name" "$MOCK_STATE/unknown_repos" 2>/dev/null; then echo '{"message":"Not Found","status":"404"}'; exit 1; fi
+  # A lookup that fails with nothing on stdout (a dropped connection):
+  # only the script's own fallback decides what it counts as.
+  if grep -qx "$name" "$MOCK_STATE/silent_repos" 2>/dev/null; then exit 1; fi
+  echo true; exit 0
+fi
 if [[ "${1:-}" == "api" ]]; then
   [[ -f "$MOCK_STATE/billing_unreadable" ]] && exit 1
+  # The request line, so a test can prove the month is named on it.
+  printf '%s\n' "${2:-}" > "$MOCK_STATE/last_request"
   net="$(cat "$MOCK_STATE/billing_net" 2>/dev/null || echo 0)"
   mins="$(cat "$MOCK_STATE/billing_mins" 2>/dev/null || echo 100)"
   # A second Actions line billed in a DIFFERENT unit. Storage is an
   # Actions charge that is not runner minutes, and summing netAmount
   # across the product read it as minute overage.
   stor="$(cat "$MOCK_STATE/billing_storage_net" 2>/dev/null || echo 0)"
-  printf '{"usageItems":[{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":%s,"netAmount":%s},{"product":"actions","sku":"Actions Storage","unitType":"GigabyteHours","quantity":10,"netAmount":%s}]}\n' "$mins" "$net" "$stor"
+  # Rows carry the month they bill for, as the real endpoint's do. The
+  # PREVIOUS month's row (billed, as an overage month would be) is what
+  # the endpoint hands back beside the current one after a rollover.
+  this_month="$(date -u +%Y-%m)-01"
+  prev_month="$(date -u -d "$(date -u +%Y-%m-01) -1 day" +%Y-%m)-01"
+  prev_mins="$(cat "$MOCK_STATE/billing_prev_mins" 2>/dev/null || echo 0)"
+  prev_net="$(cat "$MOCK_STATE/billing_prev_net" 2>/dev/null || echo 0)"
+  # A PUBLIC repository's minute row rides beside the private one when
+  # billing_public_mins is set: GitHub lists it in the same payload and
+  # never counts it toward the included allowance.
+  public_mins="$(cat "$MOCK_STATE/billing_public_mins" 2>/dev/null || echo 0)"
+  printf '{"usageItems":[{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":%s,"netAmount":%s,"date":"%s","repositoryName":"privrepo"},{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":%s,"netAmount":%s,"date":"%s","repositoryName":"privrepo"},{"product":"actions","sku":"Actions Linux","unitType":"Minutes","quantity":%s,"netAmount":0,"date":"%s","repositoryName":"openrepo"},{"product":"actions","sku":"Actions Storage","unitType":"GigabyteHours","quantity":10,"netAmount":%s,"date":"%s","repositoryName":"privrepo"}]}\n' \
+    "$mins" "$net" "$this_month" "$prev_mins" "$prev_net" "$prev_month" "$public_mins" "$this_month" "$stor" "$this_month"
   exit 0
 fi
 exit 1
@@ -120,6 +163,88 @@ invoke
 assert_rc       "exits 0"                0
 assert_contains "says OK"                "OK — Actions operational"
 assert_contains "quotes the minutes"     "100 minutes used"
+
+echo "actions-health: the previous month's minutes are not this period's"
+# Unfiltered, the usage endpoint returns last month's rows beside this
+# month's after a rollover; summed, two months read as one period, and
+# last month's billed overage read as money moving now.
+reset
+printf '3000\n' > "$SANDBOX/state/billing_mins"
+printf '900\n'  > "$SANDBOX/state/billing_prev_mins"
+invoke_with 3500
+assert_rc        "exits 0 — this month alone is under the allowance" 0
+assert_contains  "quotes this month only"         "3000 of 3500 minutes used"
+assert_lacks     "never adds the previous month"  "3900 of"
+assert_requested "names the year on the request"  "year=$(date -u +%Y)"
+assert_requested "names the month on the request" "month=$(date -u +%-m)"
+reset
+printf '87.384\n' > "$SANDBOX/state/billing_prev_net"
+printf '5000\n'   > "$SANDBOX/state/billing_prev_mins"
+invoke
+assert_rc        "last month's billed overage is not a cost now: exits 0" 0
+assert_lacks     "and is not quoted as billing"   "billing as overage"
+
+echo "actions-health: a PUBLIC repository's minutes do not count toward the allowance"
+reset
+printf '42406\n' > "$SANDBOX/state/billing_mins"
+printf '8613\n'  > "$SANDBOX/state/billing_public_mins"
+printf 'openrepo\n' > "$SANDBOX/state/public_repos"
+invoke_with 50000
+assert_rc        "exits 0 — the private repositories are under the allowance" 0
+assert_contains  "quotes the private sum only"      "42406 of 50000 minutes used"
+assert_lacks     "never adds the public repository" "51019 of"
+reset
+printf '42406\n' > "$SANDBOX/state/billing_mins"
+printf '8613\n'  > "$SANDBOX/state/billing_public_mins"
+invoke_with 50000
+assert_rc        "the same minutes on a private repository exit 1" 1
+assert_contains  "and the sum includes them"        "51019 of 50000"
+reset
+printf '42406\n' > "$SANDBOX/state/billing_mins"
+printf '8613\n'  > "$SANDBOX/state/billing_public_mins"
+printf 'openrepo\n' > "$SANDBOX/state/unknown_repos"
+invoke_with 50000
+assert_rc        "a repository the lookup cannot read (404) is counted" 1
+reset
+printf '42406\n' > "$SANDBOX/state/billing_mins"
+printf '8613\n'  > "$SANDBOX/state/billing_public_mins"
+printf 'openrepo\n' > "$SANDBOX/state/silent_repos"
+invoke_with 50000
+assert_rc        "a lookup that fails with no output is counted too" 1
+
+echo "actions-health: run from a PUBLIC repository, billing cannot hold a run"
+# #194 (2026-10-06): "$87 billing as overage, every further minute is
+# money" held a reviewed PR whose run billed 0 ms.
+reset
+touch "$SANDBOX/state/this_repo_public"
+printf '87.384\n' > "$SANDBOX/state/billing_net"
+printf '60000\n'  > "$SANDBOX/state/billing_mins"
+invoke
+assert_rc        "billed overage elsewhere, no allowance configured: exits 0" 0
+assert_contains  "says the repository is public"    "this repository is public, so its runs bill nothing"
+assert_contains  "quotes the private usage as context" "60000 minutes this period, \$87.384 billing as overage"
+assert_lacks     "never DEGRADED"                   "DEGRADED"
+invoke_with 50000
+assert_rc        "past the allowance and billed: still exits 0" 0
+printf '0\n' > "$SANDBOX/state/billing_net"
+invoke_with 50000
+assert_rc        "past the allowance and NOT billed: still exits 0 (no allowance is drawn here)" 0
+assert_contains  "and quotes the usage without a cost" "60000 minutes this period.)"
+printf 'major_outage\n' > "$SANDBOX/state/actions_status"
+invoke
+assert_rc        "a degraded platform still stops the work" 1
+assert_contains  "and names it"                      "major_outage"
+reset
+touch "$SANDBOX/state/this_repo_public" "$SANDBOX/state/billing_unreadable"
+invoke
+assert_rc        "billing unreadable: still answers, exits 0" 0
+assert_contains  "and says why it can"               "this repository is public, so its runs bill nothing. (Billing API unreadable.)"
+reset
+touch "$SANDBOX/state/this_repo_unreadable"
+printf '87.384\n' > "$SANDBOX/state/billing_net"
+invoke
+assert_rc        "a visibility that cannot be read is private: billed exits 1" 1
+assert_contains  "with the cost line"                "billing as overage"
 
 echo "actions-health: a degraded Actions component stops the work"
 reset
