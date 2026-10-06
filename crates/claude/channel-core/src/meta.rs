@@ -168,14 +168,16 @@ impl ChannelMeta {
         Ok(())
     }
 
-    /// The value under `key`, if set.
+    /// The value under `key`, if set. Tests' only: the server serializes
+    /// `meta` and never reads it back.
+    #[cfg(test)]
     #[must_use]
-    pub fn get(&self, key: MetaKey) -> Option<&str> {
+    pub(crate) fn get(&self, key: MetaKey) -> Option<&str> {
         self.values[key.index()].as_deref()
     }
 
     /// The keys set, with their values, in [`MetaKey::ALL`] order.
-    pub fn entries(&self) -> impl Iterator<Item = (&'static str, &str)> {
+    pub(crate) fn entries(&self) -> impl Iterator<Item = (&'static str, &str)> {
         MetaKey::ALL
             .iter()
             .zip(&self.values)

@@ -97,8 +97,6 @@ Refusal::to_wire                                 call  refusal.to_wire(
 
 # --- stage 16 -- the Claude bridge's pure half, called by its MCP
 # --- server (apps/claude-channel, plan section 19 step 3).
-ChannelMeta::entries                   stage-16  apps/claude-channel serializes a notification
-ChannelMeta::get                       stage-16  apps/claude-channel reads a notification's token
 
 # --- stage-9 -----------------------------------------------------
 # RE-DATED AT THE STAGE 9 CLOSURE, and the old reason was wrong rather
