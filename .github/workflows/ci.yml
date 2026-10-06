@@ -264,10 +264,12 @@ jobs:
       # had no cargo cache at all — every run re-downloaded the registry
       # and rebuilt each spike harness from nothing.
       #
-      # Keyed on the harness LOCK FILES, which carry the pinned revisions
+      # Keyed on EVERY spike LOCK FILE, which carry the pinned revisions
       # of this repository's own crates: a pin that moves changes the
       # lock, which changes the key, which is exactly when the rebuild
-      # should be paid. `restore-keys` on the prefix means an unrelated
+      # should be paid. Every lock, not only harness/: the guard below
+      # resolves and builds the phase-b and node crates too, and keyed on
+      # the harness locks alone their registry changes were never saved. `restore-keys` on the prefix means an unrelated
       # lock change warms from the previous build rather than starting
       # cold; cargo rebuilds only what actually differs.
       #
@@ -302,7 +304,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.CARGO_CACHE_PATHS }}
-          key: tree-checks-cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'spikes/*/harness/Cargo.lock') }}
+          key: tree-checks-cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'spikes/**/Cargo.lock') }}
           restore-keys: |
             tree-checks-cargo-${{ runner.os }}-
 
