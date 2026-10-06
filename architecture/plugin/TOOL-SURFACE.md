@@ -91,6 +91,8 @@ transport_health
 
 `joined_channels` and `profile_desired_channels` remain distinct. A profile-desired backend subscription does not authorize bridge broadcast or make it an inbound consumer.
 
+Where each comes from (A 2026-10-06, Stage 16 step 3): `local_peer_id` is the session's `local_peer` (`contracts/LOCAL-CLIENT.md` §2), learned at open. `profile_desired_channels` is read from the profile's non-secret configuration document through `profile-config` (`ProfileConfig::load` over the same `ProfilePaths` that give the data socket; the socket paths themselves need no document read) and is reported **as configured**: the profile document's statement, not the daemon's live subscription state, which nothing on the data plane reports. When that load fails, `status` reports the field as unknown with the load error's class, never as an empty list. `joined_channels` are the joins the bridge made through its join tool and nothing else: the bridge joins no channel by configuration, a reconnect re-takes exactly the joins it held, and a profile-desired subscription confers no bridge membership.
+
 ## Tool results
 
 Wording must be exact:
