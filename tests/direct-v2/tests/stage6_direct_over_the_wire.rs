@@ -2187,3 +2187,91 @@ async fn a_held_send_whose_endpoint_was_revoked_meanwhile_never_reaches_the_wire
         receiver.shutdown().await.expect("clean shutdown");
     }
 }
+
+/// A send to a peer whose every address is quarantined is held off by
+/// the gate: `PeerUnreachable` at once, reported as the quarantine, not
+/// as an empty book (`CONNECTIVITY.md` §12; #208 review F2). The first
+/// send is the control: its dial is made, and the identity mismatch it
+/// meets is what quarantines the address.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_send_to_a_peer_whose_every_address_is_quarantined_is_reported_as_the_quarantine() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let (sender_id, sender_peer) = who();
+    let (answering_id, answering_peer) = who();
+    let (_expected_id, expected) = who();
+    let mut sender = SwarmRuntime::start(
+        &sender_id,
+        SubstrateConfig::default(),
+        trusting(&[&expected]),
+    )
+    .expect("the sender starts");
+    sender
+        .configure_direct(endpoints(8))
+        .await
+        .expect("endpoints install");
+    let leases = claim_all(&sender, &["human", "claude"]).await;
+    let _ = sender
+        .listen(format!("/ip4/{ip}/tcp/0").parse().expect("valid"))
+        .await
+        .expect("the sender listens");
+    // Another identity answers at the address the sender holds for
+    // `expected`.
+    let answering = SwarmRuntime::start(
+        &answering_id,
+        SubstrateConfig::default(),
+        trusting(&[&sender_peer]),
+    )
+    .expect("starts");
+    let address = answering
+        .listen(format!("/ip4/{ip}/tcp/0").parse().expect("valid"))
+        .await
+        .expect("listens");
+    assert_ne!(answering_peer, expected);
+    assert_eq!(
+        sender
+            .learn(expected.clone(), [address.to_string()])
+            .await
+            .expect("delivered"),
+        1
+    );
+
+    let mut events = Vec::new();
+    for id in [131, 132] {
+        let answer = sender
+            .send_direct(
+                &leases["human"],
+                expected.clone(),
+                frame(Some("claude"), b"quarantine", id),
+            )
+            .await
+            .expect("delivered");
+        assert_eq!(answer, Err(TransportError::PeerUnreachable));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match tokio::time::timeout(remaining, sender.next_event()).await {
+                Ok(Some(SwarmEvent::DialFailed {
+                    peer: Some(p),
+                    class,
+                    ..
+                })) if p == expected => {
+                    events.push(class);
+                    break;
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => panic!("the sender stopped"),
+                Err(elapsed) => panic!("no DialFailed for send {id} ({elapsed}): {events:?}"),
+            }
+        }
+    }
+    assert_eq!(
+        events,
+        vec![
+            DialFailureClass::IdentityMismatch,
+            DialFailureClass::Denied(interweave_transport_runtime::DialDenial::AddressQuarantined),
+        ],
+        "the first send's dial meets the mismatch; the second is held by the quarantine"
+    );
+    sender.shutdown().await.expect("clean shutdown");
+    answering.shutdown().await.expect("clean shutdown");
+}
