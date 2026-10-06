@@ -5,7 +5,7 @@ topic: "review-dispatch-shape-in-interweave"
 description: "Blind review dispatch here: subagent_type code-review, model fable, lowercase description starting \"review\"/\"re-review\", no isolation -- opus is refused since the fabric's 2026-09-25 guard change (it was the reverse before)"
 tier: 1
 knowledge_scope: full
-distilled_at: "2026-09-26"
+distilled_at: "2026-10-05"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"
@@ -13,6 +13,7 @@ origin:
     working_copy: interweave
 derived_from:
   - 67b5fb746cad364c
+  - 88b7eb81b6b84da8
 ---
 
 ## Blind review dispatch here: subagent_type code-review, model fable, lowercase description starting "review"/"re-review", no isolation -- opus is refused since the fabric's 2026-09-25 guard change (it was the reverse before)
@@ -31,7 +32,7 @@ real model comes from its agent file, gated by
 
 **How to apply:** `Agent(subagent_type: "code-review", model: "fable",
 description: "review <what>")`, no isolation, prompt pointing at a brief
-rendered by `bin/fabric-review brief`; post the report with
+rendered by `fabric-review brief`; post the report with
 `tools/gh/post-review.sh <n>` (the only reviewer since #114). If the guard
 message changes again, the refusal text names the rule to follow.
 

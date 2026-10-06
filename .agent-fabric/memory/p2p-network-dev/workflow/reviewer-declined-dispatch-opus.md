@@ -2,10 +2,10 @@
 role: "p2p-network-dev"
 class: workflow
 topic: "reviewer-declined-dispatch-opus"
-description: "Correction to workflow/reviewer-declined-dispatch-opus.md: there is no automated reviewer; the review class's blind review, posted with post-review.sh, is the review"
+description: "The review is the review class's blind review of the current head, posted with post-review.sh; there is no automated reviewer to request or wait for"
 tier: 1
 knowledge_scope: full
-distilled_at: "2026-09-26"
+distilled_at: "2026-10-05"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"
@@ -17,26 +17,27 @@ origin:
     working_copy: InterWeave
 derived_from:
   - 0fdbb0d12e948ad0
+  - 2957e5cb05b94060
   - d4c06fb7437ba6ab
 ---
 
-## Correction to workflow/reviewer-declined-dispatch-opus.md: there is no automated reviewer; the review class's blind review, posted with post-review.sh, is the review
+## The review is the review class's blind review of the current head, posted with post-review.sh; there is no automated reviewer to request or wait for
 
-Corrects `.agent-fabric/memory/p2p-network-dev/workflow/reviewer-declined-dispatch-opus.md`
-(line 22 and the section it heads). Since InterWeave PR #114 merged (1cde0049,
-2026-09-25) the automated reviewer is retired: nothing is requested with
-`@codex review`, and `tools/gh/pr-review-status.sh` forwards to agent-fabric's
-`runtime/github/pr-review-status.sh`, which takes no `--automated-only`.
+Every PR head in InterWeave gets the review class's blind review: a `code-review`
+dispatch on `fable`, briefed with `fabric-review brief` (facts only, the exact
+`base..head`), no isolation, description beginning `review` or `re-review`. It is
+posted on the PR as a review object with `tools/gh/post-review.sh <n>`, and
+`tools/gh/pr-review-status.sh <n>` counts it on its `blind reviews` line against the
+head. A posted review of the current head with no open P1/P2 is the gate; a fix range
+is re-reviewed before the arm. The automated reviewer is retired (InterWeave #114,
+1cde0049, 2026-09-25): nothing asks `@codex review`, `--automated-only` does not
+exist, and anything that installation still posts unasked is a finding to judge,
+never coverage (#120 took one such P2 and fixed it, 795c0fc0).
 
-The rule now: every PR head gets the review class's blind review (`code-review`,
-briefed by `bin/fabric-review brief`), posted as a review object with
-`tools/gh/post-review.sh <n>`; that posted review of the current head with no
-open P1/P2 is the gate (CLAUDE.md §9 on main after #114).
-
-**Why:** the slice taught running two reviewers and reading the automated one's
-threads, and a non-zero `--automated-only` exit as the trigger; none of that
-exists now.
+**Why:** the section this replaces taught running two reviewers and reading a
+non-zero `--automated-only` exit as the trigger; neither exists since #114.
 **How to apply:** dispatch the review class on the finished head, post its report
-with post-review.sh, arm when it reports no P1/P2.
+with post-review.sh, fix and re-review, arm when the head's posted review has no
+open P1/P2 (and, on a security boundary, the owner has spoken).
 
-*Observed 2026-09-25 (p2p-network-dev)*
+*Observed 2026-09-26 (p2p-network-dev)*

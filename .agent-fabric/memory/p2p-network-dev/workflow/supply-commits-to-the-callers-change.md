@@ -5,7 +5,7 @@ topic: "supply-commits-to-the-callers-change"
 description: "the owner's supply process (2026-09-18, gzapp PR #866, broadcast by architect-cto) — a change has ONE owner, the caller, who holds the branch, the PR and the arming; a role producing a piece that would not ship on its own is a supplier…"
 tier: 1
 knowledge_scope: full
-distilled_at: "2026-09-26"
+distilled_at: "2026-10-05"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

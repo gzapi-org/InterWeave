@@ -5,7 +5,7 @@ topic: "push-before-describing-pr-state"
 description: "Never report a PR's commits, review coverage or arming readiness from the local log; push first, then read the remote"
 tier: 1
 knowledge_scope: full
-distilled_at: "2026-09-26"
+distilled_at: "2026-10-05"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

@@ -5,7 +5,7 @@ topic: "pr112-mdns-carry-to-rule-10"
 description: "what the next mDNS change (ADR-0053 rule 10) owes after #112 — accessor, refresh, and four carried P3s"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-09-26"
+distilled_at: "2026-10-05"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

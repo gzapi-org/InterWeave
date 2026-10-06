@@ -5,7 +5,7 @@ topic: "stage-11-step-9-path-preference"
 description: "Step 9 (path preference and stability) -- PR #103 queued 2026-09-19 at 593afe1 after 2 rounds (17 work commits); the retirement widened to any stable direct path; P3s carried to step 10's first commit"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-09-26"
+distilled_at: "2026-10-05"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

@@ -5,7 +5,7 @@ topic: "dns-wrap-reshapes-every-dial-error"
 description: "wrapping the base transport in libp2p-dns changes the error of EVERY dial, not only a name's — MultiaddrNotSupported stops arriving, so classify an undialable address by its own shape"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-09-26"
+distilled_at: "2026-10-05"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

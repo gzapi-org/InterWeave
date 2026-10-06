@@ -1,20 +1,33 @@
 ---
 role: "p2p-network-dev"
 class: threads
+topic: "threads-carried-2026-09-17"
 description: "Stage 11 current state — which PRs merged (#86, #85), what #84 waits on, the arming rule for a PR whose late rounds find only comment defects, and what is next"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-09-17"
+distilled_at: "2026-10-05"
 origin:
+  - agent: "p2p-network-dev-01"
+    host: "develop-qzapp"
+    project: interweave
+    working_copy: interweave
   - agent: user
     host: "develop-qzapp"
     project: interweave
     working_copy: InterWeave
 derived_from:
+  - 8f1c7690abd2beae
   - a7a5009bfed28ba6
 ---
 
-## Stage 11 current state — which PRs merged (#86, #85), what #84 waits on, the arming rule for a PR whose late rounds find only comment defects, and what is next
+## HISTORICAL — Stage 11 as of 2026-09-10: #86 and #85 merged, #84's integration by merge, the heads that day, and the arm-on-P1/P2-clear rule; steps 3 to 10 have all merged since
+
+HISTORICAL: this is Stage 11 as it stood on 2026-09-10, kept as the record of those
+rounds. It is not the current state — #84 and every later step (3 to 10) have merged,
+and the mDNS work of ADR-0053 landed in #120 (53cce603, 2026-09-26); read the plan's
+§14 and `[workspace.metadata.interweave].status` for where the stage is now. The gate
+it names (`--automated-only`, @codex) is superseded by #114.
+
 
 Stage 11 (mandatory Internet connectivity) as of 2026-09-10:
 
@@ -36,3 +49,7 @@ Stage 11 (mandatory Internet connectivity) as of 2026-09-10:
 The per-PR review-round record is [[stage-11-review-rounds]].
 
 *References: connectivity-constructor-gated-off, stage-11-review-rounds, stage-closure-needs-approval*
+
+*References: connectivity-constructor-gated-off, stage-11-review-rounds, stage-closure-needs-approval*
+
+*Observed 2026-09-26 (p2p-network-dev)*
