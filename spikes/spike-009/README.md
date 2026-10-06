@@ -106,11 +106,17 @@ The recorded run is [`device/REPRODUCTION-2026-10-06d.log`](./device/REPRODUCTIO
 
 **Two invalidation signals, both seen on this device:** `UnrecoverableKeyException` from `KeyStore.getKey` after a credential change (D6a, part 3), and `KeyPermanentlyInvalidatedException` from `Cipher.init` after a biometric enrollment (part 4). Recovery has to be entered on either.
 
-**Limit:** the per-operation key in part 4 was never used before the event. Its prompt went unanswered, so its pre-event health rests on its generation and `KeyInfo`, not on a completed unwrap. Part 3's per-operation key did complete one, and the same configuration is used here.
+**Limit:** neither part-4 key was used before the event. The per-operation key's prompt went unanswered, and the timed key was only generated, so their pre-event health rests on generation and `KeyInfo`. After the event the timed key was shown to wrap, not to unwrap. Part 3's per-operation key did complete one, and the same configuration is used here.
 
 ## The device half: the plan, as written before the run
 
-[`device/`](./device), above. This is the plan the run followed, kept as written; what was measured is in parts 1–4 above, and where they differ the parts are the record. Two of its expectations were not measured: the control field's IME-suggestion leak (only its flags were read) and the clipboard check. Results are written to app-private storage and read back over adb (`run-as`). The fixture seed is the TEST-ONLY public vector only.
+[`device/`](./device), above. This is the plan the run followed, kept as written; what was measured is in parts 1–4 above, and where they differ the parts are the record. Expectations of it that were not measured:
+- D5's mapping to the diagnostic `background_restart_requires_user_authentication`: only the exception was measured, and a process kill stood in for a service restart.
+- D6a's "the app enters recovery and never makes a new key over the profile silently": the harness has no recovery path; it records the invalidation and the control only.
+- D7's IME-suggestion leak under the control: only the flags were read.
+- D7's clipboard check: copy, cut and paste are refused by construction, not measured.
+- D7's saved-state and crash-artifact search: run over the app's own storage only, with no positive control (D7's "did not establish" list).
+- D6b's pre-event use of both part-4 keys (part 4's Limit). Results are written to app-private storage and read back over adb (`run-as`). The fixture seed is the TEST-ONLY public vector only.
 
 | id | what | recorded |
 |---|---|---|
