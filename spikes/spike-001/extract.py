@@ -12,6 +12,8 @@ paths, account and telemetry detail this public repository must not
 hold. Written into ``runs/<run-name>/``:
 
   stub.jsonl    the stub's own record, with tool-use ids replaced
+                (s16_run.py has no stub: the far peer's bridge record,
+                peer.jsonl, goes into evidence.md instead)
   evidence.md   from run.json: the command and knobs (paths replaced);
                 the model the session used; from the debug log, only the
                 lines about the stub's own MCP server; from the screen,
@@ -30,8 +32,10 @@ import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parent.parent
-# Only the stub's own server, under either name it gets.
-DEBUG_KEEP = re.compile(r'MCP server "(?:spike001|plugin:interweave-spike:spike001)"|\[channel\] (?:spike001|plugin:interweave-spike:spike001)')
+# Only the run's own server, under either name it gets: the stub's, or
+# the Stage 16 bridge's (s16_run.py).
+SERVERS = ("spike001", "plugin:interweave-spike:spike001", "interweave", "plugin:interweave:interweave")
+DEBUG_KEEP = re.compile(r'MCP server "(?:' + "|".join(map(re.escape, SERVERS)) + r')"|\[channel\] (?:' + "|".join(map(re.escape, SERVERS)) + r')\b')
 
 
 def redact(text: str) -> str:
@@ -58,7 +62,7 @@ def session_evidence(path: pathlib.Path) -> tuple:
                 # Only the stub's own entry: the same attachment lists the
                 # instructions of every other server the account loads.
                 ours = [(n, b) for n, b in zip(att.get("addedNames", []), att.get("addedBlocks", []))
-                        if n in ("spike001", "plugin:interweave-spike:spike001")]
+                        if n in SERVERS]
                 for name, block in ours:
                     lines += [f"**attachment, type `{att['type']}`, server `{name}`:**", "", *fenced(block)]
             continue
@@ -132,6 +136,10 @@ def main() -> int:
         kept, m = stream_json_evidence(text)
         models |= m
         lines += ["## Model output", "", *fenced(text if kept is None else "\n\n".join(kept))]
+
+    if (raw / "peer.jsonl").exists():
+        lines += ["## The far peer's bridge (daemon B): every line it wrote", "",
+                  *fenced((raw / "peer.jsonl").read_text())]
 
     if (raw / "validate.txt").exists():
         lines += ["## `claude plugin validate --strict` output", "", *fenced((raw / "validate.txt").read_text())]
