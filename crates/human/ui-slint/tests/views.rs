@@ -2082,3 +2082,70 @@ fn leaving_drops_a_waiting_change_and_a_non_peer_id_is_said() {
         "dropped, never made"
     );
 }
+
+/// Read is a retention act (RETENTION.md): a conversation the trust
+/// settings cover is not on screen, so nothing in it is read -- not a
+/// message arriving there, and not one selected in the list beside the
+/// settings, focused window or not.
+#[test]
+fn a_conversation_under_the_trust_settings_reads_nothing() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let (me, bob, carol) = (peer(), peer(), peer());
+    model.received(received(1, &bob, "seen before the settings"));
+    view.set_window_focused(true);
+    let read = open(&mut view, &mut model, &direct(&bob));
+    assert_eq!(
+        read,
+        vec![Intent::MarkRead(RowId::from_stored(1))],
+        "control: the open conversation is read"
+    );
+    // As the root does: the read is applied before the next turn.
+    model.read(RowId::from_stored(1));
+    trust_settings(&mut view, &mut model, &me, &[]);
+
+    model.received(received(2, &bob, "arrives under the settings"));
+    view.render(&model);
+    let raised = intents(&mut view, &mut model);
+    assert!(
+        !raised.contains(&Intent::MarkRead(RowId::from_stored(2))),
+        "an arrival under the settings is not read: {raised:?}"
+    );
+
+    view.set_window_focused(false);
+    view.set_window_focused(true);
+    let raised = intents(&mut view, &mut model);
+    assert!(raised.is_empty(), "nor does focus regained: {raised:?}");
+
+    // A conversation picked in the list beside the settings is shown in
+    // their place -- the waiting change dropped -- and only then read.
+    model.received(received(3, &carol, "selected from beside the settings"));
+    view.render(&model);
+    let _ = model
+        .trust_settings_mut()
+        .input(interweave_human_ui_model::TrustInput::EntryChanged(
+            carol.as_str().to_owned(),
+        ));
+    let _ = model
+        .trust_settings_mut()
+        .input(interweave_human_ui_model::TrustInput::ProposeAllow);
+    view.select(direct(&carol));
+    let raised = intents(&mut view, &mut model);
+    view.render(&model);
+    assert!(!view.window().get_trust_page(), "the settings closed");
+    assert_eq!(
+        model.trust_settings().pending(),
+        None,
+        "the waiting change dropped"
+    );
+    // The take that leaves the settings returns for the root to apply
+    // the cancel; the next resolves the view again, and the root's
+    // in-flight set sends one read per row (app-core).
+    assert!(
+        !raised.is_empty()
+            && raised
+                .iter()
+                .all(|i| *i == Intent::MarkRead(RowId::from_stored(3))),
+        "only the conversation now shown is read: {raised:?}"
+    );
+}

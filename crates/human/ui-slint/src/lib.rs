@@ -598,6 +598,12 @@ impl View {
             };
             match input {
                 Input::Select(key) => {
+                    // A conversation picked in the list beside the trust
+                    // settings is shown in their place: the settings close,
+                    // dropping a change still waiting, and only then is the
+                    // conversation on screen to read.
+                    let leaving = self.page == Page::Trust;
+                    self.page = Page::Conversation;
                     out.extend(
                         model
                             .conversation_viewed(&key, self.focused)
@@ -607,10 +613,14 @@ impl View {
                     self.shared.borrow_mut().selected = Some(key.clone());
                     self.shown = Some(key);
                     self.selection_unrendered = true;
+                    if leaving {
+                        out.push(ViewEvent::Trust(TrustInput::Cancel));
+                        return out;
+                    }
                 }
                 Input::Focus(focused) => {
                     self.focused = focused;
-                    if let Some(key) = &self.shown {
+                    if let Some(key) = self.on_screen() {
                         out.extend(
                             model
                                 .conversation_viewed(key, focused)
@@ -676,7 +686,7 @@ impl View {
         // focus and the conversation of this moment, so it can only read
         // less than the person's order would.
         let viewed = std::mem::take(&mut self.shared.borrow_mut().viewed);
-        if viewed && let Some(key) = &self.shown {
+        if viewed && let Some(key) = self.on_screen() {
             for intent in model.conversation_viewed(key, self.focused) {
                 // A focus gained or a selection in this same take may have
                 // read these already: one intent per row.
@@ -687,6 +697,16 @@ impl View {
             }
         }
         out
+    }
+
+    /// The conversation a person can see now: the one shown, unless the
+    /// trust settings cover it. Read is a retention act, so only this one
+    /// is ever read (`a_conversation_under_the_trust_settings_reads_nothing`).
+    fn on_screen(&self) -> Option<&ConversationKey> {
+        match self.page {
+            Page::Conversation => self.shown.as_ref(),
+            Page::Trust => None,
+        }
     }
 
     /// Show `model`. Lists are updated BY KEY -- a row's data replaced in
@@ -705,7 +725,7 @@ impl View {
         self.render_chrome(model);
         self.render_announcement(model);
         self.render_trust(model);
-        if let Some(key) = &self.shown {
+        if let Some(key) = self.on_screen() {
             let unread = model
                 .conversations()
                 .iter()
