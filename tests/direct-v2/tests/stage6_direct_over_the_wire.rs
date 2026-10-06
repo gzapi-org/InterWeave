@@ -1887,9 +1887,8 @@ async fn a_send_to_a_known_unconnected_peer_dials_once_and_is_accepted() {
 ///    a second send is `PeerUnreachable` at once, though a dial would
 ///    now succeed. The gate still decides (`CONNECTIVITY.md` §12).
 /// 3. The receiver dials in. The retained inbound lifts the backoff.
-/// 4. The receiver restarts, and a send dials and is accepted -- where
-///    step 2, the peer equally reachable, was refused. The difference is
-///    the inbound's reset.
+/// 4. The receiver restarts, and a send dials and is accepted. Step 3's
+///    gate row is what shows the reset; step 4 shows the send dialling.
 ///
 /// Step 4 restarts on a FRESH port. On its old port the first dial back
 /// hung for about ten seconds, five runs out of five, while a few
@@ -2000,13 +1999,31 @@ async fn a_restarted_peer_is_reachable_once_it_has_connected_in_and_held_off_bef
         }
     }
 
-    // 3. The receiver connects in; the sender retains it.
+    // The control for step 3: the failed dial set the peer's backoff.
+    let rows = sender
+        .peer_gates(vec![receiver_peer.clone()])
+        .await
+        .expect("answered");
+    assert!(rows[0].backoff_until_ms.is_some(), "{rows:?}");
+
+    // 3. The receiver connects in; the sender retains it, and the row
+    // says the backoff is gone -- the reset itself, which step 4 alone
+    // could not show: its fresh address is untried, and the gate admits
+    // an untried address whatever the peer's backoff (#208 review F3).
     receiver
         .dial(sender_peer.clone(), sender_address)
         .await
         .expect("delivered")
         .expect("admitted");
     wait_connected(&mut sender).await;
+    let rows = sender
+        .peer_gates(vec![receiver_peer.clone()])
+        .await
+        .expect("answered");
+    assert_eq!(
+        rows[0].backoff_until_ms, None,
+        "the inbound reset it: {rows:?}"
+    );
     receiver.shutdown().await.expect("clean shutdown");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
