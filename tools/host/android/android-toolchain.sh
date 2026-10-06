@@ -307,6 +307,7 @@ with tarfile.open(sys.argv[1], 'r:gz') as t:
 PY
 [[ "$(id -u)" -eq 0 ]] || die "--install writes $SDK_DIR and $PROFILE: run it as root"
 [[ "$persist" == direct ]] || command -v mountpoint >/dev/null || die "mountpoint is required on a Qubes AppVM"
+command -v flock >/dev/null || die "flock (util-linux) is required to install"
 
 # Where the tree is really written: SDK_DIR itself, or, on an AppVM, its
 # bind-dirs store under /rw, which Qubes mounts onto SDK_DIR at boot.
@@ -320,17 +321,26 @@ mkdir -p "$(dirname "$store")" || die "cannot create $(dirname "$store")"
 # the first's live state for them. Held until this process exits; the
 # file lives in /run/lock (a tmpfs, never beside the SDK).
 lock="${ANDROID_TOOLCHAIN_LOCK:-/run/lock/android-toolchain.lock}"
-{ exec 9>"$lock" && flock -n 9; } || die "another --install is running on this host (it holds $lock)"
+exec 9>"$lock" || die "cannot open the install lock $lock"
+flock -n 9 || die "another --install is running on this host (it holds $lock)"
 # A run killed between moving the old tree aside and moving the new one in
 # left the old one at .old and nothing in place: put it back first, so
 # this run's failure cannot leave the host with no install at all.
 if [[ -e "$old" && ! -e "$store" ]]; then mv "$old" "$store" && say "  restored the previous install from $old"; fi
+# A killed run's copy of the profile is made only after its swap. With its
+# .old tree still beside the store, it got past the swap and the new tree
+# stays, so the copy is dropped; without one, it was killed rolling back
+# (the final cleanup drops the copy before the .old tree), so the
+# previous tree is in place and the copy is its profile: put back, in
+# place, as rollback would have.
+if [[ -e "$pstore.old" ]]; then
+    if [[ -e "$old" ]]; then rm -f "$pstore.old"
+    else cat "$pstore.old" > "$pstore" && rm -f "$pstore.old" && say "  restored the previous profile from $pstore.old"; fi
+fi
 rm -rf "$old"
 # Staging trees a killed run left (random names, so nothing else finds
-# them), and its copy of the profile: a killed run either never rewrote
-# the profile or got as far as the new tree it now matches, so the copy is
-# never the one to put back.
-rm -rf "$(dirname "$store")"/.android-sdk.new.* "$pstore.old" 2>/dev/null
+# them).
+rm -rf "$(dirname "$store")"/.android-sdk.new.* 2>/dev/null
 new="$(mktemp -d "$(dirname "$store")/.android-sdk.new.XXXXXX")" || die "cannot make a staging directory beside $store"
 trap 'rm -rf "$new"' EXIT
 # Unpacked with the same `data` filter the scan judged it by, which also
@@ -372,7 +382,7 @@ rollback() {  # rollback <message>
         && restore_profile; then
         die "$1; the previous install is restored"
     fi
-    die "$1; restoring the previous install FAILED as well: the previous tree is at ${old}, if not at ${store} (and its profile at ${pstore}.old)"
+    die "$1; restoring the previous install FAILED as well: the previous tree is at ${old}, if not at ${store}$( [[ -e "$pstore.old" ]] && printf ' (and its profile at %s)' "$pstore.old" )"
 }
 mount_store || rollback "the new install is in $store but cannot be bind-mounted onto $SDK_DIR"
 
@@ -403,7 +413,7 @@ if [[ "$persist" == bind ]]; then
             || rollback "cannot bind-mount $pstore onto $PROFILE"
     fi
 fi
-rm -rf "$old" "$pstore.old"
+rm -f "$pstore.old"; rm -rf "$old"
 say "== installed =="
 say "Each Android account runs, once: bash tools/host/android/rust-android.sh"
 say "Any account, any time:            bash tools/host/android/android-toolchain.sh --check"

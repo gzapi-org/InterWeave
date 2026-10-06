@@ -279,9 +279,24 @@ if unshare -rm true 2>/dev/null; then
     exec 8>&-
     [[ "$got" -eq 2 && "$out" == *"another --install is running"* && -e "$SANDBOX/opt/android-sdk/previous-install" && "$(ls -A "$SANDBOX/opt")" == android-sdk ]] \
         && pass "a second --install while one runs is refused, and touches nothing" || fail "a concurrent install was not refused cleanly" "$out"
-    # A profile copy a killed run left is swept at the start, whatever
-    # follows, so no rollback can put it back.
-    mkdir -p "$SANDBOX/etc"; echo stale > "$SANDBOX/etc/android-sdk.sh.old"
+    # The lock that cannot be opened is said as that, not as a running
+    # install.
+    ANDROID_TOOLCHAIN_LOCK="$SANDBOX/no-such-dir/x.lock" inst full
+    [[ "$got" -eq 2 && "$out" == *"cannot open the install lock"* ]] && pass "an install lock that cannot be opened is named as such" || fail "the lock failure was misnamed" "$out"
+    # A profile copy a killed run left: killed rolling back (no .old tree
+    # beside the store), the copy is the previous tree's profile and goes
+    # back; past its swap (.old beside the store), it is dropped.
+    mkdir -p "$SANDBOX/etc"; echo '# the new run' > "$SANDBOX/etc/android-sdk.sh"; echo '# previous' > "$SANDBOX/etc/android-sdk.sh.old"
+    make_tree "$SANDBOX/bad" "platforms;android-30@9"; pack "$SANDBOX/bad"
+    inst full
+    [[ ! -e "$SANDBOX/etc/android-sdk.sh.old" && "$(cat "$SANDBOX/etc/android-sdk.sh")" == "# previous" ]] \
+        && pass "a killed rollback's profile copy is put back, even by a refused install" || fail "the interrupted rollback's profile was not restored" "$(cat "$SANDBOX/etc/android-sdk.sh"*)"
+    echo '# the new run' > "$SANDBOX/etc/android-sdk.sh"; echo '# previous' > "$SANDBOX/etc/android-sdk.sh.old"
+    cp -a "$SANDBOX/opt/android-sdk" "$SANDBOX/opt/android-sdk.old"
+    inst full
+    [[ ! -e "$SANDBOX/etc/android-sdk.sh.old" && "$(cat "$SANDBOX/etc/android-sdk.sh")" == "# the new run" ]] \
+        && pass "a profile copy left past the swap is dropped, the profile kept" || fail "the copy past the swap was mishandled" "$(cat "$SANDBOX/etc/android-sdk.sh"*)"
+    rm -f "$SANDBOX/etc/android-sdk.sh"
     make_tree "$SANDBOX/bad" "platforms;android-30@9"; pack "$SANDBOX/bad"
     inst full
     [[ ! -e "$SANDBOX/etc/android-sdk.sh.old" ]] && pass "a killed run's profile copy is swept, even by a refused install" || fail "the stale profile copy survived" "$(ls -a "$SANDBOX/etc")"
