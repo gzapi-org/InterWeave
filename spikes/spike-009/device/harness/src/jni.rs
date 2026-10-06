@@ -144,3 +144,22 @@ pub unsafe extern "system" fn Java_org_interweave_spike009_Core_verify(
         None => framing::Refused::WrongIdentity as jint,
     }
 }
+
+/// The PeerId a typed phrase restores, or null when the production
+/// parse refuses it (D7's picker). The phrase's bytes are not kept.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_interweave_spike009_Core_peerOfPhrase(
+    env: *mut JNIEnv,
+    _: jclass,
+    words: jbyteArray,
+) -> jbyteArray {
+    let Some(mut w) = (unsafe { bytes(env, words) }) else {
+        return ptr::null_mut();
+    };
+    let peer = utf8(&w).and_then(framing::peer_of_phrase);
+    w.fill(0);
+    match peer {
+        Some(p) => unsafe { array(env, p.as_bytes()) },
+        None => ptr::null_mut(),
+    }
+}

@@ -16,5 +16,18 @@
             android:name=".Cmd"
             android:exported="true"
             android:permission="android.permission.DUMP" />
+
+        <!-- D6b: one fingerprint per operation, started from the shell. -->
+        <activity
+            android:name=".Prompt"
+            android:exported="true"
+            android:permission="android.permission.DUMP" />
+
+        <!-- D7: the phrase screen under test, and its unprotected control. -->
+        <activity
+            android:name=".Phrase"
+            android:exported="true"
+            android:permission="android.permission.DUMP"
+            android:windowSoftInputMode="stateVisible" />
     </application>
 </manifest>

@@ -107,3 +107,13 @@ fn a_seed_deriving_another_identity_is_refused() {
         Err(framing::Refused::WrongIdentity)
     );
 }
+
+#[test]
+fn the_fixture_phrase_restores_the_fixture_peer_and_a_bad_one_nothing() {
+    // TEST-ONLY: the public all-zero BIP-39 vector's 24 words.
+    let fixture = format!("{} art", ["abandon"; 23].join(" "));
+    assert_eq!(framing::peer_of_phrase(&fixture), Some(FIXTURE_PEER()));
+    let bad_checksum = format!("{} abandon", ["abandon"; 23].join(" "));
+    assert_eq!(framing::peer_of_phrase(&bad_checksum), None);
+    assert_eq!(framing::peer_of_phrase("abandon art"), None);
+}

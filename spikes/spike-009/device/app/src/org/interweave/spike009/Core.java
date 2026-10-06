@@ -34,4 +34,7 @@ final class Core {
     static native byte[] part(byte[] envelope, int which);
 
     static native int verify(byte[] seed, byte[] peer);
+
+    /** The PeerId a typed phrase restores, or null when the production parse refuses it. */
+    static native byte[] peerOfPhrase(byte[] words);
 }

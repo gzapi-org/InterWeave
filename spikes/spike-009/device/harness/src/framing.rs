@@ -116,3 +116,13 @@ pub fn verify(seed: &[u8], peer: &str) -> Result<(), Refused> {
         Err(Refused::WrongIdentity)
     }
 }
+
+/// The PeerId a typed recovery phrase restores, through the production
+/// parse (checksum, word list, 24 words) and derivation; `None` for any
+/// phrase it refuses. The words go no further than this call.
+#[must_use]
+pub fn peer_of_phrase(words: &str) -> Option<String> {
+    let phrase = RecoveryPhrase::parse(words).ok()?;
+    let identity = ProfileIdentity::from_phrase(&phrase).ok()?;
+    Some(identity.transport_identity().ok()?.as_str().to_owned())
+}
