@@ -80,7 +80,7 @@ mod unix {
             .enable_time()
             .build()
             .map_err(|e| format!("the runtime: {e}"))?;
-        runtime.block_on(async {
+        let ended = runtime.block_on(async {
             let binding = IpcBinding::new(sockets, CLIENT_KIND);
             let served = serve(
                 binding,
@@ -93,7 +93,13 @@ mod unix {
                 served = served => served.map_err(|e| format!("stdio: {e}")),
                 () = first_signal() => Ok(()),
             }
-        })
+        });
+        // NOT a drop: dropping the runtime waits for its blocking pool,
+        // and stdin's read there cannot be cancelled -- with the host never
+        // closing stdin, the first signal would not end the process
+        // (`the_first_sigint_ends_the_process_with_stdin_held_open`).
+        runtime.shutdown_background();
+        ended
     }
 
     /// `--profile <name> --endpoint <id>`, in either order, nothing else.

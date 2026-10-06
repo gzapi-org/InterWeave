@@ -39,5 +39,6 @@ rand = { workspace = true }
 interweave-ipc-client = { path = "../../crates/local/ipc-client" }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 interweave-local-client-fake = { path = "../../tests/local-client-fake" }
 interweave-profile-identity = { path = "../../crates/identity/profile-identity" }
