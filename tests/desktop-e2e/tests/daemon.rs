@@ -1154,3 +1154,116 @@ async fn transportctl_against_a_live_daemon() {
         stderr(&out)
     );
 }
+
+/// A peer that goes away and comes back is in the other daemon's log
+/// under `interweave::connectivity`, by its `PeerId` -- it is on the
+/// allowlist -- with the failed redial and the retry's delay, and no
+/// address on any of those lines; and at `debug` nothing below
+/// `warn` reaches the log from any target outside this repository's
+/// (`observability.md` §Logs, A 2026-10-06; `init_logging`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_peers_restart_is_in_the_connectivity_log_and_third_party_debug_is_not() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let (a, b) = (Home::new("human-desktop"), Home::new("human-desktop"));
+    let (a_peer, b_peer) = (a.write_key(), b.write_key());
+    let (a_port, b_port) = (free_port(ip), free_port(ip));
+    let at = |port: u16| format!("/ip4/{ip}/tcp/{port}");
+    let to_a = format!("{}/p2p/{}", at(a_port), a_peer.as_str());
+    let to_b = format!("{}/p2p/{}", at(b_port), b_peer.as_str());
+    b.write_config(&example(
+        "human-desktop.yaml",
+        &a_peer,
+        &at(b_port),
+        Some(&to_a),
+    ));
+    a.write_config(&example(
+        "human-desktop.yaml",
+        &b_peer,
+        &at(a_port),
+        Some(&to_b),
+    ));
+    let mut b_daemon = b.start(&[]);
+    b_daemon.serving(&b).await;
+    let mut a_daemon = a.start(&[]);
+    a_daemon.serving(&a).await;
+
+    // The lines A writes about B, each wait bounded.
+    let about_b = |log: &str, what: &str| -> usize {
+        log.lines()
+            .filter(|l| {
+                l.contains("interweave::connectivity")
+                    && l.contains(b_peer.as_str())
+                    && l.contains(what)
+            })
+            .count()
+    };
+    let wait_for = |what: &'static str, at_least: usize| {
+        let a_daemon = &a_daemon;
+        async move {
+            let deadline = tokio::time::Instant::now() + PATIENCE;
+            while about_b(&a_daemon.log(), what) < at_least {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "A never logged {what:?} x{at_least}:\n{}",
+                    a_daemon.log()
+                );
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    };
+    wait_for("peer connected", 1).await;
+
+    assert!(b_daemon.terminate().await.success(), "{}", b_daemon.log());
+    wait_for("peer disconnected", 1).await;
+    wait_for("dial failed", 1).await;
+    wait_for("delay_ms=30000", 1).await;
+
+    // Back on its address: B's own static route reaches A, whose
+    // retained inbound lifts the backoff the failed redial set.
+    let mut b_daemon = b.start(&[]);
+    b_daemon.serving(&b).await;
+    wait_for("peer connected", 2).await;
+
+    assert!(a_daemon.terminate().await.success(), "{}", a_daemon.log());
+    assert!(b_daemon.terminate().await.success(), "{}", b_daemon.log());
+    let log = a_daemon.log();
+    let ip = ip.to_string();
+    for line in log
+        .lines()
+        .filter(|l| l.contains("interweave::connectivity"))
+    {
+        assert!(
+            !line.contains("/ip4/") && !line.contains(&ip),
+            "a connectivity line carries an address: {line}"
+        );
+    }
+    // Below `warn`, first-party targets only. The fmt layout is
+    // `<time> <LEVEL> <target>: <message>`.
+    let mut first_party_debug = 0;
+    for line in log.lines() {
+        let mut words = line.split_whitespace();
+        let (Some(_), Some(level), Some(target)) = (words.next(), words.next(), words.next())
+        else {
+            continue;
+        };
+        if matches!(level, "DEBUG" | "INFO" | "TRACE") {
+            assert!(
+                target.starts_with("interweave") || target.starts_with("transport_daemon"),
+                "a third-party target below warn reached the log: {line}"
+            );
+            if level == "DEBUG" {
+                first_party_debug += 1;
+            }
+        }
+    }
+    assert!(
+        first_party_debug > 0,
+        "the profile logs at debug, so the check above is not vacuous:\n{log}"
+    );
+    // And the daemon's own lines are not capped with the third parties.
+    assert!(
+        log.lines()
+            .any(|l| l.contains(" INFO transport_daemon::") && l.contains("starting")),
+        "the daemon's own info line:\n{log}"
+    );
+}
