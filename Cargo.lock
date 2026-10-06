@@ -3192,10 +3192,13 @@ name = "interweave-claude-channel"
 version = "0.0.0"
 dependencies = [
  "interweave-claude-channel-core",
+ "interweave-ipc-client",
  "interweave-local-client-api",
  "interweave-local-client-fake",
+ "interweave-profile-config",
  "interweave-profile-identity",
  "interweave-transport-api",
+ "rand 0.10.2",
  "serde",
  "serde_json",
  "tokio",
