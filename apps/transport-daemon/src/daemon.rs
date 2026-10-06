@@ -263,6 +263,16 @@ fn unlink(sockets: &SocketPaths) {
     }
 }
 
+/// The prefix every first-party library target begins with: the crates'
+/// module paths (`interweave_*`) and the named targets
+/// (`interweave::audit`, `interweave::connectivity`).
+const FIRST_PARTY: &str = "interweave";
+
+/// This binary's own target, which does not begin with [`FIRST_PARTY`]:
+/// the crate is `transport_daemon`, so its `starting` and `serving`
+/// lines would be capped with the third parties without it.
+const THIS_DAEMON: &str = env!("CARGO_CRATE_NAME");
+
 /// Logging to stderr at the profile's level, and at no other: no
 /// environment variable overrides it (plan §16 (11)).
 ///
@@ -271,6 +281,16 @@ fn unlink(sockets: &SocketPaths) {
 /// it can be audited, unconditionally; a profile at `warn` or `error`
 /// would otherwise apply the change and leave no record of it
 /// (`a_trust_change_is_in_the_log_at_every_level`, desktop-e2e).
+///
+/// AND EVERY THIRD-PARTY TARGET AT `warn` AT MOST (`observability.md`
+/// §Logs, A 2026-10-06): libp2p and the stack beneath it log addresses
+/// at `debug`, which ADR-0052 rule 5 keeps out of any log, and nothing
+/// here checks what they write. So only this repository's own targets --
+/// the libraries' `interweave…` and this binary's own -- follow the
+/// profile's level; the rest are capped, whichever crate they come from,
+/// a new dependency's included
+/// (`a_peers_restart_is_in_the_connectivity_log_and_third_party_debug_is_not`,
+/// desktop-e2e).
 fn init_logging(level: LogLevel) {
     use tracing_subscriber::filter::Targets;
     use tracing_subscriber::layer::SubscriberExt as _;
@@ -295,7 +315,9 @@ fn init_logging(level: LogLevel) {
         .finish()
         .with(
             Targets::new()
-                .with_default(level)
+                .with_default(std::cmp::min(level, tracing::Level::WARN))
+                .with_target(FIRST_PARTY, level)
+                .with_target(THIS_DAEMON, level)
                 .with_target(AUDIT_TARGET, tracing::Level::INFO),
         )
         .try_init();
