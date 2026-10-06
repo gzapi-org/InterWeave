@@ -143,13 +143,13 @@ impl TrustSettings {
             self.say(TrustOutcome::Entry(EntryProblem::NotAPeerId));
             return;
         };
-        let list = self.list.as_ref();
-        if list.is_some_and(|l| l.local_peer.as_ref() == Some(&peer)) {
-            self.say(TrustOutcome::Entry(EntryProblem::OwnIdentity));
+        // Only against a list read, as a removal is: before it, neither
+        // check below can be made (`an_allow_is_proposed_only_against_a_list_read`).
+        let Some(list) = self.list.as_ref() else {
             return;
-        }
-        if list.is_some_and(|l| l.allowed.contains(&peer)) {
-            self.say(TrustOutcome::Entry(EntryProblem::AlreadyTrusted));
+        };
+        if let Some(why) = entry_problem(list, &peer) {
+            self.say(TrustOutcome::Entry(why));
             return;
         }
         self.pending = Some(TrustChange {
@@ -186,12 +186,23 @@ impl TrustSettings {
     }
 
     /// The daemon's answer to a read. A re-read a change left owed that
-    /// fails says the list may be stale, never that nothing changed.
+    /// fails says the list may be stale, never that nothing changed. A
+    /// waiting change the new list makes moot -- an allow of a peer now
+    /// listed or of this profile -- is dropped.
     pub fn read(&mut self, answer: Result<TrustList, TrustProblem>) {
         self.reading = false;
         let rereading = std::mem::take(&mut self.rereading);
         match answer {
-            Ok(list) => self.list = Some(list),
+            Ok(list) => {
+                if self
+                    .pending
+                    .as_ref()
+                    .is_some_and(|c| c.allowed && entry_problem(&list, &c.peer).is_some())
+                {
+                    self.pending = None;
+                }
+                self.list = Some(list);
+            }
             Err(problem) if rereading => self.say(TrustOutcome::NotReadAgain(problem)),
             Err(problem) => self.say(TrustOutcome::Problem(problem)),
         }
@@ -208,6 +219,14 @@ impl TrustSettings {
             self.in_flight = None;
         }
         match answer {
+            // The list read back is the daemon's, and another local
+            // administrator may have changed the same peer in between: a
+            // list that says otherwise is not reported as the change made.
+            Ok(list) if list.allowed.contains(&change.peer) != change.allowed => {
+                self.list = Some(list);
+                self.reread = true;
+                self.say(TrustOutcome::Unconfirmed(change));
+            }
             Ok(list) => {
                 self.made(&change);
                 self.list = Some(list);
@@ -284,6 +303,17 @@ impl TrustSettings {
     #[must_use]
     pub const fn outcome(&self) -> (Option<&TrustOutcome>, u64) {
         (self.outcome.as_ref(), self.outcomes)
+    }
+}
+
+/// Why `peer` is not one to allow against `list`, if it is not.
+fn entry_problem(list: &TrustList, peer: &TransportIdentity) -> Option<EntryProblem> {
+    if list.local_peer.as_ref() == Some(peer) {
+        Some(EntryProblem::OwnIdentity)
+    } else if list.allowed.contains(peer) {
+        Some(EntryProblem::AlreadyTrusted)
+    } else {
+        None
     }
 }
 
@@ -521,5 +551,46 @@ mod tests {
                 "{failure:?}: the list may be stale, and nothing says it was not changed"
             );
         }
+    }
+
+    #[test]
+    fn an_allow_is_proposed_only_against_a_list_read() {
+        let (me, them) = (peer(), peer());
+        let mut s = TrustSettings::default();
+        s.entry_changed(me.as_str().to_owned());
+        s.propose_allow();
+        assert_eq!(s.pending(), None, "nothing to check it against yet");
+        // A waiting allow the list then makes moot is dropped.
+        let mut s = read(&me, &[]);
+        s.entry_changed(them.as_str().to_owned());
+        s.propose_allow();
+        assert!(s.pending().is_some());
+        s.read(Ok(TrustList {
+            local_peer: Some(me),
+            allowed: vec![them],
+        }));
+        assert_eq!(s.pending(), None, "already trusted now");
+    }
+
+    #[test]
+    fn a_read_back_that_says_otherwise_is_not_reported_as_the_change() {
+        let (me, them) = (peer(), peer());
+        let mut s = read(&me, std::slice::from_ref(&them));
+        s.propose_revoke(&them);
+        let shown = s.pending().cloned().expect("proposed");
+        let Some(Intent::SetTrust(change)) = s.confirm(&shown) else {
+            panic!("a change");
+        };
+        // Another administrator allowed it again between the set and the
+        // read-back.
+        s.set(
+            change.clone(),
+            Ok(TrustList {
+                local_peer: Some(me),
+                allowed: vec![them],
+            }),
+        );
+        assert_eq!(s.outcome().0, Some(&TrustOutcome::Unconfirmed(change)));
+        assert_eq!(s.take_reread(), Some(Intent::ReadTrust));
     }
 }
