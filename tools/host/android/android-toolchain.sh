@@ -114,14 +114,19 @@ read_pins "$PINS_FILE"
 SDK_DIR="${ANDROID_TOOLCHAIN_SDK_DIR:-${PIN[SDK_DIR]}}"
 BIND_ROOT="${ANDROID_TOOLCHAIN_BIND_ROOT:-/rw/bind-dirs}"
 BIND_CONF="${ANDROID_TOOLCHAIN_BIND_CONF:-/rw/config/qubes-bind-dirs.d/50_android-sdk.conf}"
-# The Qubes VM type; empty where this is not Qubes. Set (even empty) in
-# the environment, that value is used (tests). On Qubes, a type that cannot
-# be read is "?" — never guessed as "not Qubes", which would install onto
-# a root volume an AppVM discards.
-vm_type() {
-    if [[ -n "${ANDROID_TOOLCHAIN_VM_TYPE+set}" ]]; then printf '%s' "$ANDROID_TOOLCHAIN_VM_TYPE"; return; fi
+# How this machine keeps what is written to its root volume, the key
+# Qubes' own bind-dirs decides on (/usr/lib/qubes/init/functions):
+#   ""        not Qubes: everything persists
+#   full      a TemplateVM or StandaloneVM: everything persists
+#   rw-only   a template-based AppVM: only /rw (and /home) persist
+#   dispvm    a DispVM (/type): nothing persists
+#   ?         Qubes, but unreadable — never guessed
+# Set (even empty) in the environment, that value is used (tests).
+persistence() {
+    if [[ -n "${ANDROID_TOOLCHAIN_PERSISTENCE+set}" ]]; then printf '%s' "$ANDROID_TOOLCHAIN_PERSISTENCE"; return; fi
     command -v qubesdb-read >/dev/null || return 0
-    local t; t="$(qubesdb-read /qubes-vm-type 2>/dev/null || true)"; printf '%s' "${t:-?}"
+    [[ "$(qubesdb-read /type 2>/dev/null)" == DispVM ]] && { printf dispvm; return; }
+    local p; p="$(qubesdb-read /qubes-vm-persistence 2>/dev/null || true)"; printf '%s' "${p:-?}"
 }
 MANIFEST_NAME=".android-toolchain.manifest"
 
@@ -174,11 +179,12 @@ if [[ "$MODE" == check ]]; then
     say "== $me --check: $SDK_DIR against $(basename "$PINS_FILE") =="
     [[ -d "$SDK_DIR" ]] || { bad "$SDK_DIR is not installed on this host"; say "== 1 problem =="; exit 1; }
     verify_tree "$SDK_DIR"
-    writable="$(find "$SDK_DIR" -perm /022 -print -quit 2>/dev/null)"
+    # A symlink's own mode is always rwxrwxrwx and means nothing: not counted.
+    writable="$(find "$SDK_DIR" ! -type l -perm /022 -print -quit 2>/dev/null)"
     special="$(find "$SDK_DIR" -perm /6000 -print -quit 2>/dev/null)"
     if [[ "$(stat -c %U "$SDK_DIR" 2>/dev/null)" == "${ANDROID_TOOLCHAIN_OWNER:-root}" && -z "$writable" && -z "$special" ]]; then ok "owned by root, read-only to accounts, no setuid or setgid"
     else bad "$SDK_DIR must be root's, writable by no group or other, with no setuid/setgid bit (first offender: ${writable:-${special:-$(stat -c '%U' "$SDK_DIR")}})"; fi
-    if [[ "$(vm_type)" == AppVM ]]; then
+    if [[ "$(persistence)" == rw-only ]]; then
         if grep -qF "'$SDK_DIR'" "$BIND_CONF" 2>/dev/null && mountpoint -q "$SDK_DIR"; then ok "kept across reboots by bind-dirs ($BIND_CONF)"
         else bad "this AppVM does not keep $SDK_DIR: no bind-dirs entry in $BIND_CONF, or it is not mounted — it goes at the next shutdown"; fi
     fi
@@ -240,11 +246,12 @@ fi
 
 # ── --install ────────────────────────────────────────────────────────
 # Refusals first, every one before anything is written.
-case "$(vm_type)" in
-    AppVM)   persist=bind ;;
-    DispVM)  die "this is a Qubes DispVM: nothing it installs outlives it" ;;
-    "?")     die "this is Qubes, but its VM type cannot be read (qubesdb-read /qubes-vm-type); refusing rather than guessing where a write persists" ;;
-    *)       persist=direct ;;   # TemplateVM, StandaloneVM, or not Qubes at all
+case "$(persistence)" in
+    ""|full) persist=direct ;;
+    rw-only) persist=bind ;;
+    dispvm)  die "this is a Qubes DispVM: nothing it installs outlives it" ;;
+    "?")     die "this is Qubes, but /qubes-vm-persistence cannot be read; refusing rather than guessing where a write persists" ;;
+    *)       die "this Qubes VM's persistence is '$(persistence)': nothing it installs would survive" ;;
 esac
 [[ -r "$ARCHIVE" && -r "$ARCHIVE.sha256" ]] || die "need $ARCHIVE and $ARCHIVE.sha256 side by side"
 # The sidecar's hash and name are both held to THIS archive: `sha256sum
@@ -255,37 +262,52 @@ read -r want_sum want_name < "$ARCHIVE.sha256"
 manifest="$(tar -xzOf "$ARCHIVE" "./$MANIFEST_NAME" 2>/dev/null)" || die "$ARCHIVE holds no $MANIFEST_NAME"
 [[ "$manifest" == "$(pins_canonical)" ]] \
     || die "$ARCHIVE was staged from other pins than this checkout's: stage again, or check out the commit it was staged from"
-[[ "$(id -u)" -eq 0 ]] || die "--install writes $SDK_DIR and $PROFILE: run it as root"
 command -v python3 >/dev/null || die "python3 is required to install"
+# THE ARCHIVE IS NOT TRUSTED: staged by an unprivileged account, unpacked
+# here as root. Every member is judged before anything is written: only
+# files, directories and symlinks (a hard link is refused even inside the
+# tree; staged archives hold none); and each must pass tarfile's `data`
+# filter — no absolute path, no `..` out of the tree, no link pointing
+# outside it. The filter's known bypasses were fixed in 3.12.11 and
+# 3.13.4, so an older Python is refused rather than trusted.
+python3 - "$ARCHIVE" <<'PY' || die "the archive is refused (above); nothing was written"
+import sys, tarfile
+v = sys.version_info
+if not hasattr(tarfile, 'data_filter') or v < (3, 12, 11) or (3, 13) <= v[:2] < (3, 14) and v < (3, 13, 4):
+    sys.exit(f"python {v[0]}.{v[1]}.{v[2]} has no trustworthy tarfile data filter (needs 3.12.11+, 3.13.4+ or 3.14+)")
+with tarfile.open(sys.argv[1], 'r:gz') as t:
+    for m in t.getmembers():
+        if not (m.isfile() or m.isdir() or m.issym()):
+            sys.exit(f"refused: {m.name} is a {'hard link' if m.islnk() else 'device or special file'}")
+        try:
+            tarfile.data_filter(m, '/nonexistent-android-sdk-dest')
+        except tarfile.FilterError as e:
+            sys.exit(f"refused: {e}")
+PY
+[[ "$(id -u)" -eq 0 ]] || die "--install writes $SDK_DIR and $PROFILE: run it as root"
 [[ "$persist" == direct ]] || command -v mountpoint >/dev/null || die "mountpoint is required on a Qubes AppVM"
 
 # Where the tree is really written: SDK_DIR itself, or, on an AppVM, its
 # bind-dirs store under /rw, which Qubes mounts onto SDK_DIR at boot.
 if [[ "$persist" == bind ]]; then store="$BIND_ROOT$SDK_DIR" pstore="$BIND_ROOT$PROFILE"; else store="$SDK_DIR" pstore="$PROFILE"; fi
 old="$store.old"
-say "== $me --install into $SDK_DIR${persist/bind/ (kept by bind-dirs in $store)}${persist/direct/} =="
+if [[ "$persist" == bind ]]; then say "== $me --install into $SDK_DIR (kept by bind-dirs in $store) =="
+else say "== $me --install into $SDK_DIR =="; fi
 # A run killed between moving the old tree aside and moving the new one in
 # left the old one at .old and nothing in place: put it back first, so
 # this run's failure cannot leave the host with no install at all.
 if [[ -e "$old" && ! -e "$store" ]]; then mv "$old" "$store" && say "  restored the previous install from $old"; fi
 rm -rf "$old"
+# Staging trees a killed run left (random names, so nothing else finds them).
+rm -rf "$(dirname "$store")"/.android-sdk.new.* 2>/dev/null
 mkdir -p "$(dirname "$store")" || die "cannot create $(dirname "$store")"
 new="$(mktemp -d "$(dirname "$store")/.android-sdk.new.XXXXXX")" || die "cannot make a staging directory beside $store"
 trap 'rm -rf "$new"' EXIT
-# THE ARCHIVE IS NOT TRUSTED. It was staged by an unprivileged account and
-# is unpacked here as root, so it is unpacked by Python's tarfile with the
-# `data` filter: only files, directories and symlinks; no absolute path, no
-# `..` out of the tree, no link pointing outside it; setuid, setgid and
-# sticky bits dropped; owners not taken from the archive. Anything else
-# refuses the whole archive, before the old install is touched. The scan
-# before it is stricter than the filter in one way: it refuses a hard link
-# even inside the tree, which no SDK archive holds (staged ones have none).
-python3 - "$ARCHIVE" "$new" <<'PY' || die "the archive holds something an SDK must not (above); nothing installed"
+# Unpacked with the same `data` filter the scan judged it by, which also
+# drops setuid, setgid and sticky bits and takes no owner from the archive.
+python3 - "$ARCHIVE" "$new" <<'PY' || die "cannot unpack the archive (above); nothing installed"
 import sys, tarfile
 with tarfile.open(sys.argv[1], 'r:gz') as t:
-    for m in t.getmembers():
-        if not (m.isfile() or m.isdir() or m.issym()):
-            sys.exit(f"refused: {m.name} is a {'hard link' if m.islnk() else 'device or special file'}")
     t.extractall(sys.argv[2], filter='data')
 PY
 chown -R root:root "$new" \
@@ -294,11 +316,15 @@ chown -R root:root "$new" \
     || die "cannot set the owner or modes on $new (nothing installed yet)"
 PROBLEMS=0; verify_tree "$new" >&2
 [[ "$PROBLEMS" -eq 0 ]] || die "the unpacked tree does not verify ($PROBLEMS problem(s), above); $SDK_DIR is untouched"
+# On an AppVM the store is mounted on SDK_DIR: unmounted only for the swap,
+# and mounted again whatever happens, so a failure leaves a visible install.
+mount_store() { [[ "$persist" == bind ]] || return 0; mkdir -p "$SDK_DIR" && { mountpoint -q "$SDK_DIR" || mount --bind "$store" "$SDK_DIR"; }; }
 if [[ "$persist" == bind ]] && mountpoint -q "$SDK_DIR"; then umount "$SDK_DIR" || die "cannot unmount the old $SDK_DIR to replace it"; fi
-[[ -e "$store" ]] && { mv "$store" "$old" || die "cannot move the old $store aside"; }
-mv "$new" "$store" || { [[ -e "$old" ]] && mv "$old" "$store"; die "cannot move the new tree into place; the old install is restored"; }
+[[ -e "$store" ]] && { mv "$store" "$old" || { mount_store; die "cannot move the old $store aside"; }; }
+mv "$new" "$store" || { [[ -e "$old" ]] && mv "$old" "$store"; mount_store; die "cannot move the new tree into place; the old install is restored"; }
 trap - EXIT
 rm -rf "$old"
+mount_store || die "the new install is in $store but cannot be bind-mounted onto $SDK_DIR"
 
 ndk_path="$(pkgs | sed -n 's/^ndk;\([^@]*\)@.*/\1/p' | head -1)"
 mkdir -p "$(dirname "$pstore")" || die "cannot create $(dirname "$pstore")"
@@ -316,8 +342,8 @@ if [[ "$persist" == bind ]]; then
         && printf "# Written by InterWeave tools/host/android/android-toolchain.sh --install.\nbinds+=( '%s' )\nbinds+=( '%s' )\n" \
             "$SDK_DIR" "$PROFILE" > "$BIND_CONF" \
         || die "cannot write $BIND_CONF: the install is in $store but will not be mounted after a reboot"
-    # Now, without a restart: what Qubes does at the next boot.
-    mkdir -p "$SDK_DIR" && mount --bind "$store" "$SDK_DIR" || die "cannot bind-mount $store onto $SDK_DIR"
+    # Now, without a restart: what Qubes does at the next boot (the SDK is
+    # mounted already, just after the swap).
     if ! mountpoint -q "$PROFILE"; then
         mkdir -p "$(dirname "$PROFILE")" && touch "$PROFILE" && mount --bind "$pstore" "$PROFILE" \
             || die "cannot bind-mount $pstore onto $PROFILE"

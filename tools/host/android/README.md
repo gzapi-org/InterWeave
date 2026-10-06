@@ -51,7 +51,8 @@ bash tools/host/android/android-toolchain.sh --stage
 sudo bash tools/host/android/android-toolchain.sh --install ~/android-staging/android-toolchain-<id>.tar.gz
 ```
 
-**On a Qubes AppVM**, `/opt` and `/etc` are discarded at shutdown.
+**On a template-based Qubes AppVM** (`/qubes-vm-persistence` is
+`rw-only`), `/opt` and `/etc` are discarded at shutdown.
 `--install` keeps them with Qubes bind-dirs:
 - the tree lives in `/rw/bind-dirs/opt/android-sdk`, on the persistent
   volume;
@@ -60,20 +61,26 @@ sudo bash tools/host/android/android-toolchain.sh --install ~/android-staging/an
   `/etc/profile.d/android-sdk.sh`, at every boot;
 - `--install` mounts both at once, so no restart is needed.
 
-In a TemplateVM, a StandaloneVM or any other host, `/opt/android-sdk` is
-written directly.
+Where everything persists (a TemplateVM, a StandaloneVM, any host that is
+not Qubes), `/opt/android-sdk` is written directly. The volume it lands on
+needs room for the old tree, the new one and the archive at once (about
+three times the archive's unpacked size) while the install runs.
 
 The archive is treated as untrusted, since it was staged by an
 unprivileged account and is unpacked as root. Before writing anything,
 `--install` refuses:
-- a DispVM, and a Qubes VM whose type cannot be read;
+- a DispVM, a Qubes VM whose persistence cannot be read, and one that
+  persists neither its root nor `/rw`;
+- a Python whose tarfile `data` filter has known bypasses (before 3.12.11
+  or 3.13.4);
 - an archive not matching its `.sha256`, or whose `.sha256` names another
   file;
 - an archive staged from other pins than the checkout's;
 - any member that is not a file, directory or symlink, a hard link, an
   absolute or `..` path, or a link out of the tree.
 
-Setuid and setgid bits are dropped. A failed install leaves the previous
+Every member is judged before anything is written. Setuid and setgid bits
+are dropped. A failed install leaves the previous
 one in place, and an interrupted earlier swap is restored first. Every
 pins value must match its form, and nothing in the file is ever executed.
 

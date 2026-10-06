@@ -31,8 +31,8 @@ expect() {  # expect <label> <want-rc> <substring>
     if [[ "$got" -eq "$2" && "$out" == *"$3"* ]]; then pass "$1"
     else fail "$1 — wanted exit $2 and '$3', got $got" "$out"; fi
 }
-# This host may be a Qubes AppVM; the cases that want a VM type say so.
-export ANDROID_TOOLCHAIN_VM_TYPE=""
+# This host may be a Qubes AppVM; the cases that want a persistence say so.
+export ANDROID_TOOLCHAIN_PERSISTENCE=""
 SANDBOX="$(realpath -- "$(mktemp -d)")"; trap 'chmod -R u+w "$SANDBOX" 2>/dev/null; rm -rf "$SANDBOX"' EXIT
 PINS="$SANDBOX/pins"
 
@@ -58,6 +58,7 @@ make_tree() {  # make_tree <root> [<override "path@rev">]
     mkdir -p "$root/cmdline-tools/latest" "$root/jdk"
     printf 'Pkg.Revision=23.0\n' > "$root/cmdline-tools/latest/source.properties"
     printf 'IMPLEMENTOR_VERSION="Temurin-17.0.20.1+1"\n' > "$root/jdk/release"
+    ln -s release "$root/jdk/release-link"   # a symlink's mode is 0777: --check must not count it
     while IFS= read -r spec; do
         path="${spec%@*}" rev="${spec##*@}"
         [[ -n "${2:-}" && "${2%@*}" == "$path" ]] && rev="${2##*@}"
@@ -174,7 +175,16 @@ expect "a setuid file in the SDK is named" 1 "no setuid/setgid bit"
 chmod u-s "$SANDBOX/opt/android-sdk/jdk/release"
 ANDROID_TOOLCHAIN_OWNER=nobody run bash "$UNDER_TEST" --check
 expect "an SDK not owned by root is named" 1 "must be root's"
-ANDROID_TOOLCHAIN_VM_TYPE=AppVM ANDROID_TOOLCHAIN_BIND_CONF="$SANDBOX/none.conf" run bash "$UNDER_TEST" --check
+# qubesdb-read, stubbed: answers each key from $SANDBOX/qdb/<key>, or nothing.
+mkdir -p "$SANDBOX/qdb"
+printf '#!/bin/sh\ncat "%s/qdb/$(basename "$1")" 2>/dev/null\n' "$SANDBOX" > "$SANDBOX/bin/qubesdb-read"; chmod +x "$SANDBOX/bin/qubesdb-read"
+qubes() { out="$(env -u ANDROID_TOOLCHAIN_PERSISTENCE ANDROID_TOOLCHAIN_PINS="$PINS" PATH="$SANDBOX/bin:$PATH" bash "$UNDER_TEST" "$@" 2>&1)"; got=$?; }
+printf AppVM > "$SANDBOX/qdb/type"
+printf full > "$SANDBOX/qdb/qubes-vm-persistence"
+qubes --check; [[ "$got" -eq 0 && "$out" != *"bind-dirs"* ]] && pass "a fully persistent VM (a StandaloneVM) is checked as a direct install" || fail "full persistence was checked for bind-dirs" "$out"
+printf rw-only > "$SANDBOX/qdb/qubes-vm-persistence"
+qubes --check; expect "an rw-only VM (template-based AppVM) is checked for bind-dirs" 1 "bind-dirs"
+ANDROID_TOOLCHAIN_PERSISTENCE=rw-only ANDROID_TOOLCHAIN_BIND_CONF="$SANDBOX/none.conf" run bash "$UNDER_TEST" --check
 expect "on an AppVM, an SDK no bind-dirs entry keeps is named" 1 "goes at the next shutdown"
 : > "$ANDROID_TOOLCHAIN_PROFILE"
 run bash "$UNDER_TEST" --check
@@ -183,35 +193,39 @@ rm -rf "$SANDBOX/opt"; unset ANDROID_TOOLCHAIN_OWNER
 
 echo "android-toolchain --install: every refusal comes before anything is written"
 make_tree "$SANDBOX/staged"; pack "$SANDBOX/staged"
-ANDROID_TOOLCHAIN_VM_TYPE=DispVM run bash "$UNDER_TEST" --install "$SANDBOX/a.tar.gz"
-expect "a DispVM is refused" 2 "nothing it installs outlives it"
-printf '#!/bin/sh\nexit 0\n' > "$SANDBOX/bin/qubesdb-read"; chmod +x "$SANDBOX/bin/qubesdb-read"
-out="$(env -u ANDROID_TOOLCHAIN_VM_TYPE ANDROID_TOOLCHAIN_PINS="$PINS" PATH="$SANDBOX/bin:$PATH" bash "$UNDER_TEST" --install "$SANDBOX/a.tar.gz" 2>&1)"; got=$?
-expect "on Qubes, an unreadable VM type is refused" 2 "its VM type cannot be read"
+printf DispVM > "$SANDBOX/qdb/type"; printf rw-only > "$SANDBOX/qdb/qubes-vm-persistence"
+qubes --install "$SANDBOX/a.tar.gz"; expect "a DispVM (/type) is refused" 2 "nothing it installs outlives it"
+printf AppVM > "$SANDBOX/qdb/type"; rm "$SANDBOX/qdb/qubes-vm-persistence"
+qubes --install "$SANDBOX/a.tar.gz"; expect "on Qubes, an unreadable persistence is refused" 2 "/qubes-vm-persistence cannot be read"
+printf none > "$SANDBOX/qdb/qubes-vm-persistence"
+qubes --install "$SANDBOX/a.tar.gz"; expect "a VM that persists nothing is refused" 2 "persistence is 'none'"
 rm -f "$SANDBOX/bin/qubesdb-read"
 cp "$SANDBOX/a.tar.gz" "$SANDBOX/other.tar.gz"; printf 'x' >> "$SANDBOX/a.tar.gz"
-ANDROID_TOOLCHAIN_VM_TYPE=AppVM run bash "$UNDER_TEST" --install "$SANDBOX/a.tar.gz"
+ANDROID_TOOLCHAIN_PERSISTENCE=rw-only run bash "$UNDER_TEST" --install "$SANDBOX/a.tar.gz"
 expect "an archive not matching its .sha256 is refused" 2 "does not match its .sha256"
 ( cd "$SANDBOX" && sha256sum other.tar.gz > a.tar.gz.sha256 )
-ANDROID_TOOLCHAIN_VM_TYPE=AppVM run bash "$UNDER_TEST" --install "$SANDBOX/a.tar.gz"
+ANDROID_TOOLCHAIN_PERSISTENCE=rw-only run bash "$UNDER_TEST" --install "$SANDBOX/a.tar.gz"
 expect "a .sha256 naming another file is refused" 2 "names other.tar.gz, not a.tar.gz"
 make_tree "$SANDBOX/staged2"; sed -i 's/^JDK_VERSION=.*/JDK_VERSION=17.0.19+1/' "$SANDBOX/staged2/.android-toolchain.manifest"
 pack "$SANDBOX/staged2"
-ANDROID_TOOLCHAIN_VM_TYPE=AppVM run bash "$UNDER_TEST" --install "$SANDBOX/a.tar.gz"
+ANDROID_TOOLCHAIN_PERSISTENCE=rw-only run bash "$UNDER_TEST" --install "$SANDBOX/a.tar.gz"
 expect "an archive staged from other pins is refused" 2 "staged from other pins"
+pack_hostile "$SANDBOX/staged" escape
+ANDROID_TOOLCHAIN_PERSISTENCE=rw-only run bash "$UNDER_TEST" --install "$SANDBOX/a.tar.gz"
+expect "a hostile member is refused by the dry pass, before the root check" 2 "nothing was written"
 pack "$SANDBOX/staged"
 if [[ "$(id -u)" -ne 0 ]]; then
-    ANDROID_TOOLCHAIN_VM_TYPE=AppVM run bash "$UNDER_TEST" --install "$SANDBOX/a.tar.gz"
+    ANDROID_TOOLCHAIN_PERSISTENCE=rw-only run bash "$UNDER_TEST" --install "$SANDBOX/a.tar.gz"
     expect "not root: refused" 2 "run it as root"
 fi
 [[ ! -e "$SANDBOX/opt" && ! -e "$SANDBOX/rw" ]] && pass "  and nothing was written by any refusal" || fail "a refusal wrote something" "$(ls "$SANDBOX")"
 
 echo "android-toolchain --install, as uid 0 in user and mount namespaces"
 if unshare -rm true 2>/dev/null; then
-    inst() {  # inst <vm-type>: --install (and, for an AppVM, --check inside the same mount namespace)
+    inst() {  # inst <persistence>: --install (and, rw-only, --check inside the same mount namespace)
         local extra=""
-        [[ "$1" == AppVM ]] && extra=" && bash '$UNDER_TEST' --check"
-        run unshare -rm env ANDROID_TOOLCHAIN_PINS="$PINS" ANDROID_TOOLCHAIN_VM_TYPE="$1" \
+        [[ "$1" == rw-only ]] && extra=" && bash '$UNDER_TEST' --check"
+        run unshare -rm env ANDROID_TOOLCHAIN_PINS="$PINS" ANDROID_TOOLCHAIN_PERSISTENCE="$1" \
             ANDROID_TOOLCHAIN_PROFILE="$SANDBOX/etc/android-sdk.sh" ANDROID_TOOLCHAIN_BIND_ROOT="$SANDBOX/rw/bind-dirs" \
             ANDROID_TOOLCHAIN_BIND_CONF="$SANDBOX/rw/config/50_android-sdk.conf" ANDROID_TOOLCHAIN_OWNER=root \
             bash -c "bash '$UNDER_TEST' --install '$SANDBOX/a.tar.gz'$extra"
@@ -221,26 +235,27 @@ if unshare -rm true 2>/dev/null; then
     mkdir -p "$SANDBOX/opt/android-sdk"; : > "$SANDBOX/opt/android-sdk/previous-install"
     for kind in device hardlink innerlink escape; do
         pack_hostile "$SANDBOX/staged" "$kind"
-        inst StandaloneVM
+        inst full
         if [[ "$got" -eq 2 && -e "$SANDBOX/opt/android-sdk/previous-install" && "$(ls -A "$SANDBOX/opt")" == android-sdk ]]; then
             pass "an archive with a $kind member is refused; the previous install stays, nothing beside it"
         else fail "a $kind member was not refused cleanly (exit $got)" "$out"$'\n'"$(ls -a "$SANDBOX/opt")"; fi
     done
     make_tree "$SANDBOX/bad" "platforms;android-30@9"; pack "$SANDBOX/bad"
-    inst StandaloneVM
+    inst full
     [[ "$got" -eq 2 && "$out" == *"platforms;android-30: 9, pinned 3"* && -e "$SANDBOX/opt/android-sdk/previous-install" ]] \
         && pass "a tree that fails verification is refused, named, and the previous install stays" || fail "a failing tree was not refused cleanly" "$out"
     mv "$SANDBOX/opt/android-sdk" "$SANDBOX/opt/android-sdk.old"
-    inst StandaloneVM
+    inst full
     [[ "$out" == *"restored the previous install"* && -e "$SANDBOX/opt/android-sdk/previous-install" ]] \
         && pass "an interrupted swap (.old, nothing in place) is restored before anything else" || fail "the interrupted swap was not restored" "$out"
+    mkdir -p "$SANDBOX/opt/.android-sdk.new.killed/x"
     pack_hostile "$SANDBOX/staged" setuid
-    inst StandaloneVM
+    inst full
     expect "a good archive installs in place" 0 "== installed =="
     [[ ! -e "$SANDBOX/opt/android-sdk/previous-install" && "$(ls -A "$SANDBOX/opt")" == android-sdk ]] \
         && pass "  the previous install is replaced whole, nothing left beside it" || fail "the swap left something" "$(ls -a "$SANDBOX/opt")"
-    [[ -z "$(find "$SANDBOX/opt/android-sdk" -perm /6000 -o -perm /022 | head -1)" && -e "$SANDBOX/opt/android-sdk/platform-tools/evil" ]] \
-        && pass "  read-only to group and other, and the archive's setuid bit dropped" || fail "a writable or setuid path survived" "$(find "$SANDBOX/opt/android-sdk" -perm /6000 -o -perm /022 | head -3)"
+    [[ -z "$(find "$SANDBOX/opt/android-sdk" ! -type l \( -perm /6000 -o -perm /022 \) | head -1)" && -e "$SANDBOX/opt/android-sdk/platform-tools/evil" ]] \
+        && pass "  read-only to group and other, and the archive's setuid bit dropped" || fail "a writable or setuid path survived" "$(find "$SANDBOX/opt/android-sdk" ! -type l \( -perm /6000 -o -perm /022 \) | head -3)"
     grep -qx "export ANDROID_NDK_HOME=$SANDBOX/opt/android-sdk/ndk/28.2.13676358" "$SANDBOX/etc/android-sdk.sh" \
         && grep -qx "export ANDROID_JDK_HOME=$SANDBOX/opt/android-sdk/jdk" "$SANDBOX/etc/android-sdk.sh" \
         && ! grep -qE 'JAVA_HOME=|PATH=' "$SANDBOX/etc/android-sdk.sh" \
@@ -249,7 +264,7 @@ if unshare -rm true 2>/dev/null; then
     # A Qubes AppVM: the tree goes to the bind-dirs store under /rw, an
     # entry keeps SDK_DIR and the profile, both are mounted now, and
     # --check passes while they are.
-    pack "$SANDBOX/staged"; inst AppVM
+    pack "$SANDBOX/staged"; inst rw-only
     expect "on an AppVM: installs into the bind-dirs store, and --check passes while mounted" 0 "kept across reboots by bind-dirs"
     [[ -r "$SANDBOX/rw/bind-dirs$SANDBOX/opt/android-sdk/.android-toolchain.manifest" && -r "$SANDBOX/rw/bind-dirs$SANDBOX/etc/android-sdk.sh" ]] \
         && pass "  the tree and the profile live under /rw (the persistent volume)" || fail "the bind-dirs store is not where Qubes reads it" "$(find "$SANDBOX/rw" -maxdepth 8 | head)"
