@@ -275,6 +275,15 @@ where
     }
 }
 
+/// Whether `session` has ended, asked of the session rather than read
+/// from an error code: a binding reports the same end as
+/// `BackendUnavailable`, `ShuttingDown`, `Timeout` or `ProtocolViolation`
+/// by the way it ended. `events(0)` takes nothing on a live session and
+/// answers the end on an ended one (`DataSessionPort::events`).
+async fn ended<S: DataSessionPort>(session: &S) -> bool {
+    session.events(0).await.is_err()
+}
+
 /// An open refused because of the endpoint, not the daemon: reported as
 /// itself (TOOL-SURFACE.md §Tool results, LIFECYCLE.md §Endpoint conflict).
 const fn endpoint_refusal(error: TransportError) -> bool {
@@ -331,22 +340,21 @@ impl<B: DataSessionBinding> Bridge<B> {
         };
         let mut died = false;
         for channel in joined {
-            match drive(&session, session.join(channel.clone()), &mut emit).await? {
-                Ok(()) => {}
-                // The session died; the daemon refused nothing, so the
-                // joins are kept for the next open.
-                Err(TransportError::BackendUnavailable) => {
+            if let Err(e) = drive(&session, session.join(channel.clone()), &mut emit).await? {
+                // A session that ended refused nothing, whatever code its
+                // end came with: the joins are kept for the next open
+                // (`a_daemon_stopping_during_the_rejoin_keeps_the_join`).
+                if ended(&session).await {
                     died = true;
                     break;
                 }
-                Err(e) => {
-                    emit.state.left(&channel);
-                    rejoin_refused.insert(channel, e);
-                }
+                emit.state.left(&channel);
+                rejoin_refused.insert(channel, e);
             }
         }
         if died {
             self.state.lease_lost();
+            self.health = None;
             self.last_open_error = Some(TransportError::BackendUnavailable);
             self.schedule_reconnect();
             return Ok(());
@@ -510,8 +518,14 @@ impl<B: DataSessionBinding> Bridge<B> {
             }
             ToolCall::Leave(channel) => {
                 let left = drive(session, session.leave(channel.clone()), &mut emit).await?;
-                emit.state.left(&channel);
-                rejoin_refused.remove(&channel);
+                // A live daemon that refused the leave still holds the
+                // join, so the bridge keeps it; an ended session took the
+                // join with it, and the intent to leave stands -- the next
+                // open does not re-take it.
+                if left.is_ok() || ended(session).await {
+                    emit.state.left(&channel);
+                    rejoin_refused.remove(&channel);
+                }
                 left.map(|()| format!("left {}", channel.as_str()))
             }
             ToolCall::Broadcast { channel, payload } => {

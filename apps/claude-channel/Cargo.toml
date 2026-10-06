@@ -39,6 +39,8 @@ rand = { workspace = true }
 interweave-ipc-client = { path = "../../crates/local/ipc-client" }
 
 [dev-dependencies]
+# A paused clock for the backoff test.
+tokio = { workspace = true, features = ["test-util"] }
 interweave-ipc-protocol = { path = "../../crates/api/ipc-protocol" }
 tempfile = { workspace = true }
 interweave-local-client-fake = { path = "../../tests/local-client-fake" }

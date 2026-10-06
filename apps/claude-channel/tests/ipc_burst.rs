@@ -14,8 +14,13 @@ use std::time::Duration;
 
 use interweave_claude_channel::serve::{Config, Env, serve};
 use interweave_ipc_client::{IpcBinding, SocketPaths};
-use interweave_ipc_protocol::{DecodedFrame, Frame, FrameError, decode_frame, encode_frame};
-use interweave_transport_api::EndpointId;
+use interweave_ipc_protocol::{
+    DecodedFrame, DirectReceived, Frame, FrameError, decode_frame, encode_frame,
+};
+use interweave_local_client_api::ReceivedDirect;
+use interweave_transport_api::{
+    EndpointId, MAX_PAYLOAD_BYTES, MessageId, Payload, TransportIdentity,
+};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -76,7 +81,13 @@ async fn a_call_answered_behind_a_burst_of_events_completes() {
     let (bridge_out, host_out) = tokio::io::duplex(1 << 16);
     let env = Env {
         now_ms: Box::new(|| 0),
-        entropy: Box::new(|| [7; 16]),
+        entropy: Box::new({
+            let mut n = 0_u8;
+            move || {
+                n = n.wrapping_add(1);
+                [n; 16]
+            }
+        }),
     };
     let config = Config {
         endpoint: EndpointId::parse("claude").expect("endpoint"),
@@ -122,10 +133,19 @@ async fn a_call_answered_behind_a_burst_of_events_completes() {
         panic!("the send's request")
     };
     for sequence in 0..BURST {
+        let message = ReceivedDirect {
+            source_peer: TransportIdentity::parse(PEER).expect("peer"),
+            source_endpoint: EndpointId::parse("human").expect("endpoint"),
+            destination_endpoint: EndpointId::parse("claude").expect("endpoint"),
+            message_id: MessageId::from_bytes([u8::try_from(sequence).expect("small"); 16]),
+            payload: Payload::new(None, format!("m{sequence}").into_bytes(), MAX_PAYLOAD_BYTES)
+                .expect("payload"),
+            received_at_ms: 0,
+        };
         daemon
             .write(&json!({
-                "type": "event", "sequence": sequence, "event_type": "peer.disconnected",
-                "data": {"peer": PEER, "reason_class": "policy"}
+                "type": "event", "sequence": sequence, "event_type": "message.direct",
+                "data": serde_json::to_value(DirectReceived::from(message)).expect("data")
             }))
             .await;
     }
@@ -137,6 +157,7 @@ async fn a_call_answered_behind_a_burst_of_events_completes() {
         .await;
 
     let mut lines = BufReader::new(host_out).lines();
+    let mut notified: u64 = 0;
     let answer = tokio::time::timeout(PATIENCE, async {
         loop {
             let line = lines.next_line().await.expect("readable").expect("a line");
@@ -144,10 +165,37 @@ async fn a_call_answered_behind_a_burst_of_events_completes() {
             if value["id"] == json!(1) {
                 return value;
             }
+            if value["method"] == json!("notifications/claude/channel") {
+                notified += 1;
+            }
         }
     })
     .await
     .expect("the send answers behind the burst, not never");
+    // The reader delivers the answer once it is past the burst, which
+    // can leave up to the queue's bound of events still buffered: those
+    // follow the answer. Everything else was drained AND written while
+    // the call was in flight, not held aside.
+    let before = notified;
+    assert!(
+        before >= BURST - u64::from(QUEUE),
+        "{before} of {BURST} written before the answer"
+    );
+    let rest = tokio::time::timeout(PATIENCE, async {
+        let mut n = 0;
+        while before + n < BURST {
+            let line = lines.next_line().await.expect("readable").expect("a line");
+            if serde_json::from_str::<Value>(&line).expect("json")["method"]
+                == json!("notifications/claude/channel")
+            {
+                n += 1;
+            }
+        }
+        n
+    })
+    .await
+    .expect("the rest follow");
+    assert_eq!(before + rest, BURST, "every message notified once");
     assert_eq!(
         answer["result"]["content"][0]["text"],
         json!("remote transport accepted at endpoint human")

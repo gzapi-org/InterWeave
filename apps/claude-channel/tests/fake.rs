@@ -62,9 +62,18 @@ struct Record {
     down: AtomicBool,
     /// Joins are refused, as a daemon that will not take one answers.
     refuse_join: AtomicBool,
-    /// The next join finds the session dead, as a daemon restarting
-    /// between the open and the re-join leaves it.
+    /// The next join ends the session, as a daemon stopping between the
+    /// open and the re-join does: the session is down from then on, and
+    /// the join answers `ShuttingDown`, the code the IPC binding gives a
+    /// graceful stop.
     die_on_join: AtomicBool,
+    /// Leaves are refused by a live daemon.
+    refuse_leave: AtomicBool,
+    /// When each open was asked, on the test's clock.
+    opens: Mutex<Vec<tokio::time::Instant>>,
+    /// Every open succeeds and the session it gives has already ended:
+    /// a daemon that accepts and closes at once.
+    accept_and_close: AtomicBool,
 }
 
 impl Record {
@@ -100,6 +109,11 @@ impl DataSessionBinding for Recorded {
     async fn open(&self, request: SessionRequest) -> Result<RecordedSession, TransportError> {
         self.record.call("open");
         self.record
+            .opens
+            .lock()
+            .expect("lock")
+            .push(tokio::time::Instant::now());
+        self.record
             .requests
             .lock()
             .expect("lock")
@@ -123,13 +137,17 @@ impl DataSessionPort for RecordedSession {
             return Err(TransportError::Overloaded);
         }
         if self.record.die_on_join.swap(false, Ordering::SeqCst) {
-            return Err(TransportError::BackendUnavailable);
+            self.record.down.store(true, Ordering::SeqCst);
+            return Err(TransportError::ShuttingDown);
         }
         self.inner.join(channel).await
     }
     async fn leave(&self, channel: ChannelId) -> Result<(), TransportError> {
         self.record.call("leave");
         self.record.down()?;
+        if self.record.refuse_leave.load(Ordering::SeqCst) {
+            return Err(TransportError::Overloaded);
+        }
         self.inner.leave(channel).await
     }
     async fn broadcast(
@@ -155,6 +173,9 @@ impl DataSessionPort for RecordedSession {
     }
     async fn events(&self, max: usize) -> Result<Vec<SessionEvent>, TransportError> {
         self.record.down()?;
+        if self.record.accept_and_close.load(Ordering::SeqCst) {
+            return Err(TransportError::BackendUnavailable);
+        }
         self.inner.events(max).await
     }
     async fn ready(&self) -> Result<(), TransportError> {
@@ -162,6 +183,9 @@ impl DataSessionPort for RecordedSession {
         // connection's end would be.
         loop {
             self.record.down()?;
+            if self.record.accept_and_close.load(Ordering::SeqCst) {
+                return Err(TransportError::BackendUnavailable);
+            }
             if let Ok(woke) =
                 tokio::time::timeout(Duration::from_millis(20), self.inner.ready()).await
             {
@@ -348,13 +372,36 @@ async fn the_host_is_kept_in_the_2025_11_25_era() {
 #[tokio::test]
 async fn an_inbound_direct_is_notified_and_replied_to_on_its_route() {
     let mut w = World::start().await;
-    w.peer_sends("hello claude").await;
+    // From B's `claude`, which is not B's default (`human`): a reply that
+    // dropped its route would land on the default instead.
+    let b_claude =
+        w.b.open(
+            SessionRequest::new(
+                "test-peer",
+                Some(endpoint("claude")),
+                [DataCapability::Events, DataCapability::Commands],
+            )
+            .expect("request"),
+        )
+        .await
+        .expect("opens");
+    b_claude
+        .send_direct(
+            DirectDestination {
+                peer: w.a.peer().clone(),
+                endpoint: Some(endpoint("claude")),
+            },
+            MessageId::from_bytes([4; 16]),
+            Payload::new(None, b"hello claude".to_vec(), MAX_PAYLOAD_BYTES).expect("payload"),
+        )
+        .await
+        .expect("accepted");
     let n = w.notification().await;
     assert_eq!(n["content"], json!("hello claude"));
     let meta = &n["meta"];
     assert_eq!(meta["delivery_mode"], json!("direct"));
     assert_eq!(meta["source_peer"], json!(w.b.peer().as_str()));
-    assert_eq!(meta["source_endpoint"], json!("human"));
+    assert_eq!(meta["source_endpoint"], json!("claude"));
     assert_eq!(meta["destination_endpoint"], json!("claude"));
     assert!(meta.get("source").is_none(), "no source key: {meta}");
     let token = meta["reply_token"].as_str().expect("a token").to_owned();
@@ -362,12 +409,12 @@ async fn an_inbound_direct_is_notified_and_replied_to_on_its_route() {
     let (text, error) = w
         .tool(
             "reply",
-            json!({"reply_token": token, "content": "hello human"}),
+            json!({"reply_token": token, "content": "hello back"}),
         )
         .await;
     assert!(!error, "{text}");
-    assert_eq!(text, "remote transport accepted at endpoint human");
-    let events = w.peer.events(usize::MAX).await.expect("events");
+    assert_eq!(text, "remote transport accepted at endpoint claude");
+    let events = b_claude.events(usize::MAX).await.expect("events");
     let reply = events
         .iter()
         .find_map(|e| match e {
@@ -376,7 +423,7 @@ async fn an_inbound_direct_is_notified_and_replied_to_on_its_route() {
         })
         .expect("the reply arrived");
     assert_eq!(reply.source_endpoint, endpoint("claude"));
-    assert_eq!(reply.payload.bytes(), b"hello human");
+    assert_eq!(reply.payload.bytes(), b"hello back");
 
     let (text, error) = w
         .tool(
@@ -712,11 +759,13 @@ async fn an_endpoint_conflict_is_reported_as_itself() {
     assert!(text.starts_with("EndpointInUse"), "{text}");
 }
 
-/// A session that dies during the re-join is a reconnect, not a refusal:
-/// the join is kept and re-taken by the next open (LIFECYCLE.md step 6:
-/// only what "the daemon refuses" is a row).
+/// A daemon that stops during the re-join refused nothing: its session
+/// ended with `ShuttingDown`, and the join is kept and re-taken by the
+/// next open (LIFECYCLE.md step 6: only what "the daemon refuses" is a
+/// row). Its control is `a_refused_rejoin_is_a_status_row_until_the_next_join`,
+/// where a live daemon refuses.
 #[tokio::test]
-async fn a_session_dying_during_the_rejoin_keeps_the_join() {
+async fn a_daemon_stopping_during_the_rejoin_keeps_the_join() {
     let mut w = World::start().await;
     w.tool("join", json!({"channel": "general"})).await;
     w.record.down.store(true, Ordering::SeqCst);
@@ -727,16 +776,59 @@ async fn a_session_dying_during_the_rejoin_keeps_the_join() {
     }
     w.record.die_on_join.store(true, Ordering::SeqCst);
     w.record.down.store(false, Ordering::SeqCst);
-    w.wait_connected().await;
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while w.record.die_on_join.load(Ordering::SeqCst) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the re-join never came"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let status = w.status().await;
     assert_eq!(status["rejoin_refused"], json!([]), "no refusal recorded");
+    w.record.down.store(false, Ordering::SeqCst);
+    w.wait_connected().await;
+    let status = w.status().await;
+    assert_eq!(status["rejoin_refused"], json!([]), "still none");
     assert_eq!(
         status["joined_channels"],
         json!(["general"]),
         "the join kept"
     );
-    assert!(
-        !w.record.die_on_join.load(Ordering::SeqCst),
-        "the control: the dying re-join happened"
-    );
+}
+
+/// A live daemon that refuses a leave still holds the join, so the bridge
+/// keeps it; the leave that succeeds is the control.
+#[tokio::test]
+async fn a_refused_leave_keeps_the_join() {
+    let mut w = World::start().await;
+    w.tool("join", json!({"channel": "general"})).await;
+    w.record.refuse_leave.store(true, Ordering::SeqCst);
+    let (text, error) = w.tool("leave", json!({"channel": "general"})).await;
+    assert!(error && text.starts_with("Overloaded"), "{text}");
+    assert_eq!(w.status().await["joined_channels"], json!(["general"]));
+    w.record.refuse_leave.store(false, Ordering::SeqCst);
+    let (text, error) = w.tool("leave", json!({"channel": "general"})).await;
+    assert!(!error, "{text}");
+    assert_eq!(w.status().await["joined_channels"], json!([]));
+}
+
+/// A daemon that accepts and closes at once is retried on a growing
+/// backoff, not at the first delay forever (LIFECYCLE.md §Reconnect).
+#[tokio::test(start_paused = true)]
+async fn a_daemon_that_accepts_and_closes_is_retried_on_a_growing_backoff() {
+    let w = World::start().await;
+    w.record.accept_and_close.store(true, Ordering::SeqCst);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        if w.record.opens.lock().expect("lock").len() >= 6 {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "too few opens");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let opens = w.record.opens.lock().expect("lock").clone();
+    let gaps: Vec<Duration> = opens.windows(2).map(|p| p[1] - p[0]).collect();
+    let last = gaps.len() - 1;
+    assert!(gaps[last] >= gaps[last - 2] * 3, "the gaps grow: {gaps:?}");
 }
