@@ -47,6 +47,25 @@ pub enum TrustOutcome {
     Entry(EntryProblem),
 }
 
+/// What a person did in the trust settings, as a view hands it to the
+/// root ([`crate::ViewEvent::Trust`]); the root applies it with
+/// [`TrustSettings::input`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrustInput {
+    /// The settings opened.
+    Opened,
+    /// The `PeerId` field now reads this.
+    EntryChanged(String),
+    /// Propose trusting the typed `PeerId`.
+    ProposeAllow,
+    /// Propose removing trust from a listed peer.
+    ProposeRevoke(TransportIdentity),
+    /// Carry out the change on show.
+    Confirm,
+    /// Drop the change on show.
+    Cancel,
+}
+
 /// The trust settings, as a view renders them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TrustSettings {
@@ -61,6 +80,31 @@ pub struct TrustSettings {
 }
 
 impl TrustSettings {
+    /// Apply what the person did: the intent it asks for, if any -- a
+    /// read on opening, a change only on confirmation.
+    pub fn input(&mut self, input: TrustInput) -> Option<Intent> {
+        match input {
+            TrustInput::Opened => self.opened(),
+            TrustInput::EntryChanged(text) => {
+                self.entry_changed(text);
+                None
+            }
+            TrustInput::ProposeAllow => {
+                self.propose_allow();
+                None
+            }
+            TrustInput::ProposeRevoke(peer) => {
+                self.propose_revoke(&peer);
+                None
+            }
+            TrustInput::Confirm => self.confirm(),
+            TrustInput::Cancel => {
+                self.cancel();
+                None
+            }
+        }
+    }
+
     /// The view opened: read the allowlist, unless a read or a change is
     /// already on its way.
     pub fn opened(&mut self) -> Option<Intent> {
@@ -243,6 +287,41 @@ mod tests {
         assert_eq!(s.outcome().0, Some(&TrustOutcome::Changed(change)));
         assert_eq!(s.entry(), "", "the trusted PeerId leaves the field");
         assert_eq!(s.in_flight(), None);
+    }
+
+    #[test]
+    fn of_every_input_only_opening_and_confirming_ask_for_anything() {
+        let (me, them) = (peer(), peer());
+        let mut s = TrustSettings::default();
+        let mut asked = Vec::new();
+        for input in [
+            TrustInput::Opened,
+            TrustInput::EntryChanged(them.as_str().to_owned()),
+            TrustInput::ProposeAllow,
+            TrustInput::Cancel,
+            TrustInput::ProposeAllow,
+            TrustInput::ProposeRevoke(them.clone()),
+            TrustInput::Confirm,
+        ] {
+            if matches!(input, TrustInput::EntryChanged(_)) {
+                s.read(Ok(TrustList {
+                    local_peer: Some(me.clone()),
+                    allowed: Vec::new(),
+                }));
+            }
+            asked.extend(s.input(input));
+        }
+        assert_eq!(
+            asked,
+            [
+                Intent::ReadTrust,
+                Intent::SetTrust(TrustChange {
+                    peer: them,
+                    allowed: true
+                })
+            ],
+            "a revoke of an unlisted peer proposes nothing, so the allow stands"
+        );
     }
 
     #[test]

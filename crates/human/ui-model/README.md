@@ -54,7 +54,7 @@ Agreed with the client's role before it was built (relay seqs 10630, 10639 and 1
 - `ReadTrust`, when the trust settings open;
 - `SetTrust(change)`, only from `TrustSettings::confirm` of a change the person proposed in the settings -- the typed PeerId, or a listed peer's removal -- and was shown with its exact PeerId.
 
-**`ViewEvent`** is what a view hands the root: an `Intent`, or a draft edit the root applies with `draft_changed` before it takes the view's events again. It lives here, not in the toolkit crate, so a root that names no toolkit can handle it; `ui-slint` re-exports it.
+**`ViewEvent`** is what a view hands the root: an `Intent`; a draft edit the root applies with `draft_changed`; or a trust settings input (`TrustInput`) the root applies with `TrustSettings::input`, which returns `ReadTrust` on opening and `SetTrust` on confirmation only. The root applies an edit or an input before it takes the view's events again. It lives here, not in the toolkit crate, so a root that names no toolkit can handle it; `ui-slint` re-exports it.
 
 Only the trust settings' two touch administration, and nothing touches recovery: no intent a message or a conversation offers reaches trust (`tests/section_13.rs`, s13_4 and s13_5). Read is a retention act, so `MarkRead` comes only from `conversation_viewed(key, focused: true)`: never on receipt, never from a notification, never while unfocused, and never from `actions()`.
 

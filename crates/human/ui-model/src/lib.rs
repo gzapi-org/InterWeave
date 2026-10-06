@@ -27,4 +27,4 @@ pub use model::{
     ItemDiagnostics, ItemKey, ItemStatus, ListedInbound, ListedOutbound, MessageItem, Reply,
     Retention, RouteLabel, SESSION_ITEM_CAP, SessionNotice, Table, Trust, UiModel, ViewEvent,
 };
-pub use trust::{EntryProblem, TrustChange, TrustOutcome, TrustSettings};
+pub use trust::{EntryProblem, TrustChange, TrustInput, TrustOutcome, TrustSettings};

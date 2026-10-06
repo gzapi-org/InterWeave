@@ -22,7 +22,7 @@ use crate::labels::{
     ErrorClass, LabelKey, UiText, fill, outbound_label, placeholder_en, send_error_class,
     session_problem_class, short_peer,
 };
-use crate::trust::{TrustChange, TrustSettings};
+use crate::trust::{TrustChange, TrustInput, TrustSettings};
 
 /// How many items the model holds that the store no longer does --
 /// read-and-unkept inbound and terminal outbound -- before it evicts the
@@ -96,6 +96,10 @@ pub enum ViewEvent {
         /// The draft as it now reads.
         draft: String,
     },
+    /// The person acted in the trust settings: the root passes it to
+    /// [`TrustSettings::input`] before taking the view's events again, and
+    /// carries out the intent it returns.
+    Trust(TrustInput),
 }
 
 /// Which table an item's row is in: a row id names a row within one.
