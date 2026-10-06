@@ -66,7 +66,7 @@ Model: <synthetic>
 }
 ```
 
-## Claude Code debug log: the stub's own server only
+## Claude Code debug log: the run's own server only
 
 ```text
 2026-10-06T10:23:16.849Z [DEBUG] MCP server "plugin:interweave:interweave": Starting connection with timeout of 30000ms

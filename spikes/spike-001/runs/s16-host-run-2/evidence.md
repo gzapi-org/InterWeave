@@ -67,7 +67,7 @@ Model: claude-opus-5-5
 }
 ```
 
-## Claude Code debug log: the stub's own server only
+## Claude Code debug log: the run's own server only
 
 ```text
 2026-10-06T14:27:58.468Z [DEBUG] MCP server "plugin:interweave:interweave": Starting connection with timeout of 30000ms
