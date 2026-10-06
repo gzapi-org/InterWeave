@@ -9,10 +9,13 @@
 //! with no connection answered `PeerUnreachable` at once, and a person
 //! whose peer had just restarted read that for the backoff's 30-60 s.
 //! A send now dials once and waits here for the outcome: flushed onto
-//! the wire when a connection to the peer is retained, failed when no
-//! dial, race or connection is left for it, and failed at
-//! [`SEND_DIAL_HORIZON_MS`] or as soon as its caller stops waiting,
-//! whichever comes first.
+//! the wire when a connection to the peer is retained, failed when a dial
+//! to the peer fails with no other dial, race or connection left for it,
+//! and otherwise failed at [`SEND_DIAL_HORIZON_MS`] or as soon as its
+//! caller stops waiting, whichever comes first. Two ends reach only the
+//! horizon: a deferred circuit route the gate refuses when its head-start
+//! runs out, and a connection established but not retained -- neither is
+//! a failed dial event (#208 review F5).
 //!
 //! What it holds counts against the same bounds as an exchange already
 //! on the wire (`admit_outbound`), so holding moves no work outside them.

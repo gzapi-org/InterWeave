@@ -103,7 +103,9 @@ pub struct DialGateStatus {
     pub peer_entries: usize,
     /// The gate's retry and quarantine notes its bound discarded
     /// unreported, since the runtime started (`MAX_GATE_NOTES`). Not zero
-    /// means connectivity lines are missing.
+    /// means connectivity lines are missing; zero does not mean none are,
+    /// since a note handed up as an event is dropped uncounted when the
+    /// outbox has no base room, as every informational event is.
     pub gate_notes_dropped: u64,
 }
 
