@@ -564,6 +564,22 @@ assert_rc "a crate outside harness/ with an accounted pin passes" 0
 assert_contains "and its trace line is printed" "spikes/spike-test/node pins"
 rm -rf "$SANDBOX"; SANDBOX=""
 
+# ANOTHER CRATE'S RUN IS NOT THIS CRATE'S RECORDING. The node's pin is
+# made the parent of a commit that touches only the spike's harness crate:
+# that commit is the harness's run, and the node may not borrow it, though
+# it is confined to the spike (#211 review).
+new_provenance_sandbox yes yes node
+mkdir -p "$SANDBOX/spikes/spike-test/harness"
+printf '[package]\nname = "h"\nversion = "0.0.0"\n' > "$SANDBOX/spikes/spike-test/harness/Cargo.toml"
+borrowed="$( git -C "$SANDBOX" rev-parse HEAD )"
+git -C "$SANDBOX" add -A >/dev/null && git -C "$SANDBOX" commit -qm 'the harness run' -- spikes/spike-test/harness
+git -C "$SANDBOX" update-ref refs/remotes/origin/main HEAD
+sed -i "s/rev = \"[0-9a-f]*\" }/rev = \"$borrowed\" }/" "$SANDBOX/spikes/spike-test/node/Cargo.toml"
+run_provenance_guard
+assert_rc "a pin borrowed from another crate's run FAILS" 1
+assert_contains "and is refused as no recording" "no commit in that"
+rm -rf "$SANDBOX"; SANDBOX=""
+
 # `--no-provenance` SKIPS IT, for a clone without the history, and the
 # skip is visible.
 new_provenance_sandbox yes no
