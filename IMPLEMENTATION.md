@@ -16,9 +16,6 @@ presentation models and the reference Slint views, the in-memory fake
 passing the same conformance functions as the real bindings, HumanChatV2
 across two daemons, and the envelope contract `active` with the close;
 the plan's §17 closing record carries what it did not prove.
-Stage 15 builds the desktop human client, `apps/human-desktop`; Stage 16,
-the Claude Code Channel bridge, runs beside it under the plan's §19
-(SPIKE-001 PASS, 2026-10-03), the status naming the lowest open stage.
 Stage 13 closed 2026-10-01 on the IPC v2 batches (#144, #145, #147, #151,
 #154, #156, #157), the composition hardening (#159), the ledger audit
 (#160) and the `peer.disconnected` producer (#162): the daemon, the IPC

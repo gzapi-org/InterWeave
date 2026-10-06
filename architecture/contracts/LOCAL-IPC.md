@@ -349,12 +349,9 @@ speaks 2.1 (§Version negotiation's capability rule); the `close` frame's
 `supported` list is `[{major: 2, minor: 1}]` since R1. The two are the
 same runtime overlay as `admin.endpoints.*` — never written to
 `config.yaml`, `persisted: false` — until the owner decides persistence
-(ADR-0028's question, routed with the Stage 15 record). Their schemas,
-`trust-list-params`, `trust-list` and `trust-set-params`, are `approved`,
-and the method and capability enums carry their minor bumps (`ipc/method`
+(ADR-0028's question, routed with the Stage 15 record). Their schemas, `trust-list-params`, `trust-list` and `trust-set-params`, were `approved`, and the method and capability enums carry their minor bumps (`ipc/method`
 1.1.0, `ipc/capability` 1.2.0, `ipc/request` 1.1.0), as every 2.0 shape
-did (plan §16 (3)); they flipped `active` with Stage 15's close (2026-10-06, with `ipc/path-changed`). Discovery and
-bootstrap administration still have no method; they stay Stage 15's.
+did (plan §16 (3)); they flipped `active` with Stage 15's close (2026-10-06, with `ipc/path-changed`). Discovery and bootstrap administration still have no method; Stage 15's close carried them to the owner (plan §18's record, with ADR-0032's revisit).
 
 ## Event catalogue
 

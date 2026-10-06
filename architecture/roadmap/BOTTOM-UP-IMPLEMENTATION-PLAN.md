@@ -4527,8 +4527,7 @@ in `chat.rs`: two shipped binaries, direct and broadcast, plain and
 store; (c) `check_human_layering.sh` holds with `app-core` guarded (67
 runtime dependencies walked at the close) and `cargo deny` is green with
 the delta the owner decided in (14) — the Slint Royalty-free 2.0
-exceptions, RUSTSEC-2026-0192 ignored with its reason and the next Slint
-bump as the revisit, BSL-1.0 admitted nowhere; (d) the accessibility
+exceptions, RUSTSEC-2026-0192 ignored with its reason and the next Slint or winit bump as the revisit, BSL-1.0 admitted nowhere; (d) the accessibility
 bullet ran on a real adapter —
 `the_tree_read_over_atspi_labels_message_route_and_connectivity_controls`,
 AT-SPI under Xvfb in CI (devex-tooling's `with_display.sh`, #188), the
@@ -4536,8 +4535,7 @@ trust leg included — so no release-test record is named as a limit; (e)
 (13)'s four schemas — `ipc/trust-list-params`, `ipc/trust-list`,
 `ipc/trust-set-params`, `ipc/path-changed` — flipped `active` in the
 pull request that lands this record, their mirrors in
-`schema_agreement.rs` and `check_schemas_are_tested.sh` covering the
-`ipc` family (30 schemas named); (f) the ledger holds no `stage-15`
+`schema_agreement.rs` and `check_schemas_are_tested.sh` covering the `ipc` and `human-chat` families (30 schemas named, 29 of them `ipc`); (f) the ledger holds no `stage-15`
 entry — `DirectoryCache::forget`'s production caller is the `SetTrust`
 arm of the libp2p runtime's commands (B9 through R2) — and the status
 moves to `stage-16-claude-code-channel`, Stage 16 being the lowest open
@@ -4554,8 +4552,7 @@ finalised by language-culture, since English has no holder — the first
 English holder reads every `UiText` once. The trust allowlist change is
 a runtime overlay lost on restart (ADR-0028), said in the copy;
 persistence stays the owner's. The "human lease never became held"
-timeout B5 first saw was never reproduced (288 runs under load, #196);
-the session-timing log (#191) is in the binary for the next occurrence.
+timeout B5 first saw was never reproduced (rust-ui-dev's report at the close, 2026-10-06: 288 runs under load; #196's commits record 48); the session-timing log (#191) is in the binary for the next occurrence.
 LOCAL-CLIENT.md item 10's end-of-route clause is proved by the
 in-process tests only, not by the shared suite the IPC adapter runs
 (p2p-network-dev's gap, named on #190). The carries of the paragraph
@@ -4657,9 +4654,7 @@ LOWEST open stage — `stage-15-desktop-human-client` until Stage 15 closed, `st
 `Proof::Stage(16)` deferral is written while 16 runs beside 15 (the
 matrix expires a deferral only when the status passes its stage, so it
 would fire at Stage 17's opening, long after this stage's close), and
-the Cargo.toml status comment names both stages. The three prose status
-sites name Stage 16 as running under this section without the words the
-guard reserves for the status's stage. (3) `contracts/CHANNEL-EVENT.md`
+the Cargo.toml status comment names both stages. The three prose status sites named Stage 16 as running under this section without the words the guard reserves for the status's stage — until Stage 15's close, since when they say Stage 16 is open (2026-10-06). (3) `contracts/CHANNEL-EVENT.md`
 loses its `source | constant p2p` meta row under ADR-0049 (SPIKE-001
 fact 11: the host sets the tag's `source` from the server name and
 renders a `meta` key of that name as a second attribute); provenance is
