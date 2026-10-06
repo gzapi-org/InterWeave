@@ -30,11 +30,11 @@ mkdir -p "$out/classes" "$out/dex" "$out/stage/lib"
 
 (cd "$here/harness" && cargo ndk -t arm64-v8a -P 30 -o "$out/stage/lib" build --release --locked)
 
+mapfile -t sources < <(find "$here/app/src" -name '*.java')
 "$ANDROID_JDK_HOME/bin/javac" --release 11 -Xlint:-options \
-    -classpath "$platform" -d "$out/classes" \
-    $(find "$here/app/src" -name '*.java')
-"$tools/d8" --release --min-api 30 --lib "$platform" --output "$out/dex" \
-    $(find "$out/classes" -name '*.class')
+    -classpath "$platform" -d "$out/classes" "${sources[@]}"
+mapfile -t classes < <(find "$out/classes" -name '*.class')
+"$tools/d8" --release --min-api 30 --lib "$platform" --output "$out/dex" "${classes[@]}"
 
 "$tools/aapt2" link -o "$out/unsigned.apk" -I "$platform" \
     --manifest "$here/app/AndroidManifest.xml" \
