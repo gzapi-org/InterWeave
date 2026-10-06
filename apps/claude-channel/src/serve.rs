@@ -300,12 +300,9 @@ impl<B: DataSessionBinding> Bridge<B> {
         };
         match self.run(call).await {
             Ok(text) => tool_result_line(id, &text, false),
-            Err(e) => {
-                if e == TransportError::BackendUnavailable {
-                    self.lost();
-                }
-                tool_result_line(id, &error_text(e), true)
-            }
+            // A session that ended is noticed where it ends: `ready`
+            // resolves once it has, and the loop reconnects from there.
+            Err(e) => tool_result_line(id, &error_text(e), true),
         }
     }
 
