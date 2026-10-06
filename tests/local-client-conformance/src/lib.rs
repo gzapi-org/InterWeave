@@ -818,6 +818,47 @@ pub async fn administration_is_a_separate_authority<B: DataSessionBinding + Admi
     holder.close().await.expect("closes");
 }
 
+/// `admin.peers.list` (`CONNECTIVITY.md` §19, A 2026-10-06): a port
+/// without `admin.status` is refused; with it, the connected `remote` has
+/// a row that reads connected with the `connected` outcome, no row is the
+/// local peer, and no peer has two rows. Waited for, since a binding's
+/// pair may still be connecting when the case starts.
+pub async fn peer_rows_answer_under_admin_status<B: AdminBinding>(
+    binding: &B,
+    local: &TransportIdentity,
+    remote: &TransportIdentity,
+) {
+    use interweave_local_client_api::PeerOutcome;
+    let powerless = port(binding, &[AdminCapability::Endpoints]).await;
+    assert_eq!(
+        powerless.peers().await,
+        Err(TransportError::CapabilityDenied)
+    );
+    let admin = port(binding, &[AdminCapability::Status]).await;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    let rows = loop {
+        let rows = admin.peers().await.expect("the rows");
+        if rows.iter().any(|r| &r.peer == remote && r.connected) {
+            break rows;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "remote never read connected: {rows:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    let row = rows
+        .iter()
+        .find(|r| &r.peer == remote)
+        .expect("remote's row");
+    assert_eq!(row.last_outcome, Some(PeerOutcome::Connected), "{row:?}");
+    assert!(!rows.iter().any(|r| &r.peer == local), "{rows:?}");
+    let mut peers: Vec<&TransportIdentity> = rows.iter().map(|r| &r.peer).collect();
+    peers.sort();
+    peers.dedup();
+    assert_eq!(peers.len(), rows.len(), "one row per peer: {rows:?}");
+}
+
 /// `admin.trust` (ADR-0032, LOCAL-IPC.md; LOCAL-CLIENT.md §7 item 11): a
 /// port without the capability is refused both methods; the policy reads
 /// back the local peer, never among the allowed, and the connected

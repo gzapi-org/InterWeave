@@ -514,6 +514,12 @@ async fn trust_administration_revokes_as_policy() {
     suite::trust_administration_revokes_as_policy(&p.a, &p.a_peer, &p.b_peer).await;
 }
 
+#[tokio::test]
+async fn peer_rows_answer_under_admin_status() {
+    let p = pair();
+    suite::peer_rows_answer_under_admin_status(&p.a, &p.a_peer, &p.b_peer).await;
+}
+
 /// One direct message from `from` to `endpoint` at `to`, its outcome
 /// only.
 async fn direct_to(
