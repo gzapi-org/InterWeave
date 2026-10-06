@@ -7,7 +7,7 @@
 3. Bridge connects only to daemon IPC v2 data socket.
 4. Hello requests non-admin capabilities and claims the configured EndpointId.
 5. Daemon grants endpoint lease/epoch or returns a clear conflict/configuration error.
-6. Bridge reads the profile PeerId from the session's creation context (`local_peer`) and the effective limits from the grant, and re-takes the channel joins it held before a reconnect — none at first start: joins are made through the join tool, never by configuration; a re-join the daemon refuses leaves `joined_channels` and is reported as a notification, and Claude joins again through the tool (A 2026-10-06).
+6. Bridge reads the profile PeerId from the session's creation context (`local_peer`) and the effective limits from the grant, and re-takes the channel joins it held before a reconnect — none at first start: joins are made through the join tool, never by configuration; a re-join the daemon refuses leaves `joined_channels` and is held in `status.rejoin_refused` until the next join or leave of that channel — never composed into a channel event, whose body is the payload's content alone (`contracts/CHANNEL-EVENT.md` §Sanitization), and no other notification: the bridge declares no MCP `logging` capability — so Claude learns of it through `status` and joins again through the tool (A 2026-10-06).
 7. Inbound Channel notifications begin.
 
 The bridge never receives the profile private key and never becomes daemon owner merely because it started first.
