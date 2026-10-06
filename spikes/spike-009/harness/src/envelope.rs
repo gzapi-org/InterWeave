@@ -15,8 +15,10 @@
 //!   IV on encryption (randomized encryption is required by default), so
 //!   the caller cannot choose it and must keep the one it is given.
 //! - The header and the expected PeerId are associated data (Android's
-//!   `Cipher.updateAAD`): a changed policy byte, version or a ciphertext
-//!   moved to another profile fails authentication, not silently.
+//!   `Cipher.updateAAD`). An unknown version or policy byte is refused by
+//!   the header check before decryption (`Refused::Version`,
+//!   `Refused::Policy`); a VALID policy swapped for the other, or a
+//!   ciphertext moved to another profile, fails authentication.
 //! - The PeerId is NOT in the envelope: it is the profile's, kept beside
 //!   it, and unwrap also re-derives it from the seed and compares, so a
 //!   seed that authenticates but derives another identity is refused.

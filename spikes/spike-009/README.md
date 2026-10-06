@@ -33,7 +33,7 @@ associated data = magic | version | policy | the profile's PeerId (UTF-8)
 ```
 
 - **The IV is stored**, because an AndroidKeyStore AES-GCM key generates its own IV on encryption: randomized encryption is required by default, so the caller cannot choose the IV.
-- **The header and the PeerId are associated data**, through Android's `Cipher.updateAAD`, so a changed policy, a changed version or a ciphertext moved to another profile fails authentication.
+- **The header and the PeerId are associated data**, through Android's `Cipher.updateAAD`, so a valid policy swapped for the other, or a ciphertext moved to another profile, fails authentication. An unknown version or policy byte is refused earlier, by the header check, before any decryption (H3's Version and Policy counts).
 - **The PeerId is not stored in the envelope.** It is the profile's, kept beside the envelope, and unwrap also re-derives it from the seed and compares.
 
 Whether this layout becomes the format is a decision for the contract's owner, after the device half has shown AndroidKeyStore produces it. **Assumed, not yet verified on a device:** that a Keystore AES-GCM cipher takes associated data and returns a 12-byte IV and a 128-bit tag in this arrangement.
