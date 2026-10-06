@@ -137,6 +137,7 @@ fn main() {
     );
 
     println!("H7 -- an envelope belongs to one profile");
+    // TEST-ONLY synthetic seed: a fixed second identity, no real key material.
     let other = peer_of(&[7u8; 32]).expect("another PeerId");
     r.check(
         "H7",

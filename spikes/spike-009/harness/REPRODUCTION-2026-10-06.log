@@ -3,7 +3,7 @@
 # host: develop-qzapp (Linux x86_64), rustc 1.98.1
 # production crates pinned at a41e1f3d (Cargo.toml); third-party crates exact, lock committed
 # command: cargo run --locked (from spikes/spike-009/harness)
-# key material: the fixture's TEST-ONLY public all-zero vector, and random keys and identities made and dropped in memory
+# key material: the fixture's TEST-ONLY public all-zero vector, and random keys and identities made and dropped in memory; also a fixed TEST-ONLY synthetic seed [7u8; 32] for H7's second identity (this line corrected after PR #207's review; the run's output is unchanged)
 
 H1 -- the fixture seed derives the frozen PeerId
   [ok] H1 the production derivation gives the golden PeerId
