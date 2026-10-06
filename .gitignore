@@ -168,6 +168,12 @@ spikes/**/Cargo.lock
 # patch-release-visible detail of `libp2p-mdns`, and the row exists to be
 # compared against the vendored copy that bounds it (ADR-0053).
 !spikes/spike-010/harness/Cargo.lock
+# SPIKE-009's host half: what it records is that the production
+# identity derivation and AES-256-GCM (`aes-gcm`) give back the exact
+# seed and PeerId through the proposed envelope, and fail closed on
+# every tamper -- a result about those crates' versions, so the graph is
+# committed and the direct requirements are exact.
+!spikes/spike-009/harness/Cargo.lock
 # SPIKE-001's stub for a different reason: its graph is not the evidence
 # (the Claude Code build each run records is), but its drivers build it
 # `--locked`, so without the lock a fresh clone cannot rebuild the stub
