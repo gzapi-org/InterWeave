@@ -1732,8 +1732,10 @@ async fn an_endpoint_restricted_to_a_client_kind_still_leases() {
 /// Nothing to dial and could-not-reach are different answers.
 ///
 /// `DIRECT.md` separates them: no usable candidate addresses is
-/// `PeerUnknown`, without ad hoc discovery; a peer with candidates that
-/// is simply not connected is `PeerUnreachable`. Both used to be
+/// `PeerUnknown`, without ad hoc discovery and without a dial; a peer
+/// with candidates that cannot be reached is `PeerUnreachable` -- since
+/// A 2026-10-06 after the one dial the send makes to its known path
+/// (here a closed loopback port, so the dial is refused). Both used to be
 /// `PeerUnreachable`, on a comment claiming this layer "knows only that
 /// there is no connection" — while the `ConnectionManager`, in scope at
 /// that call, knows whether any address was ever recorded.
@@ -1792,10 +1794,259 @@ async fn an_unknown_peer_and_an_unreachable_one_are_told_apart() {
         )
         .await
         .expect("the command reaches the task")
-        .expect_err("an address, but no connection");
+        .expect_err("an address, and the dial to it refused");
     assert_eq!(
         unreachable,
         TransportError::PeerUnreachable,
         "something to dial that is not connected is a network answer"
     );
+}
+
+/// A send to an authorized peer that holds no connection and has a known
+/// path dials once and is accepted (`TRANSPORT.md` §Direct, A 2026-10-06,
+/// relay seq 13444). Before it, the same send answered `PeerUnreachable`
+/// at once, and a person whose peer was up read that until something
+/// else connected the two.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_send_to_a_known_unconnected_peer_dials_once_and_is_accepted() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let (sender_id, sender_peer) = who();
+    let (receiver_id, receiver_peer) = who();
+    let receiver = SwarmRuntime::start(
+        &receiver_id,
+        SubstrateConfig::default(),
+        trusting(&[&sender_peer]),
+    )
+    .expect("the receiver starts");
+    let sender = SwarmRuntime::start(
+        &sender_id,
+        SubstrateConfig::default(),
+        trusting(&[&receiver_peer]),
+    )
+    .expect("the sender starts");
+    sender
+        .configure_direct(endpoints(8))
+        .await
+        .expect("endpoints install");
+    let leases = claim_all(&sender, &["human", "claude"]).await;
+    receiver
+        .configure_direct(endpoints(8))
+        .await
+        .expect("endpoints install");
+    let held = claim_all(&receiver, &["human", "claude"]).await;
+    // A private listener of the family, without which ADR-0052 refuses
+    // the learned private address.
+    let _ = sender
+        .listen(format!("/ip4/{ip}/tcp/0").parse().expect("valid"))
+        .await
+        .expect("the sender listens");
+    let address = receiver
+        .listen(format!("/ip4/{ip}/tcp/0").parse().expect("valid"))
+        .await
+        .expect("the receiver listens");
+    assert_eq!(
+        sender
+            .learn(receiver_peer.clone(), [address.to_string()])
+            .await
+            .expect("delivered"),
+        1
+    );
+    // THE CONTROL: a known path, and no connection before the send.
+    let gate = sender.status(None).await.expect("answered").dial_gate;
+    assert_eq!(gate.established_connections, 0, "{gate:?}");
+
+    let resolved = sender
+        .send_direct(
+            &leases["human"],
+            receiver_peer,
+            frame(Some("claude"), b"dialled", 101),
+        )
+        .await
+        .expect("the command reaches the task")
+        .expect("the send dialled its known path and was accepted");
+    assert_eq!(resolved, endpoint("claude"));
+    let delivered = receiver
+        .commander()
+        .drain_leased(&held["claude"], usize::MAX)
+        .await
+        .expect("answers");
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].payload.bytes(), b"dialled");
+
+    sender.shutdown().await.expect("clean shutdown");
+    receiver.shutdown().await.expect("clean shutdown");
+}
+
+/// The restart case rust-ui-dev measured (relay seqs 12921, 12948), over
+/// real sockets.
+///
+/// 1. The receiver is down: the send's dial is refused and the send is
+///    `PeerUnreachable`; the failure puts the receiver in backoff.
+/// 2. The receiver comes up on that address, but the gate holds it off:
+///    a second send is `PeerUnreachable` at once, though a dial would
+///    now succeed. The gate still decides (`CONNECTIVITY.md` §12).
+/// 3. The receiver dials in. The retained inbound lifts the backoff.
+/// 4. The receiver restarts, and a send dials and is accepted -- where
+///    step 2, the peer equally reachable, was refused. The difference is
+///    the inbound's reset.
+///
+/// Step 4 restarts on a FRESH port. On its old port the first dial back
+/// hung for about ten seconds, five runs out of five, while a few
+/// microseconds' delay before the send avoided it: the dial reuses this
+/// node's listen port (`PortUse::Reuse`, libp2p-swarm's default), so it
+/// is the old connection's 4-tuple, which the restarted side's kernel
+/// may still hold. That is a finding of its own, not this test's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restarted_peer_is_reachable_once_it_has_connected_in_and_held_off_before() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let (sender_id, sender_peer) = who();
+    let (receiver_id, receiver_peer) = who();
+    let mut sender = SwarmRuntime::start(
+        &sender_id,
+        SubstrateConfig::default(),
+        trusting(&[&receiver_peer]),
+    )
+    .expect("the sender starts");
+    sender
+        .configure_direct(endpoints(8))
+        .await
+        .expect("endpoints install");
+    let leases = claim_all(&sender, &["human", "claude"]).await;
+    let sender_address = sender
+        .listen(format!("/ip4/{ip}/tcp/0").parse().expect("valid"))
+        .await
+        .expect("the sender listens");
+    // A port nothing listens on yet: bound and released.
+    let port = std::net::TcpListener::bind((ip, 0))
+        .expect("binds")
+        .local_addr()
+        .expect("an address")
+        .port();
+    let receiver_address = format!("/ip4/{ip}/tcp/{port}");
+    assert_eq!(
+        sender
+            .learn(receiver_peer.clone(), [receiver_address.clone()])
+            .await
+            .expect("delivered"),
+        1
+    );
+
+    // 1. Down.
+    assert_eq!(
+        send_restart(&sender, &leases, &receiver_peer, 111)
+            .await
+            .expect("delivered"),
+        Err(TransportError::PeerUnreachable),
+        "the dial is refused"
+    );
+
+    // 2. Up on the same address, and held off.
+    let start_receiver = || async {
+        let receiver = SwarmRuntime::start(
+            &receiver_id,
+            SubstrateConfig::default(),
+            trusting(&[&sender_peer]),
+        )
+        .expect("the receiver starts");
+        receiver
+            .configure_direct(endpoints(8))
+            .await
+            .expect("endpoints install");
+        let held = claim_all(&receiver, &["human", "claude"]).await;
+        receiver
+            .listen(receiver_address.parse().expect("valid"))
+            .await
+            .expect("the receiver listens on its old address");
+        (receiver, held)
+    };
+    let (receiver, _held) = start_receiver().await;
+    let asked = tokio::time::Instant::now();
+    assert_eq!(
+        send_restart(&sender, &leases, &receiver_peer, 112)
+            .await
+            .expect("delivered"),
+        Err(TransportError::PeerUnreachable),
+        "the gate holds the peer in backoff: no dial, though one would succeed"
+    );
+    // AT ONCE: refused by the gate, not held to the send's ten-second
+    // horizon.
+    assert!(
+        asked.elapsed() < Duration::from_secs(5),
+        "answered after {:?}",
+        asked.elapsed()
+    );
+
+    // 3. The receiver connects in; the sender retains it.
+    receiver
+        .dial(sender_peer.clone(), sender_address)
+        .await
+        .expect("delivered")
+        .expect("admitted");
+    wait_connected(&mut sender).await;
+    receiver.shutdown().await.expect("clean shutdown");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining, sender.next_event()).await {
+            Ok(Some(SwarmEvent::Disconnected { .. })) => break,
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("the sender stopped"),
+            Err(elapsed) => panic!("no disconnect within 20s ({elapsed})"),
+        }
+    }
+
+    // 4. Restarted, on a fresh port (above), which the sender learns.
+    let receiver = SwarmRuntime::start(
+        &receiver_id,
+        SubstrateConfig::default(),
+        trusting(&[&sender_peer]),
+    )
+    .expect("the receiver restarts");
+    receiver
+        .configure_direct(endpoints(8))
+        .await
+        .expect("endpoints install");
+    let held = claim_all(&receiver, &["human", "claude"]).await;
+    let fresh = receiver
+        .listen(format!("/ip4/{ip}/tcp/0").parse().expect("valid"))
+        .await
+        .expect("the receiver listens");
+    assert_eq!(
+        sender
+            .learn(receiver_peer.clone(), [fresh.to_string()])
+            .await
+            .expect("delivered"),
+        1
+    );
+    assert_eq!(
+        send_restart(&sender, &leases, &receiver_peer, 113)
+            .await
+            .expect("delivered"),
+        Ok(endpoint("claude")),
+        "the inbound lifted the backoff, so the send dials"
+    );
+    let delivered = receiver
+        .commander()
+        .drain_leased(&held["claude"], usize::MAX)
+        .await
+        .expect("answers");
+    assert_eq!(delivered.len(), 1);
+
+    sender.shutdown().await.expect("clean shutdown");
+    receiver.shutdown().await.expect("clean shutdown");
+}
+
+async fn send_restart(
+    sender: &SwarmRuntime,
+    leases: &Leases,
+    to: &TransportIdentity,
+    id: u8,
+) -> Result<Result<EndpointId, TransportError>, SubstrateError> {
+    sender
+        .send_direct(
+            &leases["human"],
+            to.clone(),
+            frame(Some("claude"), b"restart", id),
+        )
+        .await
 }
