@@ -15,9 +15,13 @@
 //! - the host itself (step 5: the bridge loaded as a plugin in the
 //!   installed Claude Code);
 //! - a network other than one host's private address;
-//! - B's far end as the human client's facade: B is a plain data session,
-//!   which is what the facade sits on. The facade adds the envelope, and
-//!   the bridge forwards an envelope as text, unparsed.
+//! - B's far end as the human client's facade itself: B is a plain data
+//!   session, which is what the facade sits on, and the envelope the
+//!   facade adds -- `HumanChatV2`, plain or brotli-compressed (`;ce=br`)
+//!   past the payload limit -- is built with chat-protocol's own encoder
+//!   and sent from it (`a_human_chat_envelope_is_notified_as_its_decoded_text`).
+//!   The bridge decodes `;ce=br` and forwards the envelope's JSON as text,
+//!   reading nothing of what it means.
 
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::panic)]
@@ -32,8 +36,8 @@ use interweave_local_client_api::{
     DataCapability, DataSessionBinding as _, DataSessionPort as _, SessionEvent, SessionRequest,
 };
 use interweave_transport_api::{
-    BroadcastMessageV1, ChannelId, DirectDestination, EndpointId, MAX_PAYLOAD_BYTES, MessageId,
-    Payload, TransportIdentity,
+    BroadcastMessageV1, ChannelId, DirectDestination, EndpointId, MAX_PAYLOAD_BYTES, MediaType,
+    MessageId, Payload, TransportIdentity,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader, Lines};
@@ -376,6 +380,17 @@ async fn send_until_accepted(
     content: &str,
     daemons: &[&Daemon],
 ) -> EndpointId {
+    send_payload_until_accepted(from, peer, endpoint, &text(content), daemons).await
+}
+
+/// [`send_until_accepted`] for a payload of any media type.
+async fn send_payload_until_accepted(
+    from: &IpcSession,
+    peer: &TransportIdentity,
+    endpoint: EndpointId,
+    payload: &Payload,
+    daemons: &[&Daemon],
+) -> EndpointId {
     let deadline = tokio::time::Instant::now() + PATIENCE * 3;
     loop {
         match from
@@ -385,7 +400,7 @@ async fn send_until_accepted(
                     endpoint: Some(endpoint.clone()),
                 },
                 MessageId::from_bytes(rand_bytes()),
-                text(content),
+                payload.clone(),
             )
             .await
         {
@@ -409,7 +424,7 @@ fn rand_bytes() -> [u8; 16] {
     bytes
 }
 
-/// The direct message's notification from B's `human`.
+/// Whether `events_of` has received a direct message carrying `content`.
 async fn direct_from(events_of: &IpcSession, content: &[u8]) -> bool {
     events_of
         .events(usize::MAX)
@@ -697,4 +712,61 @@ async fn the_daemon_away_and_back_with_a_stale_token() {
         bridge.child.try_wait().expect("waitable").is_none(),
         "the bridge never exited"
     );
+}
+
+/// The human client's envelope, as its facade sends it, reaches the bridge
+/// as the envelope's own JSON text, compressed or not (CHANNEL-EVENT.md
+/// §Content; the facade far end Stage 16's close carried as a deviation).
+/// The facade compresses an envelope past the payload limit to `;ce=br`
+/// (ADR-0050), and the bridge decodes it before classifying it, so the
+/// model reads the same text either way, and `meta.content_type` is the
+/// media type without its `ce` parameter. The plain envelope is the
+/// control for the compressed one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_human_chat_envelope_is_notified_as_its_decoded_text() {
+    use interweave_human_chat_protocol::{
+        HumanChatV2, MEDIA_TYPE_V2, MessageKind, encode_outbound,
+    };
+    let (a, a_daemon, a_peer, b, b_daemon, _b_peer) = two_daemons().await;
+    let daemons = [&a_daemon, &b_daemon];
+    let mut bridge = Bridge::start(&a);
+    bridge.wait_leased(&daemons).await;
+    let b_human = session(&b, human()).await;
+
+    let envelope = HumanChatV2 {
+        v: 2,
+        kind: MessageKind::Text,
+        app_message_id: "0123456789abcdef0123456789abcdef".to_owned(),
+        // Repetitive, so it compresses well below half its size.
+        text: "the same line again, ".repeat(400),
+        reply_to: None,
+        sent_at_ms: None,
+        from_endpoint: None,
+    };
+    let raw = serde_json::to_string(&envelope).expect("an envelope serializes");
+    let plain = encode_outbound(&envelope, MAX_PAYLOAD_BYTES).expect("fits as it is");
+    let compressed = encode_outbound(&envelope, raw.len() / 2).expect("fits compressed");
+    assert_eq!(
+        plain.media_type, MEDIA_TYPE_V2,
+        "the control is uncompressed"
+    );
+    assert!(
+        compressed.media_type.ends_with(";ce=br") && compressed.bytes.len() < raw.len() / 2,
+        "{}",
+        compressed.media_type
+    );
+
+    for encoded in [plain, compressed] {
+        let payload = Payload::new(
+            Some(MediaType::parse(&encoded.media_type).expect("a media type")),
+            encoded.bytes.clone(),
+            MAX_PAYLOAD_BYTES,
+        )
+        .expect("a payload");
+        send_payload_until_accepted(&b_human, &a_peer, claude(), &payload, &daemons).await;
+        let n = bridge.notification().await;
+        assert_eq!(n["content"], json!(raw), "{}", encoded.media_type);
+        assert_eq!(n["meta"]["payload_encoding"], json!("utf8"));
+        assert_eq!(n["meta"]["content_type"], json!(MEDIA_TYPE_V2));
+    }
 }
