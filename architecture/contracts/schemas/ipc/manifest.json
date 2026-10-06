@@ -125,7 +125,7 @@
     {
       "name": "path-changed",
       "file": "path-changed.schema.json",
-      "status": "approved"
+      "status": "active"
     },
     {
       "name": "frame",
@@ -135,17 +135,17 @@
     {
       "name": "trust-list-params",
       "file": "trust-list-params.schema.json",
-      "status": "approved"
+      "status": "active"
     },
     {
       "name": "trust-list",
       "file": "trust-list.schema.json",
-      "status": "approved"
+      "status": "active"
     },
     {
       "name": "trust-set-params",
       "file": "trust-set-params.schema.json",
-      "status": "approved"
+      "status": "active"
     }
   ]
 }

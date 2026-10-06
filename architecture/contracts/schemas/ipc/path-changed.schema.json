@@ -40,7 +40,7 @@
   },
   "x-contract": {
     "name": "ipc.path-changed",
-    "status": "approved",
+    "status": "active",
     "version": "1.0.0",
     "adr": [
       "0017",
