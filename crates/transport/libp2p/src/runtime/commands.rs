@@ -911,7 +911,7 @@ pub(super) fn handle_command(
                     return;
                 }
                 if !in_flight.dials_peer(&peer)
-                    && dial_peer(
+                    && let Err(refusal) = dial_peer(
                         swarm,
                         manager,
                         in_flight,
@@ -921,8 +921,18 @@ pub(super) fn handle_command(
                         DialOrigin::Manual,
                         now_ms,
                     )
-                    .is_err()
                 {
+                    // The caller reads the bare code (`TRANSPORT.md`
+                    // §Direct); what held the peer is the gate's class,
+                    // reported for the connectivity line and the peer's
+                    // row -- informational, at base capacity only.
+                    if super::may_buffer_delivery(outbox.len(), event_capacity) {
+                        outbox.push_back(SwarmEvent::DialFailed {
+                            peer: Some(peer),
+                            detail: format!("direct send: {refusal:?}"),
+                            class: super::messages::DialFailureClass::of_refusal(&refusal),
+                        });
+                    }
                     let _ = reply.send(Err(DirectError::PeerUnreachable));
                     return;
                 }
