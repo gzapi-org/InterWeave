@@ -4,7 +4,7 @@ Android Keystore wrapping, invalidation and background/user-presence behavior.
 
 Do not treat experiments placed here as production implementation. Evidence and final decision must be recorded against [`architecture/roadmap/SPIKES.md`](../../architecture/roadmap/SPIKES.md); the verdict is architect-cto's to write there, not this file's.
 
-**Status: the HOST HALF has run (2026-10-06); the DEVICE HALF has not.** No verdict is recorded. AndroidKeyStore itself — TEE/StrongBox, user presence, lock/reboot/process restart, invalidation, the phrase UI — has not been exercised on any device yet, and nothing below speaks for it.
+**Status: the HOST HALF has run (2026-10-06); the DEVICE HALF has PARTLY run (2026-10-06: D1–D3, D4's process restart, D5).** No verdict is recorded. Not yet run on the device: D4's lock and reboot, D6a, D6b and D7 (below).
 
 ## The host half: what was established
 
@@ -36,7 +36,7 @@ associated data = magic | version | policy | the profile's PeerId (UTF-8)
 - **The header and the PeerId are associated data**, through Android's `Cipher.updateAAD`, so a valid policy swapped for the other, or a ciphertext moved to another profile, fails authentication. An unknown version or policy byte is refused earlier, by the header check, before any decryption (H3's Version and Policy counts).
 - **The PeerId is not stored in the envelope.** It is the profile's, kept beside the envelope, and unwrap also re-derives it from the seed and compares.
 
-Whether this layout becomes the format is a decision for the contract's owner, after the device half has shown AndroidKeyStore produces it. **Assumed, not yet verified on a device:** that a Keystore AES-GCM cipher takes associated data and returns a 12-byte IV and a 128-bit tag in this arrangement.
+Whether this layout becomes the format is a decision for the contract's owner, after the device half has shown AndroidKeyStore produces it. **Verified on the test device (D2, below):** a Keystore AES-GCM cipher takes this associated data and returns a 12-byte IV and a 128-bit tag, so the device frames exactly this 66-byte layout.
 
 ## What the host half did not establish
 
@@ -51,12 +51,24 @@ Everything that needs AndroidKeyStore or Android itself:
 ## The device half: where it stands
 
 - **Device:** a dedicated test device is reachable over adb: a Samsung SM-A405FN running Android 11 (API 30). It advertises **no StrongBox feature**; its keystore is TEE-backed (HAL `mdfpp`). So StrongBox is recorded as absent on this device, not as tested.
-- **Toolchain:** the Android toolchain is being provisioned by devex-tooling, as a shared install that needs a root step by the owner.
-- **Harness:** the device harness will reuse this envelope layout, so the two halves meet in the same bytes.
+- **Toolchain:** the pinned Android toolchain (`tools/host/android/`), checked with `android-toolchain.sh --check` before the run.
+- **Harness:** [`device/`](./device). It is a Rust core (`device/harness`, the production derivation pinned at 7e2978d1, built with `cargo-ndk`) and a Java receiver (`device/app`) driven from the shell with `am broadcast`. `device/build.sh` builds the APK by hand from the pinned toolchain, without Gradle. The Rust core frames the envelope, checks the header and re-derives the PeerId, while the Keystore does the AES-GCM. `device/harness/tests/layout.rs` holds the two halves to one layout on the host: what the host half wraps, the device framing splits and re-frames byte for byte, and the device's associated data authenticates the host's ciphertext. Swapping version and policy in the device's associated data fails it.
 
-## The device half: the plan (NOT RUN)
+## The device half: what was established (part 1)
 
-`spikes/spike-009/harness-android/` (to be written once the toolchain is installed): a small app whose Rust core is this harness's `envelope` and the production derivation, built with `cargo-ndk` for arm64-v8a and called over JNI. Keystore operations are Kotlin; every byte decision is Rust's, so the device and host halves judge one envelope with one code path. Results are written to app-private storage and read back over adb (`run-as`), and the fixture seed is the TEST-ONLY public vector only.
+The recorded run is [`device/REPRODUCTION-2026-10-06.log`](./device/REPRODUCTION-2026-10-06.log), with the phone's own result lines verbatim.
+
+| id | observation |
+|---|---|
+| D1 | StrongBox requested: refused, `StrongBoxUnavailableException`, so absent on this device, not tested. A background-compatible key and a user-presence key (credential or Class-3 biometric, 60 s) are both generated **inside secure hardware**, origin generated. The user-presence key's authentication is **enforced by secure hardware**, and it reports `invalidated_by_biometric_enrollment: false`, as documented for a timed key. |
+| D2 | The Keystore returns a 12-byte IV, a 128-bit tag and 48 sealed bytes. The device frames the 66-byte envelope with the header `IWK1 01 00` (background) or `IWK1 01 01` (user presence). The intact envelope gives back the seed, which re-derives the frozen fixture PeerId on the device. |
+| D3 | 528 single-bit flips: **no seed**. 481 failed authentication (`AEADBadTagException`), 32 had a bad magic, 8 a bad version and 7 a bad policy, the host half's tally exactly. A valid policy byte swapped, and the envelope opened for another profile's PeerId, both fail authentication. |
+| D4 (process) | After `am force-stop`, a fresh process unwraps the background key: the seed. Inside the user-presence window, a killed and restarted process unwraps that key too. |
+| D5 | The user-presence key, with no person having unlocked within its 60 s: the wrap is refused `UserNotAuthenticatedException`. A person then unlocks with the device credential. Within the window the key wraps and unwraps, across a process kill. 75 s later, with no person, the unwrap is refused `UserNotAuthenticatedException`, while the background key still unwraps (the control). That refusal is what the `background_restart_requires_user_authentication` diagnostic reports. The harness neither replaces the key nor makes an identity, and the production mapping to that diagnostic is not this harness's to show. |
+
+## The device half: the plan
+
+[`device/`](./device), above. Rows D1–D3 and D5 and D4's process restart have run. D4's lock and reboot, D6a, D6b (it needs two fingerprints enrolled by a person; none is enrolled now) and D7 (the phrase picker, not yet written) have not. Results are written to app-private storage and read back over adb (`run-as`). The fixture seed is the TEST-ONLY public vector only.
 
 | id | what | recorded |
 |---|---|---|
