@@ -4,8 +4,8 @@
 # Real desktop processes (plan §16 Required suites): the transport-daemon
 # binary started from a profile file alone, in its own XDG tree, and
 # driven over its sockets. TEST-ONLY; nothing depends on this package.
-# The binary is the workspace's own build: run the workspace's tests, or
-# build `interweave-transport-daemon` first -- a missing binary fails the
+# The binaries are the workspace's own build: run the workspace's tests, or
+# build `interweave-transport-daemon` (and `interweave-claude-channel`) first -- a missing binary fails the
 # suite by name rather than skipping it.
 [package]
 name = "interweave-desktop-e2e-tests"
@@ -55,4 +55,6 @@ zbus = { version = "5.19", default-features = false, features = ["async-io"] }
 # window manager would; the pure-Rust connection, already compiled for
 # winit.
 x11rb = { version = "0.13", default-features = false }
-tokio = { workspace = true, features = ["macros", "net", "io-util", "rt-multi-thread", "time"] }
+# claude_channel.rs runs the shipped claude-channel binary as Claude Code
+# does: a child process on its stdio.
+tokio = { workspace = true, features = ["macros", "net", "io-util", "process", "rt-multi-thread", "time"] }

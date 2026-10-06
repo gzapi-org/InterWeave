@@ -29,6 +29,7 @@ Each run's `evidence.md` names the model its session used.
 - `run.py` runs `claude -p` with stream-JSON output, either single-turn or with two turns (`--two-turns`).
 - `run_tty.py` drives an interactive session through a pseudo-terminal. It answers the folder-trust screen and the development-channel warning, then types a prompt.
 - `validate.py` runs `claude plugin validate --strict`.
+- `s16_run.py` is Stage 16's host run (plan §19 step 5), not part of the spike's campaign. It starts two daemons, loads the packaged bridge as the plugin in an interactive session, drives a second bridge on the far daemon as the peer, and types `prompt-s16.txt`. The nested session authenticates with this login's long-term token, passed as one named variable.
 
 Each run starts from a scratch directory outside this repository, with `--setting-sources local`. The run is given an allow-listed environment, so none of the launching session's tokens, markers or model overrides reach it. Its raw output is written outside the repository. The drivers share this setup through `spike_common.py`. `extract.py` distils the raw output into the committed `runs/<name>/evidence.md` and a redacted `stub.jsonl`.
 
