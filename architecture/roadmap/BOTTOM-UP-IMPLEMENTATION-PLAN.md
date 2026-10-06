@@ -3304,8 +3304,7 @@ passed (2026-08-19 at libp2p-identity 0.2.14, re-checked by reading at
 IDENTITY-RECOVERY.md's required tests map one to one in the last batch.
 Not decided: SLIP-0039; `profile init`.
 
-(11) **Logging and CLI.** `tracing` + `tracing-subscriber` (fmt, stderr)
-in `apps/*` and `crates/local/*` only; the level from
+(11) **Logging and CLI.** `tracing` + `tracing-subscriber` (fmt, stderr) in `apps/*` and `crates/local/*` only — and, since the audit line of Stage 15's R2, `crates/transport/composition` for the audit and connectivity lines (A 2026-10-06; `crates/transport/runtime` and `libp2p` stay `tracing`-free and hand up kinds, not text); the level from
 `observability.log_level` alone, no environment override;
 `payload_logging: false` enforced by a test; the daemon runs in the
 foreground (supervision is Stage 19); no `clap` — a small tested
