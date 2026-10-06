@@ -609,10 +609,14 @@ jobs:
       # android-toolchain.sh --install refuses a Python whose tarfile
       # `data` filter has known bypasses (before 3.12.11 / 3.13.4), and
       # ubuntu-latest's own python3 is 3.12.3: every install case would be
-      # that refusal. The hosts it installs on run 3.14.
+      # that refusal. The hosts it installs on run 3.14. Only those suites
+      # get it (update-environment: false): the job's other suites use the
+      # runner's python3 and the modules it carries (PyYAML among them).
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        id: android-python
         with:
           python-version: '3.14'
+          update-environment: false
 
       # tools/host/android's install cases run as uid 0 in user and mount
       # namespaces (`unshare -rm`) and FAIL under CI where those are
@@ -642,14 +646,18 @@ jobs:
       # installed on purpose and a skip would mean the job stopped
       # exercising the guard.
       - name: Run every self-test beside its script
+        env:
+          ANDROID_PYTHON: ${{ steps.android-python.outputs.python-path }}
         run: |
           set -uo pipefail
           failed=0
           for t in tools/gh/test_*.sh tools/checks/test_*.sh tools/ci/test_*.sh tools/host/android/test_*.sh; do
             printf '::group::%s\n' "$t"
+            path="$PATH"
+            case "$t" in tools/host/android/*) path="$(dirname "$ANDROID_PYTHON"):$PATH" ;; esac
             # Through run_suite.sh: bare, a suite whose assertion calls an
             # undefined helper prints "command not found" and passes.
-            if bash tools/checks/run_suite.sh "$t"; then
+            if PATH="$path" bash tools/checks/run_suite.sh "$t"; then
               printf '::endgroup::\n'
             else
               printf '::endgroup::\n'
