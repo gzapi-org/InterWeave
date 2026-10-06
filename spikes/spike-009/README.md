@@ -4,7 +4,7 @@ Android Keystore wrapping, invalidation and background/user-presence behavior.
 
 Do not treat experiments placed here as production implementation. Evidence and final decision must be recorded against [`architecture/roadmap/SPIKES.md`](../../architecture/roadmap/SPIKES.md); the verdict is architect-cto's to write there, not this file's.
 
-**Status: the HOST HALF has run (2026-10-06); the DEVICE HALF has PARTLY run (2026-10-06: D1–D3, D4's process restart, D5).** No verdict is recorded. Not yet run on the device: D4's lock and reboot, D6a, D6b and D7 (below).
+**Status: the HOST HALF has run (2026-10-06); the DEVICE HALF has PARTLY run (2026-10-06: D1–D3, D4's process restart and lock, D5, D7).** No verdict is recorded. Not yet run on the device: D4's reboot, D6a and D6b, which need a person at the phone (below).
 
 ## The host half: what was established
 
@@ -66,9 +66,25 @@ The recorded run is [`device/REPRODUCTION-2026-10-06.log`](./device/REPRODUCTION
 | D4 (process) | After `am force-stop`, a fresh process unwraps the background key: the seed. Inside the user-presence window, a killed and restarted process unwraps that key too. |
 | D5 | The user-presence key, with no person having unlocked within its 60 s: the wrap is refused `UserNotAuthenticatedException`. A person then unlocks with the device credential. Within the window the key wraps and unwraps, across a process kill. 75 s later, with no person, the unwrap is refused `UserNotAuthenticatedException`, while the background key still unwraps (the control). That refusal is what the `background_restart_requires_user_authentication` diagnostic reports. The harness neither replaces the key nor makes an identity, and the production mapping to that diagnostic is not this harness's to show. |
 
+## The device half: what was established (part 2)
+
+The recorded run is [`device/REPRODUCTION-2026-10-06b.log`](./device/REPRODUCTION-2026-10-06b.log). The captures it measures are not committed, because the recent-apps captures also show another app's content on the device.
+
+| id | observation |
+|---|---|
+| D4 (lock) | With the keyguard showing, the background key unwraps (the seed), and the user-presence key is refused `UserNotAuthenticatedException`. |
+| D7 | The fixture phrase typed into the picker restores the fixture PeerId through the production parse; only "valid"/"invalid" is recorded. Each check against the unprotected control screen: **screenshot**: control legible; secure, `screencap` refused (an empty file). **Screen recording**: control legible; secure, the activity is black, but **the IME window is not covered by `FLAG_SECURE`** (it showed no typed text in the frame measured). **Recents**: control's snapshot shows the words; secure's is blank. **IME**: the secure field reaches Samsung Keyboard as `NO_SUGGESTIONS` and `NO_PERSONALIZED_LEARNING`; the control's carries neither. **Autofill**: under the control, Samsung Pass received a fill request and Samsung's augmented service two; under the secure screen, neither received one, though a session flagged augmented-only was opened. **Logs and app storage**: no phrase word in logcat or under the app's data directory. |
+
+**What D7 did not establish:**
+- **Whether Samsung Keyboard honours the flags:** what it learns, suggests or uploads is not observable from adb.
+- **That the IME window cannot leak:** it sits outside `FLAG_SECURE`, so a keyboard showing key-press popups could put keystrokes into a recording or a screenshot. An in-app word picker that needs no IME would close it, and that is a design input for the contract's owner.
+- **The clipboard:** copy, cut and paste are refused by construction (no action mode), not measured, since Android 11's shell cannot read the clipboard.
+- **Saved state and crash artifacts:** the field saves no instance state by construction; only the app's own storage was searched, not system_server's.
+- **The logcat and storage searches had no positive control:** the harness never writes a word, so they show that nothing leaked there, not that the search would see a leak.
+
 ## The device half: the plan
 
-[`device/`](./device), above. Rows D1–D3 and D5 and D4's process restart have run. D4's lock and reboot, D6a, D6b (it needs two fingerprints enrolled by a person; none is enrolled now) and D7 (the phrase picker, not yet written) have not. Results are written to app-private storage and read back over adb (`run-as`). The fixture seed is the TEST-ONLY public vector only.
+[`device/`](./device), above. Rows D1–D3, D4's process restart and lock, D5 and D7 have run. D4's reboot, D6a and D6b have not: they need a person at the phone. D6b also needs two fingerprints enrolled, and none is enrolled now; its prompt is `device/app/.../Prompt.java`. Results are written to app-private storage and read back over adb (`run-as`). The fixture seed is the TEST-ONLY public vector only.
 
 | id | what | recorded |
 |---|---|---|
