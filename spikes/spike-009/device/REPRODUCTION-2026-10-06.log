@@ -1,5 +1,5 @@
 # SPIKE-009 device harness -- recorded run (part 1: D1-D3, D4 process restart, D5)
-# date: 2026-10-06T20:35Z-21:00Z
+# date: 2026-10-06T20:21Z-21:00Z (corrected after PR #210's review: the first records are at 20:21Z)
 # device: Samsung SM-A405FN, Android 11 (API 30), patch 2023-03-01, arm64-v8a, over adb (wireless debugging)
 # host: develop-qzapp (Linux x86_64), rustc 1.98.1, cargo-ndk 4.1.2, NDK 28.2.13676358, build-tools 36.0.0, Temurin 17.0.20.1+1
 # production crates pinned at 7e2978d1 (harness/Cargo.toml); third-party crates exact, lock committed

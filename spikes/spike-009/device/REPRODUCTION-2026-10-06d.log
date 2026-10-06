@@ -2,7 +2,7 @@
 # date: 2026-10-06T22:14Z-22:25Z
 # device, host, toolchain, pins and library: as part 3
 # with two fingerprints enrolled (dumpsys fingerprint count 2): gen up6c (timed, 60 s); gen op6c (per operation);
-#   keyinfo op6c; a Prompt wrap of op6c was shown and went unanswered (closed by force-stop) -- so op6c was never used
+#   keyinfo op6c -- those three records are in part 3's log; a Prompt wrap of op6c was shown and went unanswered (closed by force-stop) -- so op6c was never used
 #   before the event, and its pre-event state rests on its generation and KeyInfo only
 # event: a person added a THIRD fingerprint from Settings -> Biometrics and security -> Fingerprints (PIN entered to
 #   open the page; the credential itself not changed); dumpsys fingerprint count 3 after

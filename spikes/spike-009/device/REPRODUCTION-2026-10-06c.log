@@ -15,7 +15,8 @@
 #   then a person enrolled a second fingerprint -- NOT by adding one: Settings on this device offered no "add", and
 #   the person went through Screen lock type and re-enrolled the first fingerprint as well (dumpsys fingerprint:
 #   count 2 after); unwrap up6b; keyinfo op6b; Prompt unwrap op6b; info; unwrap bg
-#   up6c and op6c were then generated for a repeat that the device's Settings could not make; nothing was done with them
+#   up6c and op6c were then generated for a repeat; part 4 made it with them (this line corrected after PR #210's
+#   review: it first said nothing was done with them)
 # key material: TEST-ONLY -- the fixture's all-zero seed; the Keystore keys never leave the device
 
 ## harness result lines (files/results.jsonl, verbatim, after part 2)
