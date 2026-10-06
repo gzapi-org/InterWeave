@@ -380,6 +380,25 @@ impl SwarmRuntime {
         answer.await.map_err(|_| SubstrateError::Stopped)
     }
 
+    /// The gate's hold on each of `peers`: connected, and until when it
+    /// is in backoff or has an address quarantined (`CONNECTIVITY.md`
+    /// §19). One row per peer asked, in the order asked; the caller
+    /// bounds the list (composition asks for the allowlist).
+    ///
+    /// # Errors
+    /// Returns [`SubstrateError::Stopped`] if the task is gone.
+    pub async fn peer_gates(
+        &self,
+        peers: Vec<TransportIdentity>,
+    ) -> Result<Vec<super::PeerGate>, SubstrateError> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(SwarmCommand::PeerGates { peers, reply })
+            .await
+            .map_err(|_| SubstrateError::Stopped)?;
+        answer.await.map_err(|_| SubstrateError::Stopped)
+    }
+
     /// Take a discovery candidate into the book through the PEER'S door
     /// -- the in-boundary learn command plan §15 owes composition.
     ///

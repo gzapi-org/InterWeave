@@ -129,7 +129,7 @@ pub use preauth_gate::PreAuthAdmission;
 pub use refusals::{DialRefusals, RECENT_CAPACITY, Refusal};
 pub use runtime::{
     BroadcastChannels, DEFAULT_COMMAND_CAPACITY, DEFAULT_EVENT_CAPACITY, DialFailureClass,
-    DialRefusal, HolePunchOutcome, MAX_CONFIGURED_CAPACITY, PathChange, PeerPath,
+    DialRefusal, HolePunchOutcome, MAX_CONFIGURED_CAPACITY, PathChange, PeerGate, PeerPath,
     RelayReservationOutcome, RelayServerOutcome, ShutdownReport, SubstrateConfig, SubstrateError,
     SwarmCommand, SwarmCommander, SwarmEvent, SwarmRuntime,
 };

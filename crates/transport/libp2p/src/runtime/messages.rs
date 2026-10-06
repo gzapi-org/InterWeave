@@ -154,6 +154,13 @@ pub enum SwarmCommand {
         /// Answered with the photograph.
         reply: oneshot::Sender<super::status::RuntimeStatus>,
     },
+    /// The gate's hold on each of these peers (`CONNECTIVITY.md` §19).
+    PeerGates {
+        /// The peers to report, in the order to answer them.
+        peers: Vec<TransportIdentity>,
+        /// Answered with one row per peer.
+        reply: oneshot::Sender<Vec<PeerGate>>,
+    },
     /// Reach a peer: reuse a direct data-plane connection, else dial
     /// the book's direct candidates and defer its circuit routes
     /// behind the head-start (§12, step 9).
@@ -337,6 +344,21 @@ pub enum SwarmCommand {
         /// Answered once the Swarm has been dropped.
         reply: oneshot::Sender<()>,
     },
+}
+
+/// The gate's hold on one peer, on the wall clock (`CONNECTIVITY.md`
+/// §19, A 2026-10-06). Times only: no address leaves the runtime here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerGate {
+    /// The peer.
+    pub peer: TransportIdentity,
+    /// Whether any connection to it is open.
+    pub connected: bool,
+    /// Dials to it are refused until then, milliseconds since the Unix
+    /// epoch.
+    pub backoff_until_ms: Option<u64>,
+    /// One of its addresses at least is quarantined until then.
+    pub quarantined_until_ms: Option<u64>,
 }
 
 /// What a failed dial was, as an address-free class

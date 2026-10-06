@@ -96,8 +96,8 @@ pub use status::{DialGateStatus, IngressStatus, PreAuthStatus, RuntimeStatus};
 
 pub use handle::{ShutdownReport, SwarmCommander};
 pub use messages::{
-    DialFailureClass, DialRefusal, HolePunchOutcome, PathChange, PeerPath, RelayReservationOutcome,
-    RelayServerOutcome, SwarmCommand, SwarmEvent,
+    DialFailureClass, DialRefusal, HolePunchOutcome, PathChange, PeerGate, PeerPath,
+    RelayReservationOutcome, RelayServerOutcome, SwarmCommand, SwarmEvent,
 };
 
 pub use config::{
@@ -2089,6 +2089,25 @@ impl SwarmRuntime {
                             // photograph reads the AutoNAT, relay, path and
                             // hole-punch state the task owns, all at one
                             // instant.
+                            Some(SwarmCommand::PeerGates { peers, reply }) => {
+                                // The manager's clock is the runtime's;
+                                // a row reads on the wall's.
+                                let (now, wall) = (now_ms(started), wall_ms());
+                                let on_wall = |until: u64| wall.saturating_add(until.saturating_sub(now));
+                                let rows = peers
+                                    .into_iter()
+                                    .map(|peer| {
+                                        let held = manager.peer_gate_state(&peer, now);
+                                        PeerGate {
+                                            connected: open.values().any(|c| c.peer == peer),
+                                            backoff_until_ms: held.backoff_until_ms.map(on_wall),
+                                            quarantined_until_ms: held.quarantined_until_ms.map(on_wall),
+                                            peer,
+                                        }
+                                    })
+                                    .collect();
+                                let _ = reply.send(rows);
+                            }
                             Some(SwarmCommand::Status { peer, reply }) => {
                                 let now = now_ms(started);
                                 let connectivity = status::summarize(
