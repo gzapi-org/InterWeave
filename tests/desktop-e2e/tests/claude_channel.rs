@@ -420,8 +420,9 @@ async fn direct_from(events_of: &IpcSession, content: &[u8]) -> bool {
 }
 
 /// Incoming direct → a channel event with both endpoints, `meta` held to
-/// the contract; `reply` takes the exact route back to B's `human`
-/// (§19 required tests).
+/// the contract; `reply` takes the exact route back to B's `claude`, not
+/// to B's default `human`, which stays leased so a fallback would land
+/// somewhere (§19 required tests).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_direct_message_is_notified_and_replied_to_across_two_daemons() {
     let (a, a_daemon, a_peer, b, b_daemon, b_peer) = two_daemons().await;
@@ -429,15 +430,17 @@ async fn a_direct_message_is_notified_and_replied_to_across_two_daemons() {
     let mut bridge = Bridge::start(&a);
     bridge.wait_leased(&daemons).await;
     let b_human = session(&b, human()).await;
+    let b_claude = claude_session(&b).await;
 
-    let accepted = send_until_accepted(&b_human, &a_peer, claude(), "hello claude", &daemons).await;
+    let accepted =
+        send_until_accepted(&b_claude, &a_peer, claude(), "hello claude", &daemons).await;
     assert_eq!(accepted, claude());
     let n = bridge.notification().await;
     assert_eq!(n["content"], json!("hello claude"));
     let meta = &n["meta"];
     assert_eq!(meta["delivery_mode"], json!("direct"));
     assert_eq!(meta["source_peer"], json!(b_peer.as_str()));
-    assert_eq!(meta["source_endpoint"], json!("human"));
+    assert_eq!(meta["source_endpoint"], json!("claude"));
     assert_eq!(meta["destination_endpoint"], json!("claude"));
     assert_eq!(meta["payload_encoding"], json!("utf8"));
     let token = meta["reply_token"].as_str().expect("a token").to_owned();
@@ -449,19 +452,22 @@ async fn a_direct_message_is_notified_and_replied_to_across_two_daemons() {
         )
         .await;
     assert!(!error, "{answer}\n{}", logs(&daemons));
-    assert_eq!(answer, "remote transport accepted at endpoint human");
+    assert_eq!(answer, "remote transport accepted at endpoint claude");
     let deadline = tokio::time::Instant::now() + PATIENCE;
-    while !direct_from(&b_human, b"hello human").await {
+    while !direct_from(&b_claude, b"hello human").await {
         assert!(
             tokio::time::Instant::now() < deadline,
             "the reply never arrived"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    assert!(
+        !direct_from(&b_human, b"hello human").await,
+        "the reply went to the sender's endpoint, not B's default"
+    );
 
     // `send` names an endpoint other than B's default (`human`), and the
     // message lands there, not on the default.
-    let b_claude = claude_session(&b).await;
     let (answer, error) = bridge
         .tool(
             "send",
