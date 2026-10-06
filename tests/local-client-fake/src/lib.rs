@@ -47,8 +47,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use interweave_local_client_api::{
     AdminBinding, AdminCapability, AdminPort, AdminStatus, DataCapability, DataSessionBinding,
     DataSessionPort, EndpointAdminView, EndpointLease, Generation, LeaseRecord, LocalAdminPort,
-    LocalDataSession, LocalSessionEvent, MAX_EVENT_QUEUE, ReceivedBroadcast, ReceivedDirect,
-    SessionEvent, SessionRequest, TrustAdminView,
+    LocalDataSession, LocalSessionEvent, MAX_EVENT_QUEUE, PeerGateView, PeerOutcome,
+    ReceivedBroadcast, ReceivedDirect, SessionEvent, SessionRequest, TrustAdminView,
 };
 use interweave_transport_api::{
     BroadcastMessageV1, ChannelId, ConnectivitySummary, DirectDestination, DirectInboundState,
@@ -935,6 +935,29 @@ impl AdminPort for FakeAdmin {
             local_peer: Some(self.node.peer.clone()),
             allowed: state.trusted.iter().cloned().collect(),
         })
+    }
+
+    /// One row per trusted peer, in order. The fake has no dial gate, so
+    /// nothing is ever in backoff or quarantined; the paired node, while
+    /// trusted, reads connected.
+    async fn peers(&self) -> Result<Vec<PeerGateView>, TransportError> {
+        self.require(AdminCapability::Status)?;
+        let paired = self.node.remote().ok().map(|remote| remote.peer.clone());
+        let state = self.node.running()?;
+        Ok(state
+            .trusted
+            .iter()
+            .map(|peer| {
+                let connected = paired.as_ref() == Some(peer);
+                PeerGateView {
+                    peer: peer.clone(),
+                    connected,
+                    backoff_until: None,
+                    quarantined_until: None,
+                    last_outcome: connected.then_some(PeerOutcome::Connected),
+                }
+            })
+            .collect())
     }
 
     /// The refusals the runtime's policy makes (the local peer, a new
