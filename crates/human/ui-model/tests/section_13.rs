@@ -12,13 +12,14 @@
 
 use interweave_human_chat_protocol::{HumanChatV2, MessageKind};
 use interweave_human_client_api::{
-    ClientEvent, Connectivity, Destination, Origin, OutboundStatus, SessionState,
+    ClientEvent, Connectivity, Destination, Origin, OutboundStatus, SessionState, TrustList,
 };
 use interweave_human_core::RowId;
 use interweave_human_store::{HumanStore, InboundOrigin, OutboundDestination, StoreOptions};
 use interweave_human_transport_client::{ClientConfig, TransportClient};
 use interweave_human_ui_model::{
-    ConversationKey, Intent, LabelKey, ListedInbound, ListedOutbound, Table, Trust, UiModel,
+    ConversationKey, Intent, LabelKey, ListedInbound, ListedOutbound, Table, Trust, TrustChange,
+    UiModel,
 };
 use interweave_local_client_fake::{FakeConfig, FakeEndpoint, FakeNetwork, FakeNode};
 use interweave_profile_identity::ProfileIdentity;
@@ -71,6 +72,7 @@ fn reaches_trust_admin_or_recovery(intent: &Intent) -> bool {
         | Intent::OpenLink(_)
         | Intent::Reopen
         | Intent::RecheckStorage => false,
+        Intent::ReadTrust | Intent::SetTrust(_) => true,
     }
 }
 
@@ -206,9 +208,9 @@ fn a_path_for_a_peer_no_conversation_is_with_is_not_kept() {
 }
 
 #[test]
-fn s13_4_trust_mutation_has_no_stage_14_surface_and_no_intent_mutates_trust() {
-    // Absence: ADR-0032's trust administration is Stage 15's. Asserted by
-    // the exhaustive match above, over every intent the model can raise.
+fn s13_4_trust_is_mutated_only_by_confirming_a_change_that_names_the_exact_peer_id() {
+    // Every intent a message or a conversation offers stays clear of
+    // trust: they are what a remote can put in front of a person.
     for intent in [
         Intent::MarkRead(RowId::from_stored(1)),
         Intent::Unkeep(RowId::from_stored(1)),
@@ -220,6 +222,29 @@ fn s13_4_trust_mutation_has_no_stage_14_surface_and_no_intent_mutates_trust() {
     ] {
         assert!(!reaches_trust_admin_or_recovery(&intent));
     }
+    // The settings are the one way, and a proposal changes nothing: the
+    // change waits, naming the exact PeerId, until the person confirms
+    // it (human-client-ui.md section 8).
+    let (me, them) = (peer(), peer());
+    let mut model = UiModel::new();
+    let settings = model.trust_settings_mut();
+    assert_eq!(settings.opened(), Some(Intent::ReadTrust));
+    settings.read(Ok(TrustList {
+        local_peer: Some(me),
+        allowed: Vec::new(),
+    }));
+    settings.entry_changed(them.as_str().to_owned());
+    settings.propose_allow();
+    let change = TrustChange {
+        peer: them.clone(),
+        allowed: true,
+    };
+    assert_eq!(model.trust_settings().pending(), Some(&change));
+    assert_eq!(
+        model.trust_settings_mut().confirm(),
+        Some(Intent::SetTrust(change)),
+        "the exact PeerId, only on confirmation"
+    );
 }
 
 #[test]

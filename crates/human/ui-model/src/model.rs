@@ -22,6 +22,7 @@ use crate::labels::{
     ErrorClass, LabelKey, UiText, fill, outbound_label, placeholder_en, send_error_class,
     session_problem_class, short_peer,
 };
+use crate::trust::{TrustChange, TrustSettings};
 
 /// How many items the model holds that the store no longer does --
 /// read-and-unkept inbound and terminal outbound -- before it evicts the
@@ -265,6 +266,12 @@ pub enum Intent {
     Reopen,
     /// Re-check storage now.
     RecheckStorage,
+    /// Read the trust allowlist: the trust settings opened.
+    ReadTrust,
+    /// Make a trust change the person confirmed in the trust settings,
+    /// which showed its exact `PeerId` and scope (`human-client-ui.md` §8).
+    /// Only [`crate::TrustSettings::confirm`] makes one.
+    SetTrust(TrustChange),
 }
 
 /// How often a composer was edited, and at which count Send was pressed.
@@ -418,6 +425,7 @@ pub struct UiModel {
     paths: HashMap<TransportIdentity, PeerPath>,
     session: SessionState,
     diagnostics: Diagnostics,
+    trust: TrustSettings,
 }
 
 impl Default for UiModel {
@@ -452,6 +460,7 @@ impl UiModel {
                 next_at: 0,
             },
             diagnostics: Diagnostics::default(),
+            trust: TrustSettings::default(),
         }
     }
 
@@ -835,6 +844,18 @@ impl UiModel {
                 Some(SessionNotice::Refused(session_problem_class(*problem)))
             }
         }
+    }
+
+    /// The trust settings (`human-client-ui.md` §8).
+    #[must_use]
+    pub const fn trust_settings(&self) -> &TrustSettings {
+        &self.trust
+    }
+
+    /// The trust settings, for the settings view's inputs and the
+    /// daemon's answers.
+    pub const fn trust_settings_mut(&mut self) -> &mut TrustSettings {
+        &mut self.trust
     }
 
     /// What trust to show for `peer`.
