@@ -53,3 +53,24 @@ Everything that needs AndroidKeyStore or Android itself:
 - **Device:** a dedicated test device is reachable over adb: a Samsung SM-A405FN running Android 11 (API 30). It advertises **no StrongBox feature**; its keystore is TEE-backed (HAL `mdfpp`). So StrongBox is recorded as absent on this device, not as tested.
 - **Toolchain:** the Android toolchain is being provisioned by devex-tooling, as a shared install that needs a root step by the owner.
 - **Harness:** the device harness will reuse this envelope layout, so the two halves meet in the same bytes.
+
+## The device half: the plan (NOT RUN)
+
+`spikes/spike-009/harness-android/` (to be written once the toolchain is installed): a small app whose Rust core is this harness's `envelope` and the production derivation, built with `cargo-ndk` for arm64-v8a and called over JNI. Keystore operations are Kotlin; every byte decision is Rust's, so the device and host halves judge one envelope with one code path. Results are written to app-private storage and read back over adb (`run-as`), and the fixture seed is the TEST-ONLY public vector only.
+
+| id | what | recorded |
+|---|---|---|
+| D1 | Generate an AndroidKeyStore AES-256-GCM key in each mode: background-compatible (no user authentication) and user-presence (`setUserAuthenticationRequired(true)`, with a timeout). | `KeyInfo.isInsideSecureHardware` (the API 30 report) and the key's properties; StrongBox requested and refused (`StrongBoxUnavailableException`), recorded as absent, not as tested |
+| D2 | Wrap the fixture seed: the Keystore generates the IV, the header and PeerId go in through `updateAAD`; Rust frames the envelope. | the IV and tag lengths; the envelope byte-for-byte against the host layout; Rust unwrap with the AES key unavailable is impossible, so the check is the Keystore decrypt giving back the seed and Rust re-deriving the frozen PeerId |
+| D3 | Tamper with the stored envelope: H3's single-bit flips over adb, through the Keystore. | every flip refused (`AEADBadTagException` or a header refusal); none yields a seed |
+| D4 | Durability: process restart (`am kill`), screen lock and unlock, reboot. | unwrap succeeds after each in the background mode; in the user-presence mode, what is asked of the person and when |
+| D5 | Background restart in user-presence mode: the service restarts with no person present. | `UserNotAuthenticatedException`, surfaced as the diagnostic `background_restart_requires_user_authentication`, never as a new identity |
+| D6 | Invalidation: lock screen removed, then set again; a biometric enrolled (if the device has one). | `KeyPermanentlyInvalidatedException` on the next use; the app enters recovery and never makes a new key over the profile silently |
+| D7 | The 24-word picker on a screen with `FLAG_SECURE`, entering the fixture's phrase. | `screencap` and `screenrecord` black; nothing in the clipboard (`cmd clipboard`/`dumpsys clipboard`); the IME sees a field that disables suggestions and learning; no autofill request (`dumpsys autofill`); `logcat` holds no word; no saved-instance or crash artifact holds one (`run-as` file search for each word) |
+
+**Each check has a control** that shows its observation was live: an envelope left intact unwraps (D3), a field without the flags DOES leak to the IME's suggestions and the screenshot (D7), and a background-mode key restarts unattended (D5).
+
+**This device cannot answer:**
+- StrongBox: the device has none.
+- The current API's Keystore behaviour: it needs a newer device.
+- Class-3 biometric binding, if the device's biometric is not Class 3.
