@@ -20,7 +20,7 @@ pub mod session;
 pub mod translate;
 
 pub use discovery::{DiscoveryDiagnostics, ProviderDiagnostics};
-pub use gate::{LastOutcome, PeerGateRow};
+pub use gate::{CONNECTIVITY_TARGET, LastOutcome, PeerGateRow};
 /// The grace a stop gives exchanges already in flight when it names none
 /// (`ComposedRuntime::stop`): the substrate's, re-exported so a
 /// composition root names it without depending on the backend.

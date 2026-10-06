@@ -31,7 +31,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::discovery::{Discovery, DiscoveryDiagnostics};
-use crate::gate::{LastOutcome, LastOutcomes, PeerGateRow};
+use crate::gate::{LastOutcome, LastOutcomes, PeerGateRow, ReconnectRefusals, Who};
 use crate::notices::{PeerNoticeDiagnostics, SessionNotices};
 use crate::session::InProcessBinding;
 use crate::translate::{CompositionError, translate};
@@ -344,6 +344,7 @@ impl ComposedRuntime {
             trust,
             infrastructure,
             outcomes: LastOutcomes::default(),
+            refusals: ReconnectRefusals::default(),
         };
         let task = tokio::spawn(driver.run(options.discovery_interval));
         Ok(Self {
@@ -519,6 +520,8 @@ struct Driver {
     infrastructure: InfrastructureSet,
     /// Each allowlisted peer's last dial outcome (`CONNECTIVITY.md` §19).
     outcomes: LastOutcomes,
+    /// Each allowlisted peer's last reconnect refusal, logged on change.
+    refusals: ReconnectRefusals,
 }
 
 impl Driver {
@@ -613,6 +616,8 @@ impl Driver {
         let observed_at = wall_ms();
         match event {
             SwarmEvent::Connected { peer, path } => {
+                crate::gate::connected(Who::of(&peer, &self.trust, &self.infrastructure), path);
+                self.refusals.forget(&peer);
                 self.outcomes
                     .record(&self.trust, &peer, LastOutcome::Connected);
                 self.paths.insert(peer.clone(), path);
@@ -634,6 +639,10 @@ impl Driver {
                 reason,
             } => self.post_path_change(peer, previous, current, reason).await,
             SwarmEvent::Disconnected { peer, reason } => {
+                crate::gate::disconnected(
+                    Who::of(&peer, &self.trust, &self.infrastructure),
+                    reason,
+                );
                 self.paths.remove(&peer);
                 self.notices.disconnected(&peer, reason);
                 self.emit(TransportEvent::PeerDisconnected {
@@ -653,10 +662,29 @@ impl Driver {
                 peer: Some(peer),
                 class,
                 ..
-            } => self
-                .outcomes
-                .record(&self.trust, &peer, LastOutcome::of_class(class)),
-            SwarmEvent::AddressQuarantined { peer, .. } => {
+            } => {
+                crate::gate::dial_failed(Who::of(&peer, &self.trust, &self.infrastructure), class);
+                self.outcomes
+                    .record(&self.trust, &peer, LastOutcome::of_class(class));
+            }
+            SwarmEvent::DialFailed {
+                peer: None, class, ..
+            } => crate::gate::dial_failed(Who::Class("unidentified"), class),
+            SwarmEvent::RetryScheduled {
+                peer,
+                origin,
+                attempt,
+                delay_ms,
+                peer_backoff,
+            } => crate::gate::retry_scheduled(
+                Who::of(&peer, &self.trust, &self.infrastructure),
+                origin,
+                attempt,
+                delay_ms,
+                peer_backoff,
+            ),
+            SwarmEvent::AddressQuarantined { peer, for_ms } => {
+                crate::gate::quarantined(Who::of(&peer, &self.trust, &self.infrastructure), for_ms);
                 self.outcomes
                     .record(&self.trust, &peer, LastOutcome::IdentityMismatch);
             }
@@ -867,6 +895,7 @@ impl Driver {
             if !allowed {
                 self.notices.revoked(&peer);
                 self.outcomes.forget(&peer);
+                self.refusals.forget(&peer);
             }
         }
         Ok(())
@@ -914,10 +943,17 @@ impl Driver {
         {
             // A refusal is the peer's last outcome (`CONNECTIVITY.md`
             // §19); an admitted dial reports its own outcome as events.
-            if let Ok(Err(refusal)) = self.swarm.reconnect(peer.clone()).await
-                && let Some(outcome) = LastOutcome::of_refusal(&refusal)
-            {
-                self.outcomes.record(&self.trust, &peer, outcome);
+            if let Ok(Err(refusal)) = self.swarm.reconnect(peer.clone()).await {
+                let class = interweave_transport_libp2p::DialFailureClass::of_refusal(&refusal);
+                if self.refusals.changed(&self.trust, &peer, class) {
+                    crate::gate::reconnect_refused(
+                        Who::of(&peer, &self.trust, &self.infrastructure),
+                        class,
+                    );
+                }
+                if let Some(outcome) = LastOutcome::of_refusal(&refusal) {
+                    self.outcomes.record(&self.trust, &peer, outcome);
+                }
             }
         }
         self.discovery.flush(now);
