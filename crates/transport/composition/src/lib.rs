@@ -13,12 +13,14 @@
 //! (`runtime`). No libp2p type crosses that trait.
 
 pub mod discovery;
+pub mod gate;
 mod notices;
 pub mod runtime;
 pub mod session;
 pub mod translate;
 
 pub use discovery::{DiscoveryDiagnostics, ProviderDiagnostics};
+pub use gate::{LastOutcome, PeerGateRow};
 /// The grace a stop gives exchanges already in flight when it names none
 /// (`ComposedRuntime::stop`): the substrate's, re-exported so a
 /// composition root names it without depending on the backend.
