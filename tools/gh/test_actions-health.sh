@@ -267,8 +267,12 @@ assert_contains  "and the header's last line"       "would stop work for no reas
 assert_lacks     "and no code after it"             "set -uo pipefail"
 
 echo "actions-health: a bad allowance is exit 2 before any network answer"
-for state in this_repo_public billing_unreadable; do
-    reset; touch "$SANDBOX/state/$state"
+# major_outage would exit 1 in the status check, so it pins the check
+# ahead of the network calls, not merely ahead of billing.
+for state in this_repo_public billing_unreadable major_outage; do
+    reset
+    if [[ "$state" == major_outage ]]; then printf 'major_outage\n' > "$SANDBOX/state/actions_status"
+    else touch "$SANDBOX/state/$state"; fi
     invoke_with abc
     assert_rc       "$state: exits 2" 2
     assert_contains "  and names the setting" "must be a positive number"
