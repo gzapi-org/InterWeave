@@ -4783,6 +4783,84 @@ carried-in tests below exist by name; (e) the ledger holds no `stage-16` entry �
 the status does not move (it names the lowest open stage) and the
 closing record says so.
 
+**Met (2026-10-06; the closing record).** Stage 16 closed on the owner's
+word of 2026-10-06 — given on the arming of the pull request that lands
+this record, which is its approval on record, as Stage 15's was — three
+days after it opened beside Stage 15 by record (#174, 2026-10-03, on
+SPIKE-001's PASS) and the same day Stage 15 closed (#202), on the steps
+above in order: step 2 (#194: `crates/claude/channel-core` — the event
+→ notification conversion, the reply-token table moved from the
+runtime with its eight ledger rows cleared, the tool surface and result
+wording, the `meta` grammar test, against the fake), step 3 (#199:
+`apps/claude-channel` — the stdio MCP server in the 2025-11-25 era over
+`ipc-client` with the bounded reconnect, fresh claim and fresh joins,
+SIGINT release, the plugin manifest; devex-tooling's
+`check_claude_layering.sh` supplied), steps 4 and 5 (#203: the shipped
+bridge against two real daemons, then inside the installed Claude Code),
+and the contract texts supplied on the way (the `;ce=br` non-UTF-8 drop,
+`local_peer`, the status facts, the refused re-join as a status row) —
+p2p-network-dev's lane throughout. The exit gate: (a) the required
+integration tests are green against the daemon harness —
+`tests/desktop-e2e/tests/claude_channel.rs`'s
+`a_direct_message_is_notified_and_replied_to_across_two_daemons`,
+`the_human_and_claude_endpoints_of_one_peer_are_routed_apart`,
+`broadcast_join_publish_reply_and_channel_not_joined` and
+`the_daemon_away_and_back_with_a_stale_token`, with
+`apps/claude-channel/tests/fake.rs`'s `send_is_endpoint_aware`,
+`an_inbound_direct_is_notified_and_replied_to_on_its_route`,
+`broadcast_join_publish_reply_and_leave`, `the_daemon_away_and_back` and
+`the_host_is_kept_in_the_2025_11_25_era` for the bullets the harness does
+not reach alone, every notification's `meta` checked against
+CHANNEL-EVENT.md's key list, order and grammar from the raw line; (b) the
+host run is recorded as `spikes/spike-001/runs/s16-host-run-3/evidence.md`
+(Claude Code 2.1.288, model claude-opus-5-5): the plugin's server loaded
+in the legacy era, B's message arrived as a `<channel
+source="plugin:interweave:interweave" …>` tag with `meta` in the table's
+order and no second `source`, the model reported it verbatim when asked
+and did not act unprompted, loaded `reply` through ToolSearch and called
+it, and B's bridge received `ack` on its route (`s16-host-run-2` is the
+same on the first authenticated attempt; `s16-host-run` the unauthenticated
+one, kept); (c) `check_bridge_default_features.sh` (no CommonMark parser
+under default features, 34 packages) and `check_claude_layering.sh` (no
+`crates/transport/*`, `crates/discovery/*` or libp2p crate, 24 runtime
+dependencies) pass with both packages members; (d) P3's test is
+`no_administrative_request_leaves_the_bridge` — it drives every tool,
+`identity` among them, and every inbound body naming an administrative
+act, reading §What is not a Claude tool from the contract — which is
+also the identity-recovery item 8 half this stage owed; the grant
+policy is exercised through a real client by the harness bridge leasing
+daemon A's `claude`; the reply-after-leave case is
+`broadcast_join_publish_reply_and_leave` and the harness's
+`…_and_channel_not_joined`; (e) the ledger holds no `stage-16` entry —
+six rows cleared by a caller, two by the deletion the paragraph above
+justifies; (f) Stage 15 closed first (#202, the same day), so the status
+moves: to `stage-17-android-human-client`, Stage 17 being the next
+stage, its prerequisites SPIKE-008 and SPIKE-009 its first work and no
+§20 package created before they close and its record lands. No
+contract flipped: CHANNEL-EVENT.md is prose under ADR-0049 and no
+`channel-event` family was authored.
+
+**Measured, and carried as limits.** The proofs ran on one host's
+private address only; a second network is Stage 18's (§21). B's far end
+in both proofs is plain IPC sessions, not the human client's facade —
+the facade sits on those same sessions and adds the envelope the bridge
+forwards unparsed, so the facade-to-bridge exchange is carried to Stage
+18 (§21) as an integration proof. The risks #199 carried stand, named
+there: ipc-client's writer can fail `BackendUnavailable` a moment before
+the reader marks the connection ended, so a re-join or leave in that
+window is kept as a refusal that Claude clears by joining again; the
+conformance suite pins `events(0)` on a live session only; a daemon
+whose runtime stopped while its connection stays open answers a join
+with a refusal the bridge records, untraced. The session transcript
+`s16-host-run-3` copied stops at the tool search (the copy preceded the
+session's last flush); the peer's own record of the reply is the
+evidence. Everything SPIKE-001 left not established stays carried by
+name in the paragraph above: marketplace distribution and `--channels`
+(Stage 19, §22), `userConfig` substitution, organisation-policy gating,
+permission relay, size limits and behaviour under load, the 2026-07-28
+revision, non-interactive delivery and the untried `-p` timings; and
+from ADR-0023, `endpoints.query` and `peer_endpoints` until its revisit.
+
 Carried here from Stage 13 (§16) and Stage 7: `claude-channel`'s IPC
 grant policy exercised through a real client (§16's carry); the
 identity-recovery item 8's Claude-tools half — export and import are
@@ -4906,6 +4984,9 @@ Android key/backup/recovery failure cases
 Carried here from Stage 13 (§16): SPIKE-005 (a hostile same-uid process); the foreign-uid peer refused on a real OS (Stage 13 unit-tests it with an injected uid); `HandshakeSlot::source`.
 
 Carried here from Stage 15 (§18): the Windows binding behind the non-Unix stub (§18 (12), §16's named pipe, its ACL model and peer identity) and the BSL-1.0 decision that waits for it (§18 (14): `clipboard-win` and `error-code` through `arboard`, admitted nowhere until Windows is built); a real relayed path reaching the human client's route indicator, if §20 has not proved it first.
+
+Carried here from Stage 16 (§19): the Claude Code Channel bridge proved on one host's private address only — a second network, and the bridge exchanging with the human client's facade as the far end (both §19 proofs used plain IPC sessions there), are this gate's integration proofs.
+
 
 
 ### Exit gate
