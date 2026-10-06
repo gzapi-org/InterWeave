@@ -344,9 +344,13 @@ async fn broadcast_until(
         .await
         .expect("accepted for local publish");
         let _ = bridge.status().await;
-        if let Some((n, line)) = bridge.notifications.pop_front() {
-            meta_is_the_contracts(&n["meta"], &line);
-            return n;
+        // Only this content's notification counts: an earlier publish,
+        // delivered late, must not stand in for it.
+        while let Some((n, line)) = bridge.notifications.pop_front() {
+            if n["content"] == json!(content) {
+                meta_is_the_contracts(&n["meta"], &line);
+                return n;
+            }
         }
         assert!(
             tokio::time::Instant::now() < deadline,

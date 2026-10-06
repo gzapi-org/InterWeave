@@ -263,9 +263,14 @@ def main() -> int:
         if pid:
             live.append(pid)
         if pid == 0:
-            os.chdir(cwd)
-            os.execvpe(cmd[0], cmd, child_env({"TERM": "xterm-256color", "COLUMNS": "120", "LINES": "40",
-                                               **long_term_token()}))
+            # The child execs or dies here: it must never return into the
+            # parent's code, whose finally would delete the live run's tree.
+            try:
+                os.chdir(cwd)
+                os.execvpe(cmd[0], cmd, child_env({"TERM": "xterm-256color", "COLUMNS": "120", "LINES": "40",
+                                                   **long_term_token()}))
+            finally:
+                os._exit(127)
 
         def pump(seconds):
             end = time.time() + seconds
