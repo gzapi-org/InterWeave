@@ -44,8 +44,10 @@
 #
 # WHAT THE TREE CHECK ASKS (no compiler; CI's tree-checks job):
 #   1. crates/transport/libp2p/tests/root_funnel.rs exists;
-#   2. it builds its Swarm through `RootFunnel::new(`, so a test reduced
-#      to the controls cannot pass as the measurement;
+#   2. each PRUNE test builds its Swarm through `RootFunnel::new(` in its
+#      own body (from its `fn` line to the `}` at that line's indent), so
+#      a prune test reduced to the bare composite cannot pass on another
+#      test's use of the funnel;
 #   3. the crate does not switch off test discovery (`autotests = false`)
 #      unless a [[test]] names root_funnel;
 #   4. .github/workflows/ci.yml runs `cargo test --workspace --all-targets`
@@ -86,13 +88,28 @@ PINNED=(
     the_control_tcp_dials_the_last_host_of_a_stacked_address
     the_root_funnel_prunes_a_stacked_address
 )
+# The prune side of each pair: the tests that must measure THROUGH the funnel.
+PRUNES=(
+    the_root_funnel_prunes_what_a_behaviour_extends_a_dial_with
+    the_root_funnel_prunes_a_stacked_address
+)
 fails=0
 fail() { echo "FAIL: $1"; fails=$((fails + 1)); }
 
 if [ ! -f "$TEST" ]; then
     fail "crates/transport/libp2p/tests/root_funnel.rs is missing — the root funnel's measurement (plan §15, ADR-0052 rule 5) is gone"
-elif ! grep -q 'RootFunnel::new(' "$TEST"; then
-    fail "tests/root_funnel.rs never builds a Swarm through RootFunnel::new( — the prune side of the measurement is gone"
+else
+    for name in "${PRUNES[@]}"; do
+        body="$(awk -v n="$name" '
+            !inside && match($0, "fn " n "[[:space:]]*[(<]") { inside = 1; ind = $0; sub(/[^[:space:]].*/, "", ind); found = 1; print; next }
+            inside { print; if ($0 == ind "}") exit }
+            END { if (!found) exit 3 }' "$TEST")"; rc=$?
+        if [ "$rc" -eq 3 ]; then
+            fail "tests/root_funnel.rs defines no fn $name — rename it in PRUNES and PINNED only if that was deliberate"
+        elif ! grep -q 'RootFunnel::new(' <<<"$body"; then
+            fail "tests/root_funnel.rs: $name never builds its Swarm through RootFunnel::new( — the prune side of the measurement is gone"
+        fi
+    done
 fi
 
 if [ -f "$CRATE/Cargo.toml" ] && grep -Eq '^[[:space:]]*autotests[[:space:]]*=[[:space:]]*false' "$CRATE/Cargo.toml"; then
