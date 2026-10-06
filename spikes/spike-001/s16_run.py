@@ -46,6 +46,22 @@ TOOL = "mcp__plugin_interweave_interweave__"
 KEYS = "expect:trust this folder,wait:1,down,enter,expect:local development,wait:1,enter,wait:10"
 
 
+def long_term_token():
+    """This login's long-term Claude Code token (a setup-token), from the
+    agent-fabric secrets file its shell profile sources -- the owner's
+    ruling of 2026-10-06: the nested session authenticates with the
+    login's own long-term token, never an interactive login. Only this one
+    variable is passed, and only its NAME is recorded."""
+    path = pathlib.Path.home() / ".config" / "agent-fabric" / "secrets.env"
+    if not path.exists():
+        raise SystemExit("no agent-fabric secrets file: run fabric-secrets sync")
+    for line in path.read_text().splitlines():
+        m = re.match(r"\s*(?:export\s+)?CLAUDE_CODE_OAUTH_TOKEN=(['\"]?)(.+)\1\s*$", line)
+        if m:
+            return {"CLAUDE_CODE_OAUTH_TOKEN": m.group(2)}
+    raise SystemExit("the secrets file holds no CLAUDE_CODE_OAUTH_TOKEN")
+
+
 def private_ipv4():
     out = subprocess.run(["ip", "-o", "-4", "addr", "show"], capture_output=True, text=True).stdout
     for addr in re.findall(r"inet (\d+\.\d+\.\d+\.\d+)/", out):
@@ -226,7 +242,8 @@ def main() -> int:
     pid, fd = pty.fork()
     if pid == 0:
         os.chdir(cwd)
-        os.execvpe(cmd[0], cmd, child_env({"TERM": "xterm-256color", "COLUMNS": "120", "LINES": "40"}))
+        os.execvpe(cmd[0], cmd, child_env({"TERM": "xterm-256color", "COLUMNS": "120", "LINES": "40",
+                                           **long_term_token()}))
 
     def pump(seconds):
         end = time.time() + seconds
@@ -307,7 +324,8 @@ def main() -> int:
     (out / "run.json").write_text(json.dumps({
         "claude_binary_version": version, "command": cmd, "keys": KEYS, "steps": steps,
         "nonce": nonce, "message": message, "prompt": prompt, "wait_status": status,
-        "env_passed": sorted(child_env({"TERM": "", "COLUMNS": "", "LINES": ""})),
+        "env_passed": sorted(child_env({"TERM": "", "COLUMNS": "", "LINES": "",
+                                        "CLAUDE_CODE_OAUTH_TOKEN": ""})),
         "seconds": round(time.time() - started, 1),
         "session_transcript": str(found[-1]) if found else None,
     }, indent=2) + "\n")
