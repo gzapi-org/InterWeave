@@ -4,7 +4,7 @@
 
 - structured diagnostics, stable event/counter names;
 - no private keys, secret config, or payload bodies in normal logs;
-- peer/channel/endpoint identifiers may be sensitive and should support redaction/hashing modes;
+- peer/channel/endpoint identifiers may be sensitive and should support redaction/hashing modes — the first rule in force (A 2026-10-06): a log line names a remote PeerId only when that peer is on the profile's trust allowlist (the operator put it there, and the daemon's log is the run-dir owner's, as the `admin.trust.set` audit line already is); any other peer — pre-authentication, infrastructure, discovery — appears as its bounded class only; no hashed or truncated form, which would be a new identifier nobody can act on. One exception, by the identifier's origin: the `admin.trust.set` audit line names the PeerId of the request whatever its allowlist status (a revoke of an absent peer, an allow refused at capacity), because that identifier came from the operator's own request over the admin socket, not from the network, and `LOCAL-CLIENT.md` §5 requires the record to carry it;
 - Claude receives high-level status by default; local CLI/human admin may expose deeper detail.
 
 ## Status model
@@ -118,6 +118,8 @@ Minimum structured state/metrics:
 - relay-server reservations/circuits/bytes/rate-limit utilization when the server role is enabled.
 
 Logs must not include private keys, recovery phrases, application payloads, or unredacted endpoint/application metadata by default. Relay/probe PeerIds and addresses may be operationally sensitive and follow the configured diagnostic-redaction policy.
+
+**Connectivity lines (A 2026-10-06).** The dial gate's transitions are logged under the target `interweave::connectivity`, written in the composition crate where the events arrive (plan §16 (11)'s carve-out, beside the audit line): at `debug`, a connection made or lost, a failed dial, a retry scheduled with its delay, and a send held by the gate (which: `backoff` or `quarantine`); at `info`, an address quarantined and a reconnect refused. A line never carries an address (ADR-0052 rule 5's class): a dial failure is reported as the gate's `DialDenial` name where the gate refused, else a fixed class (`dial_failed`, `timeout`, `refused`, `identity_mismatch`), never the library's error text. The PeerId rule above applies. The daemon's subscriber admits third-party targets (`libp2p*` and the stack beneath it) at `warn` at most whatever `observability.log_level` says: their `debug` output is unchecked for addresses and never reaches stderr through our level. The per-peer state itself is a diagnostics read (`CONNECTIVITY.md` §19), not a log.
 
 ## Human platform observability
 
