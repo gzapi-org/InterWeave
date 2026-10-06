@@ -1,0 +1,18 @@
+# SPIKE-009 device harness -- recorded run (part 4: D6b repeated with an addition only)
+# date: 2026-10-06T22:14Z-22:25Z
+# device, host, toolchain, pins and library: as part 3
+# with two fingerprints enrolled (dumpsys fingerprint count 2): gen up6c (timed, 60 s); gen op6c (per operation);
+#   keyinfo op6c; a Prompt wrap of op6c was shown and went unanswered (closed by force-stop) -- so op6c was never used
+#   before the event, and its pre-event state rests on its generation and KeyInfo only
+# event: a person added a THIRD fingerprint from Settings -> Biometrics and security -> Fingerprints (PIN entered to
+#   open the page; the credential itself not changed); dumpsys fingerprint count 3 after
+# then: info; keyinfo up6c; wrap up6c; keyinfo op6c; Prompt wrap op6c; unwrap bg
+# key material: TEST-ONLY -- the fixture's all-zero seed; the Keystore keys never leave the device
+
+## harness result lines (files/results.jsonl, verbatim, after part 3)
+{"t":1791325111585,"cmd":"info","alias":null,"biometric_strong":0,"biometric_weak":0,"device_secure":true,"feature_strongbox":false,"fixture_peer":"12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN","model":"SM-A405FN","patch":"2023-03-01","sdk":30}
+{"t":1791325114005,"cmd":"keyinfo","alias":"up6c","inside_secure_hardware":true,"invalidated_by_biometric_enrollment":false,"key_size":256,"origin":1,"user_auth_enforced_by_secure_hardware":true,"user_auth_required":true,"user_auth_type":3,"user_auth_validity_s":60}
+{"t":1791325116311,"cmd":"wrap","alias":"up6c","env_len":66,"framed":true,"header_hex":"49574b310101","iv_len":12,"sealed_len":48,"tag_bits":128}
+{"t":1791325118497,"cmd":"keyinfo","alias":"op6c","inside_secure_hardware":true,"invalidated_by_biometric_enrollment":true,"key_size":256,"origin":1,"user_auth_enforced_by_secure_hardware":true,"user_auth_required":true,"user_auth_type":2,"user_auth_validity_s":0}
+{"t":1791325120848,"cmd":"prompt-wrap","alias":"op6c","detail":"Key permanently invalidated","outcome":"KeyPermanentlyInvalidatedException"}
+{"t":1791325123946,"cmd":"unwrap","alias":"bg","detail":"","outcome":"seed"}
