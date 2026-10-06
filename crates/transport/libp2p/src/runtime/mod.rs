@@ -2895,7 +2895,13 @@ impl SwarmRuntime {
                         // wire now, asked again what its command asked.
                         if let Some(peer) = retained.as_ref() {
                             for send in held_sends.take(peer) {
-                                commands::dispatch_held(&mut swarm, &manager, &mut pending_direct, send);
+                                commands::dispatch_held(
+                                    &mut swarm,
+                                    &manager,
+                                    &direct_state,
+                                    &mut pending_direct,
+                                    send,
+                                );
                             }
                         }
                         if let Some((peer, event)) = path_update {

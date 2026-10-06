@@ -938,6 +938,7 @@ pub(super) fn handle_command(
                 }
                 held_sends.hold(super::held_sends::HeldSend {
                     peer,
+                    lease,
                     frame,
                     reply,
                     until_ms: now_ms.saturating_add(super::held_sends::SEND_DIAL_HORIZON_MS),
@@ -1589,22 +1590,43 @@ pub(super) fn dial_peer(
 }
 
 /// Put a held send on the wire now that its peer is connected, asking
-/// again what the command asked when it arrived: a drain or a revocation
-/// can land while a send waits for its dial.
+/// again what the command asked when it arrived and might have changed
+/// while it waited for its dial: the lease (a revoke, a release, a
+/// reconfiguration ends it), the drain, the peer's trust, and the source
+/// endpoint's outbound narrowing -- each answered as the `SendDirect` arm
+/// answers it. The payload limit and the self-send are fixed at arrival.
 pub(super) fn dispatch_held(
     swarm: &mut GatedSwarm,
     manager: &ConnectionManager,
+    direct_state: &DirectState,
     pending_direct: &mut HashMap<libp2p::request_response::OutboundRequestId, PendingDirect>,
     send: super::held_sends::HeldSend,
 ) {
     let super::held_sends::HeldSend {
-        peer, frame, reply, ..
+        peer,
+        lease,
+        frame,
+        reply,
+        ..
     } = send;
+    if direct_state.source_for_lease(&lease).as_ref() != Some(&frame.source_endpoint) {
+        let _ = reply.send(Err(DirectError::EndpointNotRegistered));
+        return;
+    }
     if manager.is_draining() {
         let _ = reply.send(Err(DirectError::ShuttingDown));
         return;
     }
-    if manager.classify(&peer) != ConnectionClass::DataPlaneTrusted {
+    if manager.classify(&peer) != ConnectionClass::DataPlaneTrusted
+        || !matches!(
+            direct_state.registry.authorize_outbound(
+                &frame.source_endpoint,
+                &peer,
+                &direct_state.trust
+            ),
+            interweave_trust_api::TrustDecision::Allowed
+        )
+    {
         let _ = reply.send(Err(DirectError::UnauthorizedPeer));
         return;
     }

@@ -35,6 +35,9 @@ pub(super) const SEND_DIAL_HORIZON_MS: u64 = 10_000;
 pub(super) struct HeldSend {
     /// The peer the send is to.
     pub(super) peer: TransportIdentity,
+    /// The lease the send was made under, asked again at dispatch: the
+    /// endpoint can be revoked, released or narrowed while the send waits.
+    pub(super) lease: interweave_local_client_api::EndpointLease,
     /// The frame, its source endpoint already the lease's.
     pub(super) frame: Box<DirectMessageV2>,
     /// The caller waiting for the outcome.
@@ -127,6 +130,11 @@ mod tests {
         (
             HeldSend {
                 peer: TransportIdentity::parse(peer).expect("valid"),
+                lease: interweave_local_client_api::EndpointLease {
+                    endpoint: EndpointId::parse("human").expect("valid"),
+                    epoch: interweave_local_client_api::Generation::parse("0123456789abcdef")
+                        .expect("valid"),
+                },
                 frame: Box::new(frame),
                 reply,
                 until_ms,
