@@ -4,7 +4,7 @@ Android Keystore wrapping, invalidation and background/user-presence behavior.
 
 Do not treat experiments placed here as production implementation. Evidence and final decision must be recorded against [`architecture/roadmap/SPIKES.md`](../../architecture/roadmap/SPIKES.md); the verdict is architect-cto's to write there, not this file's.
 
-**Status: the HOST HALF has run (2026-10-06); the DEVICE HALF has run (2026-10-06: D1–D7, four recorded parts; D6b repeated in part 4 with an addition only).** No verdict is recorded; the verdict is architect-cto's.
+**Status: the HOST HALF has run (2026-10-06); the DEVICE HALF has run (2026-10-06: D1–D7, four recorded parts; D6b repeated in part 4 with an addition only), with D5's restart diagnostic not produced and D7's picker not exercised (below).** No verdict is recorded; the verdict is architect-cto's.
 
 ## The host half: what was established
 
@@ -73,13 +73,13 @@ The recorded run is [`device/REPRODUCTION-2026-10-06b.log`](./device/REPRODUCTIO
 | id | observation |
 |---|---|
 | D4 (lock) | With the keyguard showing, the background key unwraps (the seed), and the user-presence key is refused `UserNotAuthenticatedException`. |
-| D7 | The fixture phrase typed into the picker restores the fixture PeerId through the production parse; only "valid"/"invalid" is recorded. Each check against the unprotected control screen: **screenshot**: control legible; secure, `screencap` refused (an empty file). **Screen recording**: control legible; secure, the activity is black, but **the IME window is not covered by `FLAG_SECURE`** (it showed no typed text in the frame measured). **Recents**: control's snapshot shows the words; secure's is blank. **IME**: the secure field reaches Samsung Keyboard as `NO_SUGGESTIONS` and `NO_PERSONALIZED_LEARNING`; the control's carries neither. **Autofill**: under the control, Samsung Pass received a fill request and Samsung's augmented service two; under the secure screen, neither received one, though a session flagged augmented-only was opened. **Logs and app storage**: no phrase word in logcat or under the app's data directory. |
+| D7 | **Measured on a free-text stand-in, not the required picker:** the harness's phrase screen is one `EditText` taking all 24 words, which is the input surface ADR-0042, SPIKES.md and `android-key-custody.md` require Android NOT to have, and the words were injected with `adb shell input text` rather than typed. What it measures holds for any secure screen; what it cannot measure is the picker. The fixture phrase entered there restores the fixture PeerId through the production parse; only "valid"/"invalid" is recorded. Each check against the unprotected control screen: **screenshot**: control legible; secure, `screencap` refused (an empty file). **Screen recording**: control legible; secure, the activity is black, but **the IME window is not covered by `FLAG_SECURE`** (it showed no typed text in the frame measured). **Recents**: control's snapshot shows the words; secure's is blank. **IME**: the secure field reaches Samsung Keyboard as `NO_SUGGESTIONS` and `NO_PERSONALIZED_LEARNING`; the control's carries neither. **Autofill**: under the control, Samsung Pass received a fill request and Samsung's augmented service two; under the secure screen, neither received one, though a session flagged augmented-only was opened. **Logs and app storage**: no phrase word in logcat or under the app's data directory. |
 
 **Two check records per Enter, in the part-2 log:** the picker's editor-action listener runs on both the key-down and the key-up of a hardware Enter (`input keyevent 66` sends both). That is read from Android's `TextView` behaviour, and the record pairs 11 ms and 37 ms apart fit it. So each mode recorded two checks. On the secure screen the field is cleared after the first, so the second parsed an empty field and recorded `invalid`. The first record of each pair is the result. The harness code is left as it ran, so the record matches the code.
 
 **What D7 did not establish:**
 - **Whether Samsung Keyboard honours the flags:** what it learns, suggests or uploads is not observable from adb.
-- **That the IME window cannot leak:** it sits outside `FLAG_SECURE`, so a keyboard showing key-press popups could put keystrokes into a recording or a screenshot. An in-app word picker that needs no IME would close it, and that is a design input for the contract's owner.
+- **That the IME window cannot leak:** it sits outside `FLAG_SECURE`, so a keyboard showing key-press popups could put keystrokes into a recording or a screenshot. The in-app per-position BIP-39 picker that ADR-0042 and `android-key-custody.md` already require needs no IME and would close it; the run did not exercise that picker.
 - **The clipboard:** copy, cut and paste are refused by construction (no action mode), not measured, since Android 11's shell cannot read the clipboard.
 - **Saved state and crash artifacts:** the field saves no instance state by construction; only the app's own storage was searched, not system_server's.
 - **The logcat and storage searches had no positive control:** the harness never writes a word, so they show that nothing leaked there, not that the search would see a leak.
@@ -113,6 +113,8 @@ The recorded run is [`device/REPRODUCTION-2026-10-06d.log`](./device/REPRODUCTIO
 [`device/`](./device), above. This is the plan the run followed, kept as written; what was measured is in parts 1–4 above, and where they differ the parts are the record. Expectations of it that were not measured:
 - D5's diagnostic and SPIKES.md's "availability diagnostic/restart trace": **not produced**. Only the Keystore exception was measured, and a process kill stood in for a service restart. Closing it needs the real stay-reachable service restarting with no person, its status reading the diagnostic as true until a person authenticates; a harness re-run cannot supply that.
 - D6a's "the app enters recovery and never makes a new key over the profile silently": the harness has no recovery path; it records the invalidation and the control only.
+- D7's **in-app 24-word picker and the absence of a free-text field** (SPIKES.md, ADR-0042): not exercised. The harness built a free-text stand-in instead, so the picker requirement needs a re-run with a real per-position word-list picker and no `EditText`, words chosen by touch.
+- Real keystrokes through an IME: the words were injected with `adb shell input text`.
 - D7's IME-suggestion leak under the control: only the flags were read.
 - D7's clipboard check: copy, cut and paste are refused by construction, not measured.
 - D7's saved-state and crash-artifact search: run over the app's own storage only, with no positive control (D7's "did not establish" list).
