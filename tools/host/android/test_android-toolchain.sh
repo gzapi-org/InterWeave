@@ -34,6 +34,8 @@ expect() {  # expect <label> <want-rc> <substring>
 # This host may be a Qubes AppVM; the cases that want a persistence say so.
 export ANDROID_TOOLCHAIN_PERSISTENCE=""
 SANDBOX="$(realpath -- "$(mktemp -d)")"; trap 'chmod -R u+w "$SANDBOX" 2>/dev/null; rm -rf "$SANDBOX"' EXIT
+# --install's one-at-a-time lock, in the sandbox rather than /run/lock.
+export ANDROID_TOOLCHAIN_LOCK="$SANDBOX/install.lock"
 PINS="$SANDBOX/pins"
 
 write_pins() {
@@ -269,8 +271,35 @@ if unshare -rm true 2>/dev/null; then
             pass "an archive with a $kind member is refused; the previous install stays, nothing beside it"
         else fail "a $kind member was not refused cleanly (exit $got)" "$out"$'\n'"$(ls -a "$SANDBOX/opt")"; fi
     done
+    # One --install at a time: while another holds the lock, refused before
+    # anything is touched.
+    pack "$SANDBOX/staged"
+    exec 8>"$ANDROID_TOOLCHAIN_LOCK"; flock 8
+    inst full
+    exec 8>&-
+    [[ "$got" -eq 2 && "$out" == *"another --install is running"* && -e "$SANDBOX/opt/android-sdk/previous-install" && "$(ls -A "$SANDBOX/opt")" == android-sdk ]] \
+        && pass "a second --install while one runs is refused, and touches nothing" || fail "a concurrent install was not refused cleanly" "$out"
+    # The lock that cannot be opened is said as that, not as a running
+    # install.
+    ANDROID_TOOLCHAIN_LOCK="$SANDBOX/no-such-dir/x.lock" inst full
+    [[ "$got" -eq 2 && "$out" == *"cannot open the install lock"* ]] && pass "an install lock that cannot be opened is named as such" || fail "the lock failure was misnamed" "$out"
+    # A profile copy a killed run left: killed rolling back (no .old tree
+    # beside the store), the copy is the previous tree's profile and goes
+    # back; past its swap (.old beside the store), it is dropped.
+    mkdir -p "$SANDBOX/etc"; echo '# the new run' > "$SANDBOX/etc/android-sdk.sh"; echo '# previous' > "$SANDBOX/etc/android-sdk.sh.old"
     make_tree "$SANDBOX/bad" "platforms;android-30@9"; pack "$SANDBOX/bad"
     inst full
+    [[ ! -e "$SANDBOX/etc/android-sdk.sh.old" && "$(cat "$SANDBOX/etc/android-sdk.sh")" == "# previous" ]] \
+        && pass "a killed rollback's profile copy is put back, even by a refused install" || fail "the interrupted rollback's profile was not restored" "$(cat "$SANDBOX/etc/android-sdk.sh"*)"
+    echo '# the new run' > "$SANDBOX/etc/android-sdk.sh"; echo '# previous' > "$SANDBOX/etc/android-sdk.sh.old"
+    cp -a "$SANDBOX/opt/android-sdk" "$SANDBOX/opt/android-sdk.old"
+    inst full
+    [[ ! -e "$SANDBOX/etc/android-sdk.sh.old" && "$(cat "$SANDBOX/etc/android-sdk.sh")" == "# the new run" ]] \
+        && pass "a profile copy left past the swap is dropped, the profile kept" || fail "the copy past the swap was mishandled" "$(cat "$SANDBOX/etc/android-sdk.sh"*)"
+    rm -f "$SANDBOX/etc/android-sdk.sh"
+    make_tree "$SANDBOX/bad" "platforms;android-30@9"; pack "$SANDBOX/bad"
+    inst full
+    [[ ! -e "$SANDBOX/etc/android-sdk.sh.old" ]] && pass "a killed run's profile copy is swept, even by a refused install" || fail "the stale profile copy survived" "$(ls -a "$SANDBOX/etc")"
     [[ "$got" -eq 2 && "$out" == *"platforms;android-30: 9, pinned 3"* && -e "$SANDBOX/opt/android-sdk/previous-install" ]] \
         && pass "a tree that fails verification is refused, named, and the previous install stays" || fail "a failing tree was not refused cleanly" "$out"
     mv "$SANDBOX/opt/android-sdk" "$SANDBOX/opt/android-sdk.old"
@@ -315,6 +344,14 @@ if unshare -rm true 2>/dev/null; then
     INST_AFTER=" && echo '# previous' >> '$SANDBOX/etc/android-sdk.sh' && ANDROID_TOOLCHAIN_BIND_CONF='$SANDBOX/conf-not-a-dir/50.conf' bash '$UNDER_TEST' --install '$SANDBOX/a.tar.gz'; echo \"rc=\$?\"; tail -1 '$SANDBOX/etc/android-sdk.sh'" inst rw-only
     [[ "$out" == *"the previous install is restored"*"rc=2"*"# previous" ]] \
         && pass "  a rollback on an AppVM restores the mounted profile in place" || fail "the mounted profile was not restored" "$out"
+    # A previous install with no profile beside it: a rollback after the
+    # profile is written takes that profile away again, rather than leave
+    # the new one behind and call the previous install restored.
+    rm -rf "$SANDBOX/rw" "$SANDBOX/opt"
+    pstore_file="$SANDBOX/rw/bind-dirs$SANDBOX/etc/android-sdk.sh"
+    INST_AFTER=" && umount '$SANDBOX/etc/android-sdk.sh' && rm -f '$pstore_file' && ANDROID_TOOLCHAIN_BIND_CONF='$SANDBOX/conf-not-a-dir/50.conf' bash '$UNDER_TEST' --install '$SANDBOX/a.tar.gz'; echo \"rc=\$?\"; [ -e '$pstore_file' ] && echo profile-present || echo profile-absent" inst rw-only
+    [[ "$out" == *"the previous install is restored"*"rc=2"*"profile-absent"* ]] \
+        && pass "  a rollback where no profile was takes the new one away" || fail "a rollback left a profile the previous install never had" "$out"
     rm -rf "$SANDBOX/rw" "$SANDBOX/opt"
 elif [[ -n "${CI:-}" ]]; then
     fail "unprivileged user and mount namespaces are unavailable under CI: the install would go untested"

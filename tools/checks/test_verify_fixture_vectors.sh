@@ -381,6 +381,20 @@ if [ -n "$REAL" ]; then
     [ "$(run_code "$REAL")" = "0" ] && ok "the real frozen vectors recompute" || bad "real fixtures fail: $(run "$REAL")"
 fi
 
+# ── an unreadable file is a report line, and the run goes on ─────────────
+R="$TMP/unreadable"; mkdir -p "$R/fixtures"
+python3 -c "import sys; open(sys.argv[1], 'w').write('{\"vectors\": [], \"n\": ' + '9' * 5000 + '}')" "$R/fixtures/a-big-int.json"
+printf '\xff\xfe{' > "$R/fixtures/b-not-utf8.json"
+ln -s nowhere.json "$R/fixtures/c-dangling.json"
+python3 -c "import sys; open(sys.argv[1], 'w').write('[' * 200000)" "$R/fixtures/d-deep.json"
+out="$(run "$R")"
+[ "$(run_code "$R")" = "1" ] && ok "unreadable files exit 1" || bad "unreadable files should exit 1: $out"
+[[ "$out" != *Traceback* ]] && ok "  with no traceback" || bad "  a traceback escaped: $out"
+[[ "$out" == *"a-big-int.json: unreadable"* && "$out" == *"b-not-utf8.json: unreadable"* ]] \
+    && ok "  an over-long integer and a non-UTF-8 file each reported, the run going on" || bad "  not both reported: $out"
+[[ "$out" == *"c-dangling.json: unreadable"* && "$out" == *"d-deep.json: unreadable"* ]] \
+    && ok "  a dangling symlink and a too-deep nesting each reported too" || bad "  not reported: $out"
+
 # ── usage ────────────────────────────────────────────────────────────────
 [ "$(run_code "$TMP/nothing-here")" = "2" ] && ok "a missing fixtures/ exits 2" || bad "missing tree should exit 2"
 help_out="$(python3 "$CHECK" --help 2>/dev/null)"
