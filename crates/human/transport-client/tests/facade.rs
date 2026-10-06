@@ -16,6 +16,7 @@ use interweave_human_store::{HumanStore, StoreOptions};
 use interweave_human_transport_client::{
     ClientConfig, ClientEvent, Connectivity, Destination, Origin, OutboundStatus, Received,
     SendError, SendProblem, SessionProblem, SessionState, TransportClient, TrustList, TrustProblem,
+    TrustSetFailure,
 };
 use interweave_local_client_api::{
     AdminBinding, AdminCapability, AdminPort, DataCapability, DataSessionBinding, DataSessionPort,
@@ -1481,7 +1482,7 @@ async fn trusting_this_profiles_own_identity_is_refused() {
     let (settings, _) = trusting(&a);
     assert_eq!(
         settings.set_trust(a.peer().clone(), true).await,
-        Err(TrustProblem::Refused)
+        Err(TrustSetFailure::NotMade(TrustProblem::Refused))
     );
     assert_eq!(
         settings.trust().await.expect("the allowlist").allowed,
@@ -1513,4 +1514,152 @@ async fn a_trust_call_opens_a_connection_holding_admin_trust_alone() {
         recording.asked.lock().expect("the record").last(),
         Some(&BTreeSet::from([AdminCapability::Status])),
     );
+}
+
+/// An admin port over a fake node's that fails the set, or the read-back
+/// after it, with a chosen error -- the failures a fake never produces.
+struct Faulty {
+    inner: <FakeNode as AdminBinding>::Admin,
+    set: Option<TransportError>,
+    read_back: Option<TransportError>,
+    set_called: std::sync::atomic::AtomicBool,
+}
+
+impl AdminPort for Faulty {
+    fn port(&self) -> &interweave_local_client_api::LocalAdminPort {
+        self.inner.port()
+    }
+    async fn status(&self) -> Result<interweave_local_client_api::AdminStatus, TransportError> {
+        self.inner.status().await
+    }
+    async fn leases(
+        &self,
+    ) -> Result<Vec<interweave_local_client_api::EndpointAdminView>, TransportError> {
+        self.inner.leases().await
+    }
+    async fn revoke_endpoint(&self, endpoint: EndpointId) -> Result<(), TransportError> {
+        self.inner.revoke_endpoint(endpoint).await
+    }
+    async fn set_endpoint_enabled(
+        &self,
+        endpoint: EndpointId,
+        enabled: bool,
+    ) -> Result<Option<interweave_local_client_api::Generation>, TransportError> {
+        self.inner.set_endpoint_enabled(endpoint, enabled).await
+    }
+    async fn set_default_endpoint(
+        &self,
+        endpoint: Option<EndpointId>,
+    ) -> Result<(), TransportError> {
+        self.inner.set_default_endpoint(endpoint).await
+    }
+    async fn trust(&self) -> Result<interweave_local_client_api::TrustAdminView, TransportError> {
+        if self.set_called.load(std::sync::atomic::Ordering::SeqCst)
+            && let Some(error) = self.read_back
+        {
+            return Err(error);
+        }
+        self.inner.trust().await
+    }
+    async fn set_trust(
+        &self,
+        peer: TransportIdentity,
+        allowed: bool,
+    ) -> Result<(), TransportError> {
+        if let Some(error) = self.set {
+            return Err(error);
+        }
+        self.inner.set_trust(peer, allowed).await?;
+        self.set_called
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    async fn shutdown(&self, grace: std::time::Duration) -> Result<(), TransportError> {
+        self.inner.shutdown(grace).await
+    }
+}
+
+#[derive(Clone)]
+struct FaultyBinding {
+    node: FakeNode,
+    set: Option<TransportError>,
+    read_back: Option<TransportError>,
+}
+
+impl AdminBinding for FaultyBinding {
+    type Admin = Faulty;
+
+    fn admin(
+        &self,
+        capabilities: BTreeSet<AdminCapability>,
+    ) -> impl std::future::Future<Output = Result<Faulty, TransportError>> + Send {
+        let this = self.clone();
+        async move {
+            Ok(Faulty {
+                inner: this.node.admin(capabilities).await?,
+                set: this.set,
+                read_back: this.read_back,
+                set_called: std::sync::atomic::AtomicBool::new(false),
+            })
+        }
+    }
+}
+
+/// A trust change's failure says whether it was made, by where it failed:
+/// a set refused before anything left was not made; one that failed after
+/// it may have reached the daemon is unconfirmed; one whose read-back
+/// alone failed was made -- and the daemon holds it.
+#[tokio::test]
+async fn a_trust_failure_says_whether_the_change_was_made() {
+    for (set, read_back, expected, made) in [
+        (
+            Some(TransportError::CapabilityDenied),
+            None,
+            TrustSetFailure::NotMade(TrustProblem::NotPermitted),
+            false,
+        ),
+        (
+            Some(TransportError::Timeout),
+            None,
+            TrustSetFailure::Unconfirmed(TrustProblem::Unavailable),
+            false,
+        ),
+        (
+            None,
+            Some(TransportError::BackendUnavailable),
+            TrustSetFailure::MadeNotReadBack(TrustProblem::Unavailable),
+            true,
+        ),
+    ] {
+        let (a, _b) = FakeNetwork::pair(node_config(), node_config());
+        let binding = FaultyBinding {
+            node: a.clone(),
+            set,
+            read_back,
+        };
+        let client = TransportClient::new(
+            a.clone(),
+            binding,
+            memory(),
+            ClientConfig {
+                client_kind: "human-client".to_owned(),
+                endpoint: Some(human()),
+                channels: Vec::new(),
+                max_payload_bytes: LIMIT,
+            },
+            wall(),
+            0,
+        )
+        .expect("an empty store");
+        let stranger = ProfileIdentity::generate()
+            .transport_identity()
+            .expect("a peer");
+        assert_eq!(
+            client.set_trust(stranger.clone(), true).await,
+            Err(expected)
+        );
+        let (settings, _) = trusting(&a);
+        let held = settings.trust().await.expect("the allowlist");
+        assert_eq!(held.allowed.contains(&stranger), made, "{expected:?}");
+    }
 }

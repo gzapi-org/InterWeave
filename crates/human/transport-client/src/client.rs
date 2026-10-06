@@ -45,7 +45,7 @@ use crate::queue::{Capped, EventQueue};
 use interweave_human_client_api::{
     ClientEvent, Connectivity, Destination, Diagnostics, Origin, OutboundStatus, OutboundUpdate,
     Received, RowError, SendError, SendProblem, SessionProblem, SessionState, TrustList,
-    TrustProblem,
+    TrustProblem, TrustSetFailure,
 };
 
 /// How many committed messages wait for hand-over at most: one session
@@ -477,18 +477,28 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
     /// session is told `PeerDisconnected` (`LOCAL-CLIENT.md` §7 item 11).
     ///
     /// # Errors
-    /// The failure's class; nothing was changed when it came from the set.
+    /// Whether the change was made, and why the answer is not the list:
+    /// not made when the connection or the set failed before anything
+    /// left; unconfirmed when the set failed after it may have reached the
+    /// daemon (`TRANSPORT.md`'s outcome-unknown class, `may_have_reached`);
+    /// made when only the read-back failed.
     pub async fn set_trust(
         &self,
         peer: TransportIdentity,
         allowed: bool,
-    ) -> Result<TrustList, TrustProblem> {
-        let admin = self.trust_port().await?;
-        admin
-            .set_trust(peer, allowed)
+    ) -> Result<TrustList, TrustSetFailure> {
+        let admin = self.trust_port().await.map_err(TrustSetFailure::NotMade)?;
+        admin.set_trust(peer, allowed).await.map_err(|error| {
+            if may_have_reached(error) {
+                TrustSetFailure::Unconfirmed(classify_trust(error))
+            } else {
+                TrustSetFailure::NotMade(classify_trust(error))
+            }
+        })?;
+        let view = admin
+            .trust()
             .await
-            .map_err(classify_trust)?;
-        let view = admin.trust().await.map_err(classify_trust)?;
+            .map_err(|error| TrustSetFailure::MadeNotReadBack(classify_trust(error)))?;
         Ok(TrustList {
             local_peer: view.local_peer,
             allowed: view.allowed,
