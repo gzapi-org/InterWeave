@@ -7,7 +7,8 @@ The repository now has two deliberately separate halves:
 
 There are production Rust crates under `crates/` and `tests/`, activated one canonical stage at a time. Since Stage 13 `apps/transport-daemon` and `apps/transportctl` are the first application binaries; there is no Android Gradle project, installer, or service unit yet: the rest of `apps/` and `packaging/` stay empty until the stage that needs them opens.
 
-**Stages 0-15 are complete; Stage 16 is open** (`stage-16-claude-code-channel`).
+**Stages 0-16 are complete; Stage 17 is open** (`stage-17-android-human-client`; SPIKE-008 and SPIKE-009 first, §20).
+Stage 16 closed 2026-10-06 on the plan record (#174), steps 2 and 3 (#194, #199) and steps 4 and 5 (#203): the Claude Code Channel bridge against two real daemons and inside Claude Code 2.1.288.
 Stage 15 closed 2026-10-06 on the plan record (#175), rust-ui-dev's batches B1 (#176), B2+B3 (#178), B4 (#181, after ADR-0054's vendoring #179), B5 (#183), B6+B7 (#187), B8 (#191) and B9 (#200), p2p-network-dev's R1 (#180, #184) and R2 (#186, #190), the contract texts (#189) and the external-review fixes (#192): the desktop human client as a shipped binary, proved against two daemons without a person. Stage 16 had run beside it since 2026-10-03 (#174).
 Stage 14 closed 2026-10-03 on the plan record (#161), the batches 2+4+3
 (#166), 5 (#167), 6 (#168), 7 (#169) and 8 (#170) and the rust-ui-dev
