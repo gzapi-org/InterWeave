@@ -926,11 +926,12 @@ def main(argv: list[str]) -> int:
         except json.JSONDecodeError as e:
             report(f"{rel}: invalid JSON — {e}")
             continue
-        # Its siblings are ValueErrors too, and each stopped the whole run
-        # with a traceback instead of being one report line: a file that
-        # is not UTF-8, and an integer literal past Python's digit limit
-        # (int() refuses more than 4300 digits).
-        except ValueError as e:
+        # Every other way a file fails to read stopped the whole run with
+        # a traceback instead of being one report line: a file that is not
+        # UTF-8 or holds an integer literal past Python's digit limit
+        # (ValueError), one that cannot be opened (OSError: permissions, a
+        # dangling symlink), and nesting deeper than the parser recurses.
+        except (ValueError, OSError, RecursionError) as e:
             report(f"{rel}: unreadable — {e}")
             continue
 
