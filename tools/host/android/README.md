@@ -77,7 +77,10 @@ unprivileged account and is unpacked as root. Before writing anything,
   file;
 - an archive staged from other pins than the checkout's;
 - any member that is not a file, directory or symlink, a hard link, an
-  absolute or `..` path, or a link out of the tree.
+  absolute path, a `..` in a member name, a member reached through a
+  symlink the archive makes, or a link out of the tree.
+
+Run one `--install` at a time on a host: nothing serialises two.
 
 Every member is judged before anything is written. Setuid and setgid bits
 are dropped. A failed install leaves the previous

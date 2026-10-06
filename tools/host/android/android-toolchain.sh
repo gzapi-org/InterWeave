@@ -269,16 +269,29 @@ command -v python3 >/dev/null || die "python3 is required to install"
 # tree; staged archives hold none); and each must pass tarfile's `data`
 # filter — no absolute path, no `..` out of the tree, no link pointing
 # outside it. The filter's known bypasses were fixed in 3.12.11 and
-# 3.13.4, so an older Python is refused rather than trusted.
+# 3.13.4, so an older Python is refused rather than trusted. The filter
+# judges a path through the links already on disk, and here nothing is on
+# disk yet, so two rules make the dry pass exact: no member name holds a
+# `..` component, and no member is reached through an earlier symlink
+# member (an SDK archive holds neither; links' TARGETS may use `..`).
 python3 - "$ARCHIVE" <<'PY' || die "the archive is refused (above); nothing was written"
-import sys, tarfile
-v = sys.version_info
+import os, sys, tarfile
+v = tuple(int(x) for x in os.environ['ANDROID_TOOLCHAIN_PYTHON_VERSION'].split('.')) if os.environ.get('ANDROID_TOOLCHAIN_PYTHON_VERSION') else sys.version_info
 if not hasattr(tarfile, 'data_filter') or v < (3, 12, 11) or (3, 13) <= v[:2] < (3, 14) and v < (3, 13, 4):
     sys.exit(f"python {v[0]}.{v[1]}.{v[2]} has no trustworthy tarfile data filter (needs 3.12.11+, 3.13.4+ or 3.14+)")
+links = set()
 with tarfile.open(sys.argv[1], 'r:gz') as t:
     for m in t.getmembers():
         if not (m.isfile() or m.isdir() or m.issym()):
             sys.exit(f"refused: {m.name} is a {'hard link' if m.islnk() else 'device or special file'}")
+        parts = [p for p in m.name.split('/') if p not in ('', '.')]
+        if '..' in parts:
+            sys.exit(f"refused: {m.name} has a '..' component")
+        through = next(('/'.join(parts[:i]) for i in range(1, len(parts)) if '/'.join(parts[:i]) in links), None)
+        if through:
+            sys.exit(f"refused: {m.name} is reached through the symlink {through}")
+        if m.issym():
+            links.add('/'.join(parts))
         try:
             tarfile.data_filter(m, '/nonexistent-android-sdk-dest')
         except tarfile.FilterError as e:

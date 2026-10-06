@@ -76,13 +76,20 @@ pack() {  # pack <tree> -> $SANDBOX/a.tar.gz + .sha256
     tar -C "$1" -czf "$SANDBOX/a.tar.gz" . && ( cd "$SANDBOX" && sha256sum a.tar.gz > a.tar.gz.sha256 )
 }
 # A hostile archive: a good tree plus one member of the named kind.
-pack_hostile() {  # pack_hostile <tree> device|hardlink|innerlink|escape|setuid
+pack_hostile() {  # pack_hostile <tree> device|hardlink|innerlink|escape|setuid|dotdot|chain
     python3 - "$1" "$2" "$SANDBOX/a.tar.gz" <<'PY'
 import io, sys, tarfile
 tree, kind, out = sys.argv[1:]
 with tarfile.open(out, 'w:gz') as t:
     t.add(tree, arcname='.')
-    m = tarfile.TarInfo('./platform-tools/evil')
+    if kind == 'chain':  # out of the tree only through a link the archive itself makes; no `..` in a name
+        for name, link in (('a', None), ('a/up', '..'), ('a/up/esc', '..'), ('esc/pwned', None)):
+            m = tarfile.TarInfo(name)
+            if name == 'a': m.type = tarfile.DIRTYPE
+            elif link: m.type, m.linkname = tarfile.SYMTYPE, link
+            t.addfile(m)
+        sys.exit(0)
+    m = tarfile.TarInfo('./platform-tools/../evil' if kind == 'dotdot' else './platform-tools/evil')
     if kind == 'device':   m.type, m.devmajor, m.devminor, m.mode = tarfile.CHRTYPE, 1, 1, 0o666
     if kind == 'hardlink': m.type, m.linkname = tarfile.LNKTYPE, '/etc/shadow'
     if kind == 'innerlink': m.type, m.linkname = tarfile.LNKTYPE, './jdk/release'
@@ -210,9 +217,20 @@ make_tree "$SANDBOX/staged2"; sed -i 's/^JDK_VERSION=.*/JDK_VERSION=17.0.19+1/' 
 pack "$SANDBOX/staged2"
 ANDROID_TOOLCHAIN_PERSISTENCE=rw-only run bash "$UNDER_TEST" --install "$SANDBOX/a.tar.gz"
 expect "an archive staged from other pins is refused" 2 "staged from other pins"
-pack_hostile "$SANDBOX/staged" escape
-ANDROID_TOOLCHAIN_PERSISTENCE=rw-only run bash "$UNDER_TEST" --install "$SANDBOX/a.tar.gz"
-expect "a hostile member is refused by the dry pass, before the root check" 2 "nothing was written"
+for kind in escape dotdot chain; do
+    pack_hostile "$SANDBOX/staged" "$kind"
+    ANDROID_TOOLCHAIN_PERSISTENCE=rw-only run bash "$UNDER_TEST" --install "$SANDBOX/a.tar.gz"
+    expect "a $kind member is refused by the dry pass, before the root check" 2 "nothing was written"
+done
+pack "$SANDBOX/staged"
+for v in 3.12.10 3.13.3 3.11.13; do
+    ANDROID_TOOLCHAIN_PYTHON_VERSION=$v ANDROID_TOOLCHAIN_PERSISTENCE=rw-only run bash "$UNDER_TEST" --install "$SANDBOX/a.tar.gz"
+    expect "python $v (a data filter with known bypasses) is refused" 2 "no trustworthy tarfile data filter"
+done
+for v in 3.12.11 3.13.4 3.14.0; do
+    ANDROID_TOOLCHAIN_PYTHON_VERSION=$v ANDROID_TOOLCHAIN_PERSISTENCE=rw-only run bash "$UNDER_TEST" --install "$SANDBOX/a.tar.gz"
+    [[ "$out" != *"no trustworthy"* ]] && pass "python $v is accepted" || fail "python $v was refused" "$out"
+done
 pack "$SANDBOX/staged"
 if [[ "$(id -u)" -ne 0 ]]; then
     ANDROID_TOOLCHAIN_PERSISTENCE=rw-only run bash "$UNDER_TEST" --install "$SANDBOX/a.tar.gz"
