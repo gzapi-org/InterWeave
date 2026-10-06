@@ -186,7 +186,7 @@ mounts_under() {
 cleanup() {
     # Further signals are ignored here: a signal's trap ends in exit, and
     # an exit inside the EXIT trap skips the rest of it, the scratch with
-    # it. The wait below is bounded, so ignoring them cannot hang.
+    # it. Both waits below are bounded, so ignoring them cannot hang.
     trap '' INT TERM HUP
     # The bus's process group, on every exit and not only on a signal: a
     # launcher or registry the wrapper started directly (step 3) that hung
@@ -201,7 +201,13 @@ cleanup() {
         while kill -0 -- "-$bus_pid" 2>/dev/null && (($(now_ms) < until)); do sleep 0.1; done
         kill -KILL -- "-$bus_pid" 2>/dev/null
     fi
-    if [[ -n "$xvfb_pid" ]]; then kill "$xvfb_pid" 2>/dev/null; wait "$xvfb_pid" 2>/dev/null; fi
+    if [[ -n "$xvfb_pid" ]]; then
+        kill "$xvfb_pid" 2>/dev/null
+        local until=$(($(now_ms) + STOP_SECONDS * 1000))
+        while kill -0 "$xvfb_pid" 2>/dev/null && (($(now_ms) < until)); do sleep 0.1; done
+        kill -KILL "$xvfb_pid" 2>/dev/null
+        wait "$xvfb_pid" 2>/dev/null
+    fi
     # A mount a KILLed service never took down: rm cannot remove a mount
     # point, and --one-file-system keeps it from deleting through one.
     local mp fuse

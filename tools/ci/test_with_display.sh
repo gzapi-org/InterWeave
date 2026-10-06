@@ -30,7 +30,9 @@ command -v python3 >/dev/null || { echo "test_with_display: python3 is needed (t
 
 failures=0
 SANDBOX_TMPDIR="${TMPDIR-}"
-SANDBOX="$(mktemp -d)"
+# Canonical, as the wrapper's scratch is: a TMPDIR behind a symlink
+# would otherwise fail every comparison of the two paths.
+SANDBOX="$(realpath -- "$(mktemp -d)")"
 trap 'rm -rf "$SANDBOX"' EXIT
 BIN="$SANDBOX/bin"
 mkdir -p "$BIN"
@@ -48,6 +50,9 @@ cat > "$BIN/Xvfb" <<EOF
 echo \$\$ > "$SANDBOX/xvfb-pid"
 [[ -e "$SANDBOX/xvfb-dies" ]] && { echo "Fatal server error: no screens" >&2; exit 1; }
 [[ -e "$SANDBOX/xvfb-mute" ]] || echo 7 >&3
+# xvfb-stubborn: ignores TERM, as the process itself (exec keeps the
+# pid and the ignored TERM), so the wrapper's KILL leaves no child.
+[[ -e "$SANDBOX/xvfb-stubborn" ]] && { trap '' TERM; exec sleep 10 >/dev/null 2>&1; }
 sleep 10 >/dev/null 2>&1 &
 trap 'touch "$SANDBOX/xvfb-terminated"; kill \$!; exit 0' TERM
 wait
@@ -66,7 +71,9 @@ export DBUS_SESSION_BUS_ADDRESS=unix:path=$SANDBOX/bus
 # A parent of the command, as the real one is (it forks the daemon and the
 # command and outlives both), so a signal to it alone does not reach them.
 "\$@"
-exit \$?
+rc=\$?
+touch "$SANDBOX/bus-exited"
+exit \$rc
 EOF
 # gdbus: Set, GetAddress and the registry probe, each breakable.
 cat > "$BIN/gdbus" <<EOF
@@ -174,7 +181,7 @@ echo "\$*" >> "$SANDBOX/unmounted"
 EOF
 chmod +x "$BIN/fusermount3" "$BIN/umount"
 
-reset() { rm -f "$SANDBOX"/{xvfb-dies,xvfb-mute,bus-fails,set-fails,no-address,registry-down,cmd-ran,bus-ran,a11y-on,xvfb-pid,xvfb-terminated,sleeper-pid,spawn-denied,launcher-mute,launcher-hangs,launcher-pid,launcher-ran,launcher-started,registryd-started,rundir,mountinfo,unmounted,stubborn-pid,rm-args}; ATSPI_DIRS="$ATSPI"; }
+reset() { rm -f "$SANDBOX"/{xvfb-dies,xvfb-mute,bus-fails,set-fails,no-address,registry-down,cmd-ran,bus-ran,a11y-on,xvfb-pid,xvfb-terminated,sleeper-pid,spawn-denied,launcher-mute,launcher-hangs,launcher-pid,launcher-ran,launcher-started,registryd-started,rundir,mountinfo,unmounted,stubborn-pid,rm-args,bus-exited,xvfb-stubborn}; ATSPI_DIRS="$ATSPI"; }
 
 # run [<arg>…]: the wrapper under the stubs, from a Wayland desktop.
 run() {
@@ -401,7 +408,7 @@ took=$((SECONDS - start)); spid="$(cat "$SANDBOX/stubborn-pid" 2>/dev/null)"; ru
 if [[ "$got" -eq 0 && "$took" -le 4 && -n "$spid" ]] && ! kill -0 "$spid" 2>/dev/null && [[ ! -e "${rundir%/run}" ]]; then
     pass "a service ignoring TERM is KILLed after the bound (${took}s), and the scratch goes"
 else fail "a TERM-ignoring service: exit $got, ${took}s, pid ${spid:-?} alive=$(kill -0 "$spid" 2>/dev/null && echo yes || echo no)" "$out"
-     kill -KILL "$spid" 2>/dev/null; rm -rf "${rundir%/run}"; fi
+     pkill -KILL -P "$spid" 2>/dev/null; kill -KILL "$spid" 2>/dev/null; rm -rf "${rundir%/run}"; fi
 
 # A signal while cleanup waits does not abandon it: the scratch goes and
 # the command's status stands.
@@ -409,14 +416,16 @@ reset
 PATH="$BIN:$PATH" WITH_DISPLAY_READY_SECONDS=1 WITH_DISPLAY_STOP_SECONDS=2 WITH_DISPLAY_ATSPI_DIRS="$ATSPI_DIRS" \
     bash "$UNDER_TEST" "$CMD2" stubborn >/dev/null 2>&1 &
 wp=$!
-for ((i = 0; i < 50; i++)); do [[ -s "$SANDBOX/stubborn-pid" ]] && break; sleep 0.1; done
-sleep 0.5; kill -TERM "$wp" 2>/dev/null; wait "$wp"; got=$?
+# The bus has exited, so the wrapper is past its own wait and in cleanup,
+# held there by the stubborn service.
+for ((i = 0; i < 50; i++)); do [[ -e "$SANDBOX/bus-exited" ]] && break; sleep 0.1; done
+sleep 0.2; kill -TERM "$wp" 2>/dev/null; wait "$wp"; got=$?
 spid="$(cat "$SANDBOX/stubborn-pid" 2>/dev/null)"; rundir="$(cat "$SANDBOX/rundir" 2>/dev/null)"
 if [[ "$got" -eq 0 && -n "$rundir" && ! -e "${rundir%/run}" ]]; then
     pass "TERM during cleanup's wait: the scratch still goes, and the status is the command's"
 else fail "TERM during cleanup: exit $got, scratch ${rundir%/run} left=$([[ -e "${rundir%/run}" ]] && echo yes || echo no)"
-     kill -KILL "$spid" 2>/dev/null; rm -rf "${rundir%/run}"; fi
-kill -KILL "$spid" 2>/dev/null
+     pkill -KILL -P "$spid" 2>/dev/null; kill -KILL "$spid" 2>/dev/null; rm -rf "${rundir%/run}"; fi
+pkill -KILL -P "$spid" 2>/dev/null; kill -KILL "$spid" 2>/dev/null
 
 # The removal never deletes through a mount point.
 reset
@@ -445,6 +454,15 @@ rundir="$(cat "$SANDBOX/rundir" 2>/dev/null)"
 if [[ "$rundir" == "$SANDBOX/realtmp/"* && "$(wc -l < "$SANDBOX/unmounted" 2>/dev/null)" -eq 2 ]]; then
     pass "a symlinked TMPDIR: the scratch is canonical and its mounts are found"
 else fail "a symlinked TMPDIR hid the mounts (runtime dir ${rundir:-none})" "$(cat "$SANDBOX/unmounted" 2>/dev/null || echo none)"; fi
+
+
+# An Xvfb that ignores TERM: cleanup's wait on it is bounded too, then KILL.
+reset; touch "$SANDBOX/xvfb-stubborn"; start=$SECONDS
+export WITH_DISPLAY_STOP_SECONDS=1; run "$CMD" 0; unset WITH_DISPLAY_STOP_SECONDS
+took=$((SECONDS - start)); pid="$(cat "$SANDBOX/xvfb-pid" 2>/dev/null)"
+if [[ "$got" -eq 0 && "$took" -le 4 && -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then
+    pass "an Xvfb ignoring TERM is KILLed after the bound (${took}s)"
+else fail "a TERM-ignoring Xvfb: exit $got, ${took}s, pid ${pid:-?}" "$out"; kill -KILL "$pid" 2>/dev/null; fi
 
 echo
 if (( failures > 0 )); then
