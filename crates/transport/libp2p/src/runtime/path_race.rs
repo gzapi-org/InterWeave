@@ -105,6 +105,12 @@ impl Races {
         self.inner.remove(peer).is_some()
     }
 
+    /// Whether a relayed dial to `peer` still waits out its head-start.
+    #[must_use]
+    pub(super) fn waits_for(&self, peer: &TransportIdentity) -> bool {
+        self.inner.contains_key(peer)
+    }
+
     #[cfg(test)]
     pub(super) fn len(&self) -> usize {
         self.inner.len()

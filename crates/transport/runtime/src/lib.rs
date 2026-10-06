@@ -28,8 +28,9 @@ pub mod topic;
 
 pub use connection_manager::{
     ADMIT_RELOAD_ATTEMPTS, ConnectionManager, ConnectionSlot, DEFAULT_MAX_ADDRESSES_PER_PEER,
-    DEFAULT_MAX_RETRY_ENTRIES, DialTicket, PolicySnapshot, RETRY_BASE_MS, RETRY_CEILING_MS,
-    RetentionRefusal, Revoked, SnapshotHandle, TrustSources, retry_backoff_ms,
+    DEFAULT_MAX_RETRY_ENTRIES, DialTicket, GateNote, MAX_GATE_NOTES, PeerGateState, PolicySnapshot,
+    RETRY_BASE_MS, RETRY_CEILING_MS, RetentionRefusal, RetryScheduled, Revoked, SnapshotHandle,
+    TrustSources, retry_backoff_ms,
 };
 pub use connection_policy::{
     AddressState, ConnectionClass, ConnectionPolicy, DEFAULT_IDLE_TTL_MS,

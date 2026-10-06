@@ -853,6 +853,11 @@ pub struct ConnectionManager {
     /// first, at most [`MAX_RETIRED_BOOK_PEERS`]: their entries are kept
     /// so a trust flap does not cost a peer its routes (`set_trust`).
     retired: std::collections::VecDeque<TransportIdentity>,
+    /// The retry and quarantine decisions not yet handed up, oldest
+    /// first, at most [`MAX_GATE_NOTES`] (`drain_notes`).
+    notes: std::collections::VecDeque<GateNote>,
+    /// Notes lost to that bound since the manager was built.
+    notes_dropped: u64,
     /// The latest `now_ms` any call has handed the manager, for the two
     /// paths that take a book entry out with no clock of their own
     /// (`retire_unclassified_book_peers`,
@@ -921,6 +926,8 @@ impl ConnectionManager {
             local_peer: None,
             retries: std::collections::BTreeMap::new(),
             retired: std::collections::VecDeque::new(),
+            notes: std::collections::VecDeque::new(),
+            notes_dropped: 0,
             clock_ms: 0,
             max_addresses_per_peer: DEFAULT_MAX_ADDRESSES_PER_PEER,
             max_retry_entries: DEFAULT_MAX_RETRY_ENTRIES,
@@ -1368,11 +1375,15 @@ impl ConnectionManager {
     /// cannot dial at all -- is [`Self::record_permanent_failure`], and
     /// answering "will retrying help" is the caller's job because only
     /// the backend knows which `DialError` it received.
-    pub fn record_failure(&mut self, ticket: DialTicket, now_ms: u64) {
+    ///
+    /// Returns the retry it scheduled, for the caller to report, or `None`
+    /// when it scheduled none: a ticket not issued here, a placeholder,
+    /// or a hole-punch dial.
+    pub fn record_failure(&mut self, ticket: DialTicket, now_ms: u64) -> Option<RetryScheduled> {
         let now_ms = ticket.settled_at(now_ms);
         self.observe(now_ms);
         if !self.issued_here(&ticket) {
-            return;
+            return None;
         }
         // A PLACEHOLDER NAMES NO ROUTE. A behaviour dial is admitted
         // with an empty address (F9) and rebound to the real one at the
@@ -1384,7 +1395,7 @@ impl ConnectionManager {
         if ticket.address().is_empty() {
             self.settle(ticket);
             self.publish();
-            return;
+            return None;
         }
         // A HOLE-PUNCH DIAL IS NOT A ROUTE. Its address is a candidate
         // the far end named for THIS attempt -- a NAT mapping, a port
@@ -1404,8 +1415,9 @@ impl ConnectionManager {
         if ticket.origin() == DialOrigin::DcutrHolePunch {
             self.settle(ticket);
             self.publish();
-            return;
+            return None;
         }
+        let mut scheduled = None;
         if let Some(peer) = ticket.peer().cloned() {
             // ONE delay, used for both. The address-scoped backoff and
             // the reconnect schedule disagreeing would mean the manager
@@ -1414,8 +1426,9 @@ impl ConnectionManager {
             // another failure -- a peer talking itself into permanent
             // backoff without the remote end doing anything.
             let delay = self.retry_delay_ms(&peer);
-            self.policy
-                .record_address_failure(&peer, ticket.address(), now_ms, delay);
+            let peer_backoff =
+                self.policy
+                    .record_address_failure(&peer, ticket.address(), now_ms, delay);
             // REMEMBER THE ADDRESS WE JUST TRIED, or the retry we are
             // about to schedule has nothing to dial.
             //
@@ -1449,10 +1462,22 @@ impl ConnectionManager {
             // claiming exists to prevent.
             let held_by_another = !ticket.owns_scheduler_claim()
                 && self.retries.get(&peer).is_some_and(|entry| entry.claimed);
-            self.schedule_retry(peer, now_ms, delay, held_by_another);
+            let attempt = self.schedule_retry(peer.clone(), now_ms, delay, held_by_another);
+            let retry = RetryScheduled {
+                attempt,
+                delay_ms: delay,
+                peer_backoff,
+            };
+            self.note(GateNote::RetryScheduled {
+                peer,
+                origin: ticket.origin(),
+                retry,
+            });
+            scheduled = Some(retry);
         }
         self.settle(ticket);
         self.publish();
+        scheduled
     }
 
     /// Score an address-scoped failure with no ticket and no admission.
@@ -1661,6 +1686,12 @@ impl ConnectionManager {
             self.policy
                 .record_identity_mismatch(&peer, ticket.address(), now_ms)
         });
+        if mismatched && let Some(peer) = ticket.peer().cloned() {
+            self.note(GateNote::AddressQuarantined {
+                peer,
+                for_ms: crate::connection_policy::IDENTITY_MISMATCH_QUARANTINE_MS,
+            });
+        }
         // A CLAIMED ATTEMPT THAT ENDS HERE MUST GIVE THE CLAIM BACK.
         // The quarantine is address-scoped and the peer may have other
         // routes, so the entry is released rather than removed -- but
@@ -1777,6 +1808,31 @@ impl ConnectionManager {
             return Err(RetentionRefusal::ConnectedPeerLimitReached);
         }
         Ok(())
+    }
+
+    /// An inbound connection from `peer` was RETAINED: the peer is up.
+    ///
+    /// Resets the peer's dial backoff -- the peer-scoped suppression and
+    /// the scheduled retry with its attempt count -- because a peer that
+    /// just reached this profile is better evidence than a timer its
+    /// failures set while it was away (architect-cto's ruling of
+    /// 2026-10-06, relay seq 13444: a restarted peer must not stay
+    /// unreachable for the backoff's 30-60 s after it is back).
+    /// CONNECTIVITY.md's cadence stays for a peer that has not shown
+    /// itself. Address quarantines are untouched: an inbound proves the
+    /// peer, not any address this profile dials it at.
+    ///
+    /// Called only after retention admitted the connection, so it never
+    /// acts for a peer the trust policy refuses. Returns whether there was
+    /// anything to reset.
+    pub fn record_inbound_retained(&mut self, peer: &TransportIdentity, now_ms: u64) -> bool {
+        self.observe(now_ms);
+        let backoff = self.policy.clear_peer_backoff(peer);
+        let retry = self.retries.remove(peer).is_some();
+        if backoff || retry {
+            self.publish();
+        }
+        backoff || retry
     }
 
     /// Record that an established connection has gone.
@@ -2015,7 +2071,14 @@ impl ConnectionManager {
 
     /// `claimed` carries a claim forward that this failure did not own;
     /// see [`Self::record_failure`].
-    fn schedule_retry(&mut self, peer: TransportIdentity, now_ms: u64, delay: u64, claimed: bool) {
+    /// Returns the attempt number the retry will be.
+    fn schedule_retry(
+        &mut self,
+        peer: TransportIdentity,
+        now_ms: u64,
+        delay: u64,
+        claimed: bool,
+    ) -> u32 {
         let attempts = self.retries.get(&peer).map_or(0, |r| r.attempts);
 
         if !self.retries.contains_key(&peer) && self.retries.len() >= self.max_retry_entries {
@@ -2033,15 +2096,111 @@ impl ConnectionManager {
             }
         }
 
+        let attempt = attempts.saturating_add(1);
         self.retries.insert(
             peer,
             Retry {
                 due_at_ms: now_ms.saturating_add(delay),
-                attempts: attempts.saturating_add(1),
+                attempts: attempt,
                 claimed,
             },
         );
+        attempt
     }
+
+    /// The retry and quarantine decisions made since the last call, oldest
+    /// first, for the runtime to report (`observability.md` §Logs, A
+    /// 2026-10-06). One queue every settlement path writes, so no path
+    /// can decide without being reported -- a failure settled inside
+    /// `attempt_dial` as much as one the event loop settles.
+    pub fn drain_notes(&mut self) -> Vec<GateNote> {
+        self.notes.drain(..).collect()
+    }
+
+    /// How many notes the [`MAX_GATE_NOTES`] bound discarded, oldest
+    /// first, because nothing drained them in time.
+    #[must_use]
+    pub fn notes_dropped(&self) -> u64 {
+        self.notes_dropped
+    }
+
+    fn note(&mut self, note: GateNote) {
+        if self.notes.len() >= MAX_GATE_NOTES {
+            let _ = self.notes.pop_front();
+            self.notes_dropped = self.notes_dropped.saturating_add(1);
+        }
+        self.notes.push_back(note);
+    }
+
+    /// What the gate holds against `peer` at `now_ms`, for diagnostics:
+    /// its peer-scoped backoff, its latest live address quarantine and its
+    /// scheduled retry. Times only -- no address leaves the manager.
+    #[must_use]
+    pub fn peer_gate_state(&self, peer: &TransportIdentity, now_ms: u64) -> PeerGateState {
+        PeerGateState {
+            backoff_until_ms: self
+                .policy
+                .peer(peer)
+                .and_then(|b| b.until_ms)
+                .filter(|until| now_ms < *until),
+            quarantined_until_ms: self.policy.quarantined_until(peer, now_ms),
+            retry_due_at_ms: self.retries.get(peer).map(|r| r.due_at_ms),
+        }
+    }
+}
+
+/// How many undrained notes the manager keeps. The runtime drains every
+/// turn of its loop, so the bound is met only by a turn that settles more
+/// dials than this -- each holding a pending-dial slot, so the pending
+/// ceiling bounds a turn's settlements too.
+pub const MAX_GATE_NOTES: usize = 64;
+
+/// A decision of the gate's that its runtime reports. Peers and times
+/// only: no address leaves the manager this way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GateNote {
+    /// A failed dial scheduled the peer's next retry.
+    RetryScheduled {
+        /// The peer.
+        peer: TransportIdentity,
+        /// Who asked for the dial that failed.
+        origin: DialOrigin,
+        /// What was scheduled.
+        retry: RetryScheduled,
+    },
+    /// An address of the peer answered with another identity and is
+    /// quarantined.
+    AddressQuarantined {
+        /// The peer the address was dialled as.
+        peer: TransportIdentity,
+        /// For how long.
+        for_ms: u64,
+    },
+}
+
+/// A retry [`ConnectionManager::record_failure`] scheduled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryScheduled {
+    /// Which retry this will be: 1 for the first after a run of successes.
+    pub attempt: u32,
+    /// How long until it is due.
+    pub delay_ms: u64,
+    /// Whether the failure also put the peer itself in backoff, which it
+    /// does only when no other known-good address remains.
+    pub peer_backoff: bool,
+}
+
+/// The gate's hold on one peer, as [`ConnectionManager::peer_gate_state`]
+/// reports it. Every field is `None` for a peer the gate holds nothing
+/// against.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PeerGateState {
+    /// Dials to the peer are refused until then.
+    pub backoff_until_ms: Option<u64>,
+    /// At least one of the peer's addresses is quarantined until then.
+    pub quarantined_until_ms: Option<u64>,
+    /// The scheduled retry comes due then.
+    pub retry_due_at_ms: Option<u64>,
 }
 
 /// `CONNECTIVITY.md`'s first retry delay for a peer not yet verified:
@@ -3235,6 +3394,178 @@ mod tests {
     }
 
     #[test]
+    fn a_retained_inbound_resets_the_peers_backoff_and_keeps_its_quarantines() {
+        let mut m = manager(8);
+        let t = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 0)
+            .expect("admitted");
+        m.record_failure(t, 0);
+        let q = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/q"), 0)
+            .expect("admitted");
+        assert!(m.record_identity_mismatch(q, 0));
+        // The control: the failure holds the peer off, and its retry is
+        // scheduled 30 s out.
+        assert_eq!(
+            m.handle().load().admit(&request(P1, "/a"), 1_000).err(),
+            Some(DialDenial::PeerBackoff)
+        );
+        assert_eq!(m.scheduled_retries(), 1);
+
+        assert!(m.record_inbound_retained(&peer(P1), 1_000));
+        assert_eq!(m.scheduled_retries(), 0, "the retry and its count go");
+        assert!(
+            m.handle().load().admit(&request(P1, "/a"), 1_000).is_ok(),
+            "the peer is dialable at once"
+        );
+        assert_eq!(
+            m.handle().load().admit(&request(P1, "/q"), 1_000).err(),
+            Some(DialDenial::AddressQuarantined),
+            "an inbound proves the peer, not the mismatched address"
+        );
+        // The next failure starts the cadence over, at 30 s.
+        let t = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 2_000)
+            .expect("admitted");
+        m.record_failure(t, 2_000);
+        assert!(!m.is_retry_due(&peer(P1), 31_999));
+        assert!(m.is_retry_due(&peer(P1), 32_000));
+        // Nothing to reset is said so.
+        assert!(!m.record_inbound_retained(&peer(P2), 2_000));
+    }
+
+    #[test]
+    fn a_failure_reports_the_retry_it_scheduled_and_the_gate_state_follows() {
+        let mut m = manager(8);
+        assert_eq!(m.peer_gate_state(&peer(P1), 0), PeerGateState::default());
+        let t = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 0)
+            .expect("admitted");
+        assert_eq!(
+            m.record_failure(t, 0),
+            Some(RetryScheduled {
+                attempt: 1,
+                delay_ms: 30_000,
+                peer_backoff: true
+            })
+        );
+        assert_eq!(
+            m.peer_gate_state(&peer(P1), 1_000),
+            PeerGateState {
+                backoff_until_ms: Some(30_000),
+                quarantined_until_ms: None,
+                retry_due_at_ms: Some(30_000),
+            }
+        );
+        let t = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 30_000)
+            .expect("past the backoff");
+        assert_eq!(
+            m.record_failure(t, 30_000),
+            Some(RetryScheduled {
+                attempt: 2,
+                delay_ms: 60_000,
+                peer_backoff: true
+            })
+        );
+        // A quarantine is reported by its own deadline, and lapses.
+        let q = m
+            .handle()
+            .load()
+            .admit(&request(P2, "/q"), 0)
+            .expect("admitted");
+        assert!(m.record_identity_mismatch(q, 0));
+        let held = m.peer_gate_state(&peer(P2), 1_000);
+        assert_eq!(held.quarantined_until_ms, Some(30 * 60 * 1_000));
+        assert_eq!(held.backoff_until_ms, None, "a mismatch is not a backoff");
+        assert_eq!(
+            m.peer_gate_state(&peer(P2), 30 * 60 * 1_000)
+                .quarantined_until_ms,
+            None
+        );
+        // A hole-punch dial schedules nothing and says so.
+        let punch = m
+            .handle()
+            .load()
+            .admit(&request_at(P2, "/p", DialOrigin::DcutrHolePunch), 0)
+            .expect("admitted");
+        assert_eq!(m.record_failure(punch, 0), None);
+    }
+
+    #[test]
+    fn every_retry_and_quarantine_is_noted_once_and_the_bound_drops_the_oldest() {
+        let mut m = manager(8);
+        let t = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 0)
+            .expect("admitted");
+        let _ = m.record_failure(t, 0);
+        let q = m
+            .handle()
+            .load()
+            .admit(&request(P2, "/q"), 0)
+            .expect("admitted");
+        assert!(m.record_identity_mismatch(q, 0));
+        // A hole-punch failure schedules nothing, so notes nothing: the
+        // control that a note follows a decision, not a settlement.
+        let punch = m
+            .handle()
+            .load()
+            .admit(&request_at(P2, "/p", DialOrigin::DcutrHolePunch), 0)
+            .expect("admitted");
+        let _ = m.record_failure(punch, 0);
+        assert_eq!(
+            m.drain_notes(),
+            vec![
+                GateNote::RetryScheduled {
+                    peer: peer(P1),
+                    origin: DialOrigin::ConnectionManager,
+                    retry: RetryScheduled {
+                        attempt: 1,
+                        delay_ms: 30_000,
+                        peer_backoff: true
+                    },
+                },
+                GateNote::AddressQuarantined {
+                    peer: peer(P2),
+                    for_ms: 30 * 60 * 1_000
+                },
+            ]
+        );
+        assert!(m.drain_notes().is_empty(), "drained, not copied");
+
+        // The bound: one more than it holds loses the oldest, counted.
+        let mut now = 0;
+        for _ in 0..=MAX_GATE_NOTES {
+            now += 400_000;
+            let t = m
+                .handle()
+                .load()
+                .admit(&request(P1, "/a"), now)
+                .expect("past the backoff");
+            let _ = m.record_failure(t, now);
+        }
+        let notes = m.drain_notes();
+        assert_eq!(notes.len(), MAX_GATE_NOTES);
+        assert_eq!(m.notes_dropped(), 1);
+        assert!(matches!(
+            notes.first(),
+            Some(GateNote::RetryScheduled { retry, .. }) if retry.attempt == 3
+        ));
+    }
+
+    #[test]
     fn a_success_clears_the_retry_and_republishes() {
         let mut m = manager(8);
         let t = m
@@ -3464,7 +3795,9 @@ mod tests {
             .admit(&request(P1, "/ip4/198.51.100.1/tcp/1"), 0)
             .expect("admitted");
         assert_eq!(
-            held_at_install(&mut m, |m| m.record_failure(ticket, 0)),
+            held_at_install(&mut m, |m| {
+                let _ = m.record_failure(ticket, 0);
+            }),
             Some(1),
             "the settled ticket's unit is held until the install"
         );

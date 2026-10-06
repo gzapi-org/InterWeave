@@ -605,7 +605,7 @@ async fn a_deferred_circuit_the_gate_refuses_is_reported() {
         PATIENCE,
         Some(|s: Side, e: &SwarmEvent| {
             s == Side::Dialer
-                && matches!(e, SwarmEvent::DialFailed { peer, detail } if peer.as_ref() == Some(&target_peer) && detail.starts_with("deferred circuit: "))
+                && matches!(e, SwarmEvent::DialFailed { peer, detail, .. } if peer.as_ref() == Some(&target_peer) && detail.starts_with("deferred circuit: "))
         }),
     )
     .await;

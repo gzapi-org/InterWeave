@@ -70,6 +70,7 @@ pub mod dcutr_driver;
 mod direct;
 mod endpoints;
 mod handle;
+mod held_sends;
 pub mod kademlia_driver;
 pub mod mdns_driver;
 mod messages;
@@ -95,8 +96,8 @@ pub use status::{DialGateStatus, IngressStatus, PreAuthStatus, RuntimeStatus};
 
 pub use handle::{ShutdownReport, SwarmCommander};
 pub use messages::{
-    DialRefusal, HolePunchOutcome, PathChange, PeerPath, RelayReservationOutcome,
-    RelayServerOutcome, SwarmCommand, SwarmEvent,
+    DialFailureClass, DialRefusal, HolePunchOutcome, PathChange, PeerGate, PeerPath,
+    RelayReservationOutcome, RelayServerOutcome, SwarmCommand, SwarmEvent,
 };
 
 pub use config::{
@@ -1342,6 +1343,9 @@ impl SwarmRuntime {
         // without one the book's circuit routes are undialable and no
         // race is ever deferred.
         let mut races = path_race::Races::default();
+        // Sends waiting for the dial they started (relay seq 13444),
+        // bounded with the exchanges in flight by `admit_outbound`.
+        let mut held_sends = held_sends::HeldSends::default();
         // The bound set as last observed, for section 14's network
         // change (step 10).
         let mut network = network_change::NetworkSet::default();
@@ -1533,7 +1537,10 @@ impl SwarmRuntime {
                 // The slack stays bounded because `pending_direct` is
                 // bounded — `admit_outbound` caps it at 128 — so this
                 // cannot become the unbounded queue the capacity exists
-                // to rule out.
+                // to rule out. A HELD SEND counts too: its dial settles
+                // only by Swarm progress, and `admit_outbound` caps held
+                // sends and `pending_direct` together, outside the outbox,
+                // so they cannot earn their own room (#208 bot thread, B1).
                 // A GRACE THAT IS OVER ENDS THE LOOP. Checked before the
                 // select rather than inside it, so both ways out — the
                 // last exchange settling, and the deadline passing —
@@ -1554,6 +1561,17 @@ impl SwarmRuntime {
                     break;
                 }
 
+                // THE GATE'S DECISIONS, handed up once per turn: every
+                // retry and quarantine the manager noted since the last
+                // (`drain_notes`), whichever path settled the dial.
+                // Informational, so at base capacity only, as deliveries
+                // are: a full outbox drops them rather than queueing.
+                for note in manager.drain_notes() {
+                    if may_buffer_delivery(outbox.len(), config.event_capacity) {
+                        outbox.push_back(SwarmEvent::from_note(note));
+                    }
+                }
+
                 // The deadline, when a shutdown is waiting out its
                 // grace. `None` the rest of the time, and the select
                 // branch below is inert then.
@@ -1562,6 +1580,10 @@ impl SwarmRuntime {
                 // The earliest head-start to run out, as an instant on
                 // the runtime's clock; inert when no race waits.
                 let race_due = races
+                    .next_due_ms()
+                    .map(|due| started + Duration::from_millis(due));
+                // The earliest held send's horizon, likewise.
+                let held_due = held_sends
                     .next_due_ms()
                     .map(|due| started + Duration::from_millis(due));
 
@@ -1575,7 +1597,7 @@ impl SwarmRuntime {
                     outbox.len(),
                     config.event_capacity,
                     listens.len(),
-                    pending_direct.len() + pending_endpoints.len(),
+                    pending_direct.len() + pending_endpoints.len() + held_sends.len(),
                     direct_state.answering() + directory_state.answering(),
                     outstanding_queries,
                     transactions,
@@ -1587,6 +1609,13 @@ impl SwarmRuntime {
                     // unless a direct connection to the peer landed
                     // meanwhile -- in which case the race is over and
                     // the relay stays a route in the book for later.
+                    // A HELD SEND'S HORIZON, on its own timer: the retry
+                    // tick may be far longer than the horizon.
+                    () = tokio::time::sleep_until(held_due.unwrap_or_else(tokio::time::Instant::now)), if held_due.is_some() => {
+                        for send in held_sends.take_expired(now_ms(started)) {
+                            let _ = send.reply.send(Err(DirectError::PeerUnreachable));
+                        }
+                    }
                     () = tokio::time::sleep_until(race_due.unwrap_or_else(tokio::time::Instant::now)), if race_due.is_some() => {
                         let now = now_ms(started);
                         for (peer, relayed) in races.take_due(now) {
@@ -1631,6 +1660,7 @@ impl SwarmRuntime {
                                 outbox.push_back(SwarmEvent::DialFailed {
                                     peer: Some(peer.clone()),
                                     detail: format!("deferred circuit: {refusal:?}"),
+                                    class: messages::DialFailureClass::of_refusal(&refusal),
                                 });
                             }
                         }
@@ -1680,6 +1710,12 @@ impl SwarmRuntime {
                     // already bounded; this walks it.
                     _ = retries.tick() => {
                         let now = now_ms(started);
+                        // A HELD SEND ENDS AT ITS HORIZON, or as soon as
+                        // its caller stopped waiting (a closed reply is
+                        // answered into nothing).
+                        for send in held_sends.take_expired(now) {
+                            let _ = send.reply.send(Err(DirectError::PeerUnreachable));
+                        }
                         let due = manager.take_due_retries(now, config.max_retries_per_tick);
                         for peer in due {
                             // NOT THIS SCHEDULER'S TO REACH. A failed
@@ -1735,6 +1771,9 @@ impl SwarmRuntime {
                                             DialRefusal::Policy(
                                                 DialDenial::Unauthorized
                                             )
+                                        ),
+                                        class: messages::DialFailureClass::Denied(
+                                            DialDenial::Unauthorized,
                                         ),
                                     });
                                 }
@@ -1883,6 +1922,7 @@ impl SwarmRuntime {
                                     outbox.push_back(SwarmEvent::DialFailed {
                                         peer: Some(peer.clone()),
                                         detail: format!("scheduled retry: {refusal:?}"),
+                                        class: messages::DialFailureClass::of_refusal(&refusal),
                                     });
                                 }
                             }
@@ -2063,6 +2103,25 @@ impl SwarmRuntime {
                             // photograph reads the AutoNAT, relay, path and
                             // hole-punch state the task owns, all at one
                             // instant.
+                            Some(SwarmCommand::PeerGates { peers, reply }) => {
+                                // The manager's clock is the runtime's;
+                                // a row reads on the wall's.
+                                let (now, wall) = (now_ms(started), wall_ms());
+                                let on_wall = |until: u64| wall.saturating_add(until.saturating_sub(now));
+                                let rows = peers
+                                    .into_iter()
+                                    .map(|peer| {
+                                        let held = manager.peer_gate_state(&peer, now);
+                                        PeerGate {
+                                            connected: open.values().any(|c| c.peer == peer),
+                                            backoff_until_ms: held.backoff_until_ms.map(on_wall),
+                                            quarantined_until_ms: held.quarantined_until_ms.map(on_wall),
+                                            peer,
+                                        }
+                                    })
+                                    .collect();
+                                let _ = reply.send(rows);
+                            }
                             Some(SwarmCommand::Status { peer, reply }) => {
                                 let now = now_ms(started);
                                 let connectivity = status::summarize(
@@ -2136,6 +2195,11 @@ impl SwarmRuntime {
                                         outbox.push_back(SwarmEvent::Kademlia { event });
                                     }
                                 }
+                                // A SEND STILL WAITING FOR ITS DIAL never
+                                // reached the wire: stopping answers it.
+                                for send in held_sends.take_all() {
+                                    let _ = send.reply.send(Err(DirectError::ShuttingDown));
+                                }
                                 // NOTHING IN FLIGHT IS THE COMMON CASE,
                                 // and it still stops immediately.
                                 if shutdown_settled(
@@ -2199,6 +2263,7 @@ impl SwarmRuntime {
                                     head_start_ms,
                                     &task_operator,
                                     &task_stores,
+                                    &mut held_sends,
                                     command,
                                 );
                                 // A revocation names connections; this
@@ -2534,6 +2599,28 @@ impl SwarmRuntime {
                         // `since_ms` and the wrapper's interval start are
                         // the same instant (PR #103 round 2).
                         let settled_at = now_ms(started);
+                        // The peer a failed dial was to, read before the
+                        // settlement takes its ticket.
+                        let failed_peer = match &event {
+                            libp2p::swarm::SwarmEvent::OutgoingConnectionError {
+                                peer_id: Some(peer_id),
+                                ..
+                            } => to_transport_identity(peer_id).ok(),
+                            _ => None,
+                        };
+                        // An outbound establishment, which the settlement
+                        // may refuse at retention: then no connection
+                        // enters `open` and nothing else would answer a
+                        // send held for this dial (#208 bot thread, B3).
+                        let established = match &event {
+                            libp2p::swarm::SwarmEvent::ConnectionEstablished {
+                                peer_id,
+                                connection_id,
+                                endpoint: libp2p::core::ConnectedPoint::Dialer { .. },
+                                ..
+                            } => to_transport_identity(peer_id).ok().map(|p| (p, *connection_id)),
+                            _ => None,
+                        };
                         // REBUILT PER EVENT, not held: rule 3 asks what
                         // this node listens on NOW, and a node that
                         // binds a private interface between two Identify
@@ -2562,6 +2649,39 @@ impl SwarmRuntime {
                         // function stays free of the Swarm.
                         for id in refuse {
                             swarm.close_connection(id);
+                        }
+                        // A HELD SEND FAILS WITH ITS LAST DIAL: no dial
+                        // still in flight to the peer, no relayed route
+                        // waiting out its head-start, no connection.
+                        // Anything else is still on its way.
+                        if let Some(peer) = failed_peer.as_ref()
+                            && held_sends.holds(peer)
+                            && !in_flight.dials_peer(peer)
+                            && !races.waits_for(peer)
+                            && !open.values().any(|c| &c.peer == peer)
+                        {
+                            for send in held_sends.take(peer) {
+                                let _ = send.reply.send(Err(DirectError::PeerUnreachable));
+                            }
+                        }
+                        // REFUSED AT RETENTION, with nothing else on its
+                        // way: answered now by current policy -- not put on
+                        // the wire, since the refused connection is closing.
+                        if let Some((peer, id)) = established.as_ref()
+                            && !open.contains_key(id)
+                            && held_sends.holds(peer)
+                            && !in_flight.dials_peer(peer)
+                            && !races.waits_for(peer)
+                            && !open.values().any(|c| &c.peer == peer)
+                        {
+                            let answer = if manager.classify(peer) == interweave_transport_runtime::ConnectionClass::DataPlaneTrusted {
+                                DirectError::PeerUnreachable
+                            } else {
+                                DirectError::UnauthorizedPeer
+                            };
+                            for send in held_sends.take(peer) {
+                                let _ = send.reply.send(Err(answer));
+                            }
                         }
 
                         // THE ROUTE THAT WORKED, for a connection this
@@ -2816,6 +2936,19 @@ impl SwarmRuntime {
                         {
                             let trusted = mesh_admits(manager.classify(peer));
                             swarm.sync_broadcast_admission(&id, trusted);
+                        }
+                        // THE CONNECTION A HELD SEND WAITED FOR: on the
+                        // wire now, asked again what its command asked.
+                        if let Some(peer) = retained.as_ref() {
+                            for send in held_sends.take(peer) {
+                                commands::dispatch_held(
+                                    &mut swarm,
+                                    &manager,
+                                    &direct_state,
+                                    &mut pending_direct,
+                                    send,
+                                );
+                            }
                         }
                         if let Some((peer, event)) = path_update {
                             dialing::settle_path(
