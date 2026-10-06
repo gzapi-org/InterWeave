@@ -60,8 +60,9 @@ public final class Cmd extends BroadcastReceiver {
         }).start();
     }
 
+    /** The key mode is the alias's prefix: bg (no user authentication), up (timed), op (per operation). */
     static int policyOf(String alias) {
-        return "bg".equals(alias) ? 0 : 1;
+        return alias != null && alias.startsWith("bg") ? 0 : 1;
     }
 
     static void run(Context app, String cmd, String alias, int timeout) throws Exception {
@@ -113,11 +114,11 @@ public final class Cmd extends BroadcastReceiver {
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
                 .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
                 .setKeySize(256);
-        if ("up".equals(alias)) {
+        if (alias.startsWith("up")) {
             b.setUserAuthenticationRequired(true)
                     .setUserAuthenticationParameters(timeout,
                             KeyProperties.AUTH_DEVICE_CREDENTIAL | KeyProperties.AUTH_BIOMETRIC_STRONG);
-        } else if ("op".equals(alias)) {
+        } else if (alias.startsWith("op")) {
             b.setUserAuthenticationRequired(true)
                     .setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG);
         }

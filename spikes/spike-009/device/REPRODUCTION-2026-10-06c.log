@@ -1,0 +1,57 @@
+# SPIKE-009 device harness -- recorded run (part 3: D4 reboot, D6a, D6b)
+# date: 2026-10-06T21:28Z-22:15Z
+# device, host, toolchain and pins: as part 1; production crates pinned at 7e2978d1
+# libspike009.so sha256 prefix: 6f6c5fc79736c467 (as part 2); Cmd.java now takes the key mode from the alias prefix (bg/up/op)
+# D4 reboot: adb reboot; a person unlocked and re-enabled wireless debugging (adb on a new port); unwrap bg; unwrap up
+#   (refused: the unlock was over 60 s earlier); then a person locked and unlocked (21:44:31Z) and, inside the window,
+#   unwrap up -- the user-presence key made before the reboot
+# D6a: fresh keys bg6a and up6a generated, wrapped and unwrapped inside that window; then a person changed the screen
+#   lock to Swipe in Settings (device_secure false); unwrap bg6a, up6a, up, bg; keyinfo up6a; then the person set a
+#   PIN again (device_secure true); unwrap up6a, up, bg6a
+# D6b: a person enrolled one fingerprint (BiometricManager BIOMETRIC_STRONG: success, so Class 3); fresh keys up6b
+#   (timed) and op6b (per operation, AUTH_BIOMETRIC_STRONG) generated; op6b wrapped and then unwrapped through
+#   BiometricPrompt, one touch each, and up6b wrapped and unwrapped inside the 60 s that touch opened (the controls);
+#   then a person enrolled a second fingerprint -- NOT by adding one: Settings on this device offered no "add", and
+#   the person went through Screen lock type and re-enrolled the first fingerprint as well (dumpsys fingerprint:
+#   count 2 after); unwrap up6b; keyinfo op6b; Prompt unwrap op6b; info; unwrap bg
+#   up6c and op6c were then generated for a repeat that the device's Settings could not make; nothing was done with them
+# key material: TEST-ONLY -- the fixture's all-zero seed; the Keystore keys never leave the device
+
+## harness result lines (files/results.jsonl, verbatim, after part 2)
+{"t":1791322217204,"cmd":"unwrap","alias":"bg","detail":"","outcome":"seed"}
+{"t":1791322532578,"cmd":"unwrap","alias":"bg","detail":"","outcome":"seed"}
+{"t":1791322535887,"cmd":"unwrap","alias":"up","detail":"","outcome":"UserNotAuthenticatedException"}
+{"t":1791323072651,"cmd":"unwrap","alias":"up","detail":"","outcome":"seed"}
+{"t":1791323074999,"cmd":"gen","alias":"bg6a","detail":"timeout=60","outcome":"ok"}
+{"t":1791323077248,"cmd":"gen","alias":"up6a","detail":"timeout=60","outcome":"ok"}
+{"t":1791323079509,"cmd":"wrap","alias":"bg6a","env_len":66,"framed":true,"header_hex":"49574b310100","iv_len":12,"sealed_len":48,"tag_bits":128}
+{"t":1791323081756,"cmd":"wrap","alias":"up6a","env_len":66,"framed":true,"header_hex":"49574b310101","iv_len":12,"sealed_len":48,"tag_bits":128}
+{"t":1791323084002,"cmd":"unwrap","alias":"up6a","detail":"","outcome":"seed"}
+{"t":1791323086239,"cmd":"keyinfo","alias":"up6a","inside_secure_hardware":true,"invalidated_by_biometric_enrollment":false,"key_size":256,"origin":1,"user_auth_enforced_by_secure_hardware":true,"user_auth_required":true,"user_auth_type":3,"user_auth_validity_s":60}
+{"t":1791323153372,"cmd":"info","alias":null,"biometric_strong":11,"biometric_weak":11,"device_secure":false,"feature_strongbox":false,"fixture_peer":"12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN","model":"SM-A405FN","patch":"2023-03-01","sdk":30}
+{"t":1791323155573,"cmd":"unwrap","alias":"bg6a","detail":"","outcome":"seed"}
+{"t":1791323157811,"cmd":"unwrap","alias":"up6a","detail":"","outcome":"UnrecoverableKeyException"}
+{"t":1791323159941,"cmd":"unwrap","alias":"up","detail":"","outcome":"UnrecoverableKeyException"}
+{"t":1791323162139,"cmd":"unwrap","alias":"bg","detail":"","outcome":"seed"}
+{"t":1791323164352,"cmd":"keyinfo","alias":"up6a","detail":"UnrecoverableKeyException: Failed to obtain information about key","outcome":"error"}
+{"t":1791323234096,"cmd":"info","alias":null,"biometric_strong":11,"biometric_weak":11,"device_secure":true,"feature_strongbox":false,"fixture_peer":"12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN","model":"SM-A405FN","patch":"2023-03-01","sdk":30}
+{"t":1791323236610,"cmd":"unwrap","alias":"up6a","detail":"","outcome":"UnrecoverableKeyException"}
+{"t":1791323238803,"cmd":"unwrap","alias":"up","detail":"","outcome":"UnrecoverableKeyException"}
+{"t":1791323241012,"cmd":"unwrap","alias":"bg6a","detail":"","outcome":"seed"}
+{"t":1791323465307,"cmd":"info","alias":null,"biometric_strong":0,"biometric_weak":0,"device_secure":true,"feature_strongbox":false,"fixture_peer":"12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN","model":"SM-A405FN","patch":"2023-03-01","sdk":30}
+{"t":1791323467473,"cmd":"gen","alias":"up6b","detail":"timeout=60","outcome":"ok"}
+{"t":1791323469723,"cmd":"gen","alias":"op6b","detail":"timeout=60","outcome":"ok"}
+{"t":1791323471854,"cmd":"keyinfo","alias":"up6b","inside_secure_hardware":true,"invalidated_by_biometric_enrollment":false,"key_size":256,"origin":1,"user_auth_enforced_by_secure_hardware":true,"user_auth_required":true,"user_auth_type":3,"user_auth_validity_s":60}
+{"t":1791323473989,"cmd":"keyinfo","alias":"op6b","inside_secure_hardware":true,"invalidated_by_biometric_enrollment":true,"key_size":256,"origin":1,"user_auth_enforced_by_secure_hardware":true,"user_auth_required":true,"user_auth_type":2,"user_auth_validity_s":0}
+{"t":1791323625454,"cmd":"prompt-wrap","alias":"op6b","detail":"env_len=66","outcome":"wrapped"}
+{"t":1791323625882,"cmd":"wrap","alias":"up6b","env_len":66,"framed":true,"header_hex":"49574b310101","iv_len":12,"sealed_len":48,"tag_bits":128}
+{"t":1791323628063,"cmd":"unwrap","alias":"up6b","detail":"","outcome":"seed"}
+{"t":1791323635224,"cmd":"prompt-unwrap","alias":"op6b","detail":"","outcome":"seed"}
+{"t":1791324728175,"cmd":"unwrap","alias":"up6b","detail":"","outcome":"UnrecoverableKeyException"}
+{"t":1791324730367,"cmd":"keyinfo","alias":"op6b","detail":"UnrecoverableKeyException: User changed or deleted their auth credentials","outcome":"error"}
+{"t":1791324732583,"cmd":"prompt-unwrap","alias":"op6b","detail":"User changed or deleted their auth credentials","outcome":"UnrecoverableKeyException"}
+{"t":1791324735720,"cmd":"info","alias":null,"biometric_strong":0,"biometric_weak":0,"device_secure":true,"feature_strongbox":false,"fixture_peer":"12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN","model":"SM-A405FN","patch":"2023-03-01","sdk":30}
+{"t":1791324738184,"cmd":"unwrap","alias":"bg","detail":"","outcome":"seed"}
+{"t":1791324850578,"cmd":"gen","alias":"up6c","detail":"timeout=60","outcome":"ok"}
+{"t":1791324852792,"cmd":"gen","alias":"op6c","detail":"timeout=60","outcome":"ok"}
+{"t":1791324855020,"cmd":"keyinfo","alias":"op6c","inside_secure_hardware":true,"invalidated_by_biometric_enrollment":true,"key_size":256,"origin":1,"user_auth_enforced_by_secure_hardware":true,"user_auth_required":true,"user_auth_type":2,"user_auth_validity_s":0}
