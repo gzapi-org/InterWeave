@@ -25,6 +25,7 @@ A local data-plane session has immutable creation context:
 ```text
 LocalDataSession {
   session_id: opaque 128-bit generation,
+  local_peer: the profile's PeerId,
   client_kind: bounded local label,
   endpoint_lease: EndpointLease?,
   capabilities: bounded set,
@@ -32,7 +33,7 @@ LocalDataSession {
 }
 ```
 
-`session_id` is binding-local: it identifies the session to the process that opened it and never crosses the IPC wire; across bindings a grant is identified by its lease epoch (A 2026-09-30).
+`session_id` is binding-local: it identifies the session to the process that opened it and never crosses the IPC wire; across bindings a grant is identified by its lease epoch (A 2026-09-30). `local_peer` is the profile's PeerId as the binding learned it at open — ipc-client from `hello_response`'s profile PeerId (`LOCAL-IPC.md` §Handshake), the in-process binding from the runtime's identity, a fake from its configuration — part of the creation context and no wire field of its own; it is the identity a data-plane client reports as its own (`plugin/TOOL-SURFACE.md` `local_peer_id`), since a data-plane session reaches no admin port to ask (A 2026-10-06, Stage 16 step 3).
 
 A direct-capable session owns exactly one configured EndpointId lease. The runtime derives `source_endpoint` from that lease for every direct send/reply. No application API accepts a caller-supplied source endpoint.
 
