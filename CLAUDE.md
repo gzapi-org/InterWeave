@@ -854,11 +854,9 @@ not a draft and this session's; no `AWAITING-SUPPLY` lacks its range
 line; a security-boundary change has the review class's review of the current
 head and no unresolved thread; and under eight work commits
 (`tools/gh/pr-gate.sh` counts them) — boundary or not — only on the
-owner's word, the phrase `owner's word` in the basis (agent-fabric #99
-brings the tool to this rule; before it the tool asked the phrase on
-every boundary PR — until it lands, a basis on eight or more names the
-consent it has, e.g. `owner's word: the standing word of 2026-09-27`,
-never the phrase alone). It posts the basis as a comment and prints
+owner's word, the phrase `owner's word` in the basis (agent-fabric #99,
+2026-10-06; before it the tool asked the phrase on every boundary PR).
+It posts the basis as a comment and prints
 the watcher line. Which changed files are a security boundary is
 agent-fabric's `projects/interweave/integration/gh/arm.json` — the list
 above in path form, matched case-insensitively, the normative vectors
