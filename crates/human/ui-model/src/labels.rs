@@ -255,7 +255,7 @@ ui_texts! {
     /// Said once the daemon revoked a peer. `{peer}` the exact `PeerId`.
     PeerUntrusted => "{peer} is no longer trusted.",
     /// The typed text is not a `PeerId`.
-    NotAPeerId => "That is not a PeerId. A PeerId starts with 12D3KooW or Qm.",
+    NotAPeerId => "That is not a PeerId. A PeerId for this profile's network starts with 12D3KooW.",
     /// The typed `PeerId` is this profile's own.
     OwnIdentity => "That is this profile's own PeerId.",
     /// The typed `PeerId` is already listed.
