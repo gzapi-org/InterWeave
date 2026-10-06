@@ -18,6 +18,7 @@ mod common;
 
 mod a11y;
 mod accessibility;
+mod chat;
 mod daemon_link;
 mod display;
 mod endpoints;
