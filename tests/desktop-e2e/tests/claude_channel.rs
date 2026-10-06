@@ -213,6 +213,25 @@ fn meta_is_the_contracts(meta: &Value, line: &str) {
         );
         last = Some(at);
     }
+    // The table's "direct only" and "only for broadcast" rows, both ways.
+    let has = |key: &str| object.contains_key(key);
+    match meta["delivery_mode"].as_str() {
+        Some("direct") => {
+            assert!(
+                has("source_endpoint") && has("destination_endpoint"),
+                "{meta}"
+            );
+            assert!(!has("channel"), "no channel on a direct message: {meta}");
+        }
+        Some("broadcast") => {
+            assert!(has("channel"), "{meta}");
+            assert!(
+                !has("source_endpoint") && !has("destination_endpoint"),
+                "no endpoint on a broadcast: {meta}"
+            );
+        }
+        other => panic!("delivery_mode {other:?}"),
+    }
     for (key, value) in object {
         assert!(value.is_string(), "{key} is a string: {meta}");
         let mut chars = key.chars();
@@ -236,8 +255,9 @@ fn logs(daemons: &[&Daemon]) -> String {
 }
 
 /// Two daemons from the shipped desktop example (endpoints `human` and
-/// `claude`), each with a static route to the other, both serving, and
-/// connected.
+/// `claude`), each with a static route to the other, both serving. Not
+/// yet connected: the first exchange waits on that (`send_until_accepted`,
+/// `broadcast_until`).
 async fn two_daemons() -> (
     Home,
     Daemon,
@@ -284,6 +304,57 @@ async fn session(home: &Home, endpoint: EndpointId) -> IpcSession {
         )
         .await
         .expect("a session")
+}
+
+/// A session leased on `home`'s `claude`, under the client kind that
+/// endpoint admits.
+async fn claude_session(home: &Home) -> IpcSession {
+    home.binding()
+        .open(
+            SessionRequest::new(
+                "claude-channel",
+                Some(claude()),
+                [DataCapability::Events, DataCapability::Commands],
+            )
+            .expect("request"),
+        )
+        .await
+        .expect("a session on claude")
+}
+
+/// Publish on `general` from `from` until the bridge is notified of it --
+/// the mesh forms after the join, so the first publishes may reach no one
+/// -- and return that notification.
+async fn broadcast_until(
+    from: &IpcSession,
+    bridge: &mut Bridge,
+    content: &str,
+    daemons: &[&Daemon],
+) -> Value {
+    let deadline = tokio::time::Instant::now() + PATIENCE * 2;
+    loop {
+        from.broadcast(
+            general(),
+            BroadcastMessageV1 {
+                message_id: MessageId::from_bytes(rand_bytes()),
+                sent_at_ms: 0,
+                payload: text(content),
+            },
+        )
+        .await
+        .expect("accepted for local publish");
+        let _ = bridge.status().await;
+        if let Some((n, line)) = bridge.notifications.pop_front() {
+            meta_is_the_contracts(&n["meta"], &line);
+            return n;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no broadcast reached the bridge\n{}",
+            logs(daemons)
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 fn text(content: &str) -> Payload {
@@ -383,6 +454,30 @@ async fn a_direct_message_is_notified_and_replied_to_across_two_daemons() {
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+
+    // `send` names an endpoint other than B's default (`human`), and the
+    // message lands there, not on the default.
+    let b_claude = claude_session(&b).await;
+    let (answer, error) = bridge
+        .tool(
+            "send",
+            json!({"peer": b_peer.as_str(), "endpoint": "claude", "content": "named"}),
+        )
+        .await;
+    assert!(!error, "{answer}");
+    assert_eq!(answer, "remote transport accepted at endpoint claude");
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while !direct_from(&b_claude, b"named").await {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the named send never arrived at B's claude"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        !direct_from(&b_human, b"named").await,
+        "and not at B's default"
+    );
 }
 
 /// One `PeerId`, two endpoints: B's message to A's `claude` reaches the
@@ -484,6 +579,27 @@ async fn broadcast_join_publish_reply_and_channel_not_joined() {
     assert!(!error, "{answer}");
     assert_eq!(answer, "accepted for local publish");
 
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let arrived = b_human
+            .events(usize::MAX)
+            .await
+            .expect("events")
+            .iter()
+            .any(|e| {
+                matches!(e, SessionEvent::Broadcast(m)
+                if m.channel == general() && m.payload.bytes() == b"hi back")
+            });
+        if arrived {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the bridge's broadcast never reached B"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
     let (answer, error) = bridge.tool("leave", json!({"channel": "general"})).await;
     assert!(!error, "{answer}");
     let (answer, error) = bridge
@@ -515,6 +631,17 @@ async fn the_daemon_away_and_back_with_a_stale_token() {
         .expect("token")
         .to_owned();
     let before = bridge.status().await["endpoint_lease_epoch"].clone();
+    let (answer, error) = bridge.tool("join", json!({"channel": "general"})).await;
+    assert!(!error, "{answer}");
+    b_human.join(general()).await.expect("B joins");
+    // The control: the join carries a broadcast before the restart.
+    broadcast_until(
+        &b_human,
+        &mut bridge,
+        "before restart",
+        &[&a_daemon, &b_daemon],
+    )
+    .await;
 
     a_daemon.terminate().await;
     let deadline = tokio::time::Instant::now() + PATIENCE;
@@ -545,6 +672,17 @@ async fn the_daemon_away_and_back_with_a_stale_token() {
         .tool("reply", json!({"reply_token": token, "content": "stale"}))
         .await;
     assert!(error && answer.starts_with("InvalidArgument"), "{answer}");
+    // Fresh joins: the restarted daemon knew nothing of the bridge's join,
+    // and B's broadcast reaches the bridge again.
+    assert_eq!(bridge.status().await["joined_channels"], json!(["general"]));
+    let n = broadcast_until(
+        &b_human,
+        &mut bridge,
+        "after restart",
+        &[&a_daemon, &b_daemon],
+    )
+    .await;
+    assert_eq!(n["content"], json!("after restart"));
     assert!(
         bridge.child.try_wait().expect("waitable").is_none(),
         "the bridge never exited"
