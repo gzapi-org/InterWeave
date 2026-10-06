@@ -346,8 +346,8 @@ pub struct TrustList {
     pub allowed: Vec<TransportIdentity>,
 }
 
-/// Why reading or changing trust did nothing. A class, for a settings
-/// view: the raw code stays in diagnostics (`human-client-ui.md` §12).
+/// Why reading or changing trust failed. A class, for a settings view;
+/// the raw code is not kept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TrustProblem {
     /// The daemon cannot be reached, or is stopping.
@@ -359,4 +359,19 @@ pub enum TrustProblem {
     Refused,
     /// Anything else.
     Internal,
+}
+
+/// Why a trust change's answer is not the allowlist after it: whether the
+/// change was made is what a person must be told truly, and the transport
+/// says it only for some failures (`TRANSPORT.md` §Error model, dispatch
+/// state).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TrustSetFailure {
+    /// Not made: refused, or never sent.
+    NotMade(TrustProblem),
+    /// May have been made: the request may have reached the daemon before
+    /// the failure, which does not say whether it took effect.
+    Unconfirmed(TrustProblem),
+    /// Made, and the allowlist could not be read back after it.
+    MadeNotReadBack(TrustProblem),
 }
