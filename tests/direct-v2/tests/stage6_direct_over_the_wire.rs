@@ -2074,3 +2074,116 @@ async fn send_restart(
         )
         .await
 }
+
+/// A send held for its dial is asked again at dispatch, and an endpoint
+/// revoked while it waited never reaches the wire (#208 review F1).
+///
+/// The dial is held open by a proxy that lets the TCP handshake through
+/// -- the kernel accepts it -- and splices to the receiver only after a
+/// delay, so the libp2p handshake, and with it the connection the send
+/// waits for, cannot finish before the revoke lands. The control is the
+/// same run without the revoke: accepted and delivered, so the proxy is
+/// not what refuses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_send_whose_endpoint_was_revoked_meanwhile_never_reaches_the_wire() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    for revoke in [false, true] {
+        let (sender_id, sender_peer) = who();
+        let (receiver_id, receiver_peer) = who();
+        let receiver = SwarmRuntime::start(
+            &receiver_id,
+            SubstrateConfig::default(),
+            trusting(&[&sender_peer]),
+        )
+        .expect("the receiver starts");
+        let sender = SwarmRuntime::start(
+            &sender_id,
+            SubstrateConfig::default(),
+            trusting(&[&receiver_peer]),
+        )
+        .expect("the sender starts");
+        sender
+            .configure_direct(endpoints(8))
+            .await
+            .expect("endpoints install");
+        let leases = claim_all(&sender, &["human", "claude"]).await;
+        receiver
+            .configure_direct(endpoints(8))
+            .await
+            .expect("endpoints install");
+        let held = claim_all(&receiver, &["human", "claude"]).await;
+        let _ = sender
+            .listen(format!("/ip4/{ip}/tcp/0").parse().expect("valid"))
+            .await
+            .expect("the sender listens");
+        let target = receiver
+            .listen(format!("/ip4/{ip}/tcp/0").parse().expect("valid"))
+            .await
+            .expect("the receiver listens");
+        let target_port = target
+            .iter()
+            .find_map(|p| match p {
+                libp2p::multiaddr::Protocol::Tcp(port) => Some(port),
+                _ => None,
+            })
+            .expect("a tcp port");
+
+        // The slow door: accepted by the kernel at once, spliced late.
+        let proxy = tokio::net::TcpListener::bind((ip, 0)).await.expect("binds");
+        let proxy_port = proxy.local_addr().expect("an address").port();
+        let splice = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1_500)).await;
+            let (mut inbound, _) = proxy.accept().await.expect("the dial arrives");
+            let mut outbound = tokio::net::TcpStream::connect((ip, target_port))
+                .await
+                .expect("the receiver answers");
+            let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+        });
+        assert_eq!(
+            sender
+                .learn(
+                    receiver_peer.clone(),
+                    [format!("/ip4/{ip}/tcp/{proxy_port}")]
+                )
+                .await
+                .expect("delivered"),
+            1
+        );
+
+        let send = sender.send_direct(
+            &leases["human"],
+            receiver_peer.clone(),
+            frame(Some("claude"), b"held", 121),
+        );
+        let meanwhile = async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            if revoke {
+                sender
+                    .revoke_endpoint(endpoint("human"))
+                    .await
+                    .expect("the revoke reaches the task");
+            }
+        };
+        let (answer, ()) = tokio::join!(send, meanwhile);
+        let answer = answer.expect("the command reaches the task");
+        let delivered = receiver
+            .commander()
+            .drain_leased(&held["claude"], usize::MAX)
+            .await
+            .expect("answers");
+        if revoke {
+            assert_eq!(
+                answer,
+                Err(TransportError::EndpointNotRegistered),
+                "the lease ended while the send waited"
+            );
+            assert!(delivered.is_empty(), "nothing reached the wire");
+        } else {
+            assert_eq!(answer, Ok(endpoint("claude")), "the control");
+            assert_eq!(delivered.len(), 1);
+        }
+        splice.abort();
+        sender.shutdown().await.expect("clean shutdown");
+        receiver.shutdown().await.expect("clean shutdown");
+    }
+}
