@@ -142,8 +142,10 @@ chmod +x "$CMD"
 # in the bus's group that, on TERM, takes half a second and then writes
 # into the runtime directory (the document portal unmounting its FUSE
 # mount there); `mounted` lists a mount under the runtime directory (and
-# one elsewhere) in the mountinfo the wrapper reads; `locked` leaves a
-# file rm cannot remove. Each records the runtime directory.
+# one elsewhere) in the mountinfo the wrapper reads; `mixed` lists a
+# FUSE mount and a tmpfs one. (A scratch that cannot be removed is an rm
+# stub below, not a mode.)
+# Each records the runtime directory.
 CMD2="$SANDBOX/cmd2"
 cat > "$CMD2" <<EOF
 #!/usr/bin/env bash
@@ -163,8 +165,10 @@ case "\${1:-}" in
   stubborn)
     ( trap '' TERM; sleep 30 ) >/dev/null 2>&1 &
     echo \$! > "$SANDBOX/stubborn-pid" ;;
-  locked)
-    mkdir -p "\$XDG_RUNTIME_DIR/locked" && touch "\$XDG_RUNTIME_DIR/locked/x" && chmod 500 "\$XDG_RUNTIME_DIR/locked" ;;
+  mixed)
+    rd="\$(realpath "\$XDG_RUNTIME_DIR")"; mkdir -p "\$XDG_RUNTIME_DIR/doc" "\$XDG_RUNTIME_DIR/t"
+    { echo "36 25 0:32 / \$rd/doc rw - fuse.portal portal rw"
+      echo "40 25 0:35 / \$rd/t rw shared:1 - tmpfs tmpfs rw"; } > "$SANDBOX/mountinfo" ;;
 esac
 exit 0
 EOF
@@ -178,10 +182,12 @@ EOF
 cat > "$BIN/fusermount3" <<EOF
 #!/usr/bin/env bash
 echo "\$*" >> "$SANDBOX/unmounted"
+[[ -e "$SANDBOX/fusermount-fails" ]] && exit 1
+exit 0
 EOF
 chmod +x "$BIN/fusermount3" "$BIN/umount"
 
-reset() { rm -f "$SANDBOX"/{xvfb-dies,xvfb-mute,bus-fails,set-fails,no-address,registry-down,cmd-ran,bus-ran,a11y-on,xvfb-pid,xvfb-terminated,sleeper-pid,spawn-denied,launcher-mute,launcher-hangs,launcher-pid,launcher-ran,launcher-started,registryd-started,rundir,mountinfo,unmounted,stubborn-pid,rm-args,bus-exited,xvfb-stubborn}; ATSPI_DIRS="$ATSPI"; }
+reset() { rm -f "$SANDBOX"/{xvfb-dies,xvfb-mute,bus-fails,set-fails,no-address,registry-down,cmd-ran,bus-ran,a11y-on,xvfb-pid,xvfb-terminated,sleeper-pid,spawn-denied,launcher-mute,launcher-hangs,launcher-pid,launcher-ran,launcher-started,registryd-started,rundir,mountinfo,unmounted,stubborn-pid,rm-args,bus-exited,xvfb-stubborn,fusermount-fails,rm-refuses}; ATSPI_DIRS="$ATSPI"; }
 
 # run [<arg>…]: the wrapper under the stubs, from a Wayland desktop.
 run() {
@@ -392,13 +398,29 @@ if [[ "$(cat "$SANDBOX/unmounted" 2>/dev/null)" == "-u -z $rundir/doc/by-app"$'\
 else fail "the unmounts were wrong" "$(cat "$SANDBOX/unmounted" 2>/dev/null || echo none)"; fi
 [[ ! -e "${rundir%/run}" ]] && pass "  and the scratch is removed" || { fail "the scratch was left after the unmounts"; rm -rf "${rundir%/run}"; }
 
-# What cannot be removed is said, never silent.
-reset; run "$CMD2" locked
+# What cannot be removed is said, never silent. An rm that refuses the
+# scratch stands for whatever kept it (a permission, a mount): for every
+# uid, root included, which a read-only directory would not stop.
+reset; touch "$SANDBOX/rm-refuses"
+printf '#!/usr/bin/env bash\n[[ -e "%s/rm-refuses" && " $* " == *" --one-file-system "* ]] && exit 1\nexec "%s" "$@"\n' "$SANDBOX" "$(PATH=/usr/bin:/bin command -v rm)" > "$BIN/rm"; chmod +x "$BIN/rm"
+run "$CMD2"; rm -f "$BIN/rm" "$SANDBOX/rm-refuses"
 rundir="$(cat "$SANDBOX/rundir" 2>/dev/null)"
 if [[ "$got" -eq 0 && "$out" == *"could not remove its scratch ${rundir%/run} — left behind"* ]]; then
     pass "a scratch that cannot be removed is reported, and the command's status kept"
 else fail "a leftover scratch was not reported (exit $got)" "$out"; fi
-chmod -R u+w "${rundir%/run}" 2>/dev/null; rm -rf "${rundir%/run}"
+rm -rf "${rundir%/run}"
+
+# fusermount only for FUSE; any other type, or a fusermount that fails,
+# takes umount -l.
+reset; export WITH_DISPLAY_MOUNTINFO="$SANDBOX/mountinfo"; run "$CMD2" mixed; unset WITH_DISPLAY_MOUNTINFO
+rundir="$(cat "$SANDBOX/rundir" 2>/dev/null)"
+if [[ "$(cat "$SANDBOX/unmounted" 2>/dev/null)" == "umount -l $rundir/t"$'\n'"-u -z $rundir/doc" ]]; then
+    pass "a tmpfs mount takes umount -l, a FUSE one fusermount"
+else fail "the unmount commands by type were wrong" "$(cat "$SANDBOX/unmounted" 2>/dev/null || echo none)"; fi
+reset; touch "$SANDBOX/fusermount-fails"; export WITH_DISPLAY_MOUNTINFO="$SANDBOX/mountinfo"; run "$CMD2" mixed; unset WITH_DISPLAY_MOUNTINFO
+rundir="$(cat "$SANDBOX/rundir" 2>/dev/null)"
+grep -qx "umount -l $rundir/doc" "$SANDBOX/unmounted" 2>/dev/null && pass "  and a fusermount that fails falls back to umount -l" \
+    || fail "a failing fusermount did not fall back" "$(cat "$SANDBOX/unmounted" 2>/dev/null || echo none)"
 
 
 # A service that ignores TERM: the wait is bounded by
@@ -429,7 +451,7 @@ pkill -KILL -P "$spid" 2>/dev/null; kill -KILL "$spid" 2>/dev/null
 
 # The removal never deletes through a mount point.
 reset
-printf '#!/usr/bin/env bash\necho "$*" >> "%s/rm-args"\nexec /usr/bin/rm "$@"\n' "$SANDBOX" > "$BIN/rm"; chmod +x "$BIN/rm"
+printf '#!/usr/bin/env bash\necho "$*" >> "%s/rm-args"\nexec "%s" "$@"\n' "$SANDBOX" "$(PATH=/usr/bin:/bin command -v rm)" > "$BIN/rm"; chmod +x "$BIN/rm"
 run "$CMD2"; rm -f "$BIN/rm"
 rundir="$(cat "$SANDBOX/rundir" 2>/dev/null)"
 grep -qxF -- "-rf --one-file-system ${rundir%/run}" "$SANDBOX/rm-args" 2>/dev/null \

@@ -42,7 +42,8 @@
 # Xvfb is terminated when the wrapper returns; the bus and what it
 # activated end with dbus-run-session, and the scratch is removed only
 # once that group has ended (bounded by WITH_DISPLAY_STOP_SECONDS, then
-# KILL), with any mount left under it unmounted first; what cannot be
+# KILL and a second's grace), with any mount left under it unmounted
+# first (fusermount for FUSE, umount -l otherwise); what cannot be
 # removed is reported. The bus runs in a process group of
 # its own (setsid), and INT, TERM or HUP sent to the wrapper — `kill`, or
 # Ctrl-C in its terminal — ends that whole group, the command included,
@@ -174,14 +175,17 @@ bus_pid=""
 # would cut TERM's grace to nothing for a signal at a second's end.
 stop_by=""
 now_ms() { local t="${EPOCHREALTIME//[.,]/}"; echo $((t / 1000)); }
-# Mount points under $1, deepest first, from mountinfo's fifth field
-# (octal-escaped: a space is \040).
+# Mount points under $1, deepest first, as "<fstype><TAB><mount point>":
+# the point is mountinfo's fifth field (octal-escaped: a space is \040),
+# the type the first field after the " - " separator.
 mounts_under() {
-    local mp
-    while read -r _ _ _ _ mp _; do
+    local line mp
+    while IFS= read -r line; do
+        read -r _ _ _ _ mp _ <<<"${line%% - *}"
         mp="$(printf '%b' "$mp")"
-        [[ "$mp" == "$1"/* ]] && printf '%s\n' "$mp"
-    done <"${WITH_DISPLAY_MOUNTINFO:-/proc/self/mountinfo}" 2>/dev/null | sort -r
+        [[ "$mp" == "$1"/* ]] && printf '%s\t%s\n' "${line#* - }" "$mp"
+    done <"${WITH_DISPLAY_MOUNTINFO:-/proc/self/mountinfo}" 2>/dev/null \
+        | sed 's/ [^\t]*\t/\t/' | sort -t $'\t' -k2 -r
 }
 cleanup() {
     # Further signals are ignored here: a signal's trap ends in exit, and
@@ -200,6 +204,11 @@ cleanup() {
         local until=$(($(now_ms) + STOP_SECONDS * 1000))
         while kill -0 -- "-$bus_pid" 2>/dev/null && (($(now_ms) < until)); do sleep 0.1; done
         kill -KILL -- "-$bus_pid" 2>/dev/null
+        # A KILL is delivered, not yet done: a call in flight still
+        # completes. A short grace, bounded too — a zombie of an orphaned
+        # member reads as alive until something reaps it.
+        local gone=$(($(now_ms) + 1000))
+        while kill -0 -- "-$bus_pid" 2>/dev/null && (($(now_ms) < gone)); do sleep 0.05; done
     fi
     if [[ -n "$xvfb_pid" ]]; then
         kill "$xvfb_pid" 2>/dev/null
@@ -210,11 +219,16 @@ cleanup() {
     fi
     # A mount a KILLed service never took down: rm cannot remove a mount
     # point, and --one-file-system keeps it from deleting through one.
-    local mp fuse
+    # fusermount only for a FUSE mount, which is what it unmounts; any
+    # other type takes umount -l.
+    local mp fstype fuse
     fuse="${WITH_DISPLAY_FUSERMOUNT-$(command -v fusermount3 || command -v fusermount)}"
-    while read -r mp; do
+    while IFS=$'\t' read -r fstype mp; do
         [[ -n "$mp" ]] || continue
-        if [[ -n "$fuse" ]]; then "$fuse" -u -z "$mp" 2>/dev/null; else umount -l "$mp" 2>/dev/null; fi
+        case "$fstype" in
+            fuse|fuse.*|fuseblk) [[ -n "$fuse" ]] && "$fuse" -u -z "$mp" 2>/dev/null || umount -l "$mp" 2>/dev/null ;;
+            *) umount -l "$mp" 2>/dev/null ;;
+        esac
     done < <(mounts_under "$scratch")
     rm -rf --one-file-system "$scratch" 2>/dev/null
     [[ -e "$scratch" ]] && echo "with_display: could not remove its scratch $scratch — left behind" >&2
