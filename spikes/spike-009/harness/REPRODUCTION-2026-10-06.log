@@ -1,0 +1,38 @@
+# SPIKE-009 host harness -- recorded run
+# date: 2026-10-06T14:34Z
+# host: develop-qzapp (Linux x86_64), rustc 1.98.1
+# production crates pinned at a41e1f3d (Cargo.toml); third-party crates exact, lock committed
+# command: cargo run --locked (from spikes/spike-009/harness)
+# key material: the fixture's TEST-ONLY public all-zero vector, and random keys and identities made and dropped in memory; also a fixed TEST-ONLY synthetic seed [7u8; 32] for H7's second identity (this line corrected after PR #207's review; the run's output is unchanged)
+
+H1 -- the fixture seed derives the frozen PeerId
+  [ok] H1 the production derivation gives the golden PeerId
+H2 -- round trip, both unlock policies
+  [ok] H2 BackgroundCompatible: the envelope is 66 bytes
+  [ok] H2 BackgroundCompatible: unwrap gives the exact seed back
+  [ok] H2 BackgroundCompatible: that seed derives the same PeerId
+  [ok] H2 UserPresence: the envelope is 66 bytes
+  [ok] H2 UserPresence: unwrap gives the exact seed back
+  [ok] H2 UserPresence: that seed derives the same PeerId
+  [ok] H2 two wraps of one seed differ (a fresh IV each)
+H3 -- every single-bit flip, in every byte, is refused
+  [ok] H3 all 528 flips refused, none yields a seed
+  [note] refusals by kind: {"Authentication": 481, "Magic": 32, "Policy": 7, "Version": 8}
+H4 -- a wrong length is refused
+  [ok] H4 truncated by one
+  [ok] H4 extended by one
+  [ok] H4 empty
+H5 -- another wrapping key (a Keystore key invalidated and made again) is refused
+  [ok] H5 a new key fails authentication
+H6 -- the header is checked or authenticated, never trusted
+  [ok] H6 a wrong magic is refused
+  [ok] H6 an unknown version is refused
+  [ok] H6 an unknown policy is refused
+  [ok] H6 a VALID policy swapped (user-presence to background) fails authentication
+H7 -- an envelope belongs to one profile
+  [ok] H7 unwrapped for another PeerId, it fails authentication
+  [ok] H7 a seed that authenticates but derives another identity is refused
+H8 -- random identities round-trip exactly
+  [ok] H8 100 of 100 random identities give back the exact seed and PeerId
+
+all 20 checks held

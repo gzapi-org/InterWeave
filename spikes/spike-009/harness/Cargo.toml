@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# SPIKE-009 host harness -- EVIDENCE ONLY, and deliberately not a
+# workspace member (an empty [workspace] table below), as every spike
+# harness: never built by `cargo xtask ci`, never in the root lock, one
+# deliberate `git`/`rev` away from production rather than one accident.
+#
+# THE HOST HALF of SPIKE-009 (architecture/roadmap/SPIKES.md): what can
+# be established without the device -- the exact seed/PeerId round trip
+# through a versioned AES-256-GCM envelope shaped so Android's Keystore
+# can produce the same bytes, and the fail-closed matrix. AndroidKeyStore
+# itself (TEE/StrongBox, user presence, lock/reboot, invalidation) is
+# the device half, in its own harness.
+
+[package]
+name = "spike-009-harness"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+# Exact versions, the ones the root Cargo.lock resolves today, so the
+# lock committed beside this file rebuilds the measured graph.
+aes-gcm = "=0.10.3"
+hex = "=0.4.3"
+serde_json = "=1.0.151"
+
+# THE PRODUCTION IDENTITY, by revision: what is measured is that the
+# real derivation -- entropy IS the seed, ADR-0033 -- gives back the
+# frozen fixture's PeerId after a wrap and unwrap, not a copy of it.
+# The pin is the tree this run built against (SPIKES.md, "frozen all
+# the way down"): a41e1f3d, origin/main when the first recorded run was
+# made, there being no earlier run of this harness.
+interweave-profile-identity = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "a41e1f3d44e833ab02f459674cd9d55339f27fec" }
+interweave-transport-api = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "a41e1f3d44e833ab02f459674cd9d55339f27fec" }
+
+[workspace]
