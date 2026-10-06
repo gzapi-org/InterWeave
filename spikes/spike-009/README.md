@@ -4,7 +4,7 @@ Android Keystore wrapping, invalidation and background/user-presence behavior.
 
 Do not treat experiments placed here as production implementation. Evidence and final decision must be recorded against [`architecture/roadmap/SPIKES.md`](../../architecture/roadmap/SPIKES.md); the verdict is architect-cto's to write there, not this file's.
 
-**Status: the HOST HALF has run (2026-10-06); the DEVICE HALF has PARTLY run (2026-10-06: D1–D3, D4's process restart and lock, D5, D7).** No verdict is recorded. Not yet run on the device: D4's reboot, D6a and D6b, which need a person at the phone (below).
+**Status: the HOST HALF has run (2026-10-06); the DEVICE HALF has run (2026-10-06: D1–D7, three recorded parts), with D6b's attribution limited by the device (below).** No verdict is recorded; the verdict is architect-cto's.
 
 ## The host half: what was established
 
@@ -82,9 +82,21 @@ The recorded run is [`device/REPRODUCTION-2026-10-06b.log`](./device/REPRODUCTIO
 - **Saved state and crash artifacts:** the field saves no instance state by construction; only the app's own storage was searched, not system_server's.
 - **The logcat and storage searches had no positive control:** the harness never writes a word, so they show that nothing leaked there, not that the search would see a leak.
 
+## The device half: what was established (part 3)
+
+The recorded run is [`device/REPRODUCTION-2026-10-06c.log`](./device/REPRODUCTION-2026-10-06c.log). A person at the phone made each change; the harness recorded the result.
+
+| id | observation |
+|---|---|
+| D4 (reboot) | After `adb reboot` and the person's first unlock, the background key unwraps. The user-presence key made before the reboot is refused `UserNotAuthenticatedException` once its 60 s have passed, and unwraps (the seed) inside the window after a later unlock. Both survive a reboot. |
+| D6a | Fresh keys of both modes, each first shown to wrap and unwrap. The person changes the screen lock to Swipe (`device_secure: false`). The background keys, fresh and old, still unwrap: the control. Both user-presence keys, fresh and old, are **invalidated**. With the PIN set again, they stay invalidated: it is permanent. **On this device the invalidation surfaces as `UnrecoverableKeyException` from `KeyStore.getKey`**, before any cipher, and not as the `KeyPermanentlyInvalidatedException` this plan expected; `KeyInfo` cannot be read for the key either. A production check written for the latter alone would miss it. |
+| D6b | With one Class-3 fingerprint enrolled: a fresh per-operation key (biometric, every use; `invalidated_by_biometric_enrollment: true`) wraps and unwraps through `BiometricPrompt`, one touch each. A fresh timed key wraps and unwraps inside the 60 s a touch opens. These are the controls. Then the enrollment changed. **This device's Settings offered no way to add a fingerprint without re-enrolling the first** (the person went through Screen lock type; two enrolled after). After the change, BOTH keys are invalidated (`UnrecoverableKeyException: User changed or deleted their auth credentials`), and the background key still unwraps. |
+
+**What D6b did not establish:** that adding a fingerprint, and only that, invalidates the per-operation key and spares the timed one. The event this device's Settings allowed included re-enrolling the first fingerprint, and possibly a pass through the credential flow. So the timed key's invalidation cannot be attributed: Android documents enrollment invalidation for per-operation keys only, and a credential change or an emptied fingerprint set invalidates both. A device whose Settings can add a fingerprint on its own is needed to close it. What holds either way: no key that was invalidated ever gave back a seed, and the background-compatible key was untouched by every credential and biometric change.
+
 ## The device half: the plan
 
-[`device/`](./device), above. Rows D1–D3, D4's process restart and lock, D5 and D7 have run. D4's reboot, D6a and D6b have not: they need a person at the phone. D6b also needs two fingerprints enrolled, and none is enrolled now; its prompt is `device/app/.../Prompt.java`. Results are written to app-private storage and read back over adb (`run-as`). The fixture seed is the TEST-ONLY public vector only.
+[`device/`](./device), above. Every row has run (parts 1–3 above). D6b ran with the attribution limit stated in part 3. Results are written to app-private storage and read back over adb (`run-as`). The fixture seed is the TEST-ONLY public vector only.
 
 | id | what | recorded |
 |---|---|---|
