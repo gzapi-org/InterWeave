@@ -37,7 +37,7 @@ of the four architect-cto offered: state overlay; the daemon writing
 
 **What changed.** The Decision gains the persisted-overlay paragraph:
 `<state>/trust-overlay.json`, owner-only and refused when not the
-daemon's own or writable by others; two lists, `added` (beyond
+daemon's own or readable or writable by anyone but its owner; two lists, `added` (beyond
 `config.yaml`'s `trust.allowed_peers`) and `revoked` (configured peers
 revoked); the effective allowlist (configured ∪ added) ∖ revoked, derived
 before the first connection is admitted, fatal above `MAX_ALLOWED_PEERS`
@@ -56,8 +56,8 @@ the previous overlay before the failed answer; the store is a port the
 composition takes at construction, supplied by the daemon and by the
 embedded runtime alike;
 `config.yaml` never written; a present overlay that does not parse,
-names a peer in both lists, is not the daemon's own or is writable by
-others fatal, never skipped; a failed normalisation rewrite at load
+names a peer in both lists, is not the daemon's own or is readable or writable by
+anyone but its owner fatal, never skipped; a failed normalisation rewrite at load
 fatal, since a stale entry left on disk could undo the operator's next
 `config.yaml` edit. The overlay is durable authorisation in its own backup class:
 backed up with the profile, never deleted to reset. `admin.trust.list`
