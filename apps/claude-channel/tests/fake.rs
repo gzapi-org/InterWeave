@@ -85,6 +85,9 @@ struct Record {
     hold_send: AtomicBool,
     /// Joins never answer, recorded `join cancelled` the same way.
     hold_join: AtomicBool,
+    /// Leaves never answer, recorded `leave cancelled`: the daemon still
+    /// holds the join.
+    hold_leave: AtomicBool,
     /// Joins and leaves take effect at the daemon and then never answer:
     /// a cancel that races a completed call.
     land_then_hold: AtomicBool,
@@ -183,6 +186,10 @@ impl DataSessionPort for RecordedSession {
     async fn leave(&self, channel: ChannelId) -> Result<(), TransportError> {
         self.record.call("leave");
         self.record.down()?;
+        if self.record.hold_leave.load(Ordering::SeqCst) {
+            let _cancelled = Cancelled(Arc::clone(&self.record), "leave");
+            std::future::pending::<()>().await;
+        }
         if self.record.refuse_leave.load(Ordering::SeqCst) {
             return Err(TransportError::Overloaded);
         }
@@ -1605,13 +1612,13 @@ async fn a_pending_leave_refused_on_reissue_keeps_the_join() {
     let mut w = World::start_pull().await;
     let (text, error) = w.tool("join", json!({"channel": "general"})).await;
     assert!(!error, "{text}");
-    w.record.land_then_hold.store(true, Ordering::SeqCst);
+    w.record.hold_leave.store(true, Ordering::SeqCst);
     in_flight_as_the_queue_fills(&mut w, "leave", json!({"channel": "general"}), "leave").await;
     assert_eq!(
         w.status().await["pull_queue"]["pending"],
         json!([{"channel": "general", "op": "leave"}])
     );
-    w.record.land_then_hold.store(false, Ordering::SeqCst);
+    w.record.hold_leave.store(false, Ordering::SeqCst);
     w.record.refuse_leave.store(true, Ordering::SeqCst);
     let leaves = |w: &World| w.record.calls().iter().filter(|c| *c == "leave").count();
     let before = leaves(&w);
