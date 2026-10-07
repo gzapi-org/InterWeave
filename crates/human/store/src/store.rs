@@ -385,9 +385,20 @@ impl HumanStore {
     /// the page images it held -- a released message's content among them
     /// -- leave the log. With `secure_delete` the released bytes are
     /// already zeroed in the page the checkpoint writes back.
+    ///
+    /// ONE CONNECTION IS ASSUMED. The store is opened once per process (the
+    /// desktop client under its single-instance lock), and nothing else
+    /// writes it. A reader elsewhere -- the desktop e2e tests read the
+    /// running client's file -- can hold the log: SQLite then waits the
+    /// busy timeout and answers busy IN THE RESULT ROW, not as an error,
+    /// so the row is read and busy is a failure (#214's review, F2).
     fn truncate_wal(&self) -> Result<(), StoreError> {
-        self.conn
-            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+        let busy: i64 = self
+            .conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+        if busy != 0 {
+            return Err(StoreError::LogNotTruncated);
+        }
         Ok(())
     }
 

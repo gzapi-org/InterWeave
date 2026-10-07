@@ -299,3 +299,37 @@ fn a_never_checkpointed_store_released_and_killed_is_scrubbed_at_the_next_open()
     );
     drop(store);
 }
+
+/// A reader holding a snapshot keeps the log from being truncated, and
+/// SQLite says so in the checkpoint's result row, not as an error. The
+/// store must not take that for success: opened under such a reader, an
+/// existing store reports degraded (#214's review, F2). Waits the busy
+/// timeout once.
+#[test]
+fn a_held_log_is_not_mistaken_for_a_truncated_one() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = state(&dir);
+    let row = store_with_both(&path);
+    let mut store = HumanStore::open(&path, StoreOptions::default()).expect("reopens");
+    store.mark_read(row, 4_000).expect("released");
+    std::mem::forget(store);
+    // Frames in the log, never checkpointed, for the truncate to need.
+    let writer = rusqlite::Connection::open(&path).expect("writer");
+    writer
+        .execute_batch("INSERT INTO settings (key, value) VALUES ('test_frame', '1');")
+        .expect("a frame written");
+    std::mem::forget(writer);
+    let reader = rusqlite::Connection::open(&path).expect("reader");
+    reader
+        .execute_batch("BEGIN; SELECT count(*) FROM settings;")
+        .expect("a read snapshot held");
+    let store = HumanStore::open(&path, StoreOptions::default()).expect("opens");
+    assert_eq!(
+        store.health(),
+        interweave_human_core::retention::StorageHealth::Degraded,
+        "a truncate the reader blocked is not reported as done"
+    );
+    reader.execute_batch("COMMIT").expect("snapshot released");
+    drop(store);
+    std::mem::forget(reader);
+}
