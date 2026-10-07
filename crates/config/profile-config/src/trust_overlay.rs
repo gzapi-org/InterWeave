@@ -324,7 +324,11 @@ fn open_private(path: &Path) -> Result<std::fs::File, OverlayError> {
                 }
             })?;
         let meta = file.metadata().map_err(OverlayError::Read)?;
-        let uid = persist::effective_uid().map_err(OverlayError::Write)?;
+        // A refusal on READ: the owner cannot be checked, so the file
+        // cannot be trusted -- not a write failure (#215 review P3).
+        let uid = persist::effective_uid().map_err(|_| OverlayError::NotPrivate {
+            detail: "its owner cannot be checked: this process's uid is unreadable".to_owned(),
+        })?;
         if !meta.file_type().is_file() {
             return Err(OverlayError::NotPrivate {
                 detail: "it is not a regular file".to_owned(),
