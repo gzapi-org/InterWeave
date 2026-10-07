@@ -132,8 +132,8 @@ pub(crate) async fn admin<A: AdminPort>(
             // A ROW THAT DOES NOT PERSIST AT 2.3 OR LATER IS REFUSED, never
             // served in the 2.1 shape the 2.3 contract forbids there: only
             // a store-less runtime reports one, and it is never served
-            // over IPC (LOCAL-CLIENT.md §7 item 11) -- one that is is
-            // refused here with `Internal`, never served (#215 review P3).
+            // over IPC (LOCAL-CLIENT.md §7 item 11) -- one that is served
+            // is refused here with `Internal`, never served the row.
             Ok(view)
                 if minor >= TRUST_SOURCE_SINCE_MINOR
                     && view.allowed.iter().any(|row| !row.persisted) =>
