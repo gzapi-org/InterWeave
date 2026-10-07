@@ -1,0 +1,142 @@
+# SPIKE-008 device harness -- recorded run (part 1: L1, L3, L4, L5, S1, E1, R1-R3, B1, B3)
+# date: 2026-10-06T23:00Z-23:11Z
+# device: Samsung SM-A405FN, Android 11 (API 30), patch 2023-03-01, arm64-v8a, over adb (wireless debugging)
+# host: develop-qzapp, rustc 1.98.1, cargo-ndk 4.1.2, NDK 28.2.13676358, build-tools 36.0.0, platform android-36, Temurin 17.0.20.1+1
+# this repository pinned at d019ac06 (harness/Cargo.toml): interweave-human-store, -human-core, -transport-api; third-party exact, lock committed
+# libspike008.so sha256 prefix: f8956d708f599ebb (both backup variants)
+# builds: bash spikes/spike-008/build.sh 30 (standard v1: allowBackup=false) and 30 true (the rules alone: allowBackup=true)
+# drivers: the shell scripts whose output follows, verbatim; the harness's own result and trace lines (files/{results,trace}.jsonl,
+#   read with run-as) are verbatim too. Each clean reinstall wipes the app's files, so each step's lines were read back
+#   right after it.
+# key material and content: none -- every file is a TEST-ONLY label, every store row a label (P1..K3); the fixture PeerId only
+
+## step 1 (standard v1): L1, S1/E1, L4, L5 -- driver output
+## 23:00:45Z uninstall (clean start) and install the standard-v1 variant (allowBackup=false)
+Success
+## 23:00:49Z L1: launch from the launcher
+Status: ok
+    isForeground=true foregroundId=1 
+flags=0x62
+## 23:00:55Z S1/E1: layout, seed, transitions
+## 23:01:22Z L4: home, then the process SIGKILLs itself
+pid before: 2960
+pid back after ~1 s: 6519
+## 23:01:34Z L5: force-stop; nothing should restart for 90 s
+pid 90 s after force-stop: ''; service records: 0
+pid after the launcher: 3179
+## 23:03:13Z done
+
+## step 1: the harness's result lines
+{"t":1791327670175,"up":5427299,"pid":2960,"event":"layout","detail":"written"}
+{"t":1791327673700,"up":5430825,"pid":2960,"event":"seed","detail":{"pending":["P1","P2","P3"],"unread":["U1","U2","U3"],"kept":["K1","K2","K3"],"eligible":["K1","K2","K3","U1","U2","U3"]}}
+{"t":1791327677078,"up":5434203,"pid":2960,"event":"transitions","detail":{"pending":["P2","P3"],"unread":["U2","U3"],"kept":["K2","K3"],"eligible":["K2","K3","U2","U3"]}}
+{"t":1791327680205,"up":5437330,"pid":2960,"event":"files","detail":{"identity/wrapped.env":55,"config/profile.json":18,"recovery-tmp/pending.txt":26,"human/human.sqlite":86016,"marker/control.txt":55}}
+{"t":1791327687062,"up":5444187,"pid":2960,"event":"die","detail":"pid=2960"}
+{"t":1791327692892,"up":5450017,"pid":6519,"event":"census","detail":{"pending":["P2","P3"],"unread":["U2","U3"],"kept":["K2","K3"],"eligible":["K2","K3","U2","U3"]}}
+{"t":1791327791517,"up":5548642,"pid":3179,"event":"census","detail":{"pending":["P2","P3"],"unread":["U2","U3"],"kept":["K2","K3"],"eligible":["K2","K3","U2","U3"]}}
+
+## step 1: the trace (heartbeat and net-link lines omitted)
+{"t":1791327651870,"up":5408994,"pid":2960,"event":"launcher-created","detail":""}
+{"t":1791327651937,"up":5409062,"pid":2960,"event":"service-created","detail":""}
+{"t":1791327652121,"up":5409246,"pid":2960,"event":"foreground-started","detail":"type=512"}
+{"t":1791327652132,"up":5409257,"pid":2960,"event":"start-command","detail":"intent=true flags=0 id=1"}
+{"t":1791327652142,"up":5409267,"pid":2960,"event":"net-available","detail":"601"}
+{"t":1791327652144,"up":5409269,"pid":2960,"event":"net-capabilities","detail":"601 wifi validated=true"}
+{"t":1791327688451,"up":5445575,"pid":6519,"event":"service-created","detail":""}
+{"t":1791327688457,"up":5445582,"pid":6519,"event":"foreground-started","detail":"type=512"}
+{"t":1791327688465,"up":5445590,"pid":6519,"event":"start-command","detail":"intent=false flags=0 id=2"}
+{"t":1791327787000,"up":5544125,"pid":3179,"event":"launcher-created","detail":""}
+{"t":1791327787044,"up":5544168,"pid":3179,"event":"service-created","detail":""}
+{"t":1791327787050,"up":5544175,"pid":3179,"event":"foreground-started","detail":"type=512"}
+{"t":1791327787061,"up":5544186,"pid":3179,"event":"start-command","detail":"intent=true flags=0 id=1"}
+
+## step 2 (standard v1): R1-R3, the recovery screen in its own task, against the launcher as control -- driver output
+## 23:03:33Z R (recovery): fresh start
+mResumedActivity: ActivityRecord{36562a9 u0 org.interweave.spike008/.Recovery t724}
+* Recent #0: Task{df0b02e #724 visible=false type=standard mode=fullscreen translucent=true A=10386:org.interweave.spike008.recovery U=0 StackId=724 sz=1}
+Activities=[ActivityRecord{36562a9 u0 org.interweave.spike008/.Recovery t724}]
+* Recent #1: Task{e56855d #723 visible=false type=standard mode=fullscreen translucent=true A=10386:org.interweave.spike008 U=0 StackId=723 sz=1}
+Activities=[ActivityRecord{e63c607 u0 org.interweave.spike008/.Launcher t723}]
+recents cards:
+SPIKE-008 [216,323][864,1668]
+SPIKE-008 [964,392][1080,1607]
+## 23:03:52Z R (control): fresh start
+mResumedActivity: ActivityRecord{aa5a27b u0 org.interweave.spike008/.Launcher t725}
+* Recent #0: Task{d5fb8f1 #725 visible=false type=standard mode=fullscreen translucent=true A=10386:org.interweave.spike008 U=0 StackId=725 sz=1}
+Activities=[ActivityRecord{aa5a27b u0 org.interweave.spike008/.Launcher t725}]
+* Recent #1: Task{6b5adb3 #704 visible=true type=home mode=fullscreen translucent=true A=10143:com.sec.android.app.launcher.activities.LauncherActivity U=0 StackId=1 sz=1}
+--
+recents cards:
+SPIKE-009 [0,392][116,1607]
+SPIKE-008 [964,392][1080,1607]
+## 23:04:11Z done
+
+## step 2: measurements (host side, from the captures; images not committed: the recents captures show other apps' cards)
+screencap, recovery: an empty file (the capture is refused)
+screencap, control (launcher): non-black 0.905
+screenrecord first frame, recovery: non-black 0.005 (black)
+screenrecord first frame, control: non-black 0.905
+recents, opened from the recovery screen: the recovery task's card is listed, its snapshot blank white (no text)
+recents after Home from the recovery screen (about 23:05Z, an ad-hoc run between steps 2 and 4, its commands' output
+  NOT captured here -- this line corrected after PR #214's review: it first said 23:06Z, inside step 4): the system holds both tasks (dumpsys recents:
+  Recent #1 org.interweave.spike008.recovery, Recent #2 org.interweave.spike008) but the recents UI shows one SPIKE-008
+  card; tapping it resumed org.interweave.spike008/.Launcher -- the recovery task is not shown once left
+  (an earlier build that opened the recovery screen INSIDE the launcher's task had that task listed with it on top:
+  excludeFromRecents acts on a task's root, which is why the requirement says a dedicated Activity/task)
+
+## step 3: B1 (standard v1) -- driver output
+adb shell bmgr transport com.android.localtransport/.LocalTransport  (the phone's transport was Google's; restored after step 4)
+flags=[ DEBUGGABLE HAS_CODE ALLOW_CLEAR_USER_DATA ]
+Running incremental backup for 1 requested packages.
+Package org.interweave.spike008 with result: Backup is not allowed
+Backup finished with result: Success
+
+## step 4 (the rules alone, allowBackup=true): B1 and B3 through the local transport -- driver output
+## 23:05:55Z rules-only variant (allowBackup=true): clean install, launch, layout, seed, transitions, files
+Success
+{"t":1791327984087,"up":5741211,"pid":7601,"event":"files","detail":{"identity/wrapped.env":55,"config/profile.json":18,"recovery-tmp/pending.txt":26,"human/human.sqlite":86016,"marker/control.txt":55}}
+## 23:06:25Z backup through the local transport
+Package org.interweave.spike008 with result: Success
+Backup finished with result: Success
+  1 : Local disk image
+## 23:06:29Z uninstall, then reinstall: Android restores at install
+Success
+Success
+files:
+marker
+
+files/marker:
+control.txt
+{"t":1791328010072,"up":5767196,"pid":7978,"event":"files","detail":{"identity/wrapped.env":-1,"config/profile.json":-1,"recovery-tmp/pending.txt":-1,"human/human.sqlite":-1,"marker/control.txt":55}}
+{"t":1791328015145,"up":5772270,"pid":7978,"event":"census","detail":{"pending":[],"unread":[],"kept":[],"eligible":[]}}
+## 23:06:57Z done
+adb shell bmgr transport com.google.android.gms/.backup.BackupTransportService  (restored)
+
+## step 5 (standard v1): L3, Doze forced with the screen off and the battery reported unplugged -- driver output
+## (its trace listing drops net-link lines -- this note added after PR #214's review)
+## 23:07:27Z standard-v1 variant: clean install, launch, Home
+Success
+## 23:07:40Z L3: screen off, battery unplugged (simulated), Doze forced
+Now forced in to deep idle mode
+IDLE
+OVERRIDE
+## 23:10:46Z after 180 s in Doze
+IDLE
+pid: 9082
+Light state: OVERRIDE, deep state: IDLE
+## 23:10:47Z Doze lifted
+{"t":1791328055212,"up":5812337,"pid":9082,"event":"launcher-created","detail":""}
+{"t":1791328055273,"up":5812397,"pid":9082,"event":"service-created","detail":""}
+{"t":1791328055293,"up":5812418,"pid":9082,"event":"foreground-started","detail":"type=512"}
+{"t":1791328055305,"up":5812430,"pid":9082,"event":"start-command","detail":"intent=true flags=0 id=1"}
+{"t":1791328055322,"up":5812447,"pid":9082,"event":"net-available","detail":"601"}
+{"t":1791328055325,"up":5812449,"pid":9082,"event":"net-capabilities","detail":"601 wifi validated=true"}
+{"t":1791328065650,"up":5822774,"pid":9082,"event":"net-capabilities","detail":"601 wifi validated=true"}
+{"t":1791328085318,"up":5842443,"pid":9082,"event":"heartbeat","detail":"n=1"}
+{"t":1791328116368,"up":5873493,"pid":9082,"event":"heartbeat","detail":"n=2"}
+{"t":1791328146406,"up":5903531,"pid":9082,"event":"heartbeat","detail":"n=3"}
+{"t":1791328176420,"up":5933545,"pid":9082,"event":"heartbeat","detail":"n=4"}
+{"t":1791328206433,"up":5963558,"pid":9082,"event":"heartbeat","detail":"n=5"}
+{"t":1791328236470,"up":5993595,"pid":9082,"event":"heartbeat","detail":"n=6"}
+{"t":1791328266500,"up":6023624,"pid":9082,"event":"heartbeat","detail":"n=7"}
+## 23:11:27Z done

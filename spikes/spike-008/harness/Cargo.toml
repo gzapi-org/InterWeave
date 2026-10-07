@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# SPIKE-008 device harness, Rust core -- EVIDENCE ONLY, and deliberately
+# not a workspace member (an empty [workspace] table below), as every
+# spike harness. Built for arm64-v8a with cargo-ndk and loaded over JNI
+# by the harness app in ../app. It holds THE PRODUCTION HUMAN STORE, so
+# what the device measures about retention and backup eligibility is the
+# store's own behaviour on Android's filesystem, not a copy of its rules.
+
+[package]
+name = "spike-008-harness"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+
+[lib]
+name = "spike008"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Exact, the version the root Cargo.lock resolves; raw JNI, byte arrays
+# and ints only.
+jni-sys = "=0.3.1"
+
+# THIS REPOSITORY, by revision (SPIKES.md, "frozen all the way down"):
+# the tree this run built against, origin/main when the first recorded
+# device run was made.
+interweave-human-store = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "d019ac06f5149567ab37d7c59c61895c974598e6" }
+interweave-human-core = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "d019ac06f5149567ab37d7c59c61895c974598e6" }
+# Exact, the root lock's version and features: `bench` times SQLite itself,
+# the same bundled build the store runs, for the cost of the deletion rule.
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
+interweave-transport-api = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "d019ac06f5149567ab37d7c59c61895c974598e6" }
+
+[dev-dependencies]
+# Exact, the root lock's version: the label test reads the JSON it checks.
+serde_json = "=1.0.151"
+
+[workspace]

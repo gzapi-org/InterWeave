@@ -121,6 +121,14 @@ pub enum StoreError {
         /// The ceiling SQLite reports in force.
         effective: i64,
     },
+    /// SQLite would not turn `secure_delete` on, so released content could
+    /// stay in the database's freed space (`RETENTION.md` §8, A
+    /// 2026-10-07). Refused at open rather than run without it.
+    SecureDeleteNotApplied,
+    /// The write-ahead log could not be truncated: another connection
+    /// held a read snapshot past the busy timeout. Released content stays
+    /// in the log until a later truncate (`RETENTION.md` §8).
+    LogNotTruncated,
     /// The database path is not a regular file.
     ///
     /// A symlink, directory, or device where the store expects its own
@@ -274,6 +282,12 @@ impl core::fmt::Display for StoreError {
             Self::TimestampOutOfRange { field, got } => write!(
                 f,
                 "{field} is {got} ms, past the largest timestamp this store can represent"
+            ),
+            Self::LogNotTruncated => f.write_str(
+                "the write-ahead log could not be truncated: another connection held it",
+            ),
+            Self::SecureDeleteNotApplied => f.write_str(
+                "SQLite would not enable secure_delete; released message content could stay in the database file",
             ),
             Self::QuotaNotApplied {
                 requested,

@@ -174,6 +174,11 @@ spikes/**/Cargo.lock
 # every tamper -- a result about those crates' versions, so the graph is
 # committed and the direct requirements are exact.
 !spikes/spike-009/harness/Cargo.lock
+# SPIKE-008's device harness: its Rust core is the production human store
+# on the device, so its graph is committed for the same reason; its recorded
+# runs sit at the spike's top level.
+!spikes/spike-008/harness/Cargo.lock
+!spikes/spike-008/REPRODUCTION-*.log
 # SPIKE-009's device harness: its Rust core runs the production derivation
 # on the device, so its graph is committed for the same reason, and its
 # recorded runs sit beside it rather than under a harness/ directory.

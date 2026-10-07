@@ -1,0 +1,29 @@
+# SPIKE-008 device harness -- recorded run (part 5: parts 3-4's store measurements repeated on the corrected harness)
+# date: 2026-10-07T07:37Z-07:39Z
+# device, host and toolchain: as part 1; this repository pinned at d019ac06; targetSdk 36, standard v1; phone locked
+# harness at 465d243e: forensic prints each reading under its own label (part 4's build, 6a385abc, printed the
+#   "later" and "open" readings under each other's labels -- see the erratum at the top of REPRODUCTION-2026-10-07b.log);
+#   error text in result lines is escaped, and every result line below parses as JSON
+# key material and content: TEST-ONLY labels and markers only
+
+## driver output, verbatim
+## 07:37:43Z clean install of the harness at 465d243e (forensic labels fixed, error text escaped); targetSdk 36, standard v1; phone locked
+Success
+## 07:37:52Z seed, transitions, redeliver; a process restart (self-SIGKILL); redeliver again; census
+## 07:38:23Z fill; dirmodes; forensic three times
+## 07:38:48Z results
+{"t":1791358685012,"up":6723122,"pid":7464,"event":"seed","detail":{"pending":["P1","P2","P3"],"unread":["U1","U2","U3"],"kept":["K1","K2","K3"],"eligible":["K1","K2","K3","U1","U2","U3"]}}
+{"t":1791358688290,"up":6726400,"pid":7464,"event":"transitions","detail":{"pending":["P2","P3"],"unread":["U2","U3"],"kept":["K2","K3"],"eligible":["K2","K3","U2","U3"]}}
+{"t":1791358691537,"up":6729647,"pid":7464,"event":"redeliver","detail":{"u1_again":"AlreadyRead","control_c1":"committed"}}
+{"t":1791358694745,"up":6732855,"pid":7464,"event":"die","detail":"pid=7464"}
+{"t":1791358698454,"up":6736564,"pid":7695,"event":"redeliver","detail":{"u1_again":"AlreadyRead","control_c1":"Sql(SqliteFailure(Error { code: ConstraintViolation, extended_code: 2067 }, Some(\"UNIQUE constraint failed: unread_inbound.source_peer, unread_inbound.source_endpoint_key, unread_inbound.channel_key, unread_inbound.app_message_id\")))"}}
+{"t":1791358701760,"up":6739870,"pid":7695,"event":"census","detail":{"pending":["P2","P3"],"unread":["C1","U2","U3"],"kept":["K2","K3"],"eligible":["C1","K2","K3","U2","U3"]}}
+{"t":1791358705156,"up":6743266,"pid":7695,"event":"fill","detail":{"max_pages":48,"committed":12,"first_error":"Sql(SqliteFailure(Error { code: DiskFull, extended_code: 13 }, Some(\"database or disk is full\")))","health":"Degraded","then":"Degraded","readable_unread":"12"}}
+{"t":1791358711338,"up":6749447,"pid":7695,"event":"dirmodes","detail":{"files":"0771","files/human":"0700","files/human-broad":"0771","open_broad":{"error":"open: the state directory is mode 0771; message content must be owner-only"}}}
+{"t":1791358715776,"up":6753886,"pid":7695,"event":"forensic","detail":{"later":{"before_read_db":"true","open":{"db":"true","wal":"true"},"closed":{"db":"true","wal":"no file"}},"open":{"released":{"db":"false","wal":"true"},"kept_control":{"db":"false","wal":"true"}},"closed":{"released":{"db":"false","wal":"no file"},"kept_control":{"db":"true","wal":"no file"}}}}
+{"t":1791358720395,"up":6758505,"pid":7695,"event":"forensic","detail":{"later":{"before_read_db":"true","open":{"db":"true","wal":"true"},"closed":{"db":"true","wal":"no file"}},"open":{"released":{"db":"false","wal":"true"},"kept_control":{"db":"false","wal":"true"}},"closed":{"released":{"db":"false","wal":"no file"},"kept_control":{"db":"true","wal":"no file"}}}}
+{"t":1791358725033,"up":6763143,"pid":7695,"event":"forensic","detail":{"later":{"before_read_db":"true","open":{"db":"true","wal":"true"},"closed":{"db":"true","wal":"no file"}},"open":{"released":{"db":"false","wal":"true"},"kept_control":{"db":"false","wal":"true"}},"closed":{"released":{"db":"false","wal":"no file"},"kept_control":{"db":"true","wal":"no file"}}}}
+## 07:38:48Z done
+
+## host, the same measurement through the same bundled SQLite, at 465d243e (harness/tests/store.rs, --nocapture)
+FORENSIC {"later":{"before_read_db":"true","open":{"db":"true","wal":"true"},"closed":{"db":"true","wal":"no file"}},"open":{"released":{"db":"false","wal":"true"},"kept_control":{"db":"false","wal":"true"}},"closed":{"released":{"db":"false","wal":"no file"},"kept_control":{"db":"true","wal":"no file"}}}

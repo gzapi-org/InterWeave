@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- dataExtractionRules (API 31+ reads this): the same exclusions for
+     cloud backup and device transfer alike. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="identity/" />
+        <exclude domain="file" path="config/" />
+        <exclude domain="file" path="recovery-tmp/" />
+        <exclude domain="file" path="human/" />
+        <exclude domain="file" path="trace.jsonl" />
+        <exclude domain="file" path="results.jsonl" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="identity/" />
+        <exclude domain="file" path="config/" />
+        <exclude domain="file" path="recovery-tmp/" />
+        <exclude domain="file" path="human/" />
+        <exclude domain="file" path="trace.jsonl" />
+        <exclude domain="file" path="results.jsonl" />
+    </device-transfer>
+</data-extraction-rules>
