@@ -77,7 +77,8 @@ screencap, control (launcher): non-black 0.905
 screenrecord first frame, recovery: non-black 0.005 (black)
 screenrecord first frame, control: non-black 0.905
 recents, opened from the recovery screen: the recovery task's card is listed, its snapshot blank white (no text)
-recents after Home from the recovery screen (23:06Z, a second run): the system holds both tasks (dumpsys recents:
+recents after Home from the recovery screen (about 23:05Z, an ad-hoc run between steps 2 and 4, its commands' output
+  NOT captured here -- this line corrected after PR #214's review: it first said 23:06Z, inside step 4): the system holds both tasks (dumpsys recents:
   Recent #1 org.interweave.spike008.recovery, Recent #2 org.interweave.spike008) but the recents UI shows one SPIKE-008
   card; tapping it resumed org.interweave.spike008/.Launcher -- the recovery task is not shown once left
   (an earlier build that opened the recovery screen INSIDE the launcher's task had that task listed with it on top:
