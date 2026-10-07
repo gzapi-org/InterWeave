@@ -245,25 +245,14 @@ fn terminal_outbound_content_leaves_both_files_before_the_call_returns() {
 #[test]
 fn a_never_checkpointed_store_released_and_killed_is_scrubbed_at_the_next_open() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = state(&dir);
-    let mut store = HumanStore::open(&path, StoreOptions::default()).expect("opens");
-    let kept = store
-        .commit_unread_inbound(&inbound(2, KEPT))
-        .expect("control commits");
-    let read = store.mark_read(kept, 3_000).expect("read");
-    store.keep(&read, 3_001).expect("kept");
-    // The truncate after that release checkpointed; start over from a
-    // never-checkpointed state: a fresh store that only commits.
-    drop(store);
     let path = dir.path().join("fresh").join("human.sqlite3");
     let mut store = HumanStore::open(&path, StoreOptions::default()).expect("opens");
-    let kept = store
+    store
         .commit_unread_inbound(&inbound(2, KEPT))
         .expect("control commits");
     store
         .commit_unread_inbound(&inbound(1, RELEASED))
         .expect("released commits");
-    let _ = kept;
     // Killed: no close, no checkpoint.
     std::mem::forget(store);
     let header = std::fs::read(&path).expect("db");
