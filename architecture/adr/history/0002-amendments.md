@@ -43,8 +43,14 @@ paused drain would hold the bridge's one loop and the host's next
 `receive` with it; a call already in flight when the queue fills is
 cancelled and answered the same (the third round's risk) — its outcome
 unknown, since the cancel is advisory: a repeated `send` or `broadcast`
-may go twice and a cancelled `leave` may have left while the bridge
-still counts the join (p2p-network-dev's two limits at 71bb46f3); and a
+may go twice and is never re-issued (p2p-network-dev's limit at
+71bb46f3), while a cancelled `join`, re-join or `leave` — whose
+first draft left the bridge's join state apart from the daemon's, the
+#221 review's P2 — is kept pending and re-issued once the pause lifts,
+before the bridge drains again, because the daemon's join and leave
+are idempotent; the answer fixes the state, a re-issue cancelled again
+stays pending, `status.pull_queue.pending` lists them, and a reply on a
+channel whose join is pending is `ChannelNotJoined` until it lands; and a
 paused bridge, reading nothing, learns of its session's end only at the
 next take, so `status` reports it true but late; `identity`,
 `status` and `receive` answer, and `receive` lifts the pause. The
