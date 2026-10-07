@@ -195,6 +195,42 @@ async fn the_overlay_is_in_force_from_the_start_against_the_configuration() {
     }
 }
 
+/// A configuration at the allowlist's bound that names this profile's own
+/// identity -- a shared list copied into every profile does -- holds one
+/// remote peer fewer than its length, and the overlay is bounded against
+/// the same set as the live policy: an allow answered `ok` there leaves
+/// a runtime that starts again, the peer still allowed (#215 review F5:
+/// counted, the local entry made that start fatal).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_allow_at_the_bound_of_a_list_naming_itself_still_starts() {
+    let (identity, me) = id();
+    let max = interweave_trust_api::PeerTrustPolicy::MAX_ALLOWED_PEERS;
+    let others: Vec<TransportIdentity> = (1..max).map(|_| id().1).collect();
+    let listed: Vec<&TransportIdentity> = others.iter().chain(std::iter::once(&me)).collect();
+    assert_eq!(listed.len(), max, "at the bound, itself included");
+    let configured = profile(&listed, &[]);
+    let (_dir, path) = state();
+    let runtime = ComposedRuntime::start(&identity, &configured, options(Some(&path)))
+        .await
+        .expect("composes");
+    let (_, extra) = id();
+    set(&runtime, &extra, true)
+        .await
+        .expect("room for one under the policy's bound");
+    runtime.stop().await.expect("stops");
+    let runtime = ComposedRuntime::start(&identity, &configured, options(Some(&path)))
+        .await
+        .expect("an allow answered ok never makes the next start fatal");
+    let view = trust(&runtime).await;
+    assert!(view.peers().any(|p| p == &extra), "still allowed");
+    assert_eq!(
+        view.allowed.len(),
+        max,
+        "the bound, the local peer not counted"
+    );
+    runtime.stop().await.expect("stops");
+}
+
 /// A present overlay that cannot be trusted stops the start, never
 /// skipped; the same contents, private, start.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

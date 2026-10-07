@@ -279,7 +279,18 @@ impl ComposedRuntime {
         // substrate starts, so no connection is admitted under the
         // configuration alone. A present overlay that cannot be trusted
         // stops the start (ADR-0028 A 2026-10-07).
-        let configured_peers = profile.trust.allowed_peers.clone();
+        // The configuration WITHOUT this profile's own identity, which a
+        // shared list copied into every profile names: the live policy
+        // drops it (`with_local_peer`), so the overlay's bound and its
+        // moves are judged against the same set -- counted, it let an
+        // allow answered `ok` make the next start fatal (#215 review F5).
+        let configured_peers: BTreeSet<TransportIdentity> = profile
+            .trust
+            .allowed_peers
+            .iter()
+            .filter(|peer| **peer != local)
+            .cloned()
+            .collect();
         let (overlay, allowed) = match &options.trust_overlay_file {
             Some(path) => TrustOverlay::load(path, &configured_peers)
                 .map_err(CompositionError::TrustOverlay)?,
