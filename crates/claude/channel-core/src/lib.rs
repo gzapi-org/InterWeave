@@ -26,5 +26,6 @@ pub use pull::{PullQueue, Take};
 pub use received_at::{MAX_RECEIVED_AT_MS, rfc3339_utc};
 pub use reply_token::{DuplicateToken, ReplyResolution, ReplyRoute, ReplyTokenTable};
 pub use tools::{
-    BROADCAST_ACCEPTED, ToolCall, ToolInputError, ToolName, direct_accepted, error_text, parse_call,
+    BROADCAST_ACCEPTED, Delivery, ToolCall, ToolInputError, ToolName, direct_accepted, error_text,
+    parse_call,
 };

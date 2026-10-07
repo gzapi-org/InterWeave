@@ -18,7 +18,7 @@
 //! `to_string` and is the one path a notification takes
 //! (`a_notification_keeps_metas_table_order_on_the_wire`).
 
-use interweave_claude_channel_core::{ChannelMeta, ChannelNotification, ToolName};
+use interweave_claude_channel_core::{ChannelMeta, ChannelNotification, Delivery, ToolName};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -106,13 +106,13 @@ pub fn error_line(id: &Value, code: i64, message: &str) -> String {
 }
 
 /// The answer to every method that is not a tool call, or `None` for
-/// `tools/call`, which the bridge answers itself.
+/// `tools/call`, which the bridge answers itself -- in `delivery`'s mode.
 #[must_use]
-pub fn protocol_answer(id: &Value, method: &str) -> Option<String> {
+pub fn protocol_answer(id: &Value, method: &str, delivery: Delivery) -> Option<String> {
     Some(match method {
-        "initialize" => result_line(id, &initialize_result()),
+        "initialize" => result_line(id, &initialize_result(delivery)),
         "ping" => result_line(id, &json!({})),
-        "tools/list" => result_line(id, &json!({"tools": tool_list()})),
+        "tools/list" => result_line(id, &json!({"tools": tool_list(delivery)})),
         "tools/call" => return None,
         // `server/discover` among them: the probe for the newer revision
         // is "method not found", which is what keeps the host in this era.
@@ -120,13 +120,16 @@ pub fn protocol_answer(id: &Value, method: &str) -> Option<String> {
     })
 }
 
-fn initialize_result() -> Value {
+/// `claude/channel` only in push mode: a pull host is told nothing it
+/// would take as a promise of pushes.
+fn initialize_result(delivery: Delivery) -> Value {
+    let capabilities = match delivery {
+        Delivery::Push => json!({"experimental": {"claude/channel": {}}, "tools": {}}),
+        Delivery::Pull => json!({"tools": {}}),
+    };
     json!({
         "protocolVersion": PROTOCOL_VERSION,
-        "capabilities": {
-            "experimental": {"claude/channel": {}},
-            "tools": {}
-        },
+        "capabilities": capabilities,
         "serverInfo": {"name": "interweave", "version": env!("CARGO_PKG_VERSION")},
         "instructions": INSTRUCTIONS
     })
@@ -141,13 +144,16 @@ pub fn tool_result_line(id: &Value, text: &str, is_error: bool) -> String {
     )
 }
 
-/// The seven tools as `tools/list` describes them. `additionalProperties`
-/// is false on each: the bridge refuses an unknown argument, a
-/// `source_endpoint` above all (`TOOL-SURFACE.md` §Bridge endpoint).
+/// `delivery`'s tools as `tools/list` describes them: the seven, and in
+/// pull mode `receive`. `additionalProperties` is false on each: the
+/// bridge refuses an unknown argument, a `source_endpoint` above all
+/// (`TOOL-SURFACE.md` §Bridge endpoint).
 #[must_use]
-pub fn tool_list() -> Vec<Value> {
-    ToolName::ALL
-        .into_iter()
+pub fn tool_list(delivery: Delivery) -> Vec<Value> {
+    delivery
+        .tools()
+        .iter()
+        .copied()
         .map(|tool| {
             let (description, properties, required): (&str, Value, &[&str]) = match tool {
                 ToolName::Broadcast => (
@@ -183,6 +189,11 @@ pub fn tool_list() -> Vec<Value> {
                 ToolName::Status => (
                     "The bridge's lease, its joined channels and the transport's health.",
                     json!({}),
+                    &[],
+                ),
+                ToolName::Receive => (
+                    "Take the messages waiting for this session, oldest first: each with its kind (direct or broadcast), content and meta. Never waits. dropped counts messages lost since the last receive because the queue was full; call again while remaining is not zero.",
+                    json!({"max": {"type": "integer", "minimum": 0, "description": "the most to take; a larger ask is clamped to the queue's bound"}}),
                     &[],
                 ),
             };
@@ -246,18 +257,20 @@ mod tests {
     #[test]
     fn discover_is_method_not_found_and_initialize_is_2025_11_25() {
         let id = json!(1);
-        let discover: Value =
-            serde_json::from_str(&protocol_answer(&id, "server/discover").expect("answered"))
-                .expect("json");
+        let discover: Value = serde_json::from_str(
+            &protocol_answer(&id, "server/discover", Delivery::Push).expect("answered"),
+        )
+        .expect("json");
         assert_eq!(discover["error"]["code"], json!(METHOD_NOT_FOUND));
         let Incoming::Request { method, .. } = parse_line(
             r#"{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2026-07-28"}}"#,
         ) else {
             panic!("a request")
         };
-        let init: Value =
-            serde_json::from_str(&protocol_answer(&json!(2), &method).expect("answered"))
-                .expect("json");
+        let init: Value = serde_json::from_str(
+            &protocol_answer(&json!(2), &method, Delivery::Push).expect("answered"),
+        )
+        .expect("json");
         assert_eq!(init["result"]["protocolVersion"], json!("2025-11-25"));
         assert_eq!(
             init["result"]["capabilities"]["experimental"]["claude/channel"],
@@ -272,7 +285,7 @@ mod tests {
 
     #[test]
     fn tools_list_is_the_seven_closed_tools() {
-        let tools = tool_list();
+        let tools = tool_list(Delivery::Push);
         let names: Vec<_> = tools
             .iter()
             .map(|t| t["name"].as_str().expect("a name").to_owned())
@@ -347,10 +360,14 @@ mod tests {
 
     #[test]
     fn an_unknown_method_is_method_not_found_and_a_tool_call_is_the_bridges() {
-        let unknown: Value =
-            serde_json::from_str(&protocol_answer(&json!(9), "resources/list").expect("answered"))
-                .expect("json");
+        let unknown: Value = serde_json::from_str(
+            &protocol_answer(&json!(9), "resources/list", Delivery::Push).expect("answered"),
+        )
+        .expect("json");
         assert_eq!(unknown["error"]["code"], json!(METHOD_NOT_FOUND));
-        assert_eq!(protocol_answer(&json!(9), "tools/call"), None);
+        assert_eq!(
+            protocol_answer(&json!(9), "tools/call", Delivery::Push),
+            None
+        );
     }
 }

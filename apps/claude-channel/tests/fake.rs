@@ -222,10 +222,20 @@ struct World {
     host_in: DuplexStream,
     host_out: Lines<BufReader<DuplexStream>>,
     next_id: u64,
+    /// Pull mode: a push notification on the host's pipe fails the test.
+    pull: bool,
 }
 
 impl World {
     async fn start() -> Self {
+        Self::start_in(interweave_claude_channel_core::Delivery::Push).await
+    }
+
+    async fn start_pull() -> Self {
+        Self::start_in(interweave_claude_channel_core::Delivery::Pull).await
+    }
+
+    async fn start_in(delivery: interweave_claude_channel_core::Delivery) -> Self {
         let (a, b) = FakeNetwork::pair(config(), config());
         let record = Arc::new(Record::default());
         let binding = Recorded {
@@ -247,6 +257,7 @@ impl World {
         let config = Config {
             endpoint: endpoint("claude"),
             desired_channels: Ok(vec![general()]),
+            delivery,
         };
         tokio::spawn(serve(
             binding,
@@ -274,6 +285,7 @@ impl World {
             host_in,
             host_out: BufReader::new(host_out).lines(),
             next_id: 0,
+            pull: delivery == interweave_claude_channel_core::Delivery::Pull,
         };
         world.wait_connected().await;
         world
@@ -305,6 +317,7 @@ impl World {
                 answer.get("method").is_some(),
                 "only notifications between: {answer}"
             );
+            assert!(!self.pull, "pull mode pushes nothing: {answer}");
         }
     }
 
@@ -340,6 +353,26 @@ impl World {
             if line["method"] == json!("notifications/claude/channel") {
                 return line["params"].clone();
             }
+        }
+    }
+
+    /// `receive(max)`'s structured answer.
+    async fn receive(&mut self, max: Option<u64>) -> Value {
+        let arguments = max.map_or_else(|| json!({}), |max| json!({"max": max}));
+        let (text, error) = self.tool("receive", arguments).await;
+        assert!(!error, "{text}");
+        serde_json::from_str(&text).expect("receive is JSON")
+    }
+
+    /// Wait until the pull queue holds `depth`.
+    async fn wait_depth(&mut self, depth: u64) {
+        let deadline = tokio::time::Instant::now() + PATIENCE;
+        while self.status().await["pull_queue"]["depth"] != json!(depth) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "never reached {depth}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
 
@@ -715,6 +748,7 @@ async fn an_endpoint_conflict_is_reported_as_itself() {
     let config = Config {
         endpoint: endpoint("claude"),
         desired_channels: Ok(Vec::new()),
+        delivery: interweave_claude_channel_core::Delivery::Push,
     };
     tokio::spawn(serve(
         binding,
@@ -899,4 +933,105 @@ async fn the_backoff_starts_over_after_a_session_that_lasted() {
         "the first retry after a lasting session is the first delay, not {:?}",
         next - ended_at
     );
+}
+
+/// Each mode's surface: push advertises `claude/channel` and the seven
+/// tools; pull advertises no channel extension and adds `receive`, so a
+/// session never has two ways of taking a message (architect-cto's ruling,
+/// relay seq 18691).
+#[tokio::test]
+async fn each_mode_advertises_its_own_way_of_taking_a_message() {
+    for (pull, tools, channel) in [(false, 7, true), (true, 8, false)] {
+        let mut w = if pull {
+            World::start_pull().await
+        } else {
+            World::start().await
+        };
+        let init = w.request("initialize", json!({})).await;
+        assert_eq!(
+            init["result"]["capabilities"]["experimental"]
+                .get("claude/channel")
+                .is_some(),
+            channel,
+            "pull={pull}: {init}"
+        );
+        let list = w.request("tools/list", json!({})).await;
+        let names: Vec<&str> = list["result"]["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .map(|t| t["name"].as_str().expect("a name"))
+            .collect();
+        assert_eq!(names.len(), tools, "pull={pull}: {names:?}");
+        assert_eq!(names.contains(&"receive"), pull, "{names:?}");
+        if !pull {
+            // Push mode has no `receive`: an unknown tool, as MCP answers.
+            let answer = w
+                .request("tools/call", json!({"name": "receive", "arguments": {}}))
+                .await;
+            assert_eq!(answer["error"]["code"], json!(-32602), "{answer}");
+        }
+    }
+}
+
+/// Pull mode: an inbound direct is queued, never pushed, and `receive`
+/// returns it with the content and meta the push would carry; its
+/// `reply_token` answers on its route. The second `receive` is empty.
+#[tokio::test]
+async fn a_pulled_direct_carries_the_pushs_content_and_meta_and_is_replied_to() {
+    let mut w = World::start_pull().await;
+    w.peer_sends("hello pull").await;
+    w.wait_depth(1).await;
+    let received = w.receive(None).await;
+    assert_eq!(received["dropped"], json!(0));
+    assert_eq!(received["remaining"], json!(0));
+    let event = &received["events"][0];
+    assert_eq!(event["kind"], json!("direct"));
+    assert_eq!(event["content"], json!("hello pull"));
+    assert_eq!(event["meta"]["delivery_mode"], json!("direct"));
+    assert_eq!(event["meta"]["source_peer"], json!(w.b.peer().as_str()));
+    assert_eq!(event["meta"]["destination_endpoint"], json!("claude"));
+    let token = event["meta"]["reply_token"]
+        .as_str()
+        .expect("a token")
+        .to_owned();
+    let (text, error) = w
+        .tool("reply", json!({"reply_token": token, "content": "back"}))
+        .await;
+    assert!(!error, "{text}");
+    assert_eq!(w.receive(None).await["events"], json!([]), "taken once");
+}
+
+/// Past the queue's bound (the session's granted event queue, 16 here)
+/// the oldest messages are dropped and counted -- once in the next
+/// `receive`, and in `status`'s total -- and the newest are kept. A
+/// `max` is clamped, never refused, and `remaining` says what is left.
+#[tokio::test]
+async fn the_pull_queue_drops_the_oldest_past_its_bound_and_counts_them() {
+    let mut w = World::start_pull().await;
+    for i in 0..18 {
+        w.peer_sends(&format!("m{i:02}")).await;
+        // Drained as it comes, as a session must be.
+        w.wait_depth(u64::try_from(i + 1).expect("small").min(16))
+            .await;
+    }
+    let status = w.status().await;
+    assert_eq!(status["pull_queue"]["dropped_total"], json!(2), "{status}");
+    let first = w.receive(Some(10)).await;
+    assert_eq!(first["dropped"], json!(2));
+    assert_eq!(first["remaining"], json!(6));
+    assert_eq!(
+        first["events"][0]["content"],
+        json!("m02"),
+        "the two oldest went"
+    );
+    let rest = w.receive(Some(1_000)).await;
+    assert_eq!(rest["dropped"], json!(0), "counted once");
+    assert_eq!(
+        rest["events"].as_array().map(Vec::len),
+        Some(6),
+        "clamped, not refused"
+    );
+    assert_eq!(rest["remaining"], json!(0));
+    assert_eq!(rest["events"][5]["content"], json!("m17"));
 }

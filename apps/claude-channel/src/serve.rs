@@ -36,8 +36,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use interweave_claude_channel_core::{
-    BROADCAST_ACCEPTED, BridgeState, ReplyRoute, ToolCall, ToolName, direct_accepted, error_text,
-    parse_call,
+    BROADCAST_ACCEPTED, BridgeState, ChannelMeta, ChannelNotification, Delivery, PullQueue,
+    ReplyRoute, ToolCall, direct_accepted, error_text, parse_call,
 };
 use interweave_local_client_api::{
     DataCapability, DataSessionBinding, DataSessionPort, LocalSessionEvent, SessionEvent,
@@ -47,6 +47,7 @@ use interweave_transport_api::{
     BroadcastMessageV1, ChannelId, ConnectivitySummary, DirectDestination, EndpointId, Health,
     MessageId, TransportError, TransportIdentity,
 };
+use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::time::Instant;
@@ -81,6 +82,35 @@ pub struct Config {
     /// from being read -- unknown, never an empty list (TOOL-SURFACE.md
     /// §Status visibility).
     pub desired_channels: Result<Vec<ChannelId>, String>,
+    /// How inbound messages reach the host (`--delivery`, required):
+    /// pushed as `notifications/claude/channel`, or queued for `receive`.
+    pub delivery: Delivery,
+}
+
+/// One message waiting in the pull queue: what the push would have
+/// carried, and whether it was direct or broadcast.
+#[derive(Debug)]
+struct Pulled {
+    kind: &'static str,
+    notification: ChannelNotification,
+}
+
+/// `receive`'s answer: the events oldest first, the drops since the last
+/// `receive`, and what remains (architect-cto's ruling, relay seq 18691).
+/// Written by `serde` straight to text, so each `meta` keeps the
+/// contract's table order, as the push does.
+#[derive(Serialize)]
+struct Received<'a> {
+    events: Vec<ReceivedEvent<'a>>,
+    dropped: u64,
+    remaining: usize,
+}
+
+#[derive(Serialize)]
+struct ReceivedEvent<'a> {
+    kind: &'static str,
+    content: &'a str,
+    meta: &'a ChannelMeta,
 }
 
 /// The bridge's clock and entropy: the caller's, so a test runs on its
@@ -133,6 +163,10 @@ struct Bridge<B: DataSessionBinding> {
     /// is not retried at the first delay forever.
     opened_at: Instant,
     health: Option<(Health, Option<ConnectivitySummary>)>,
+    /// Pull mode's queue, made at the first session with its granted
+    /// event queue as the bound, and kept across reconnects so what the
+    /// host has not taken survives the daemon going away.
+    pull: Option<PullQueue<Pulled>>,
 }
 
 /// Serve the host on `input` and `output` until `input` ends.
@@ -165,6 +199,7 @@ where
         reconnect_at: Instant::now(),
         opened_at: Instant::now(),
         health: None,
+        pull: None,
     };
     let mut lines = input.lines();
     loop {
@@ -212,6 +247,8 @@ struct Emit<'a, W> {
     env: &'a mut Env,
     health: &'a mut Option<(Health, Option<ConnectivitySummary>)>,
     out: &'a mut W,
+    /// In pull mode, where each message goes instead of a push line.
+    pull: Option<&'a mut PullQueue<Pulled>>,
 }
 
 impl<W: AsyncWrite + Unpin> Emit<'_, W> {
@@ -230,6 +267,16 @@ impl<W: AsyncWrite + Unpin> Emit<'_, W> {
             }
             let entropy = (self.env.entropy)();
             match self.state.notification(event, entropy, (self.env.now_ms)()) {
+                // Pull mode: queued, never pushed -- one mode per process.
+                Ok(Some(notification)) if self.pull.is_some() => {
+                    let kind = match event {
+                        SessionEvent::Broadcast(_) => "broadcast",
+                        _ => "direct",
+                    };
+                    if let Some(queue) = self.pull.as_deref_mut() {
+                        queue.push(Pulled { kind, notification }, false);
+                    }
+                }
                 Ok(Some(n)) => match notification_line(&n) {
                     Ok(line) => write_line(self.out, &line).await?,
                     Err(e) => eprintln!("claude-channel: a notification did not serialize: {e}"),
@@ -320,6 +367,9 @@ impl<B: DataSessionBinding> Bridge<B> {
             }
         };
         self.local_peer = Some(session.session().local_peer().clone());
+        if self.config.delivery == Delivery::Pull && self.pull.is_none() {
+            self.pull = Some(PullQueue::new(session.session().event_queue()));
+        }
         if let Some(lease) = session.session().endpoint_lease() {
             self.state
                 .leased(lease.endpoint.clone(), lease.epoch.clone());
@@ -330,6 +380,7 @@ impl<B: DataSessionBinding> Bridge<B> {
             env,
             health,
             rejoin_refused,
+            pull,
             ..
         } = self;
         let mut emit = Emit {
@@ -337,6 +388,7 @@ impl<B: DataSessionBinding> Bridge<B> {
             env,
             health,
             out,
+            pull: pull.as_mut(),
         };
         let mut died = false;
         for channel in joined {
@@ -389,13 +441,18 @@ impl<B: DataSessionBinding> Bridge<B> {
             return Ok(());
         };
         let Self {
-            state, env, health, ..
+            state,
+            env,
+            health,
+            pull,
+            ..
         } = self;
         Emit {
             state,
             env,
             health,
             out,
+            pull: pull.as_mut(),
         }
         .events(events)
         .await
@@ -408,10 +465,12 @@ impl<B: DataSessionBinding> Bridge<B> {
         out: &mut W,
     ) -> std::io::Result<Option<String>> {
         Ok(match parse_line(line) {
-            Incoming::Request { id, method, params } => match protocol_answer(&id, &method) {
-                Some(answer) => Some(answer),
-                None => Some(self.tool_call(&id, params, out).await?),
-            },
+            Incoming::Request { id, method, params } => {
+                match protocol_answer(&id, &method, self.config.delivery) {
+                    Some(answer) => Some(answer),
+                    None => Some(self.tool_call(&id, params, out).await?),
+                }
+            }
             Incoming::Notification { .. } | Incoming::Malformed => None,
         })
     }
@@ -426,7 +485,7 @@ impl<B: DataSessionBinding> Bridge<B> {
         let Some(tool) = params
             .get("name")
             .and_then(Value::as_str)
-            .and_then(ToolName::parse)
+            .and_then(|name| self.config.delivery.tool(name))
         else {
             // The method exists; the tool named does not: invalid params,
             // as MCP's tools/call answers an unknown tool.
@@ -465,6 +524,9 @@ impl<B: DataSessionBinding> Bridge<B> {
         let call = match call {
             ToolCall::Identity => return Ok(Ok(self.identity())),
             ToolCall::Status => return Ok(Ok(self.status())),
+            // From the queue, with or without a session: what was taken
+            // before the daemon went away is still the host's.
+            ToolCall::Receive { max } => return Ok(Ok(self.receive(max))),
             ToolCall::Reply {
                 reply_token,
                 payload,
@@ -491,6 +553,7 @@ impl<B: DataSessionBinding> Bridge<B> {
             env,
             health,
             rejoin_refused,
+            pull,
             ..
         } = self;
         let Some(session) = session.as_ref() else {
@@ -506,6 +569,7 @@ impl<B: DataSessionBinding> Bridge<B> {
             env,
             health,
             out,
+            pull: pull.as_mut(),
         };
         Ok(match call {
             ToolCall::Join(channel) => {
@@ -555,10 +619,45 @@ impl<B: DataSessionBinding> Bridge<B> {
             )
             .await?
             .map(|accepted| direct_accepted(&accepted)),
-            ToolCall::Identity | ToolCall::Status | ToolCall::Reply { .. } => {
+            ToolCall::Identity
+            | ToolCall::Status
+            | ToolCall::Reply { .. }
+            | ToolCall::Receive { .. } => {
                 unreachable!("answered above")
             }
         })
+    }
+
+    /// `receive(max)`: at most `max` messages from the queue, `max`
+    /// clamped to its bound, never refused; none queued yet -- no session
+    /// has opened -- is an empty answer.
+    fn receive(&mut self, max: Option<u64>) -> String {
+        let take = match self.pull.as_mut() {
+            Some(queue) => {
+                let bound = queue.bound();
+                let max = max.map_or(bound, |m| usize::try_from(m).unwrap_or(usize::MAX));
+                queue.take(max)
+            }
+            None => interweave_claude_channel_core::Take {
+                items: Vec::new(),
+                dropped: 0,
+                remaining: 0,
+            },
+        };
+        let received = Received {
+            events: take
+                .items
+                .iter()
+                .map(|pulled| ReceivedEvent {
+                    kind: pulled.kind,
+                    content: &pulled.notification.content,
+                    meta: &pulled.notification.meta,
+                })
+                .collect(),
+            dropped: take.dropped,
+            remaining: take.remaining,
+        };
+        serde_json::to_string(&received).unwrap_or_default()
     }
 
     fn identity(&self) -> String {
@@ -603,7 +702,7 @@ impl<B: DataSessionBinding> Bridge<B> {
             ),
             None => (Value::Null, Value::Null),
         };
-        json!({
+        let mut status = json!({
             "local_peer_id": self.local_peer.as_ref().map(TransportIdentity::as_str),
             "local_endpoint": self.config.endpoint.as_str(),
             "endpoint_lease_state": lease_state,
@@ -615,8 +714,15 @@ impl<B: DataSessionBinding> Bridge<B> {
             "connectivity": connectivity,
             "last_connect_error": self.last_open_error.map(|e| format!("{e:?}")),
             "reply_tokens": self.state.live_tokens(now),
-        })
-        .to_string()
+        });
+        // Pull mode: what waits for `receive`, and what was dropped.
+        if self.config.delivery == Delivery::Pull {
+            status["pull_queue"] = json!({
+                "depth": self.pull.as_ref().map_or(0, PullQueue::depth),
+                "dropped_total": self.pull.as_ref().map_or(0, PullQueue::dropped_total),
+            });
+        }
+        status.to_string()
     }
 }
 

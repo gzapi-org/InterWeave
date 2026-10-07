@@ -86,7 +86,14 @@ impl Bridge {
             "claude-channel",
             "interweave-claude-channel",
         ))
-        .args(["--profile", home.paths.profile(), "--endpoint", "claude"])
+        .args([
+            "--profile",
+            home.paths.profile(),
+            "--endpoint",
+            "claude",
+            "--delivery",
+            "push",
+        ])
         .env_clear()
         .env("XDG_CONFIG_HOME", env(&home.roots.config_home))
         .env("XDG_DATA_HOME", env(&home.roots.data_home))
