@@ -22,6 +22,8 @@ import java.nio.file.Files;
  * Every byte is a TEST-ONLY label, no key material.</li>
  * <li>files: which of those paths exist, with sizes.</li>
  * <li>seed, transitions, census: the production human store in files/human/ (0700).</li>
+ * <li>redeliver: U1 (read, not kept) delivered again, and a new message C1 as the control.</li>
+ * <li>fill: a store of its own in files/human-full/ under a page quota, filled until it refuses.</li>
  * <li>die: this process SIGKILLs itself, standing in for a low-memory kill.</li>
  * </ul>
  */
@@ -92,6 +94,20 @@ public final class Cmd extends BroadcastReceiver {
             case "census":
                 Trace.result(c, "census", new String(Core.census(path(c)), StandardCharsets.UTF_8));
                 break;
+            case "redeliver":
+                Trace.result(c, "redeliver", new String(Core.redeliver(path(c)), StandardCharsets.UTF_8));
+                break;
+            case "fill": {
+                // A store of its own, so the quota run never touches the S1 store.
+                File dir = new File(c.getFilesDir(), "human-full");
+                if (!dir.isDirectory() && !dir.mkdirs()) {
+                    throw new IllegalStateException("cannot create " + dir);
+                }
+                Os.chmod(dir.getPath(), 0700);
+                byte[] p = new File(dir, "human.sqlite").getPath().getBytes(StandardCharsets.UTF_8);
+                Trace.result(c, "fill", new String(Core.fill(p), StandardCharsets.UTF_8));
+                break;
+            }
             case "die":
                 // L4's stand-in for a low-memory kill: the shell cannot signal
                 // another app's process, and lmkd's kill is a SIGKILL, which

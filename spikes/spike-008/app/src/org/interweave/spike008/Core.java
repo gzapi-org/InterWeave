@@ -15,4 +15,8 @@ final class Core {
     static native byte[] transitions(byte[] path);
 
     static native byte[] census(byte[] path);
+
+    static native byte[] redeliver(byte[] path);
+
+    static native byte[] fill(byte[] path);
 }

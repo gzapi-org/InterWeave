@@ -77,3 +77,21 @@ pub unsafe extern "system" fn Java_org_interweave_spike008_Core_census(
 ) -> jbyteArray {
     unsafe { run(env, path, store::census) }
 }
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_interweave_spike008_Core_redeliver(
+    env: *mut JNIEnv,
+    _: jclass,
+    path: jbyteArray,
+) -> jbyteArray {
+    unsafe { run(env, path, store::redeliver) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_interweave_spike008_Core_fill(
+    env: *mut JNIEnv,
+    _: jclass,
+    path: jbyteArray,
+) -> jbyteArray {
+    unsafe { run(env, path, store::fill) }
+}

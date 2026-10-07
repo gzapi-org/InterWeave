@@ -46,3 +46,28 @@ fn a_store_already_holding_rows_is_not_seeded_again() {
     );
     let _ = std::fs::remove_dir_all(db.parent().expect("dir"));
 }
+
+#[test]
+fn a_message_read_and_not_kept_is_not_unread_again_even_after_a_reopen() {
+    let db = scratch("again");
+    store::seed(&db).expect("seeds");
+    store::transitions(&db).expect("transitions");
+    assert_eq!(
+        store::redeliver(&db).expect("redelivers"),
+        "{\"u1_again\":\"AlreadyRead\",\"control_c1\":\"committed\"}"
+    );
+    let _ = std::fs::remove_dir_all(db.parent().expect("dir"));
+}
+
+#[test]
+fn a_full_store_degrades_and_refuses_unread_while_what_it_holds_stays_readable() {
+    let db = scratch("full");
+    let out = store::fill(&db).expect("fills");
+    assert!(out.contains("\"health\":\"Degraded\""), "{out}");
+    assert!(out.contains("\"then\":\"Degraded\""), "{out}");
+    assert!(
+        !out.contains("\"committed\":0,"),
+        "a quota too small to hold one message proves nothing: {out}"
+    );
+    let _ = std::fs::remove_dir_all(db.parent().expect("dir"));
+}

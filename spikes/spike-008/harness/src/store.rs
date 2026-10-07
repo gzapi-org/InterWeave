@@ -179,3 +179,86 @@ pub fn census(path: &Path) -> Result<String, String> {
         list(&eligible)
     ))
 }
+
+fn inbound(id: u8, label: &str, payload_len: usize) -> Result<NewInbound, String> {
+    let mut payload = label.as_bytes().to_vec();
+    payload.resize(payload_len.max(payload.len()), b'.');
+    Ok(NewInbound {
+        app_message_id: AppMessageId::parse(id_of(id)).map_err(|e| e.to_string())?,
+        origin: InboundOrigin {
+            peer: peer()?,
+            endpoint: None,
+            channel: None,
+        },
+        media_type: None,
+        payload,
+        received_at: 5_000,
+    })
+}
+
+fn id_of(n: u8) -> String {
+    id(n)
+}
+
+/// `RETENTION.md` §5's duplicate suppression (STATE.md `read_pairs`): `U1`,
+/// read and not kept by `transitions`, delivered again must not come back as
+/// unread; a message never seen before (`C1`) is the control and is
+/// committed. Run after `transitions`, and again after a restart.
+///
+/// # Errors
+/// Any store error other than the refusal being measured.
+pub fn redeliver(path: &Path) -> Result<String, String> {
+    let mut store = open(path)?;
+    let again = match store.commit_unread_inbound(&inbound(0x11, "U1", 0)?) {
+        Ok(_) => "committed".to_owned(),
+        Err(e) => format!("{e:?}"),
+    };
+    let control = match store.commit_unread_inbound(&inbound(0x31, "C1", 0)?) {
+        Ok(_) => "committed".to_owned(),
+        Err(e) => format!("{e:?}"),
+    };
+    Ok(format!(
+        "{{\"u1_again\":\"{again}\",\"control_c1\":\"{control}\"}}"
+    ))
+}
+
+/// `RETENTION.md` conformance 14: when storage cannot hold unread content
+/// the store degrades instead of claiming durability. A store of its own at
+/// `path`, opened with a page quota (`max_pages`, a real `SQLITE_FULL`),
+/// takes 8 KiB unread messages until it refuses one; then its health, a
+/// further commit, and whether what it holds is still readable.
+///
+/// # Errors
+/// Any error before the first commit is attempted.
+pub fn fill(path: &Path) -> Result<String, String> {
+    const PAGES: u32 = 48;
+    let mut store = HumanStore::open(
+        path,
+        StoreOptions {
+            max_pages: Some(PAGES),
+        },
+    )
+    .map_err(|e| format!("open: {e}"))?;
+    let mut committed = 0u32;
+    let mut first_error = String::from("none");
+    for n in 0..100u8 {
+        match store.commit_unread_inbound(&inbound(0x40 + n, &format!("F{n}"), 8 * 1024)?) {
+            Ok(_) => committed += 1,
+            Err(e) => {
+                first_error = format!("{e:?}");
+                break;
+            }
+        }
+    }
+    let health = format!("{:?}", store.health());
+    let after = match store.commit_unread_inbound(&inbound(0xf0, "after", 16)?) {
+        Ok(_) => "committed".to_owned(),
+        Err(e) => format!("{e:?}"),
+    };
+    let readable = store
+        .unread_inbound()
+        .map_or_else(|e| format!("{e:?}"), |v| v.len().to_string());
+    Ok(format!(
+        "{{\"max_pages\":{PAGES},\"committed\":{committed},\"first_error\":\"{first_error}\",\"health\":\"{health}\",\"then\":\"{after}\",\"readable_unread\":\"{readable}\"}}"
+    ))
+}
