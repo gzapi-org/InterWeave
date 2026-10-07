@@ -1716,3 +1716,50 @@ async fn a_pending_leave_the_session_ended_is_not_retaken() {
     assert_eq!(status["joined_channels"], json!([]), "{status}");
     assert_eq!(joins(&w), before, "not re-taken");
 }
+
+/// A refused re-join's row, then a host leave of that channel cancelled
+/// into pending whose re-issue the session's end interrupts: the next
+/// open folds the leave, and the leave clears the row (LIFECYCLE.md step
+/// 6: a row "until the next join or leave"). The row standing until the
+/// fold is the control.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pending_leave_folded_at_open_clears_the_refusal() {
+    let mut w = World::start_pull().await;
+    let (text, error) = w.tool("join", json!({"channel": "general"})).await;
+    assert!(!error, "{text}");
+    w.record.down.store(true, Ordering::SeqCst);
+    wait_unavailable(&mut w).await;
+    w.record.refuse_join.store(true, Ordering::SeqCst);
+    w.record.down.store(false, Ordering::SeqCst);
+    w.wait_connected().await;
+    let refused = json!([{"channel": "general", "error": "Overloaded"}]);
+    assert_eq!(w.status().await["rejoin_refused"], refused);
+    w.record.refuse_join.store(false, Ordering::SeqCst);
+
+    w.record.hold_leave.store(true, Ordering::SeqCst);
+    let answer =
+        in_flight_as_the_queue_fills(&mut w, "leave", json!({"channel": "general"}), "leave").await;
+    assert_eq!(answer["result"]["isError"], json!(true), "{answer}");
+    w.record.hold_leave.store(false, Ordering::SeqCst);
+    w.record.die_on_leave.store(true, Ordering::SeqCst);
+    w.receive(None).await;
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while w.record.die_on_leave.load(Ordering::SeqCst) {
+        assert!(tokio::time::Instant::now() < deadline, "never re-issued");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    wait_unavailable(&mut w).await;
+    let status = w.status().await;
+    assert_eq!(
+        status["pull_queue"]["pending"],
+        json!([{"channel": "general", "op": "leave"}]),
+        "{status}"
+    );
+    assert_eq!(status["rejoin_refused"], refused, "standing until the fold");
+    w.record.down.store(false, Ordering::SeqCst);
+    w.wait_connected().await;
+    let status = w.status().await;
+    assert_eq!(status["pull_queue"]["pending"], json!([]), "{status}");
+    assert_eq!(status["joined_channels"], json!([]), "{status}");
+    assert_eq!(status["rejoin_refused"], json!([]), "cleared by the leave");
+}
