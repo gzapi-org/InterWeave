@@ -330,9 +330,10 @@ self-authorised, never an allowlist entry — is the first page's
 `local_peer`, absent on later pages and when the policy has none bound.
 A page because the allowlist holds up to
 `PeerTrustPolicy::MAX_ALLOWED_PEERS` (4096) peers, about 420 KB as
-2.3 rows (a row is up to 103 bytes with `source`; 84 bytes as the 2.1
-row), against this protocol's 128 KiB body; a page of 1024 is about
-103 KiB, so a full allowlist is four requests
+2.3 rows (a row with a 52-character peer id is 104 bytes with `source`,
+105 with its array comma; 81 bytes as the 2.1 row, 82 with the comma),
+against this protocol's 128 KiB body; a page of 1024 is about
+105 KiB, so a full allowlist is four requests
 (`a_full_trust_page_of_the_largest_rows_fits_the_body` pins the page). Every peer not listed is
 denied (deny-by-default is the policy's shape, not a setting; there is
 no default to report and no `TrustDecision` on the wire — that enum and
@@ -475,7 +476,8 @@ supported minor below the new one; first use `ipc/trust-list` 1.1.0 behind
 2.3.
 The first production build spoke 2.0; Stage 15's R1 batch, which
 brought `peer.path_changed`, spoke 2.1, and R2 added `admin.trust.*` to
-it; `admin.peers.list` brought 2.2 (A 2026-10-06).
+it; `admin.peers.list` brought 2.2 (A 2026-10-06); the persisted trust
+row brought 2.3 (A 2026-10-07, #215).
 
 Phases and directions, which JSON Schema cannot express and
 `tests/ipc-v2` asserts: `hello` is the client's first frame and only its
