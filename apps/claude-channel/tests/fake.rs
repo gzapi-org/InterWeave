@@ -10,7 +10,7 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -85,6 +85,11 @@ struct Record {
     hold_send: AtomicBool,
     /// Joins never answer, recorded `join cancelled` the same way.
     hold_join: AtomicBool,
+    /// `ready` does not resolve, so events gather at the daemon until it
+    /// is lifted and the bridge sees them all at once.
+    hold_ready: AtomicBool,
+    /// How many times the bridge has asked `ready`.
+    readies: AtomicU64,
 }
 
 /// Records `<call> cancelled` when a held call is dropped unanswered.
@@ -211,10 +216,15 @@ impl DataSessionPort for RecordedSession {
         self.inner.events(max).await
     }
     async fn ready(&self) -> Result<(), TransportError> {
+        self.record.readies.fetch_add(1, Ordering::SeqCst);
         // Polled: a daemon taken away is seen within a tick, as a real
         // connection's end would be.
         loop {
             self.record.down()?;
+            if self.record.hold_ready.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                continue;
+            }
             if self.record.accept_and_close.load(Ordering::SeqCst) {
                 return Err(TransportError::BackendUnavailable);
             }
@@ -1062,6 +1072,15 @@ async fn the_pull_queue_pauses_when_full_and_drops_nothing() {
     let (text, error) = w.tool("join", json!({"channel": "general"})).await;
     assert!(error, "refused while paused");
     assert_eq!(text, "the pull queue is full: call receive first");
+    // Paused with two held at the daemon, the bridge does not ask the
+    // session again: a loop that did would spin on events it cannot take.
+    let readies = w.record.readies.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        w.record.readies.load(Ordering::SeqCst),
+        readies,
+        "no wake while paused"
+    );
     let one = w.receive(Some(1)).await;
     assert_eq!(one["events"][0]["content"], json!("m00"), "nothing dropped");
     assert_eq!(one["paused"], json!(false), "a take lifts the pause");
@@ -1115,6 +1134,7 @@ async fn a_call_in_flight_when_the_queue_fills_is_cancelled() {
     let mut w = World::start_pull().await;
     fill(&mut w, 15).await;
     w.record.hold_send.store(true, Ordering::SeqCst);
+    w.record.hold_ready.store(true, Ordering::SeqCst);
     w.next_id += 1;
     let id = w.next_id;
     let b = w.b.peer().as_str().to_owned();
@@ -1129,8 +1149,11 @@ async fn a_call_in_flight_when_the_queue_fills_is_cancelled() {
         assert!(tokio::time::Instant::now() < deadline, "never sent");
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    // The sixteenth fills the queue while the send is in flight.
+    // Two gather at the daemon while the send is in flight; the drain
+    // takes the one there is room for, which fills the queue.
     w.peer_sends("last").await;
+    w.peer_sends("after").await;
+    w.record.hold_ready.store(false, Ordering::SeqCst);
     let answer = w.line().await;
     assert_eq!(answer["id"], json!(id), "{answer}");
     assert_eq!(answer["result"]["isError"], json!(true), "{answer}");
@@ -1148,7 +1171,16 @@ async fn a_call_in_flight_when_the_queue_fills_is_cancelled() {
     );
     assert_eq!(w.status().await["pull_queue"]["depth"], json!(16));
     w.record.hold_send.store(false, Ordering::SeqCst);
-    w.receive(None).await;
+    assert_eq!(
+        w.receive(None).await["events"][15]["content"],
+        json!("last")
+    );
+    w.wait_depth(1).await;
+    assert_eq!(
+        w.receive(None).await["events"][0]["content"],
+        json!("after"),
+        "the one there was no room for stayed at the daemon"
+    );
     let (text, error) = w.tool("send", json!({"peer": b, "content": "x"})).await;
     assert!(!error, "the control: {text}");
 }
