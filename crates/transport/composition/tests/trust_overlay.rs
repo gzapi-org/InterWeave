@@ -373,6 +373,115 @@ async fn an_allow_whose_write_lands_and_then_fails_is_put_back() {
     }
 }
 
+/// A set left ahead of the runtime takes effect at the next start
+/// whatever sets follow it (ADR-0028 A 2026-10-07, f290e85c; #215 review
+/// F3): an ahead revocation survives a later allow of another peer, and
+/// after an ahead allow, a revocation of that peer -- which the runtime,
+/// never having allowed it, sees as no change -- reaches the file before
+/// it is answered `ok`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_set_left_ahead_takes_effect_whatever_sets_follow() {
+    use interweave_profile_config::trust_overlay::TrustOverlay;
+    use interweave_transport_composition::OverlayFault::{AfterRename, BeforeRename};
+
+    let (identity, _) = id();
+    let (_, kept) = id();
+    let (_, revoked) = id();
+    let (_, other) = id();
+    let configured = profile(&[&kept, &revoked], &[]);
+    let peers = |path: &Path| {
+        TrustOverlay::load(path, &configured.trust.allowed_peers)
+            .expect("loads")
+            .1
+    };
+
+    // An ahead revocation, then an allow of another peer.
+    let (_dir, path) = state();
+    let runtime = ComposedRuntime::start(&identity, &configured, options(Some(&path)))
+        .await
+        .expect("composes");
+    runtime
+        .fail_overlay_writes(vec![AfterRename, BeforeRename])
+        .await
+        .expect("queued");
+    assert_eq!(
+        set(&runtime, &revoked, false).await,
+        Err(TransportError::Internal),
+        "left ahead"
+    );
+    assert!(
+        trust(&runtime).await.peers().any(|p| p == &revoked),
+        "not published"
+    );
+    set(&runtime, &other, true).await.expect("a later set");
+    runtime.stop().await.expect("stops");
+    let next = peers(&path);
+    assert!(!next.contains(&revoked), "the ahead revocation is in force");
+    assert!(next.contains(&other) && next.contains(&kept), "{next:?}");
+
+    // An ahead allow, then a revocation of the same peer.
+    let (_dir, path) = state();
+    let runtime = ComposedRuntime::start(&identity, &configured, options(Some(&path)))
+        .await
+        .expect("composes");
+    runtime
+        .fail_overlay_writes(vec![AfterRename, BeforeRename])
+        .await
+        .expect("queued");
+    assert_eq!(
+        set(&runtime, &other, true).await,
+        Err(TransportError::Internal),
+        "left ahead"
+    );
+    assert!(peers(&path).contains(&other), "ahead on disk");
+    set(&runtime, &other, false).await.expect("answered ok");
+    runtime.stop().await.expect("stops");
+    assert!(
+        !peers(&path).contains(&other),
+        "a revocation answered ok survives the restart"
+    );
+}
+
+/// A failed publish restores the previous overlay: answered
+/// `BackendUnavailable`, nothing published, the next start loads the
+/// previous lists, audited `failed`. The same set once the publish works
+/// is the control.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_publish_restores_the_previous_overlay() {
+    use interweave_profile_config::trust_overlay::TrustOverlay;
+
+    let _ = logged();
+    let (identity, _) = id();
+    let (_, stranger) = id();
+    let configured = profile(&[], &[]);
+    let (_dir, path) = state();
+    let runtime = ComposedRuntime::start(&identity, &configured, options(Some(&path)))
+        .await
+        .expect("composes");
+    runtime.fail_publishes(1).await.expect("queued");
+    assert_eq!(
+        set(&runtime, &stranger, true).await,
+        Err(TransportError::BackendUnavailable)
+    );
+    assert!(!trust(&runtime).await.peers().any(|p| p == &stranger));
+    let on_disk = |path: &Path| {
+        TrustOverlay::load(path, &configured.trust.allowed_peers)
+            .expect("loads")
+            .1
+    };
+    assert!(!on_disk(&path).contains(&stranger), "restored");
+
+    set(&runtime, &stranger, true).await.expect("the control");
+    assert!(on_disk(&path).contains(&stranger));
+    runtime.stop().await.expect("stops");
+
+    let text = logged();
+    let audit = audit_of(&text, &stranger);
+    assert_eq!(audit.len(), 2, "{text}");
+    assert!(audit[0].contains("outcome=\"failed\""), "{}", audit[0]);
+    assert!(audit[1].contains("outcome=\"changed\""), "{}", audit[1]);
+}
+
 /// Everything the runtimes in this binary have logged so far. ONE
 /// subscriber for the whole binary, installed globally once: per-test
 /// scoped subscribers on two threads raced on tracing's callsite interest

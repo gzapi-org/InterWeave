@@ -161,6 +161,10 @@ pub(crate) enum Request {
     /// The failures the next trust overlay writes meet. Test builds only.
     #[cfg(feature = "test-hooks")]
     FailOverlayWrites(Vec<OverlayFault>, oneshot::Sender<()>),
+    /// The next trust publishes fail as if the substrate were gone. Test
+    /// builds only.
+    #[cfg(feature = "test-hooks")]
+    FailPublishes(usize, oneshot::Sender<()>),
 }
 
 /// A failure a test makes the next trust overlay write meet, on either
@@ -396,6 +400,8 @@ impl ComposedRuntime {
             overlay_file: options.trust_overlay_file.clone(),
             #[cfg(feature = "test-hooks")]
             overlay_faults: std::collections::VecDeque::new(),
+            #[cfg(feature = "test-hooks")]
+            publish_faults: 0,
             outcomes: LastOutcomes::default(),
             refusals: ReconnectRefusals::default(),
         };
@@ -515,6 +521,17 @@ impl ComposedRuntime {
             .await
     }
 
+    /// Make the next `count` trust publishes fail as if the substrate
+    /// were gone, after their overlay was written: how a test reaches the
+    /// restore after a failed publish. TEST BUILDS ONLY.
+    ///
+    /// # Errors
+    /// `BackendUnavailable` once the runtime has stopped.
+    #[cfg(feature = "test-hooks")]
+    pub async fn fail_publishes(&self, count: usize) -> Result<(), TransportError> {
+        self.ask(|reply| Request::FailPublishes(count, reply)).await
+    }
+
     /// Make the next trust overlay writes meet `faults`, one each, in
     /// order: how a test reaches a write that fails after its rename,
     /// which no permission can produce. TEST BUILDS ONLY.
@@ -597,6 +614,10 @@ struct Driver {
     /// The failures the next overlay writes meet, in order (test builds).
     #[cfg(feature = "test-hooks")]
     overlay_faults: std::collections::VecDeque<OverlayFault>,
+    /// How many of the next publishes fail as if the substrate were gone
+    /// (test builds).
+    #[cfg(feature = "test-hooks")]
+    publish_faults: usize,
     /// Each allowlisted peer's last dial outcome (`CONNECTIVITY.md` §19).
     outcomes: LastOutcomes,
     /// Each allowlisted peer's last reconnect refusal, logged on change.
@@ -937,7 +958,28 @@ impl Driver {
                 self.overlay_faults = faults.into();
                 let _ = reply.send(());
             }
+            #[cfg(feature = "test-hooks")]
+            Request::FailPublishes(count, reply) => {
+                self.publish_faults = count;
+                let _ = reply.send(());
+            }
         }
+    }
+
+    /// Publish `next` to the substrate: whether it changed, or
+    /// `BackendUnavailable` -- or, test builds only, the failure a test
+    /// queued for the next publish.
+    async fn publish(&mut self, next: PeerTrustPolicy) -> Result<bool, TransportError> {
+        #[cfg(feature = "test-hooks")]
+        if self.publish_faults > 0 {
+            self.publish_faults -= 1;
+            return Err(TransportError::BackendUnavailable);
+        }
+        self.swarm
+            .set_trust(TrustSources::new(next, self.infrastructure.clone()))
+            .await
+            .map(|_closed| true)
+            .map_err(|_| TransportError::BackendUnavailable)
     }
 
     /// Write `overlay` to `path`: the overlay's own write, or -- test
@@ -976,7 +1018,8 @@ impl Driver {
     /// EVERY SET THAT REACHES THE DRIVER IS LOGGED, under
     /// [`AUDIT_TARGET`], whatever came of it (ADR-0012's consequence,
     /// LOCAL-IPC.md `admin.trust.set`): the peer, the request and its
-    /// outcome -- changed, unchanged, refused by the policy, or failed --
+    /// outcome -- changed, unchanged, refused by the policy, failed, or
+    /// unwritten (the overlay write failed, so nothing changed) --
     /// timestamped by the host's log. A set that never reaches it is not:
     /// one refused at the port for want of `admin.trust`, or by the IPC
     /// server before the port, and one whose driver has gone; none of
@@ -997,10 +1040,15 @@ impl Driver {
         // WRITTEN BEFORE PUBLISHED (ADR-0028 A 2026-10-07): a set answered
         // `ok` survives a crash, and a set whose write fails changes
         // nothing -- not the policy, not a connection, not a row, and not
-        // what the next start loads.
+        // what the next start loads. The move is asked of EVERY decided
+        // set, not only one that changes the policy: the overlay can be
+        // ahead of the policy (below), and a set the policy already
+        // agrees with must still reach the file the next start loads
+        // before it is answered `ok` (#215 review F3). In step, the move
+        // is `None` exactly when the policy did not change.
         let overlay = match decided {
-            Ok(true) => self.overlay.set(&self.configured, &peer, allowed),
-            _ => None,
+            Ok(_) => self.overlay.set(&self.configured, &peer, allowed),
+            Err(_) => None,
         };
         // `None` written, or the write's error: before its rename nothing
         // changed; after it (`installed`) the new overlay is on disk, and
@@ -1011,13 +1059,8 @@ impl Driver {
         };
         let unwritten = written.is_some();
         let published = match decided {
-            Ok(true) if unwritten => Err(TransportError::Internal),
-            Ok(true) => self
-                .swarm
-                .set_trust(TrustSources::new(next.clone(), self.infrastructure.clone()))
-                .await
-                .map(|_closed| true)
-                .map_err(|_| TransportError::BackendUnavailable),
+            Ok(_) if unwritten => Err(TransportError::Internal),
+            Ok(true) => self.publish(next.clone()).await,
             other => other,
         };
         // THE PREVIOUS OVERLAY IS PUT BACK whenever the new one may be on
@@ -1031,8 +1074,13 @@ impl Driver {
         // `unwritten`, since the file was written.
         let restore = matches!(published, Err(TransportError::BackendUnavailable))
             || written.as_ref().is_some_and(OverlayError::installed);
+        // AHEAD, THE OVERLAY ON DISK IS THE ONE KEPT: every later set is a
+        // move on the lists the next start will load, so this set does
+        // take effect then, as the warning says, whatever sets follow it
+        // (#215 review F3: kept from the old lists, the next set on any
+        // peer rewrote them and the ahead change was lost).
         let mut ahead = false;
-        if let (true, Some(_), Some(path)) = (restore, &overlay, self.overlay_file.clone()) {
+        if let (true, Some(new), Some(path)) = (restore, &overlay, self.overlay_file.clone()) {
             let previous = self.overlay.clone();
             if let Err(e) = self.write_overlay(&previous, &path)
                 && !e.installed()
@@ -1042,6 +1090,7 @@ impl Driver {
                      the set takes effect at the next start"
                 );
                 ahead = true;
+                self.overlay = new.clone();
             }
         }
         let published = if ahead {
