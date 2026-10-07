@@ -131,7 +131,7 @@ async fn a_trust_removal_shows_the_exact_peer_id_and_reaches_the_daemon_only_ove
     let view = port.trust().await.expect("the allowlist");
     assert_eq!(view.local_peer.as_ref(), Some(&world.a_peer));
     assert!(
-        !view.allows(&world.b_peer),
+        !view.peers().any(|p| p == &world.b_peer),
         "the daemon no longer allows B: {view:?}"
     );
 

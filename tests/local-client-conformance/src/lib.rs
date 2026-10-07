@@ -892,7 +892,10 @@ pub async fn the_revocation_outlived_the_restart<B: AdminBinding>(
 ) {
     let admin = port(binding, &[AdminCapability::Trust]).await;
     let view = admin.trust().await.expect("the policy");
-    assert!(!view.allows(remote), "revoked across the restart: {view:?}");
+    assert!(
+        !view.peers().any(|p| p == remote),
+        "revoked across the restart: {view:?}"
+    );
     assert!(
         view.allowed.iter().all(|row| row.persisted),
         "every row persists: {view:?}"
@@ -925,7 +928,7 @@ pub async fn trust_administration_revokes_as_policy<B: DataSessionBinding + Admi
     let admin = port(binding, &[AdminCapability::Trust]).await;
     let view = admin.trust().await.expect("the policy");
     assert_eq!(view.local_peer.as_ref(), Some(local));
-    assert!(view.allows(remote), "{view:?}");
+    assert!(view.peers().any(|p| p == remote), "{view:?}");
     // Every production binding persists, and `remote` is the configured
     // peer (ADR-0028 A 2026-10-07).
     assert!(
@@ -937,7 +940,7 @@ pub async fn trust_administration_revokes_as_policy<B: DataSessionBinding + Admi
         "{view:?}"
     );
     assert!(
-        !view.allows(local),
+        !view.peers().any(|p| p == local),
         "the local peer is never among the allowed: {view:?}"
     );
     assert_eq!(
@@ -953,7 +956,7 @@ pub async fn trust_administration_revokes_as_policy<B: DataSessionBinding + Admi
     assert_eq!(before, sorted(view.clone()), "allowing a listed peer");
     let unlisted = TransportIdentity::parse(UNLISTED_PEER).expect("a peer id");
     assert!(
-        unlisted != *local && unlisted != *remote && !view.allows(&unlisted),
+        unlisted != *local && unlisted != *remote && !view.peers().any(|p| p == &unlisted),
         "the unlisted peer is listed by nobody: {view:?}"
     );
     admin
@@ -1016,7 +1019,7 @@ pub async fn trust_administration_revokes_as_policy<B: DataSessionBinding + Admi
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let view = admin.trust().await.expect("the policy");
-    assert!(!view.allows(remote), "{view:?}");
+    assert!(!view.peers().any(|p| p == remote), "{view:?}");
     for watcher in watchers {
         watcher.close().await.expect("closes");
     }

@@ -321,12 +321,6 @@ impl TrustAdminView {
     pub fn peers(&self) -> impl ExactSizeIterator<Item = &TransportIdentity> {
         self.allowed.iter().map(|row| &row.peer)
     }
-
-    /// Whether `peer` is on the allowlist.
-    #[must_use]
-    pub fn allows(&self, peer: &TransportIdentity) -> bool {
-        self.allowed.iter().any(|row| &row.peer == peer)
-    }
 }
 
 /// One allowlisted peer (`ipc/trust-list`'s row): the peer, whether the

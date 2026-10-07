@@ -187,7 +187,7 @@ async fn the_overlay_is_in_force_from_the_start_against_the_configuration() {
             .await
             .expect("starts with its endpoint naming a revoked peer");
         assert_eq!(
-            trust(&runtime).await.allows(&named),
+            trust(&runtime).await.peers().any(|p| p == &named),
             overlay.is_none(),
             "overlay={overlay:?}"
         );
@@ -246,11 +246,14 @@ async fn a_set_whose_write_fails_changes_nothing_and_is_audited_unwritten() {
     let refused = set(&runtime, &stranger, true).await;
     chmod(dir.path(), 0o700);
     assert_eq!(refused, Err(TransportError::Internal));
-    assert!(!trust(&runtime).await.allows(&stranger), "nothing changed");
+    assert!(
+        !trust(&runtime).await.peers().any(|p| p == &stranger),
+        "nothing changed"
+    );
     assert!(!path.exists(), "nothing written");
 
     set(&runtime, &stranger, true).await.expect("the control");
-    assert!(trust(&runtime).await.allows(&stranger));
+    assert!(trust(&runtime).await.peers().any(|p| p == &stranger));
     runtime.stop().await.expect("stops");
 
     let text = String::from_utf8(lines.lock().expect("lock").clone()).expect("utf-8");
