@@ -457,6 +457,10 @@ pub(super) fn settle_established_inbound(
         .admits_retention(held.for_peer, held.connected_peers)
         .ok()?;
     let slot = manager.admit_inbound()?;
+    // The peer reached us: whatever backoff its earlier failures set is
+    // worse evidence than this connection (relay seq 13444). Only here,
+    // after retention admitted it -- a refused inbound resets nothing.
+    let _ = manager.record_inbound_retained(&peer, now_ms);
     Some(OpenConnection {
         peer,
         slot,
@@ -3778,6 +3782,75 @@ mod tests {
         );
     }
 
+    /// A retained inbound lifts the peer's dial backoff; a refused one
+    /// leaves it -- the refusal is the control that the reset follows
+    /// retention, not the connection's mere arrival.
+    #[test]
+    fn a_retained_inbound_lifts_the_peers_backoff_and_a_refused_one_does_not() {
+        let peer = ident(RELAY);
+        let fail = |m: &mut ConnectionManager| {
+            let ticket = m
+                .handle()
+                .load()
+                .admit(
+                    &DialRequest {
+                        peer: Some(ident(RELAY)),
+                        address: "/ip4/198.51.100.9/tcp/4001".to_owned(),
+                        origin: DialOrigin::ConnectionManager,
+                    },
+                    0,
+                )
+                .expect("admitted");
+            assert!(m.record_failure(ticket, 0).is_some());
+            assert_eq!(
+                m.peer_gate_state(&ident(RELAY), 1).backoff_until_ms,
+                Some(30_000)
+            );
+        };
+        // Refused: the per-peer ceiling is full.
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
+        m.set_trust(trust(&[RELAY], &[]), &[]);
+        fail(&mut m);
+        let class = m.classify(&peer);
+        let full = Held {
+            for_peer: usize::MAX,
+            connected_peers: 0,
+        };
+        assert!(
+            settle_established_inbound(
+                &mut m,
+                peer.clone(),
+                class,
+                PeerPath::Direct,
+                None,
+                full,
+                1
+            )
+            .is_none()
+        );
+        assert_eq!(
+            m.peer_gate_state(&peer, 1).backoff_until_ms,
+            Some(30_000),
+            "a refused inbound resets nothing"
+        );
+        // Retained: the backoff and the retry are gone.
+        let connection = settle_established_inbound(
+            &mut m,
+            peer.clone(),
+            class,
+            PeerPath::Direct,
+            None,
+            Held::default(),
+            1,
+        )
+        .expect("retained");
+        assert_eq!(
+            m.peer_gate_state(&peer, 1),
+            interweave_transport_runtime::PeerGateState::default()
+        );
+        drop(connection);
+    }
+
     /// The book's classification keeps the caller's own origin for a
     /// direct address and for a string that does not parse, and
     /// names `RelayCircuit` for a circuit whatever the caller's own.
@@ -4526,6 +4599,7 @@ mod tests {
             ("direct.rs", include_str!("direct.rs")),
             ("endpoints.rs", include_str!("endpoints.rs")),
             ("handle.rs", include_str!("handle.rs")),
+            ("held_sends.rs", include_str!("held_sends.rs")),
             ("kademlia_driver.rs", include_str!("kademlia_driver.rs")),
             ("mdns_driver.rs", include_str!("mdns_driver.rs")),
             ("messages.rs", include_str!("messages.rs")),

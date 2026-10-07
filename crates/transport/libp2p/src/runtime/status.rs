@@ -101,6 +101,12 @@ pub struct DialGateStatus {
     pub address_entries: usize,
     /// The bounded peer-backoff table's size.
     pub peer_entries: usize,
+    /// The gate's retry and quarantine notes its bound discarded
+    /// unreported, since the runtime started (`MAX_GATE_NOTES`). Not zero
+    /// means connectivity lines are missing; zero does not mean none are,
+    /// since a note handed up as an event is dropped uncounted when the
+    /// outbox has no base room, as every informational event is.
+    pub gate_notes_dropped: u64,
 }
 
 /// The dial gate's half of a status read, from the manager and the
@@ -121,6 +127,7 @@ pub(super) fn dial_gate(
         peer_retry_due: peer.map(|p| manager.is_retry_due(p, now_ms)),
         address_entries: policy.address_entries(),
         peer_entries: policy.peer_entries(),
+        gate_notes_dropped: manager.notes_dropped(),
     }
 }
 
@@ -245,6 +252,28 @@ mod tests {
         // Past the longest backoff CONNECTIVITY.md allows (five minutes).
         let due = dial_gate(&m, 0, Some(&peer), 1_000 + 6 * 60 * 1_000);
         assert_eq!(due.peer_retry_due, Some(true));
+
+        // The notes the bound discards: none while the queue has room,
+        // one when a failure past it pushes the oldest out undrained.
+        assert_eq!(due.gate_notes_dropped, 0);
+        let mut now = 1_000 + 6 * 60 * 1_000;
+        for _ in 0..interweave_transport_runtime::MAX_GATE_NOTES {
+            let ticket = m
+                .handle()
+                .load()
+                .admit(
+                    &DialRequest {
+                        peer: Some(peer.clone()),
+                        address: "/ip4/192.0.2.1/tcp/4001".to_owned(),
+                        origin: DialOrigin::ConnectionManager,
+                    },
+                    now,
+                )
+                .expect("past the backoff");
+            let _ = m.record_failure(ticket, now);
+            now += 6 * 60 * 1_000;
+        }
+        assert_eq!(dial_gate(&m, 0, None, now).gate_notes_dropped, 1);
     }
 
     #[test]

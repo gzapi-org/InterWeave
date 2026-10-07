@@ -656,3 +656,76 @@ async fn a_cache_that_cannot_write_is_reported_degraded() {
     subject.shutdown().await.expect("clean shutdown");
     target.shutdown().await.expect("clean shutdown");
 }
+
+/// The per-peer gate rows (`CONNECTIVITY.md` §19): one per allowlisted
+/// peer and none for anyone else; a connected peer reads connected, and
+/// once it is gone the row says what holds it -- the backoff the failed
+/// redial set, and the failure's class. An allowlisted peer never seen
+/// is the control: a row of nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_peer_rows_say_what_holds_a_peer_that_went_away() {
+    use interweave_transport_composition::LastOutcome;
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let listen = CompositionOptions {
+        listen: vec![format!("/ip4/{ip}/tcp/0")],
+        ..CompositionOptions::default()
+    };
+    let (b_id, b) = id();
+    let (a_id, a) = id();
+    let (_never_id, never) = id();
+    let target = ComposedRuntime::start(&b_id, &profile(&[&a], &[], ""), listen.clone())
+        .await
+        .expect("b composes");
+    let b_addr = format!("{}/p2p/{}", target.listening()[0], b.as_str());
+    let mut subject = ComposedRuntime::start(&a_id, &profile(&[&b, &never], &[b_addr], ""), listen)
+        .await
+        .expect("a composes");
+    wait_connected(&mut subject, &b).await;
+
+    let rows = subject.diagnostics().await.expect("answered").peers;
+    assert_eq!(rows.len(), 2, "one row per allowlisted peer: {rows:?}");
+    let row = |rows: &[interweave_transport_composition::PeerGateRow], p: &TransportIdentity| {
+        rows.iter().find(|r| &r.peer == p).cloned().expect("a row")
+    };
+    let held = row(&rows, &b);
+    assert!(held.connected, "{held:?}");
+    assert_eq!(held.last_outcome, Some(LastOutcome::Connected));
+    let unseen = row(&rows, &never);
+    assert_eq!(
+        (
+            unseen.connected,
+            unseen.backoff_until_ms,
+            unseen.quarantined_until_ms,
+            unseen.last_outcome
+        ),
+        (false, None, None, None),
+        "nothing holds a peer never dialled"
+    );
+
+    target.shutdown().await.expect("clean shutdown");
+    // The reconnect round redials B, the dial is refused, and the row
+    // follows within the round's cadence.
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    let gone = loop {
+        let rows = subject.diagnostics().await.expect("answered").peers;
+        let now = row(&rows, &b);
+        if !now.connected && now.backoff_until_ms.is_some() && now.last_outcome.is_some() {
+            break now;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the row never showed the hold: {now:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert!(
+        matches!(
+            gone.last_outcome,
+            Some(LastOutcome::DialFailed | LastOutcome::Denied)
+        ),
+        "{gone:?}"
+    );
+    assert_eq!(gone.quarantined_until_ms, None);
+
+    subject.shutdown().await.expect("clean shutdown");
+}

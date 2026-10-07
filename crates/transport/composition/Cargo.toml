@@ -60,3 +60,6 @@ serde_json = { workspace = true }
 serde_norway = "0.9.42"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+# TEST-ONLY: the connectivity lines' unit test captures what a subscriber
+# writes (`gate::tests`). The daemon's own subscriber, already in the graph.
+tracing-subscriber = { workspace = true }

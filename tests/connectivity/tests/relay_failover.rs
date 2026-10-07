@@ -20,14 +20,13 @@
 //!   the subject's `PeerId` is unchanged, since a dialer reaches it
 //!   through the spare's circuit at the same identity;
 //! - item 18: a dialer that held ONLY the lost relay's circuit is told
-//!   `Disconnected`, and a direct send it makes with no path left is
-//!   answered `PeerUnreachable` at once -- `CONNECTIVITY.md` §12's SEND
-//!   shape of that error, which is returned at once and means "no path
-//!   stands now" rather than "every path was tried", because a send
-//!   never dials and so has no budget to exhaust; the dial shape, after
-//!   the caller's deadline, is what a failover or a `DialPeer` answers
-//!   -- while the dialer that still holds the second relay's circuit
-//!   sends through it.
+//!   `Disconnected`, and a direct send it makes with no working path left
+//!   dials its known path once -- the circuit through the lost relay --
+//!   and is answered `PeerUnreachable` when that fails: `CONNECTIVITY.md`
+//!   §12's dial shape, "every path was tried", which a send has taken
+//!   since A 2026-10-06 (before it, a send never dialled and was answered
+//!   at once) -- while the dialer that still holds the second relay's
+//!   circuit sends through it.
 //!
 //! What is NOT proved here: a relay that fails mid-exchange (the
 //! request-response failure is the crate's; `dcutr.rs` pins an exchange
@@ -543,15 +542,20 @@ async fn two_reservations_are_held_the_peer_is_reached_through_either_and_a_lost
         "the kept relay's reservation was untouched: {after:?}"
     );
     // ITEM 18: the other dialer, whose only path was the lost relay's
-    // circuit, is told, and a send with no path left is answered at
-    // once -- PeerUnreachable, the transport-v2 verdict -- not held.
+    // circuit, is told, and a send with no working path left is answered
+    // PeerUnreachable, the transport-v2 verdict.
     assert!(
         after.iter().any(|(s, e)| *s == Side::Other
             && matches!(e, SwarmEvent::Disconnected { peer, .. } if *peer == subject_peer)),
         "the other dialer lost its only path: {after:?}"
     );
-    // §12's SEND shape: at once, no dial, "no path stands now". The
-    // settle below is the no-dial half of that sentence.
+    // §12's SEND shape since A 2026-10-06: a send to a not-connected
+    // peer with a known path dials it once -- here the circuit through
+    // the lost relay, still in the book -- and is PeerUnreachable when
+    // that path fails, meaning "every path was tried". Before, a send
+    // never dialled and was answered at once with no dial; the
+    // immediate shape is now the gate's alone (a peer it holds), which
+    // `tests/direct-v2`'s restart test pins.
     let asked_at = tokio::time::Instant::now();
     let answer = wire
         .other
@@ -564,21 +568,22 @@ async fn two_reservations_are_held_the_peer_is_reached_through_either_and_a_lost
         .expect("the command reaches the task");
     assert_eq!(answer, Err(TransportError::PeerUnreachable), "no path left");
     assert!(
-        asked_at.elapsed() < Duration::from_secs(1),
-        "answered at once, not held to a timeout: {:?}",
+        asked_at.elapsed() < Duration::from_secs(10),
+        "answered within the send's horizon: {:?}",
         asked_at.elapsed()
     );
-    // AND WITHOUT A DIAL: the verdict came from having no path, not
-    // from a dial that failed fast -- no dial activity at the other
-    // dialer after the send.
+    // AND AFTER A DIAL TO THE SUBJECT: the verdict came from its known
+    // path failing, and nothing connected.
     let quiet = wire.settle(WINDOW).await;
     assert!(
+        quiet.iter().any(|(s, e)| *s == Side::Other
+            && matches!(e, SwarmEvent::DialFailed { peer: Some(p), .. } if *p == subject_peer)),
+        "the send dialled its known path: {quiet:?}"
+    );
+    assert!(
         !quiet.iter().any(|(s, e)| *s == Side::Other
-            && matches!(
-                e,
-                SwarmEvent::DialFailed { .. } | SwarmEvent::Connected { .. }
-            )),
-        "no dial was made for the send: {quiet:?}"
+            && matches!(e, SwarmEvent::Connected { peer, .. } if *peer == subject_peer)),
+        "and nothing connected: {quiet:?}"
     );
     // The dialer that still holds the kept relay's circuit sends
     // through it, and the peer stayed connected for it.

@@ -1225,6 +1225,7 @@ pub(super) fn reconcile(
                 out.push(SwarmEvent::DialFailed {
                     peer: Some(peer.clone()),
                     detail: format!("autonat server: {refusal:?}"),
+                    class: super::messages::DialFailureClass::of_refusal(&refusal),
                 });
             }
         }
@@ -2807,7 +2808,7 @@ mod tests {
         );
         assert!(events.iter().any(|e| matches!(
             e,
-            SwarmEvent::DialFailed { peer: Some(p), detail }
+            SwarmEvent::DialFailed { peer: Some(p), detail, .. }
                 if *p == s1 && detail.contains("AddressQuarantined")
         )));
         let target = state.targets.get(&s1).expect("static");

@@ -1458,7 +1458,7 @@ async fn a_revoked_peer_is_not_retried() {
             .await
             .expect("the scheduler must report why it gave up")
         {
-            Some(interweave_transport_libp2p::SwarmEvent::DialFailed { peer, detail }) => {
+            Some(interweave_transport_libp2p::SwarmEvent::DialFailed { peer, detail, .. }) => {
                 assert!(
                     detail.contains("scheduled retry") && detail.contains("Unauthorized"),
                     "a revoked peer must be refused by the gate, not dialed: {detail}"

@@ -926,6 +926,14 @@ def main(argv: list[str]) -> int:
         except json.JSONDecodeError as e:
             report(f"{rel}: invalid JSON — {e}")
             continue
+        # Every other way a file fails to read stopped the whole run with
+        # a traceback instead of being one report line: a file that is not
+        # UTF-8 or holds an integer literal past Python's digit limit
+        # (ValueError), one that cannot be opened (OSError: permissions, a
+        # dangling symlink), and nesting deeper than the parser recurses.
+        except (ValueError, OSError, RecursionError) as e:
+            report(f"{rel}: unreadable — {e}")
+            continue
 
         if not isinstance(doc, dict) or "vectors" not in doc:
             continue

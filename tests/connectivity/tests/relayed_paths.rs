@@ -902,7 +902,7 @@ async fn a_circuit_route_that_failed_is_retried_as_a_relay_circuit() {
         );
         tokio::select! {
             event = dialer.next_event() => {
-                if let SwarmEvent::DialFailed { peer, detail } = event.expect("the dialer is alive") {
+                if let SwarmEvent::DialFailed { peer, detail, .. } = event.expect("the dialer is alive") {
                     assert_eq!(peer.as_ref(), Some(&far_peer));
                     failures.push(detail);
                 }

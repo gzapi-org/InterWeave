@@ -31,6 +31,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::discovery::{Discovery, DiscoveryDiagnostics};
+use crate::gate::{LastOutcome, LastOutcomes, PeerGateRow, ReconnectRefusals, Who};
 use crate::notices::{PeerNoticeDiagnostics, SessionNotices};
 use crate::session::InProcessBinding;
 use crate::translate::{CompositionError, translate};
@@ -99,6 +100,9 @@ pub struct Diagnostics {
     /// The in-process sessions' notice registry: its sessions, and the
     /// peer notices its bound dropped.
     pub peer_notices: PeerNoticeDiagnostics,
+    /// The dial gate's state for each allowlisted peer, in the
+    /// allowlist's order (`CONNECTIVITY.md` §19): never an address.
+    pub peers: Vec<PeerGateRow>,
 }
 
 /// An admin port's request that the runtime's owner shut it down
@@ -339,6 +343,8 @@ impl ComposedRuntime {
             clock: Box::new(clock),
             trust,
             infrastructure,
+            outcomes: LastOutcomes::default(),
+            refusals: ReconnectRefusals::default(),
         };
         let task = tokio::spawn(driver.run(options.discovery_interval));
         Ok(Self {
@@ -512,6 +518,10 @@ struct Driver {
     /// The infrastructure set the profile configured, republished
     /// unchanged with every trust change: `admin.trust` does not reach it.
     infrastructure: InfrastructureSet,
+    /// Each allowlisted peer's last dial outcome (`CONNECTIVITY.md` §19).
+    outcomes: LastOutcomes,
+    /// Each allowlisted peer's last reconnect refusal, logged on change.
+    refusals: ReconnectRefusals,
 }
 
 impl Driver {
@@ -606,6 +616,10 @@ impl Driver {
         let observed_at = wall_ms();
         match event {
             SwarmEvent::Connected { peer, path } => {
+                crate::gate::connected(Who::of(&peer, &self.trust, &self.infrastructure), path);
+                self.refusals.forget(&peer);
+                self.outcomes
+                    .record(&self.trust, &peer, LastOutcome::Connected);
                 self.paths.insert(peer.clone(), path);
                 self.emit(TransportEvent::PeerConnected {
                     peer,
@@ -625,6 +639,10 @@ impl Driver {
                 reason,
             } => self.post_path_change(peer, previous, current, reason).await,
             SwarmEvent::Disconnected { peer, reason } => {
+                crate::gate::disconnected(
+                    Who::of(&peer, &self.trust, &self.infrastructure),
+                    reason,
+                );
                 self.paths.remove(&peer);
                 self.notices.disconnected(&peer, reason);
                 self.emit(TransportEvent::PeerDisconnected {
@@ -640,6 +658,36 @@ impl Driver {
             SwarmEvent::DirectDelivered { endpoint, .. } => self.notices.delivered_to(&endpoint),
             SwarmEvent::BroadcastDelivered { session, .. }
             | SwarmEvent::LeaseNoticeOwed { session } => self.notices.wake(&session),
+            SwarmEvent::DialFailed {
+                peer: Some(peer),
+                class,
+                ..
+            } => {
+                crate::gate::dial_failed(Who::of(&peer, &self.trust, &self.infrastructure), class);
+                self.outcomes
+                    .record(&self.trust, &peer, LastOutcome::of_class(class));
+            }
+            SwarmEvent::DialFailed {
+                peer: None, class, ..
+            } => crate::gate::dial_failed(Who::Class("unidentified"), class),
+            SwarmEvent::RetryScheduled {
+                peer,
+                origin,
+                attempt,
+                delay_ms,
+                peer_backoff,
+            } => crate::gate::retry_scheduled(
+                Who::of(&peer, &self.trust, &self.infrastructure),
+                origin,
+                attempt,
+                delay_ms,
+                peer_backoff,
+            ),
+            SwarmEvent::AddressQuarantined { peer, for_ms } => {
+                crate::gate::quarantined(Who::of(&peer, &self.trust, &self.infrastructure), for_ms);
+                self.outcomes
+                    .record(&self.trust, &peer, LastOutcome::IdentityMismatch);
+            }
             SwarmEvent::ConnectivityChanged { .. }
             | SwarmEvent::RelayReservationChanged { .. }
             | SwarmEvent::RelayStandingChanged { .. }
@@ -759,11 +807,13 @@ impl Driver {
             }
             Request::Diagnostics(reply) => {
                 let substrate = self.swarm.status(None).await.ok();
+                let peers = self.peer_rows().await;
                 let _ = reply.send(substrate.map(|substrate| Diagnostics {
                     substrate,
                     discovery: self.discovery.diagnostics(),
                     events_dropped: self.dropped.load(Ordering::Relaxed),
                     peer_notices: self.notices.diagnostics(),
+                    peers,
                 }));
             }
             Request::Shutdown(_, reply) => {
@@ -844,9 +894,31 @@ impl Driver {
             self.trust = next;
             if !allowed {
                 self.notices.revoked(&peer);
+                self.outcomes.forget(&peer);
+                self.refusals.forget(&peer);
             }
         }
         Ok(())
+    }
+
+    /// One row per allowlisted peer: the substrate's deadlines beside the
+    /// outcome recorded here. Empty when the substrate does not answer --
+    /// a row of unknowns would read as "nothing holds this peer".
+    async fn peer_rows(&mut self) -> Vec<PeerGateRow> {
+        let peers: Vec<TransportIdentity> = self.trust.allowed_peers().cloned().collect();
+        let Ok(gates) = self.swarm.peer_gates(peers).await else {
+            return Vec::new();
+        };
+        gates
+            .into_iter()
+            .map(|gate| PeerGateRow {
+                last_outcome: self.outcomes.get(&gate.peer),
+                connected: gate.connected,
+                backoff_until_ms: gate.backoff_until_ms,
+                quarantined_until_ms: gate.quarantined_until_ms,
+                peer: gate.peer,
+            })
+            .collect()
     }
 
     /// Drain the providers, run Kademlia's schedule, and hand the book
@@ -869,7 +941,20 @@ impl Driver {
             .discovery
             .reconnect_targets(now, |p| paths.contains_key(p))
         {
-            let _ = self.swarm.reconnect(peer).await;
+            // A refusal is the peer's last outcome (`CONNECTIVITY.md`
+            // §19); an admitted dial reports its own outcome as events.
+            if let Ok(Err(refusal)) = self.swarm.reconnect(peer.clone()).await {
+                let class = interweave_transport_libp2p::DialFailureClass::of_refusal(&refusal);
+                if self.refusals.changed(&self.trust, &peer, class) {
+                    crate::gate::reconnect_refused(
+                        Who::of(&peer, &self.trust, &self.infrastructure),
+                        class,
+                    );
+                }
+                if let Some(outcome) = LastOutcome::of_refusal(&refusal) {
+                    self.outcomes.record(&self.trust, &peer, outcome);
+                }
+            }
         }
         self.discovery.flush(now);
     }

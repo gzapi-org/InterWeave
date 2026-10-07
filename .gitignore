@@ -179,6 +179,11 @@ spikes/**/Cargo.lock
 # runs sit at the spike's top level.
 !spikes/spike-008/harness/Cargo.lock
 !spikes/spike-008/REPRODUCTION-*.log
+# SPIKE-009's device harness: its Rust core runs the production derivation
+# on the device, so its graph is committed for the same reason, and its
+# recorded runs sit beside it rather than under a harness/ directory.
+!spikes/spike-009/device/harness/Cargo.lock
+!spikes/spike-009/device/REPRODUCTION-*.log
 # SPIKE-001's stub for a different reason: its graph is not the evidence
 # (the Claude Code build each run records is), but its drivers build it
 # `--locked`, so without the lock a fresh clone cannot rebuild the stub

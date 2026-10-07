@@ -432,7 +432,7 @@ async fn a_static_server_that_refuses_at_the_socket_is_not_also_retried_by_the_r
             break;
         }
         match tokio::time::timeout(remaining, subject.next_event()).await {
-            Ok(Some(SwarmEvent::DialFailed { peer, detail })) => {
+            Ok(Some(SwarmEvent::DialFailed { peer, detail, .. })) => {
                 assert_eq!(peer.as_ref(), Some(&server_peer));
                 assert!(
                     !detail.contains("scheduled retry"),
@@ -528,7 +528,7 @@ async fn a_peer_demoted_to_infrastructure_that_is_not_a_server_still_has_its_ret
             break;
         }
         match tokio::time::timeout(remaining, subject.next_event()).await {
-            Ok(Some(SwarmEvent::DialFailed { peer, detail }))
+            Ok(Some(SwarmEvent::DialFailed { peer, detail, .. }))
                 if peer.as_ref() == Some(&other) && detail.contains("scheduled retry") =>
             {
                 assert!(

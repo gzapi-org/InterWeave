@@ -1,0 +1,37 @@
+# SPIKE-009 device harness -- recorded run (part 1: D1-D3, D4 process restart, D5)
+# date: 2026-10-06T20:21Z-21:00Z (corrected after PR #210's review: the first records are at 20:21Z)
+# device: Samsung SM-A405FN, Android 11 (API 30), patch 2023-03-01, arm64-v8a, over adb (wireless debugging)
+# host: develop-qzapp (Linux x86_64), rustc 1.98.1, cargo-ndk 4.1.2, NDK 28.2.13676358, build-tools 36.0.0, Temurin 17.0.20.1+1
+# production crates pinned at 7e2978d1 (harness/Cargo.toml); third-party crates exact, lock committed
+# libspike009.so sha256 prefix: cece655ca02f374d (rebuilt from the committed source: the same)
+# build: bash spikes/spike-009/device/build.sh; adb install -r spikes/spike-009/device/build/spike009.apk
+# commands, in order (each: adb shell am broadcast -n org.interweave.spike009/.Cmd --es cmd <cmd> [--es alias <a>] [--ei timeout <s>]):
+#   info
+#   gen-strongbox sb; gen bg; keyinfo bg; wrap bg; unwrap bg; swap bg; unwrap-other bg; tamper bg
+#   gen up (timeout 60); keyinfo up; wrap up                      -- no person had unlocked within 60 s
+#   am force-stop org.interweave.spike009; unwrap bg               -- D4: a fresh process
+#   input keyevent 26 (lock); a person unlocked with the device credential at 20:58:05Z; then
+#   wrap up; unwrap up; am force-stop; unwrap up                   -- inside the 60 s window
+#   sleep 75; unwrap up; unwrap bg                                 -- D5: past the window, no person
+# key material: the fixture's TEST-ONLY public all-zero seed, and a fixed TEST-ONLY synthetic seed
+#   [7u8; 32] for unwrap-other's second identity; the Keystore keys never leave the device
+# results: files/results.jsonl, read with run-as, verbatim below (t = device epoch ms)
+
+{"t":1791318078747,"cmd":"info","alias":null,"biometric_strong":11,"biometric_weak":11,"device_secure":true,"feature_strongbox":false,"fixture_peer":"12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN","model":"SM-A405FN","patch":"2023-03-01","sdk":30}
+{"t":1791318104337,"cmd":"gen-strongbox","alias":"sb","detail":"android.security.keystore.StrongBoxUnavailableException: Failed to generate key","outcome":"refused"}
+{"t":1791318106804,"cmd":"gen","alias":"bg","detail":"timeout=60","outcome":"ok"}
+{"t":1791318109023,"cmd":"keyinfo","alias":"bg","inside_secure_hardware":true,"invalidated_by_biometric_enrollment":false,"key_size":256,"origin":1,"user_auth_enforced_by_secure_hardware":false,"user_auth_required":false,"user_auth_type":0,"user_auth_validity_s":0}
+{"t":1791318111215,"cmd":"wrap","alias":"bg","env_len":66,"framed":true,"header_hex":"49574b310100","iv_len":12,"sealed_len":48,"tag_bits":128}
+{"t":1791318113448,"cmd":"unwrap","alias":"bg","detail":"","outcome":"seed"}
+{"t":1791318115697,"cmd":"swap","alias":"bg","detail":"valid policy byte swapped","outcome":"AEADBadTagException"}
+{"t":1791318117951,"cmd":"unwrap-other","alias":"bg","detail":"","outcome":"AEADBadTagException"}
+{"t":1791318133262,"cmd":"tamper","alias":"bg","control_intact":"seed","flips":528,"seeds_from_flips":0,"tally":{"AEADBadTagException":481,"Magic":32,"Policy":7,"Version":8}}
+{"t":1791318182900,"cmd":"gen","alias":"up","detail":"timeout=60","outcome":"ok"}
+{"t":1791318185065,"cmd":"keyinfo","alias":"up","inside_secure_hardware":true,"invalidated_by_biometric_enrollment":false,"key_size":256,"origin":1,"user_auth_enforced_by_secure_hardware":true,"user_auth_required":true,"user_auth_type":3,"user_auth_validity_s":60}
+{"t":1791318187250,"cmd":"wrap","alias":"up","detail":"UserNotAuthenticatedException: User not authenticated","outcome":"error"}
+{"t":1791318206478,"cmd":"unwrap","alias":"bg","detail":"","outcome":"seed"}
+{"t":1791320286803,"cmd":"wrap","alias":"up","env_len":66,"framed":true,"header_hex":"49574b310101","iv_len":12,"sealed_len":48,"tag_bits":128}
+{"t":1791320289010,"cmd":"unwrap","alias":"up","detail":"","outcome":"seed"}
+{"t":1791320293099,"cmd":"unwrap","alias":"up","detail":"","outcome":"seed"}
+{"t":1791320370455,"cmd":"unwrap","alias":"up","detail":"","outcome":"UserNotAuthenticatedException"}
+{"t":1791320372932,"cmd":"unwrap","alias":"bg","detail":"","outcome":"seed"}
