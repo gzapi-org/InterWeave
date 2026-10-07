@@ -80,7 +80,7 @@ unprivileged account and is unpacked as root. Before writing anything,
   absolute path, a `..` in a member name, a member reached through a
   symlink the archive makes, or a link out of the tree.
 
-Run one `--install` at a time on a host: nothing serialises two.
+One `--install` runs at a time on a host: a second one is refused while the first holds `/run/lock/android-toolchain.lock`.
 
 Every member is judged before anything is written. Setuid and setgid bits
 are dropped. A failed install leaves the previous

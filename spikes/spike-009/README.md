@@ -4,7 +4,7 @@ Android Keystore wrapping, invalidation and background/user-presence behavior.
 
 Do not treat experiments placed here as production implementation. Evidence and final decision must be recorded against [`architecture/roadmap/SPIKES.md`](../../architecture/roadmap/SPIKES.md); the verdict is architect-cto's to write there, not this file's.
 
-**Status: the HOST HALF has run (2026-10-06); the DEVICE HALF has not.** No verdict is recorded. AndroidKeyStore itself — TEE/StrongBox, user presence, lock/reboot/process restart, invalidation, the phrase UI — has not been exercised on any device yet, and nothing below speaks for it.
+**Status: the HOST HALF has run (2026-10-06); the DEVICE HALF has run (2026-10-06: D1–D7, four recorded parts; D6b repeated in part 4 with an addition only), with D5's restart diagnostic not produced and D7's picker not exercised (below).** No verdict is recorded; the verdict is architect-cto's.
 
 ## The host half: what was established
 
@@ -36,7 +36,7 @@ associated data = magic | version | policy | the profile's PeerId (UTF-8)
 - **The header and the PeerId are associated data**, through Android's `Cipher.updateAAD`, so a valid policy swapped for the other, or a ciphertext moved to another profile, fails authentication. An unknown version or policy byte is refused earlier, by the header check, before any decryption (H3's Version and Policy counts).
 - **The PeerId is not stored in the envelope.** It is the profile's, kept beside the envelope, and unwrap also re-derives it from the seed and compares.
 
-Whether this layout becomes the format is a decision for the contract's owner, after the device half has shown AndroidKeyStore produces it. **Assumed, not yet verified on a device:** that a Keystore AES-GCM cipher takes associated data and returns a 12-byte IV and a 128-bit tag in this arrangement.
+Whether this layout becomes the format is a decision for the contract's owner, after the device half has shown AndroidKeyStore produces it. **Verified on the test device (D2, below):** a Keystore AES-GCM cipher takes this associated data and returns a 12-byte IV and a 128-bit tag, so the device frames exactly this 66-byte layout.
 
 ## What the host half did not establish
 
@@ -51,12 +51,76 @@ Everything that needs AndroidKeyStore or Android itself:
 ## The device half: where it stands
 
 - **Device:** a dedicated test device is reachable over adb: a Samsung SM-A405FN running Android 11 (API 30). It advertises **no StrongBox feature**; its keystore is TEE-backed (HAL `mdfpp`). So StrongBox is recorded as absent on this device, not as tested.
-- **Toolchain:** the Android toolchain is being provisioned by devex-tooling, as a shared install that needs a root step by the owner.
-- **Harness:** the device harness will reuse this envelope layout, so the two halves meet in the same bytes.
+- **Toolchain:** the pinned Android toolchain (`tools/host/android/`), checked with `android-toolchain.sh --check` before the run.
+- **Harness:** [`device/`](./device). It is a Rust core (`device/harness`, the production derivation pinned at 7e2978d1, built with `cargo-ndk`) and a Java receiver (`device/app`) driven from the shell with `am broadcast`. `device/build.sh` builds the APK by hand from the pinned toolchain, without Gradle. The Rust core frames the envelope, checks the header and re-derives the PeerId, while the Keystore does the AES-GCM. `device/harness/tests/layout.rs` holds the two halves to one layout on the host: what the host half wraps, the device framing splits and re-frames byte for byte, and the device's associated data authenticates the host's ciphertext. Swapping version and policy in the device's associated data fails it.
 
-## The device half: the plan (NOT RUN)
+## The device half: what was established (part 1)
 
-`spikes/spike-009/harness-android/` (to be written once the toolchain is installed): a small app whose Rust core is this harness's `envelope` and the production derivation, built with `cargo-ndk` for arm64-v8a and called over JNI. Keystore operations are Kotlin; every byte decision is Rust's, so the device and host halves judge one envelope with one code path. Results are written to app-private storage and read back over adb (`run-as`), and the fixture seed is the TEST-ONLY public vector only.
+The recorded run is [`device/REPRODUCTION-2026-10-06.log`](./device/REPRODUCTION-2026-10-06.log), with the phone's own result lines verbatim.
+
+| id | observation |
+|---|---|
+| D1 | StrongBox requested: refused, `StrongBoxUnavailableException`, so absent on this device, not tested. A background-compatible key and a user-presence key (credential or Class-3 biometric, 60 s) are both generated **inside secure hardware**, origin generated. The user-presence key's authentication is **enforced by secure hardware**, and it reports `invalidated_by_biometric_enrollment: false`, as documented for a timed key. |
+| D2 | The Keystore returns a 12-byte IV, a 128-bit tag and 48 sealed bytes. The device frames the 66-byte envelope with the header `IWK1 01 00` (background) or `IWK1 01 01` (user presence). The intact envelope gives back the seed, which re-derives the frozen fixture PeerId on the device. |
+| D3 | 528 single-bit flips: **no seed**. 481 failed authentication (`AEADBadTagException`), 32 had a bad magic, 8 a bad version and 7 a bad policy, the host half's tally exactly. A valid policy byte swapped, and the envelope opened for another profile's PeerId, both fail authentication. |
+| D4 (process) | After `am force-stop`, a fresh process unwraps the background key: the seed. Inside the user-presence window, a killed and restarted process unwraps that key too. |
+| D5 | The user-presence key, with no person having unlocked within its 60 s: the wrap is refused `UserNotAuthenticatedException`. A person then unlocks with the device credential. Within the window the key wraps and unwraps, across a process kill. 75 s later, with no person, the unwrap is refused `UserNotAuthenticatedException`, while the background key still unwraps (the control). That refusal is the Keystore precondition the `background_restart_requires_user_authentication` diagnostic describes, **not the diagnostic itself**. That diagnostic is a configuration predicate (`crates/config/profile-config/src/runtime.rs`, stay-reachable with user presence) and was not exercised; no stay-reachable service and no restart trace exist to emit it. The harness neither replaces the key nor makes an identity. |
+
+## The device half: what was established (part 2)
+
+The recorded run is [`device/REPRODUCTION-2026-10-06b.log`](./device/REPRODUCTION-2026-10-06b.log). The captures it measures are not committed, because the recent-apps captures also show another app's content on the device.
+
+| id | observation |
+|---|---|
+| D4 (lock) | With the keyguard showing, the background key unwraps (the seed), and the user-presence key is refused `UserNotAuthenticatedException`. |
+| D7 | **Measured on a free-text stand-in, not the required picker:** the harness's phrase screen is one `EditText` taking all 24 words, which is the input surface ADR-0042, SPIKES.md and `android-key-custody.md` require Android NOT to have, and the words were injected with `adb shell input text` rather than typed. What it measures holds for any secure screen; what it cannot measure is the picker. The fixture phrase entered there restores the fixture PeerId through the production parse; only "valid"/"invalid" is recorded. Each check against the unprotected control screen: **screenshot**: control legible; secure, `screencap` refused (an empty file). **Screen recording**: control legible; secure, the activity is black, but **the IME window is not covered by `FLAG_SECURE`** (it showed no typed text in the frame measured). **Recents**: control's snapshot shows the words; secure's is blank. **IME**: the secure field reaches Samsung Keyboard as `NO_SUGGESTIONS` and `NO_PERSONALIZED_LEARNING`; the control's carries neither. **Autofill**: under the control, Samsung Pass received a fill request and Samsung's augmented service two; under the secure screen, neither received one, though a session flagged augmented-only was opened. **Logs and app storage**: no phrase word in logcat or under the app's data directory. |
+
+**Two check records per Enter, in the part-2 log:** the stand-in field's editor-action listener runs on both the key-down and the key-up of a hardware Enter (`input keyevent 66` sends both). That is read from Android's `TextView` behaviour, and the record pairs 11 ms and 37 ms apart fit it. So each mode recorded two checks. On the secure screen the field is cleared after the first, so the second parsed an empty field and recorded `invalid`. The first record of each pair is the result. The harness code is left as it ran, so the record matches the code.
+
+**What D7 did not establish:**
+- **Whether Samsung Keyboard honours the flags:** what it learns, suggests or uploads is not observable from adb.
+- **That the IME window cannot leak:** it sits outside `FLAG_SECURE`, so a keyboard showing key-press popups could put keystrokes into a recording or a screenshot. The in-app per-position BIP-39 picker that ADR-0042 and `android-key-custody.md` already require needs no IME and would close it; the run did not exercise that picker.
+- **The clipboard:** copy, cut and paste are refused by construction (no action mode), not measured, since Android 11's shell cannot read the clipboard.
+- **Saved state and crash artifacts:** the field saves no instance state by construction; only the app's own storage was searched, not system_server's.
+- **The logcat and storage searches had no positive control:** the harness never writes a word, so they show that nothing leaked there, not that the search would see a leak.
+
+## The device half: what was established (part 3)
+
+The recorded run is [`device/REPRODUCTION-2026-10-06c.log`](./device/REPRODUCTION-2026-10-06c.log). A person at the phone made each change; the harness recorded the result.
+
+| id | observation |
+|---|---|
+| D4 (reboot) | After `adb reboot` and the person's first unlock, the background key unwraps. The user-presence key made before the reboot is refused `UserNotAuthenticatedException` once its 60 s have passed, and unwraps (the seed) inside the window after a later unlock. Both survive a reboot. |
+| D6a | Fresh keys of both modes: each wrapped, and the timed one also unwrapped (the background one was not unwrapped before the event; its unwraps after it are what show it sound). The person changes the screen lock to Swipe (`device_secure: false`). The background keys, fresh and old, still unwrap: the control. Both user-presence keys, fresh and old, are **invalidated**. With the PIN set again, they stay invalidated: it is permanent. **On this device the invalidation surfaces as `UnrecoverableKeyException` from `KeyStore.getKey`**, before any cipher, and not as the `KeyPermanentlyInvalidatedException` this plan expected; `KeyInfo` cannot be read for the key either. A production check written for the latter alone would miss it. |
+| D6b | With one Class-3 fingerprint enrolled: a fresh per-operation key (biometric, every use; `invalidated_by_biometric_enrollment: true`) wraps and unwraps through `BiometricPrompt`, one touch each. A fresh timed key wraps and unwraps inside the 60 s a touch opens. These are the controls. Then the enrollment changed. **This device's Settings offered no way to add a fingerprint without re-enrolling the first** (the person went through Screen lock type; two enrolled after). After the change, BOTH keys are invalidated (`UnrecoverableKeyException: User changed or deleted their auth credentials`), and the background key still unwraps. |
+
+**What D6b did not establish:** that adding a fingerprint, and only that, invalidates the per-operation key and spares the timed one. The event this device's Settings allowed included re-enrolling the first fingerprint, and possibly a pass through the credential flow. So the timed key's invalidation cannot be attributed: Android documents enrollment invalidation for per-operation keys only, and a credential change or an emptied fingerprint set invalidates both. Part 4 repeated it with an addition only. What holds either way: no key that was invalidated ever gave back a seed, and the background-compatible key was untouched by every credential and biometric change.
+
+## The device half: what was established (part 4)
+
+The recorded run is [`device/REPRODUCTION-2026-10-06d.log`](./device/REPRODUCTION-2026-10-06d.log). It is D6b again, with an addition only: the Fingerprints page did offer "add" once two were enrolled.
+
+| id | observation |
+|---|---|
+| D6b (repeat) | Fresh keys made with two fingerprints enrolled. The person ADDS a third from Settings → Biometrics and security → Fingerprints, without changing the credential (count 2 → 3). The **timed key survives**: its `KeyInfo` reads and it wraps inside the window the person's PIN entry opened. The **per-operation key is invalidated**: its `KeyInfo` still reads, but `Cipher.init` throws **`KeyPermanentlyInvalidatedException`**. The background key unwraps: the control. This is Android's documented behaviour, and it attributes part 3's loss of the timed key to the re-enrollment path, not to the addition. |
+
+**Two invalidation signals, both seen on this device:** `UnrecoverableKeyException` from `KeyStore.getKey` after a credential change (D6a, part 3), and `KeyPermanentlyInvalidatedException` from `Cipher.init` after a biometric enrollment (part 4). Recovery has to be entered on either.
+
+**Limit: part 4 does not meet the row's own precondition** (each fresh key wrapped and unwrapped once before the event). The timed key was only generated before it, and after it was shown to wrap, not to unwrap. The per-operation key's pre-event prompt went unanswered, so no pre-event result line exists for it. One unrecorded fact narrows the gap: `Prompt.java` initialises the cipher on the key before it builds the prompt, and records and exits on any exception, so the prompt appearing before the event means `Cipher.init` on that same key succeeded then, while after the event the same call threw `KeyPermanentlyInvalidatedException`. That is an init-level before/after on one key, with the "before" seen by the operator, not recorded. Part 3's `op6b` is not a control for `op6c`. Meeting the row exactly needs a re-run: fresh keys, both pre-event uses recorded, then one fingerprint added on the Fingerprints page; the phone already holds three.
+
+## The device half: the plan, as written before the run
+
+[`device/`](./device), above. This is the plan the run followed, kept as written; what was measured is in parts 1–4 above, and where they differ the parts are the record. Expectations of it that were not measured:
+- D5's diagnostic and SPIKES.md's "availability diagnostic/restart trace": **not produced**. Only the Keystore exception was measured, and a process kill stood in for a service restart. Closing it needs the real stay-reachable service restarting with no person, its status reading the diagnostic as true until a person authenticates; a harness re-run cannot supply that.
+- D6a's "the app enters recovery and never makes a new key over the profile silently": the harness has no recovery path; it records the invalidation and the control only.
+- D7's **in-app 24-word picker and the absence of a free-text field** (SPIKES.md, ADR-0042): not exercised. The harness built a free-text stand-in instead, so the picker requirement needs a re-run with a real per-position word-list picker and no `EditText`, words chosen by touch.
+- Real keystrokes through an IME: the words were injected with `adb shell input text`.
+- D7's IME-suggestion leak under the control: only the flags were read.
+- D7's clipboard check: copy, cut and paste are refused by construction, not measured.
+- D7's saved-state and crash-artifact search: run over the app's own storage only, with no positive control (D7's "did not establish" list).
+- D6b's pre-event use of both part-4 keys (part 4's Limit).
+
+Results are written to app-private storage and read back over adb (`run-as`). The fixture seed is the TEST-ONLY public vector only.
 
 | id | what | recorded |
 |---|---|---|
