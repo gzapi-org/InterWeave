@@ -140,7 +140,7 @@ Restart reconstructs the visible conversation only from the surviving sets plus 
 - `Keep` is a local receiver action after read.
 - Read state is never sent remotely in v1.
 - Pending outbound storage is not a transport mailbox and does not grant offline reachability to the receiver.
-- Deletion of durable message content must remove the application record and any application-owned plaintext indexes/caches that would reconstruct it; storage-media forensic guarantees depend on the selected database/filesystem/encryption layer and must not be overstated.
+- Deletion of durable message content must remove the application record and any application-owned plaintext that would reconstruct it — indexes, caches, and the database's own structures (its write-ahead log and freed pages): released content is absent from every file of the store after a clean close and after the next open following an unclean one, and while the store is open it leaves the log within a bounded window the store enforces (A 2026-10-07, on rust-ui-dev's SPIKE-008 measurement). Storage-media forensic guarantees below the database — filesystem journals, flash remanence, snapshots, OS backup — depend on the selected filesystem/encryption layer and must not be overstated.
 - Logs, analytics, crash reports, notification databases, OS backup, and search indexes must not become shadow message archives.
 
 ## 9. Conformance cases
