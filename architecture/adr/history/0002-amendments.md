@@ -41,7 +41,12 @@ pull queue is full: call receive first"), never `Overloaded` and never
 a stall — p2p-network-dev's finding that a call awaited behind the
 paused drain would hold the bridge's one loop and the host's next
 `receive` with it; a call already in flight when the queue fills is
-cancelled and answered the same (the third round's risk); `identity`,
+cancelled and answered the same (the third round's risk) — its outcome
+unknown, since the cancel is advisory: a repeated `send` or `broadcast`
+may go twice and a cancelled `leave` may have left while the bridge
+still counts the join (p2p-network-dev's two limits at 71bb46f3); and a
+paused bridge, reading nothing, learns of its session's end only at the
+next take, so `status` reports it true but late; `identity`,
 `status` and `receive` answer, and `receive` lifts the pause. The
 session's end is reported in `status` and recovered by reconnect with
 the bridge's own queue kept; every held direct message's reply token is
