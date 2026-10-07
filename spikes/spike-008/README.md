@@ -4,7 +4,7 @@ Android foreground-service/lifecycle/backup/recovery-screen platform behavior.
 
 Do not treat experiments placed here as production implementation. Evidence and final decision must be recorded against [`architecture/roadmap/SPIKES.md`](../../architecture/roadmap/SPIKES.md); the verdict is architect-cto's to write there, not this file's.
 
-**Status: RUN (2026-10-06/07, four recorded parts).** Parts 3 and 4: duplicate suppression across a restart, a full store, the network in forced Doze, the store's own directory, and a released message's bytes in the database files. Part 1: L1, L3, L4, L5, S1, E1, R1–R3, B1, B3. Part 2: P1, L2, L6, L7, L8, L9, and S1 across a reboot. Not run: B2 (the owner's decision), B4 and B5 (a second device). No verdict is recorded; the verdict is architect-cto's.
+**Status: RUN (2026-10-06/07, six recorded parts).** Parts 3 and 4: duplicate suppression across a restart, a full store, the network in forced Doze, the store's own directory, and a released message's bytes in the database files. Part 1: L1, L3, L4, L5, S1, E1, R1–R3, B1, B3. Part 2: P1, L2, L6, L7, L8, L9, and S1 across a reboot. Not run: B2 (the owner's decision), B4 and B5 (a second device). No verdict is recorded; the verdict is architect-cto's.
 
 ## The device
 
@@ -104,6 +104,25 @@ The recorded runs are [`REPRODUCTION-2026-10-07b.log`](./REPRODUCTION-2026-10-07
 - **Duplicate suppression across a reboot**, and **the byte search across a reboot or after a WAL checkpoint by time**: neither was run.
 - **Natural Doze:** forced Doze only, on a charging, locked phone.
 - **Freed pages in the database file after `VACUUM` or reuse:** only the two release orders above were searched.
+
+## The store change, verified (part 6)
+
+architect-cto's ruling: `RETENTION.md` §8 now says released content leaves every file of the store after a clean close and after the next open following an unclean one, and leaves the log within a bound while the store is open. On this PR, the human store (`crates/human/store`):
+- runs every connection with `secure_delete`, read back;
+- truncates the WAL before `transport_terminal`, `mark_read` and `unkeep` return, so the bound is one release;
+- truncates at close and at every open of an existing store;
+- rewrites once a store written before `secure_delete`;
+- has `tests/released_content.rs` pin each of these, each failing when its mechanism is switched off.
+
+The recorded run is [`REPRODUCTION-2026-10-07d.log`](./REPRODUCTION-2026-10-07d.log), with the harness re-pinned locally to the store change. The committed pin stays on `origin/main`.
+
+| | observation |
+|---|---|
+| deletion at the file level, fixed | The same byte search, 3 runs on the phone and on the host: **no released content in either file**, open or closed, in either release order. The kept control was found every time. |
+| an existing store upgraded | Part 5's store, written before `secure_delete` with no settings row, was marked `released_content_scrubbed` by this build's first open (rewritten once). Its census is unchanged. |
+| the cost | From the bench on the phone (SQLite as the store runs it): a delete with `secure_delete` and the truncate takes **14–22 ms** median and **23–37 ms** at the 95th percentile, against 4–5 ms and 9–19 ms today. A release is a person reading or unkeeping, so the bound is one release. Reading a conversation with many unread messages pays it once per row. |
+
+**What part 6 did not establish:** a power loss mid-truncate; the cost of the one-time rewrite on a large store; and media remanence below the database, which `RETENTION.md` §8 leaves to the filesystem and encryption layer.
 
 ## The harness, as planned before the run
 
