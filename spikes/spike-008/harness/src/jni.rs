@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
 //! `org.interweave.spike008.Core`'s natives over raw JNI: a path in as
-//! UTF-8 bytes, a JSON census (or `{"error":..}`) out. Nothing throws,
-//! so no Java exception is left pending.
+//! UTF-8 bytes, a JSON census (or `{"error":..}`) out. The Rust code
+//! throws nothing; the one call here that can raise is `NewByteArray`,
+//! whose allocation failure returns null with Java's `OutOfMemoryError`
+//! pending, which the caller then sees thrown.
 
 #![allow(unsafe_code, clippy::missing_safety_doc)]
 
