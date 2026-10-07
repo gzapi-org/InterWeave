@@ -135,7 +135,8 @@ class Peer:
     """The far peer: a claude-channel on B, spoken to over its stdio."""
 
     def __init__(self, binary, home, record):
-        self.proc = subprocess.Popen([str(binary), "--profile", PROFILE, "--endpoint", "claude"],
+        self.proc = subprocess.Popen([str(binary), "--profile", PROFILE, "--endpoint", "claude",
+                                      "--delivery", "push"],
                                      env={"PATH": os.environ["PATH"], **home.env()},
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.DEVNULL)
@@ -245,7 +246,7 @@ def main() -> int:
         shutil.copy(bridge, plug / "bin" / "claude-channel")
         manifest = json.loads((plug / ".mcp.json").read_text())
         server = manifest["mcpServers"]["interweave"]
-        server["args"] = ["--profile", PROFILE, "--endpoint", "claude"]
+        server["args"] = ["--profile", PROFILE, "--endpoint", "claude", "--delivery", "push"]
         server["env"] = a.env()
         (plug / ".mcp.json").write_text(json.dumps(manifest, indent=2))
 

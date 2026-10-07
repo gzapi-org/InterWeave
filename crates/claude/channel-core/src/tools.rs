@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
-//! The Claude-facing tool surface (`plugin/TOOL-SURFACE.md`): seven tools,
-//! their inputs as closed shapes, and the exact wording of their results.
+//! The agent-facing tool surface (`plugin/TOOL-SURFACE.md`): seven tools in
+//! either delivery mode, `receive` beside them in pull mode, their inputs
+//! as closed shapes, and the exact wording of their results.
 //!
-//! **Seven, and nothing administrative.** [`ToolName::ALL`] is the whole
-//! surface; trust, endpoints, keys, configuration, shutdown and raw
+//! **Nothing administrative.** [`Delivery::tools`] is the whole surface a
+//! session sees; trust, endpoints, keys, configuration, shutdown and raw
 //! network operations are not tools (§What is not a Claude tool). Every
 //! input refuses an unknown field, so no argument -- a `source_endpoint`
 //! least of all -- reaches the bridge beside the ones named: the source
@@ -38,10 +39,65 @@ pub enum ToolName {
     Identity,
     /// Health, the lease, the joins.
     Status,
+    /// Take what waits in the pull queue (pull mode only).
+    Receive,
+}
+
+/// How inbound messages reach the host -- configuration, never detected
+/// (`--delivery`, required): a host does not declare whether it takes
+/// Claude Code's channel push, so one that does is named so by whoever
+/// starts the bridge (architect-cto's ruling, relay seq 18691).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    /// Each message pushed as `notifications/claude/channel`; the
+    /// `claude/channel` capability advertised, no `receive` tool.
+    Push,
+    /// Each message queued for `receive`; no capability, no push.
+    Pull,
+}
+
+impl Delivery {
+    /// The `--delivery` value naming each mode.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Push => "push",
+            Self::Pull => "pull",
+        }
+    }
+
+    /// The mode `value` names, if any.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        [Self::Push, Self::Pull]
+            .into_iter()
+            .find(|mode| mode.as_str() == value)
+    }
+
+    /// The tools a session in this mode sees, in TOOL-SURFACE.md's order:
+    /// `receive` only in pull mode, so a session never has both ways of
+    /// taking a message.
+    #[must_use]
+    pub const fn tools(self) -> &'static [ToolName] {
+        match self {
+            Self::Push => &ToolName::ALL,
+            Self::Pull => &ToolName::PULL,
+        }
+    }
+
+    /// The tool called `name` in this mode, if it offers one.
+    #[must_use]
+    pub fn tool(self, name: &str) -> Option<ToolName> {
+        self.tools()
+            .iter()
+            .copied()
+            .find(|tool| tool.as_str() == name)
+    }
 }
 
 impl ToolName {
-    /// The whole surface, TOOL-SURFACE.md's table in its order.
+    /// The seven tools of either mode, TOOL-SURFACE.md's table in its
+    /// order.
     pub const ALL: [Self; 7] = [
         Self::Broadcast,
         Self::Send,
@@ -50,6 +106,18 @@ impl ToolName {
         Self::Leave,
         Self::Identity,
         Self::Status,
+    ];
+
+    /// Pull mode's surface: the seven, and `receive`.
+    pub const PULL: [Self; 8] = [
+        Self::Broadcast,
+        Self::Send,
+        Self::Reply,
+        Self::Join,
+        Self::Leave,
+        Self::Identity,
+        Self::Status,
+        Self::Receive,
     ];
 
     /// The tool's name.
@@ -63,13 +131,8 @@ impl ToolName {
             Self::Leave => "leave",
             Self::Identity => "identity",
             Self::Status => "status",
+            Self::Receive => "receive",
         }
-    }
-
-    /// The tool called `name`, if the surface has one.
-    #[must_use]
-    pub fn parse(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|tool| tool.as_str() == name)
     }
 }
 
@@ -105,6 +168,12 @@ pub enum ToolCall {
     Identity,
     /// `status()`.
     Status,
+    /// `receive(max?)`: at most `max` events, or as many as the queue's
+    /// bound; a larger ask is clamped by the bridge, never refused.
+    Receive {
+        /// The most to take, if named.
+        max: Option<u64>,
+    },
 }
 
 /// Why a call's arguments were refused, as the tool's error text says it.
@@ -157,6 +226,13 @@ struct ChannelInput {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NoInput {}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReceiveInput {
+    #[serde(default)]
+    max: Option<u64>,
+}
 
 /// `arguments` for `tool` as a [`ToolCall`]; absent arguments are an
 /// empty object.
@@ -216,6 +292,10 @@ pub fn parse_call(
         ToolName::Status => {
             let NoInput {} = serde_json::from_value(arguments).map_err(shape)?;
             ToolCall::Status
+        }
+        ToolName::Receive => {
+            let input: ReceiveInput = serde_json::from_value(arguments).map_err(shape)?;
+            ToolCall::Receive { max: input.max }
         }
     })
 }
@@ -299,9 +379,47 @@ mod tests {
             ]
         );
         for tool in ToolName::ALL {
-            assert_eq!(ToolName::parse(tool.as_str()), Some(tool));
+            assert_eq!(Delivery::Push.tool(tool.as_str()), Some(tool));
         }
-        assert_eq!(ToolName::parse("shutdown"), None);
+        assert_eq!(Delivery::Pull.tool("shutdown"), None);
+    }
+
+    /// Each mode's surface: push is the seven, pull is the seven and
+    /// `receive` -- so a push session never sees `receive`, and a pull
+    /// session sees it once.
+    #[test]
+    fn receive_is_on_the_pull_surface_only() {
+        assert_eq!(Delivery::Push.tools(), &ToolName::ALL[..]);
+        assert_eq!(Delivery::Push.tool("receive"), None);
+        assert_eq!(Delivery::Pull.tool("receive"), Some(ToolName::Receive));
+        assert_eq!(
+            Delivery::Pull.tools()[..7],
+            ToolName::ALL[..],
+            "the seven, in order, first"
+        );
+        assert_eq!(Delivery::Pull.tools().len(), 8);
+        assert_eq!(Delivery::parse("push"), Some(Delivery::Push));
+        assert_eq!(Delivery::parse("pull"), Some(Delivery::Pull));
+        assert_eq!(Delivery::parse("auto"), None);
+    }
+
+    /// `receive`'s one argument is an optional count; nothing else.
+    #[test]
+    fn receive_takes_an_optional_count() {
+        assert_eq!(
+            parse_call(ToolName::Receive, None),
+            Ok(ToolCall::Receive { max: None })
+        );
+        assert_eq!(
+            parse_call(ToolName::Receive, Some(json!({"max": 5}))),
+            Ok(ToolCall::Receive { max: Some(5) })
+        );
+        for bad in [json!({"max": -1}), json!({"max": "5"}), json!({"limit": 5})] {
+            assert!(
+                parse_call(ToolName::Receive, Some(bad.clone())).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     /// No call takes a source endpoint, or any field beside its own: the
@@ -313,9 +431,9 @@ mod tests {
             ToolName::Send => json!({"peer": PEER, "content": "x"}),
             ToolName::Reply => json!({"reply_token": "t", "content": "x"}),
             ToolName::Join | ToolName::Leave => json!({"channel": "general"}),
-            ToolName::Identity | ToolName::Status => json!({}),
+            ToolName::Identity | ToolName::Status | ToolName::Receive => json!({}),
         };
-        for tool in ToolName::ALL {
+        for tool in ToolName::PULL {
             let mut arguments = base(tool);
             assert!(
                 parse_call(tool, Some(arguments.clone())).is_ok(),

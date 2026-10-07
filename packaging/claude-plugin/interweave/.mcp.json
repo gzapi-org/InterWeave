@@ -2,7 +2,7 @@
   "mcpServers": {
     "interweave": {
       "command": "${CLAUDE_PLUGIN_ROOT}/bin/claude-channel",
-      "args": ["--profile", "default", "--endpoint", "claude"]
+      "args": ["--profile", "default", "--endpoint", "claude", "--delivery", "push"]
     }
   }
 }

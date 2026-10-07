@@ -174,8 +174,27 @@ impl BridgeState {
         entropy: [u8; REPLY_TOKEN_ENTROPY_BYTES],
         now_ms: u64,
     ) -> Result<Option<ChannelNotification>, ConvertError> {
+        let lease = self.lease.clone();
+        self.notification_under(event, lease.as_ref(), entropy, now_ms)
+    }
+
+    /// [`BridgeState::notification`] for a message taken from the session
+    /// under `lease` -- pull mode mints its token when the host TAKES it,
+    /// with the lease it ARRIVED under, so a message from before a
+    /// reconnect gets a token stale by its epoch, as one pushed then
+    /// would have (architect-cto's ruling, relay seq 18784).
+    ///
+    /// # Errors
+    /// As [`BridgeState::notification`].
+    pub fn notification_under(
+        &mut self,
+        event: &SessionEvent,
+        lease: Option<&(EndpointId, Generation)>,
+        entropy: [u8; REPLY_TOKEN_ENTROPY_BYTES],
+        now_ms: u64,
+    ) -> Result<Option<ChannelNotification>, ConvertError> {
         let (mut meta, content, route) = match event {
-            SessionEvent::Direct(message) => self.direct(message)?,
+            SessionEvent::Direct(message) => Self::direct(message, lease)?,
             SessionEvent::Broadcast(message) => broadcast(message)?,
             SessionEvent::Local(_) => return Ok(None),
         };
@@ -189,9 +208,17 @@ impl BridgeState {
         Ok(Some(ChannelNotification { content, meta }))
     }
 
+    /// The endpoint and epoch held, as a value to keep beside a message
+    /// taken now and minted later.
+    #[must_use]
+    pub fn lease_held(&self) -> Option<(EndpointId, Generation)> {
+        self.lease.clone()
+    }
+
+    /// A direct message's meta, content and reply route under `lease`.
     fn direct(
-        &self,
         message: &ReceivedDirect,
+        lease: Option<&(EndpointId, Generation)>,
     ) -> Result<(ChannelMeta, String, Option<ReplyRoute>), ConvertError> {
         let mut meta = ChannelMeta::new();
         meta.set(MetaKey::DeliveryMode, "direct")?;
@@ -207,9 +234,7 @@ impl BridgeState {
             message.received_at_ms,
             &message.payload,
         )?;
-        let route = self
-            .lease
-            .as_ref()
+        let route = lease
             .filter(|(endpoint, _)| *endpoint == message.destination_endpoint)
             .map(|(endpoint, epoch)| ReplyRoute::Direct {
                 remote_peer: message.source_peer.clone(),

@@ -4,8 +4,8 @@ All ADRs are **Accepted** architecture decisions unless later superseded.
 
 | ADR | Decision |
 |---|---|
-| [0001](./0001-system-boundaries.md) | Keep four explicit layers: Claude Code, Channel MCP bridge, generic transport runtime, and network backend. |
-| [0002](./0002-claude-channel-integration.md) | Use the current Claude Code Channel contract: stdio MCP server, `claude/channel`, push notifications, ordinary outbound tools, explicit instructions, and pre-delivery admission. |
+| [0001](./0001-system-boundaries.md) | Keep four explicit layers: an MCP host, the MCP bridge, generic transport runtime, and network backend; Claude Code's Channel extension is one delivery mode of the bridge (A 2026-10-07). |
+| [0002](./0002-claude-channel-integration.md) | Use the current Claude Code Channel contract: stdio MCP server, `claude/channel`, push notifications, ordinary outbound tools, explicit instructions, and pre-delivery admission; one bridge with a second, pull delivery mode for a plain MCP host (A 2026-10-07). |
 | [0003](./0003-libp2p-backend.md) | Select rust-libp2p as the first transport backend behind neutral contracts. |
 | [0004](./0004-gossipsub-broadcast.md) | Use signed GossipSub for broadcast with explicit application validation-result mapping from ADR-0029. |
 | [0005](./0005-directed-messaging.md) | Use rust-libp2p `request_response`; endpoint-aware implementation target is `/interweave/direct/2.0.0` per ADR-0030. |
@@ -26,7 +26,7 @@ All ADRs are **Accepted** architecture decisions unless later superseded.
 | [0020](./0020-no-offline-store.md) | Do not persist application messages for later network, endpoint, Claude, or human delivery. |
 | [0021](./0021-rust-workspace.md) | Separate neutral endpoint-aware contracts, runtime/EndpointRegistry, libp2p, IPC, daemon/CLI, and application adapters. |
 | [0022](./0022-discovery-upgradeability.md) | Use compile-time provider registration plus typed namespaced configuration; no dynamic shared-library loading in v1. |
-| [0023](./0023-claude-tool-surface.md) | Keep seven Claude tools; `send` gains optional remote EndpointId and bridge source route comes from IPC lease. |
+| [0023](./0023-claude-tool-surface.md) | Keep seven Claude tools, eight in pull mode (`receive`, A 2026-10-07); `send` gains optional remote EndpointId and bridge source route comes from IPC lease. |
 | [0024](./0024-reachability-scope.md) | Historical conservative reachability scope; superseded by ADR-0035 mandatory Internet reachability. |
 | [0025](./0025-channel-id-topic-mapping.md) | Use 1..128-byte ASCII ChannelIds and deterministic domain-separated SHA-256 topic mapping. |
 | [0026](./0026-backpressure-limits.md) | Bound payloads, endpoint/directory state, IPC frames/queues/clients, discovery state, and direct concurrency. |

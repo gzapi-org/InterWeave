@@ -14,6 +14,7 @@
 pub mod bridge;
 pub mod content;
 pub mod meta;
+pub mod pull;
 pub mod received_at;
 pub mod reply_token;
 pub mod tools;
@@ -21,8 +22,10 @@ pub mod tools;
 pub use bridge::{BridgeState, ChannelNotification, ConvertError, REPLY_TOKEN_ENTROPY_BYTES};
 pub use content::{ChannelContent, PayloadEncoding, Undecodable, channel_content};
 pub use meta::{ChannelMeta, MAX_META_VALUE_BYTES, MetaError, MetaKey};
+pub use pull::{PullQueue, Take};
 pub use received_at::{MAX_RECEIVED_AT_MS, rfc3339_utc};
 pub use reply_token::{DuplicateToken, ReplyResolution, ReplyRoute, ReplyTokenTable};
 pub use tools::{
-    BROADCAST_ACCEPTED, ToolCall, ToolInputError, ToolName, direct_accepted, error_text, parse_call,
+    BROADCAST_ACCEPTED, Delivery, ToolCall, ToolInputError, ToolName, direct_accepted, error_text,
+    parse_call,
 };

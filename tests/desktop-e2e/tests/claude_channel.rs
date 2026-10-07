@@ -81,12 +81,28 @@ struct Bridge {
 
 impl Bridge {
     fn start(home: &Home) -> Self {
+        Self::start_in(home, "push")
+    }
+
+    /// The bridge as a plain MCP host would start it: `--delivery pull`.
+    fn start_pull(home: &Home) -> Self {
+        Self::start_in(home, "pull")
+    }
+
+    fn start_in(home: &Home, delivery: &str) -> Self {
         let env = |p: &Path| p.as_os_str().to_owned();
         let mut child = tokio::process::Command::new(workspace_binary(
             "claude-channel",
             "interweave-claude-channel",
         ))
-        .args(["--profile", home.paths.profile(), "--endpoint", "claude"])
+        .args([
+            "--profile",
+            home.paths.profile(),
+            "--endpoint",
+            "claude",
+            "--delivery",
+            delivery,
+        ])
         .env_clear()
         .env("XDG_CONFIG_HOME", env(&home.roots.config_home))
         .env("XDG_DATA_HOME", env(&home.roots.data_home))
@@ -768,5 +784,128 @@ async fn a_human_chat_envelope_is_notified_as_its_decoded_text() {
         assert_eq!(n["content"], json!(raw), "{}", encoded.media_type);
         assert_eq!(n["meta"]["payload_encoding"], json!("utf8"));
         assert_eq!(n["meta"]["content_type"], json!(MEDIA_TYPE_V2));
+    }
+}
+
+/// A plain MCP host -- no channel extension -- drives the bridge in pull
+/// mode across two daemons (architect-cto's ruling, relay seq 18691):
+/// `initialize` advertises no `claude/channel` and `tools/list` adds
+/// `receive`; B's direct and broadcast reach the host only through
+/// `receive`, oldest first, each with the meta the push would carry;
+/// nothing is pushed; and a reply by its token reaches B. The push-mode
+/// tests above, on the same harness, are the control.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_plain_mcp_host_receives_by_pull_across_two_daemons() {
+    let (a, a_daemon, a_peer, b, b_daemon, b_peer) = two_daemons().await;
+    let daemons = [&a_daemon, &b_daemon];
+    let mut bridge = Bridge::start_pull(&a);
+    let init = bridge
+        .request(
+            "initialize",
+            json!({"protocolVersion": "2025-11-25", "capabilities": {}}),
+        )
+        .await;
+    assert!(
+        init["result"]["capabilities"].get("experimental").is_none(),
+        "no channel extension advertised: {init}"
+    );
+    let tools = bridge.request("tools/list", json!({})).await;
+    let names: Vec<&str> = tools["result"]["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .map(|t| t["name"].as_str().expect("a name"))
+        .collect();
+    assert_eq!(names.len(), 8, "{names:?}");
+    assert!(names.contains(&"receive"));
+    bridge.wait_leased(&daemons).await;
+
+    let b_human = session(&b, human()).await;
+    send_until_accepted(&b_human, &a_peer, claude(), "pull one", &daemons).await;
+    let (answer, error) = bridge.tool("join", json!({"channel": "general"})).await;
+    assert!(!error, "{answer}");
+    b_human.join(general()).await.expect("B joins");
+
+    // Received in order: the direct first, then the broadcast once the
+    // mesh carries it.
+    let mut received: Vec<Value> = Vec::new();
+    let deadline = tokio::time::Instant::now() + PATIENCE * 2;
+    while !received.iter().any(|e| e["content"] == json!("pull all")) {
+        b_human
+            .broadcast(
+                general(),
+                BroadcastMessageV1 {
+                    message_id: MessageId::from_bytes(rand_bytes()),
+                    sent_at_ms: 0,
+                    payload: text("pull all"),
+                },
+            )
+            .await
+            .expect("accepted for local publish");
+        // How a host sees the answer: one text content item holding the
+        // structured JSON, not an error (relay seq 18784 asks it recorded).
+        let framed = bridge
+            .request("tools/call", json!({"name": "receive", "arguments": {}}))
+            .await;
+        assert_eq!(framed["result"]["isError"], json!(false), "{framed}");
+        assert_eq!(
+            framed["result"]["content"][0]["type"],
+            json!("text"),
+            "{framed}"
+        );
+        let answer = framed["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text")
+            .to_owned();
+        let take: Value = serde_json::from_str(&answer).expect("receive is JSON");
+        assert_eq!(take["paused"], json!(false), "{take}");
+        received.extend(take["events"].as_array().expect("events").iter().cloned());
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no broadcast reached the host by pull\n{}",
+            logs(&daemons)
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let direct = &received[0];
+    assert_eq!(
+        direct["kind"],
+        json!("direct"),
+        "oldest first: {received:?}"
+    );
+    assert_eq!(direct["content"], json!("pull one"));
+    assert_eq!(direct["meta"]["delivery_mode"], json!("direct"));
+    assert_eq!(direct["meta"]["source_peer"], json!(b_peer.as_str()));
+    assert_eq!(direct["meta"]["destination_endpoint"], json!("claude"));
+    let broadcast = received
+        .iter()
+        .find(|e| e["content"] == json!("pull all"))
+        .expect("the broadcast");
+    assert_eq!(broadcast["kind"], json!("broadcast"));
+    assert_eq!(broadcast["meta"]["channel"], json!("general"));
+    assert!(
+        bridge.notifications.is_empty(),
+        "pull mode pushes nothing: {:?}",
+        bridge.notifications
+    );
+
+    let token = direct["meta"]["reply_token"]
+        .as_str()
+        .expect("a token")
+        .to_owned();
+    let (answer, error) = bridge
+        .tool(
+            "reply",
+            json!({"reply_token": token, "content": "pull back"}),
+        )
+        .await;
+    assert!(!error, "{answer}");
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while !direct_from(&b_human, b"pull back").await {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the reply never reached B"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
