@@ -1,0 +1,100 @@
+# SPIKE-008 device harness -- recorded run (part 2: P1, L9, L6, L7, L8 and S1 across a reboot, L2)
+# date: 2026-10-07T05:23Z-06:56Z
+# device, host, toolchain and pins: as part 1; library as part 1 (the harness is unchanged since the recording commit)
+# builds: bash spikes/spike-008/build.sh 36 (P1 onward: targetSdk 36, standard v1, allowBackup=false)
+# drivers and the harness's own lines are verbatim; a person at the phone made the changes named as theirs
+# key material and content: none -- TEST-ONLY labels only
+# B2 (a backup through Google's transport) is not run: the owner's decision of 2026-10-07, "no backup on google -- by design"
+
+## P1: the targetSdk 36 build (standard v1) on API 30 -- driver output
+## 05:23:30Z P1: targetSdk 36 on API 30, clean install
+Success
+versionCode=1 minSdk=30 targetSdk=36
+versionName=spike-t36-nobackup
+Status: ok
+isForeground=true foregroundId=1
+{"t":1791350620441,"up":28377565,"pid":31647,"event":"launcher-created","detail":""}
+{"t":1791350620523,"up":28377648,"pid":31647,"event":"service-created","detail":""}
+{"t":1791350620571,"up":28377696,"pid":31647,"event":"foreground-started","detail":"type=512"}
+{"t":1791350620585,"up":28377710,"pid":31647,"event":"start-command","detail":"intent=true flags=0 id=1"}
+{"t":1791350620594,"up":28377719,"pid":31647,"event":"net-available","detail":"601"}
+{"t":1791350620595,"up":28377720,"pid":31647,"event":"net-capabilities","detail":"601 wifi validated=true"}
+{"t":1791350620596,"up":28377721,"pid":31647,"event":"net-link","detail":"601 addresses=4"}
+START_FOREGROUND: allow; time=+4s962ms ago (running)
+
+## L9: a person tried to swipe the foreground notification away (reported: impossible) -- driver output
+## 05:27:36Z L9 after the person's swipe attempt
+NotificationRecord(0x0b2365ea
+flags=0x62
+isForeground=true foregroundId=1
+
+## L6: a person added SPIKE-008 to Settings > Battery and device care > Battery > Background usage limits >
+##   Deep sleeping apps (05:29Z), then removed it (05:41Z) -- driver output
+## 05:29:34Z L6: SPIKE-008 added to Deep sleeping apps by the person
+AC powered: true
+USB powered: false
+RUN_ANY_IN_BACKGROUND: ignore
+No operations.
+Default mode: allow
+10
+05:30:04Z pid= fg=0
+05:30:35Z pid= fg=0
+05:31:05Z pid= fg=0
+05:31:35Z pid= fg=0
+05:32:05Z pid= fg=0
+05:32:36Z pid= fg=0
+(the trace's last lines, pid 31647; no service-destroyed line follows them)
+{"t":1791350920716,"up":28677841,"pid":31647,"event":"heartbeat","detail":"n=10"}
+{"t":1791350921804,"up":28678929,"pid":31647,"event":"net-capabilities","detail":"601 wifi validated=true"}
+{"t":1791350942934,"up":28700059,"pid":31647,"event":"net-capabilities","detail":"601 wifi validated=true"}
+## 05:41:34Z L6: removed from Deep sleeping by the person
+No operations.
+Default mode: allow
+60 s later: pid='' services=0
+Status: ok
+after the launcher: pid=11644 fg=1
+
+## L7: a person turned Wi-Fi off and on (adb, over Wi-Fi, was lost meanwhile and reconnected on a new port);
+##   the phone has no mobile data (both SIM slots out of service), so no cellular transition was made -- driver output
+## 05:45:22Z L7: after Wi-Fi off/on by the person
+pid=11644 fg=1
+{"t":1791351875891,"up":29633015,"pid":11644,"event":"net-capabilities","detail":"601 wifi validated=true"}
+{"t":1791351877543,"up":29634668,"pid":11644,"event":"net-lost","detail":"601"}
+{"t":1791351884853,"up":29641978,"pid":11644,"event":"net-available","detail":"602"}
+{"t":1791351884857,"up":29641982,"pid":11644,"event":"net-capabilities","detail":"602 wifi validated=false"}
+{"t":1791351884860,"up":29641984,"pid":11644,"event":"net-link","detail":"602 addresses=2"}
+{"t":1791351885409,"up":29642534,"pid":11644,"event":"net-link","detail":"602 addresses=4"}
+{"t":1791351885460,"up":29642584,"pid":11644,"event":"net-capabilities","detail":"602 wifi validated=true"}
+
+## L8 and S1 across a reboot -- driver output
+## 05:45:33Z L8/S1: seed the store on this install before the reboot
+{"t":1791351941659,"up":29698783,"pid":11644,"event":"transitions","detail":{"pending":["P2","P3"],"unread":["U2","U3"],"kept":["K2","K3"],"eligible":["K2","K3","U2","U3"]}}
+boot id before: 29399b5a-8fb6-44b0-9733-fe5086cbc2ad
+## 05:45:54Z reboot sent
+(a person unlocked and re-enabled wireless debugging; adb on a new port)
+## 05:52:53Z L8: after the reboot and the person's unlock
+boot id after: 08069070-34af-4f8d-b59c-ba694842503b
+413.83 2830.99
+pid='' services=0
+(the trace's last lines before the reboot)
+{"t":1791351945360,"up":29702485,"pid":11644,"event":"net-capabilities","detail":"602 wifi validated=true"}
+{"t":1791351945410,"up":29702535,"pid":11644,"event":"net-lost","detail":"602"}
+(am broadcast census, enqueued 05:52:56Z; dumpsys activity broadcasts showed it queued, not yet dispatched)
+## 05:55:10Z after ~50 s of polling
+{"t":1791352509705,"up":547815,"pid":18296,"event":"census","detail":{"pending":["P2","P3"],"unread":["U2","U3"],"kept":["K2","K3"],"eligible":["K2","K3","U2","U3"]}}
+pid=18296 services=0
+
+## L2: launched, Home, screen on (stay-awake while charging), probed at 0/10/30/60 min -- driver output
+## The run then stopped by the owner's choice (screen-off and unplugged hours not run). The heartbeat count includes
+## the pre-reboot trace lines; the pid and the count's growth (2 a minute) are what the probes show.
+## (The start-marker write failed -- `run-as sh -c` does not start in the app's directory -- and `screen=` is empty --
+## Samsung's dumpsys power has no mWakefulness line; neither is a measurement.)
+## 05:55:25Z L2: launch, Home
+/system/bin/sh: can't create files/trace.jsonl: No such file or directory
+## 05:55:33Z screen on
+05:55:33Z on-0m: pid=18296 fg=1 beats=16 last="t":1791351936202 screen=
+06:05:34Z on-10m: pid=18296 fg=1 beats=36 last="t":1791353128142 screen=
+06:25:35Z on-30m: pid=18296 fg=1 beats=76 last="t":1791354329308 screen=
+06:55:35Z on-60m: pid=18296 fg=1 beats=136 last="t":1791356131167 screen=
+## 06:55:41Z screen off
+## (the driver pressed power for the screen-off half at 06:55:41Z, 6 s after the 60-minute probe and before the stop; it was stopped then, and no screen-off probe was taken)
