@@ -29,8 +29,9 @@ pub const MAX_ENDPOINT_ROWS: usize = 64;
 /// Rows on one `ipc/trust-list` page: a full allowlist of 4096 is four
 /// pages, and a page stays under the 128 KiB body with the first page's
 /// `local_peer` -- 82-byte rows at 2.1 (architect-cto's ruling of
-/// 2026-10-04, LOCAL-IPC.md `admin.trust.list`), 103-byte rows at 2.3,
-/// which carry `source`.
+/// 2026-10-04, LOCAL-IPC.md `admin.trust.list`), 105-byte rows at 2.3,
+/// which carry `source` -- each with its array comma and a 52-character
+/// peer id; about 105 KiB a page.
 /// `a_full_trust_page_of_the_largest_rows_fits_the_body`.
 pub const MAX_TRUST_PAGE_ROWS: usize = 1024;
 
