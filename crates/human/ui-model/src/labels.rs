@@ -374,7 +374,7 @@ pub mod placeholder_en {
             TrustProblem::Unavailable => UiText::TrustUnavailable,
             TrustProblem::NotPermitted => UiText::TrustNotPermitted,
             TrustProblem::Refused => UiText::TrustRefused,
-            TrustProblem::Internal => UiText::TrustFailed,
+            TrustProblem::Incompatible | TrustProblem::Internal => UiText::TrustFailed,
         })
     }
 
