@@ -557,7 +557,9 @@ pub trait AdminPort {
     /// # Errors
     /// `CapabilityDenied` without `admin.trust`; `InvalidArgument` for
     /// this profile's own identity, or for a new peer once the allowlist
-    /// holds its ceiling (4096); or `BackendUnavailable`.
+    /// holds its ceiling (4096); `Internal` when the trust overlay could
+    /// not be written (nothing changed) or was left ahead of the runtime
+    /// (it takes effect at the next start); or `BackendUnavailable`.
     fn set_trust(
         &self,
         peer: TransportIdentity,

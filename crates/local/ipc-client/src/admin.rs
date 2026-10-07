@@ -359,8 +359,9 @@ impl AdminPort for IpcAdmin {
         let pages = self.trust_pages().await?;
         let local_peer = pages.first().and_then(|page| page.local_peer.clone());
         // At 2.3 every row a production daemon sends is persisted with its
-        // source (a store-less runtime negotiates no minor above 2.2); a
-        // row without one is a daemon this client cannot read truthfully.
+        // source (a composition without a store is never served over IPC,
+        // LOCAL-CLIENT.md §7 item 11); a row without one is a daemon this
+        // client cannot read truthfully.
         let allowed = pages
             .into_iter()
             .flat_map(|page| page.allowed)
