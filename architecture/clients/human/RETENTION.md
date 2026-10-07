@@ -161,3 +161,4 @@ The desktop and Android human clients must share tests proving:
 12. explicit backup eligibility includes only unread/kept inbound message content and excludes pending outbound;
 13. Android system backup/device transfer contains none of the human message-content store;
 14. storage unavailable/full transitions the human endpoint to degraded/offline handling rather than silently claiming unread durability.
+15. released content is absent from the store's files (the database and its write-ahead log) after a clean close, after the next open following an unclean one, and within the store's bound while open (`crates/human/store/tests/released_content.rs`; A 2026-10-07).
