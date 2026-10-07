@@ -88,8 +88,10 @@ pub struct HumanStore {
 const SCRUBBED: &str = "released_content_scrubbed";
 
 /// THE CLOSE truncates the WAL too (`RETENTION.md` §8: absent "after a
-/// clean close"). SQLite's own close of the last connection checkpoints and
-/// removes the WAL as well; this makes the store's rule not rest on that.
+/// clean close"). DEFENCE IN DEPTH, NOT SEPARATELY PINNED: SQLite's own
+/// close of the last connection checkpoints and removes the WAL as well,
+/// so no test can tell this truncate apart; `tests/released_content.rs`
+/// pins the outcome (absent after a clean close), not this line.
 impl Drop for HumanStore {
     fn drop(&mut self) {
         let _ = self.truncate_wal();

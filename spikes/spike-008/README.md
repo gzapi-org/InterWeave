@@ -110,9 +110,12 @@ The recorded runs are [`REPRODUCTION-2026-10-07b.log`](./REPRODUCTION-2026-10-07
 architect-cto's ruling: `RETENTION.md` §8 now says released content leaves every file of the store after a clean close and after the next open following an unclean one, and leaves the log within a bound while the store is open. On this PR, the human store (`crates/human/store`):
 - runs every connection with `secure_delete`, read back;
 - truncates the WAL before `transport_terminal`, `mark_read` and `unkeep` return, so the bound is one release;
-- truncates at close and at every open of an existing store;
-- rewrites once a store written before `secure_delete`;
-- has `tests/released_content.rs` pin each of these, each failing when its mechanism is switched off.
+- truncates at every open of an existing store, where "existing" is what the connection sees, WAL included, so a store that was never checkpointed counts;
+- reads the checkpoint's busy row, so a truncate another reader blocked is a failure, not a success;
+- truncates at close, as defence in depth over SQLite's own close, which removes the WAL too;
+- rewrites once a store written before `secure_delete`.
+
+`tests/released_content.rs` fails when `secure_delete`, the release truncate, the open truncate, the busy check or the one-time rewrite is switched off. The close truncate is not separately pinned, since SQLite's close does the same, and the tests pin its outcome only.
 
 The recorded run is [`REPRODUCTION-2026-10-07d.log`](./REPRODUCTION-2026-10-07d.log), with the harness re-pinned locally to the store change. The committed pin stays on `origin/main`.
 
