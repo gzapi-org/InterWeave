@@ -78,14 +78,16 @@ Authority order is unchanged (`CLAUDE.md` §2): accepted ADRs → normative cont
 ## Cluster 1 — Foundation and boundaries
 
 ### 0001 — Generic transport boundary (Accepted)
-Four explicit layers: Claude Code, Channel MCP bridge, generic transport runtime, network backend.
-- Rules: Claude-specific concepts stop at the bridge; libp2p-specific concepts stop at the backend; the generic transport carries opaque payloads plus transport metadata and defines **no** application coordination semantics.
-- Keywords: layering, boundary, opaque payload, transport metadata, no coordination semantics
+Four explicit layers: an MCP host, the MCP bridge, generic transport runtime, network backend.
+- The top layer is an MCP host; Claude Code's Channel extension is one delivery mode of the bridge (Amendment 2026-10-07): Claude Code the host proved so far; push and a bounded pull tool are ADR-0002's two modes.
+- Rules: host-specific concepts stop at the bridge; libp2p-specific concepts stop at the backend; the generic transport carries opaque payloads plus transport metadata and defines **no** application coordination semantics.
+- Keywords: layering, boundary, opaque payload, transport metadata, no coordination semantics, mcp host
 
 ### 0002 — Reuse official Claude Channel and Telegram patterns (Accepted)
 Adopt the current Claude Code Channel contract rather than inventing one.
 - Rules: stdio MCP server, `claude/channel` capability, push `notifications/claude/channel`, ordinary tools for outbound actions, explicit Channel instructions, sender/trust gating **before** notification delivery; content/meta separation and terminal-only trust mutation; transport ownership moves into a daemon; no remote permission relay in v1.
-- Keywords: claude channel, mcp, stdio, push notification, trust gating, permission relay
+- Two delivery modes, one bridge (Amendment 2026-10-07): the Channel contract is the push mode; pull mode is one `receive(max)` tool over `events(max)` through one bounded pull queue of direct messages and broadcasts (the granted `event_queue`; notices stay `status`) that drops nothing — full, the bridge pauses draining, session-bound tools refuse at once with a bridge-local error, and a pause outlasting the keepalive ends the session as wedged with the pipeline's bounded content lost (the existing fate of a non-draining client, stated); `--delivery push|pull` required, one per process, capability and tool advertised only in their mode; content/meta/sanitisation/reply token shared, the token minted at the take; the plugin passes push; a scripted plain-MCP client proves it; ADR-0023 amended for the tool.
+- Keywords: claude channel, mcp, stdio, push notification, pull mode, receive tool, delivery mode, trust gating, permission relay
 
 ### 0003 — rust-libp2p as initial network backend (Accepted)
 rust-libp2p is the first backend, behind the neutral transport contract.
@@ -309,7 +311,8 @@ A peer's trust authorizes its protocol, never where this host opens sockets: Aut
 
 ### 0023 — Minimal Claude-facing transport tool surface (Accepted)
 - Rules: seven tools — `broadcast`, `send(peer, endpoint?, …)`, `reply`, `join`, `leave`, `identity`, `status`. The bridge owns one configured EndpointId lease over IPC v2; `send.endpoint` selects the **remote** endpoint while the source always comes from the bridge lease; omitting the remote endpoint asks for the remote profile's configured default. `reply` uses route metadata from the inbound event including the remote source endpoint and the local lease epoch. **Not exposed:** trust approval/revocation, endpoint creation/rebinding, identity rotation/recovery, shutdown, forced discovery/Kademlia queries, private keys, raw Swarm/multiaddr internals. `peer_endpoints` is deliberately **not** a Claude tool and `claude-channel` gets no `endpoints.query` by default.
-- Keywords: claude tools, send endpoint, reply token, lease epoch, not exposed, no peer_endpoints
+- `receive` is the eighth tool, in pull delivery mode only (Amendment 2026-10-07): takes the direct messages and broadcasts the bridge holds, never waits, `{events, remaining, paused}`; absent in push mode; `status` adds the pull queue's depth, whether the drain is paused and since when; while paused the five session-bound tools refuse at once with a bridge-local error; seven tools in push mode, eight in pull.
+- Keywords: claude tools, send endpoint, reply token, lease epoch, not exposed, no peer_endpoints, receive, pull mode
 
 ### 0032 — Human client remains above transport (Accepted)
 - Rules: the human client is an application above transport — desktop through IPC v2, Android through the embedded local-session adapter (ADR-0041). Its session owns one configured EndpointId such as `human`; it uses the same generic contracts as any local consumer; the UI/domain layer owns no libp2p policy or private keys; contacts, display names, avatars, verification state, conversation models, unread state, reactions, and attachment UX are application data. It keeps **no conventional permanent history** — only ADR-0044's three durable states. Trust mutation, endpoint configuration, discovery administration, and shutdown require the admin binding, and a data session can never self-upgrade. Network content can never invoke administrative capabilities. The UI must display EndpointId as a **remote peer-controlled route label** unless a higher-level identity system verifies a stronger binding. One desktop executable may host both surfaces but they are separate connections, authority domains, and IPC slots; on Android the split prevents confused-deputy wiring but is not an OS sandbox.
