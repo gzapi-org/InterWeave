@@ -76,6 +76,9 @@ The recorded run is [`REPRODUCTION-2026-10-07.log`](./REPRODUCTION-2026-10-07.lo
 | S1 (reboot) | The production store seeded and transitioned before the reboot held exactly P2, P3 · U2, U3 · K2, K3 after it, with eligible K2, K3, U2, U3. Nothing released came back. |
 
 **What part 2 did not establish:**
+- **Battery and network accounting** (`dumpsys batterystats`, `dumpsys netstats`), which SPIKES.md's Evidence lists and the plan names for L2, L3 and L7: not recorded in any part.
+- **P1's Play policy text, quoted with the date read:** not recorded. The current target, 36, was taken from the toolchain pins (`tools/host/android/README.md`), not from Play's page.
+- **L4's `am send-trim-memory`:** not run; only the self-SIGKILL stand-in was.
 - **L2 with the screen off or unplugged, and natural Doze:** only the screen-on, charging hour was run. Forced Doze is part 1's L3.
 - **P1 under the current API's enforcement:** this needs an API 34+ device.
 - **L6 under plain "Sleeping apps"** (not deep), and Samsung's automatic sleeping of unused apps: only the person-chosen deep list was tried.
