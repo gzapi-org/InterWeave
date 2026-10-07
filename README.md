@@ -13,8 +13,8 @@ Every closed stage has a closing record in the [implementation plan](./architect
 | 0–3 | — | the workspace and frozen fixtures; the neutral contract crates (types and validation, no I/O); the pure policies and state machines; the first file I/O — human store, peer cache, profile paths, Ed25519 identity | plan §2–§6 |
 | 4–5 | — | the authenticated libp2p substrate (TCP, Noise, Yamux, Identify); the root connection and dial-admission funnel every outbound dial passes through | plan §7–§8 |
 | 6–8 | — | directed messaging at `/interweave/direct/2.0.0` between real peers; signed GossipSub broadcast; the endpoint directory at `/interweave/endpoints/1.0.0`, with a send's source endpoint bound to the caller's lease | plan §9–§11 |
-| 9–10 | — | the discovery framework (static, cache and mDNS providers under one conformance suite; mDNS runs on a vendored, bounded `libp2p-mdns`) and Kademlia peer routing behind the root gate | plan §12–§13 |
-| 11 | 2026-09-27 | AutoNAT v2 client and server, Circuit Relay v2 client and server, DCUtR, path preference and network-change handling, each `None` by default until a profile enables it; the real-NAT matrix ran as containerised rows with four owner-deferred limits named | plan §14 |
+| 9–10 | — | the discovery framework (static, cache and mDNS providers under one conformance suite; the mDNS crate shipped its normalization half, the multicast mechanism being Stage 11's) and Kademlia peer routing behind the root gate | plan §12–§13 |
+| 11 | 2026-09-27 | AutoNAT v2 client and server, Circuit Relay v2 client and server, DCUtR, path preference and network-change handling, each `None` by default until a profile enables it; the mDNS multicast mechanism on a vendored, bounded `libp2p-mdns`; the real-NAT matrix ran as containerised rows with four owner-deferred limits named | plan §14 |
 | 12 | 2026-09-28 | the composition root: a validated profile becomes a running `TransportRuntime`; two composed nodes connect through static discovery; the in-process local-session binding passes its conformance suite on real sockets | plan §15 |
 | 13 | 2026-10-01 | the profile-scoped daemon with two owner-protected sockets, the IPC client library, and `transportctl` for live administration and offline identity backup and restore; every IPC contract `active` | plan §16 |
 | 14 | 2026-10-03 | the human application core: the facade that owns the client's half of retention, the store's application tables, a toolkit-free render and presentation model, the reference Slint views, and HumanChatV2 across two daemons | plan §17 |
@@ -29,8 +29,9 @@ Stages 18 (the adversarial and security gate) and 19 (packaging and release) fol
 - **`transport-daemon`** (`apps/transport-daemon`; the diagram's `interweave-transportd`): the profile-scoped daemon. One process per profile, two owner-protected Unix sockets, a data plane for applications and an admin plane for settings.
 - **`transportctl`** (`apps/transportctl`): administers a live daemon and backs up, verifies and restores an identity offline.
 - **`human-desktop`** (`apps/human-desktop`): the first-party desktop client, a Slint window over a headless application core.
-- **`claude-channel`** (`apps/claude-channel`): the Claude Code Channel bridge, a stdio MCP server over the daemon's data socket.
-- **`human-android`** (`apps/human-android`): a landing zone until Stage 17 lands it.
+- **`claude-channel`** (`apps/claude-channel`): the Claude Code Channel bridge, a stdio MCP server over the daemon's data socket; the plugin that starts it is `packaging/claude-plugin/interweave`.
+
+`apps/human-android` is a landing zone until Stage 17 lands the Android client.
 
 Trust changes made through the admin socket persist in the profile's state directory, never in its configuration file, and survive a daemon restart.
 
@@ -91,7 +92,7 @@ The accepted details live in the contracts and ADRs; this README is an orientati
 | [`test-data/`](./test-data/README.md) | Mutable non-normative scenario data |
 | [`spikes/`](./spikes/README.md) | Empirical investigations and their evidence harnesses; never production dependencies |
 | [`third_party/`](./third_party/README.md) | Vendored dependency sources, each under its own licence and each with an ADR; a patched one also records its diff |
-| [`packaging/`](./packaging/README.md) | Linux/macOS/Windows/Android packaging landing zones; implementation comes with Stage 19 |
+| [`packaging/`](./packaging/README.md) | The Claude Code plugin that starts the Channel bridge (`claude-plugin/`); Linux/macOS/Windows/Android landing zones, implemented with Stage 19 |
 | [`xtask/`](./xtask/README.md) | Repository/test orchestration — `cargo xtask checks` / `cargo xtask ci` |
 | [`tools/`](./tools/) | Repository tooling — PR/review scripts and tree checks, each with a self-test beside it |
 | `.claude/` | Committed agent configuration and task-scoped skills; per-developer overrides stay untracked |
@@ -112,7 +113,7 @@ cargo xtask test
 cargo xtask ci           # all of the above
 ```
 
-Nothing short-circuits: one run reports everything that is wrong. The suites that need real sockets, two daemons or a display say so in their own READMEs under [`tests/`](./tests/README.md).
+Nothing short-circuits: one run reports everything that is wrong. Suites that need real sockets or two daemons say so in their READMEs under [`tests/`](./tests/README.md); the desktop client's end-to-end suites under `tests/desktop-e2e/tests/human_app/` need a display and run under `tools/ci/with_display.sh`.
 
 ## Canonical implementation order
 
