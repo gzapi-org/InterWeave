@@ -71,3 +71,18 @@ fn a_full_store_degrades_and_refuses_unread_while_what_it_holds_stays_readable()
     );
     let _ = std::fs::remove_dir_all(db.parent().expect("dir"));
 }
+
+#[test]
+fn the_file_level_search_sees_the_kept_control_and_records_the_released_bytes() {
+    let db = scratch("forensic");
+    let out = store::forensic(&db).expect("measures");
+    eprintln!("FORENSIC {out}");
+    // The search is live only if it finds the kept control somewhere; what
+    // it finds for the released message is the measurement, recorded, not
+    // asserted (spikes/spike-008/README.md).
+    assert!(
+        out.contains("\"kept_control\":{\"db\":\"true\"") || out.contains("\"wal\":\"true\"}}"),
+        "{out}"
+    );
+    let _ = std::fs::remove_dir_all(db.parent().expect("dir"));
+}
