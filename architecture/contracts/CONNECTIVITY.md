@@ -2,7 +2,7 @@
 
 The prose here is normative for **behaviour**. The normalized summary and path vocabulary are also defined as JSON Schema under [`schemas/connectivity/`](./schemas/connectivity/) — normative for **shape** (ADR-0049). That schema is closed on purpose: it is what stops infrastructure PeerIds and relay addresses being added to a summary an ordinary data-plane client receives.
 
-Status: **Frozen for standard v1 implementation scaffolding**
+Status: **Frozen contract; implemented from Stage 11 (closed 2026-09-27) and composed from Stage 12** — the engineering document [`../transport/libp2p/CONNECTIVITY.md`](../transport/libp2p/CONNECTIVITY.md) records how each rule is built and the rules added since this contract was frozen
 
 This contract defines the backend-neutral Internet reachability surface. It does not expose AutoNAT, Circuit Relay, DCUtR, multiaddr manipulation, or Swarm internals to Claude/human clients.
 
@@ -69,13 +69,17 @@ Administrative/raw details—specific infrastructure PeerIds, addresses, probe t
 ```text
 ConnectivityChanged { summary }
 PeerConnected { peer, path, observed_at }
-PeerPathChanged { peer, previous: direct | relayed, current: direct | relayed, reason, observed_at }
+PeerPathChanged { peer, previous: direct | relayed, current: direct | relayed, reason_class, observed_at }
 PeerDisconnected { peer, reason_class, observed_at }
 ```
 
 `ConnectivityChanged` is edge/state notification, not an append-only history. Slow IPC clients may receive a coalesced latest state rather than every intermediate transition.
 
-`PeerConnected` is emitted only when a logical application peer transitions from no usable application connection to at least one usable connection. A successful DCUtR hole punch for an already-connected relayed peer therefore **does not emit a second `PeerConnected`**. After the direct connection satisfies the configured stability gate, emit `PeerPathChanged { previous: relayed, current: direct, reason: dcutr }`; a coalesced `ConnectivityChanged` may accompany it. Existing streams are not claimed to migrate.
+`PeerConnected` is emitted only when a logical application peer transitions from no usable application connection to at least one usable connection. A successful DCUtR hole punch for an already-connected relayed peer therefore **does not emit a second `PeerConnected`**. After the direct connection satisfies the configured stability gate, emit `PeerPathChanged { previous: relayed, current: direct, reason_class: dcutr }`; a coalesced `ConnectivityChanged` may accompany it. Existing streams are not claimed to migrate.
+
+`PeerPathChanged.reason_class` is one of `dcutr` (a hole punch upgraded the path), `direct_established` (a direct connection dialled beside the relayed one became the path) and `direct_lost` (the direct connection went and the relayed one remains); `TRANSPORT.md` §Events is the authoritative shape (A 2026-10-07, aligning this text with the wire: it said `reason` and named only the punch).
+
+**Rules built after this contract was frozen, recorded in the engineering document** (`../transport/libp2p/CONNECTIVITY.md`, the section numbers are its): a `send` to an authorized peer that is not connected and has a known path dials once, and a peer the dial gate holds answers `PeerUnreachable` at once (§12, A 2026-10-06); the per-peer gate rows and `admin.peers.list` on the admin socket (§19, IPC 2.2); relay control connections carry a keepalive and an interface removal closes the connections whose local address is gone (§14, 2026-09-26); the local port a dial binds (§12, A 2026-10-07); the connectivity log lines under `interweave::connectivity` (`observability.md`). They refine this contract and contradict none of it.
 
 ## 6. Path-selection semantics
 

@@ -1,6 +1,6 @@
 # Mandatory Internet reachability design
 
-Status: normative architecture for the standard-v1 rust-libp2p backend. No implementation exists in this repository.
+Status: normative architecture for the standard-v1 rust-libp2p backend, implemented from Stage 11 (closed 2026-09-27) in `crates/transport/libp2p` and composed from Stage 12 in `crates/transport/composition`; the dated "Where it runs" and "A <date>" paragraphs below record how each rule is built.
 
 ADR-0035 supersedes the earlier conditional reachability scope. The standard v1 build includes **AutoNAT v2 client + Circuit Relay v2 client + DCUtR**. Relay-server and AutoNAT-server roles are supported infrastructure modes but are not automatically enabled on every peer.
 
@@ -464,7 +464,7 @@ DirectPreferred
    `- retire redundant relayed peer connection when safe
 ```
 
-Success yields a new direct libp2p connection. Existing streams are not modeled as migrated. After the configured stability gate, runtime emits `PeerPathChanged { previous: relayed, current: direct, reason: dcutr }` for an already-logically-connected peer; it does **not** emit a second `PeerConnected`. New direct requests/pubsub streams prefer the stable direct connection. The relay reservation itself may remain warm for inbound failover according to reservation target policy.
+Success yields a new direct libp2p connection. Existing streams are not modeled as migrated. After the configured stability gate, runtime emits `PeerPathChanged { previous: relayed, current: direct, reason_class: dcutr }` (the in-process Rust field is `reason`; the wire and `TRANSPORT.md` say `reason_class`) for an already-logically-connected peer; it does **not** emit a second `PeerConnected`. New direct requests/pubsub streams prefer the stable direct connection. The relay reservation itself may remain warm for inbound failover according to reservation target policy.
 
 DCUtR-originated dials are attributed `dcutr-hole-punch` and must pass the root gate for the actual remote data-plane PeerId, and the `DCUTR.md` §6 address-class rule (ADR-0052) before any socket.
 
