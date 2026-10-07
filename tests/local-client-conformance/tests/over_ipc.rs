@@ -265,6 +265,14 @@ async fn item_10_the_runtimes_state_is_owed_once_at_open() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_rows_answer_under_admin_status() {
+    let pair = IpcPair::start().await;
+    let (a, _) = pair.bindings();
+    suite::peer_rows_answer_under_admin_status(&a, &pair.a_peer, &pair.b_peer).await;
+    pair.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn trust_administration_revokes_as_policy() {
     let pair = IpcPair::start().await;
     let (a, _) = pair.bindings();
