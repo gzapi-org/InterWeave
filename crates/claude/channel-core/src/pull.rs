@@ -1,35 +1,31 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
-//! Pull mode's one queue (architect-cto's ruling, relay seq 18691): what
-//! the bridge drains from its session while the host has not yet called
-//! `receive`.
+//! Pull mode's one queue (architect-cto's ruling, relay seq 18784): the
+//! direct messages and broadcasts the bridge took from its session and the
+//! host has not yet taken with `receive`.
 //!
-//! **Bounded at the session's granted event queue**, the same number as
-//! the IPC client's receive buffer -- never a new constant. The bridge
-//! must keep draining its session (a full IPC receive buffer stops the
-//! socket and the daemon closes the connection as wedged), so a host that
-//! pulls slowly is answered from here, and what does not fit is counted,
-//! never silently gone.
+//! **It drops nothing it took.** A direct message in it was already
+//! acknowledged to its sender, and TRANSPORT.md §Backpressure forbids
+//! acknowledging and then losing one. So the queue is bounded -- at the
+//! session's granted event queue, the same number as the IPC client's
+//! receive buffer, never a new constant -- and when it is FULL the bridge
+//! stops draining its session: the daemon's own rules then decide what the
+//! session cannot take (a direct refused to its sender as overloaded, an
+//! ordinary broadcast dropped and counted at the daemon). [`PullQueue::push`]
+//! refuses past the bound rather than evict, so the caller cannot forget.
 //!
-//! **The reserved lane is kept** (LOCAL-IPC.md §Push events): an item the
-//! caller marks reserved is never dropped. Past the bound, the OLDEST
-//! ordinary item goes -- a host that comes back wants what is newest, and
-//! the count says what it missed. Reserved items are few by construction
-//! (the session's state, its lease, a peer's disconnect, its close), so
-//! they may hold the queue past its bound rather than be lost.
+//! Session notices are never in it: they are the bridge's state and its
+//! `status` in both modes.
 //!
-//! Pure and generic over the item: what an item is (its kind, content and
-//! metadata) is the bridge's to decide.
+//! Pure and generic over the item.
 
 use std::collections::VecDeque;
 
 /// One take from the queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Take<T> {
-    /// The items taken, oldest first.
+    /// The items taken, in the order they were pushed.
     pub items: Vec<T>,
-    /// Ordinary items dropped since the previous take.
-    pub dropped: u64,
     /// The queue's depth after this take: a host calls again while it is
     /// not zero.
     pub remaining: usize,
@@ -39,11 +35,7 @@ pub struct Take<T> {
 #[derive(Debug)]
 pub struct PullQueue<T> {
     bound: usize,
-    items: VecDeque<(T, bool)>,
-    /// Dropped since the last take.
-    dropped: u64,
-    /// Dropped since the queue was made, for `status`.
-    dropped_total: u64,
+    items: VecDeque<T>,
 }
 
 impl<T> PullQueue<T> {
@@ -53,39 +45,48 @@ impl<T> PullQueue<T> {
         Self {
             bound: bound.max(1),
             items: VecDeque::new(),
-            dropped: 0,
-            dropped_total: 0,
         }
     }
 
-    /// The queue's bound: the most a `receive` may take at once.
+    /// The queue's bound: the most a `receive` takes at once.
     #[must_use]
     pub const fn bound(&self) -> usize {
         self.bound
     }
 
-    /// Queue `item`. Past the bound the oldest ORDINARY item is dropped
-    /// and counted; a reserved one is never dropped, so with only
-    /// reserved items held the queue grows past its bound.
-    pub fn push(&mut self, item: T, reserved: bool) {
-        self.items.push_back((item, reserved));
-        if self.items.len() > self.bound
-            && let Some(at) = self.items.iter().position(|(_, reserved)| !reserved)
-        {
-            self.items.remove(at);
-            self.dropped += 1;
-            self.dropped_total += 1;
-        }
+    /// Room left: how many more the caller may take from its session.
+    /// Zero is the paused state.
+    #[must_use]
+    pub fn room(&self) -> usize {
+        self.bound - self.items.len()
     }
 
-    /// Take at most `max` items, oldest first -- `max` clamped to the
-    /// bound, never refused -- with the drops since the last take.
+    /// Whether the queue is full, so the session's draining is paused.
+    #[must_use]
+    pub fn is_full(&self) -> bool {
+        self.room() == 0
+    }
+
+    /// Queue `item`.
+    ///
+    /// # Errors
+    /// The item back when the queue is full: nothing taken is ever
+    /// evicted, so a caller that took past [`PullQueue::room`] keeps it.
+    pub fn push(&mut self, item: T) -> Result<(), T> {
+        if self.is_full() {
+            return Err(item);
+        }
+        self.items.push_back(item);
+        Ok(())
+    }
+
+    /// Take at most `max` items, in the order pushed -- `max` clamped to
+    /// the bound, never refused.
     pub fn take(&mut self, max: usize) -> Take<T> {
         let n = max.min(self.bound).min(self.items.len());
-        let items = self.items.drain(..n).map(|(item, _)| item).collect();
+        let items = self.items.drain(..n).collect();
         Take {
             items,
-            dropped: std::mem::take(&mut self.dropped),
             remaining: self.items.len(),
         }
     }
@@ -95,64 +96,28 @@ impl<T> PullQueue<T> {
     pub fn depth(&self) -> usize {
         self.items.len()
     }
-
-    /// Ordinary items dropped since the queue was made.
-    #[must_use]
-    pub const fn dropped_total(&self) -> u64 {
-        self.dropped_total
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Past the bound the oldest ordinary item goes, counted once in the
-    /// next take and in the total; the newest are kept, oldest first.
+    /// Full, the queue refuses: the item comes back, nothing held is
+    /// evicted, and the room is zero -- the paused state -- until a take.
     #[test]
-    fn past_the_bound_the_oldest_ordinary_item_is_dropped_and_counted() {
-        let mut q = PullQueue::new(3);
-        for i in 0..5 {
-            q.push(i, false);
-        }
-        assert_eq!(q.depth(), 3);
-        let take = q.take(10);
-        assert_eq!(take.items, [2, 3, 4], "the newest, oldest first");
-        assert_eq!(take.dropped, 2);
-        assert_eq!(take.remaining, 0);
-        assert_eq!(q.dropped_total(), 2);
-        // Counted once: the next take reports none.
-        q.push(9, false);
-        assert_eq!(q.take(10).dropped, 0);
-        assert_eq!(q.dropped_total(), 2);
-    }
-
-    /// A reserved item is never dropped: past the bound the oldest
-    /// ORDINARY one goes in its place, and only reserved items may hold
-    /// the queue past its bound. The control is the same pushes all
-    /// ordinary, where the reserved positions are dropped too.
-    #[test]
-    fn a_reserved_item_is_never_dropped() {
+    fn a_full_queue_refuses_and_evicts_nothing() {
         let mut q = PullQueue::new(2);
-        q.push("lease", true);
-        q.push("a", false);
-        q.push("b", false);
-        assert_eq!(q.take(10).items, ["lease", "b"]);
-
-        let mut all_reserved = PullQueue::new(2);
-        for item in ["state", "lease", "close"] {
-            all_reserved.push(item, true);
-        }
-        let take = all_reserved.take(10);
-        assert_eq!(take.items.len(), 2, "a take is clamped to the bound");
+        assert_eq!(q.room(), 2);
+        q.push("a").expect("room");
+        q.push("b").expect("room");
+        assert!(q.is_full());
+        assert_eq!(q.push("c"), Err("c"), "refused, returned");
+        let take = q.take(1);
+        assert_eq!(take.items, ["a"], "nothing held was evicted");
         assert_eq!(take.remaining, 1);
-        assert_eq!(take.dropped, 0, "nothing reserved was dropped");
-
-        let mut control = PullQueue::new(2);
-        for item in ["state", "a", "b"] {
-            control.push(item, false);
-        }
-        assert_eq!(control.take(10).items, ["a", "b"]);
+        assert!(!q.is_full(), "a take lifts the pause");
+        q.push("c").expect("room again");
+        assert_eq!(q.take(10).items, ["b", "c"], "in the order pushed");
     }
 
     /// A take is clamped to the bound and to what waits, and says how many
@@ -161,7 +126,7 @@ mod tests {
     fn a_take_is_clamped_and_says_what_remains() {
         let mut q = PullQueue::new(4);
         for i in 0..4 {
-            q.push(i, false);
+            q.push(i).expect("room");
         }
         let first = q.take(3);
         assert_eq!((first.items.len(), first.remaining), (3, 1));

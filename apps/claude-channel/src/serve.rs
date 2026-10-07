@@ -39,6 +39,7 @@ use interweave_claude_channel_core::{
     BROADCAST_ACCEPTED, BridgeState, ChannelMeta, ChannelNotification, Delivery, PullQueue,
     ReplyRoute, ToolCall, direct_accepted, error_text, parse_call,
 };
+use interweave_local_client_api::Generation;
 use interweave_local_client_api::{
     DataCapability, DataSessionBinding, DataSessionPort, LocalSessionEvent, SessionEvent,
     SessionRequest,
@@ -87,23 +88,30 @@ pub struct Config {
     pub delivery: Delivery,
 }
 
-/// One message waiting in the pull queue: what the push would have
-/// carried, and whether it was direct or broadcast.
+/// A session-bound tool's answer while the pull queue is full: the
+/// bridge's own state, named, never a stall and never `Overloaded`, which
+/// says the transport is busy (architect-cto's ruling, relay seq 18798).
+pub const PULL_QUEUE_FULL: &str = "the pull queue is full: call receive first";
+
+/// One message waiting in the pull queue, as the session gave it, with
+/// the lease it arrived under: its token is minted when the host takes
+/// it, under that lease, so its TTL runs from the reading and a message
+/// from before a reconnect stays stale by its epoch (relay seq 18784).
 #[derive(Debug)]
 struct Pulled {
-    kind: &'static str,
-    notification: ChannelNotification,
+    event: SessionEvent,
+    lease: Option<(EndpointId, Generation)>,
 }
 
-/// `receive`'s answer: the events oldest first, the drops since the last
-/// `receive`, and what remains (architect-cto's ruling, relay seq 18691).
-/// Written by `serde` straight to text, so each `meta` keeps the
-/// contract's table order, as the push does.
+/// `receive`'s answer: the events in the order taken from the session,
+/// what remains, and whether the drain is paused (architect-cto's ruling,
+/// relay seq 18784). Written by `serde` straight to text, so each `meta`
+/// keeps the contract's table order, as the push does.
 #[derive(Serialize)]
 struct Received<'a> {
     events: Vec<ReceivedEvent<'a>>,
-    dropped: u64,
     remaining: usize,
+    paused: bool,
 }
 
 #[derive(Serialize)]
@@ -165,7 +173,8 @@ struct Bridge<B: DataSessionBinding> {
     health: Option<(Health, Option<ConnectivitySummary>)>,
     /// Pull mode's queue, made at the first session with its granted
     /// event queue as the bound, and kept across reconnects so what the
-    /// host has not taken survives the daemon going away.
+    /// host has not taken survives the daemon going away. Full, it pauses
+    /// the session's draining: nothing it took is ever dropped.
     pull: Option<PullQueue<Pulled>>,
 }
 
@@ -211,7 +220,10 @@ where
                     write_line(&mut output, &answer).await?;
                 }
             }
-            woke = ready(bridge.session.as_ref()), if connected => {
+            // Paused (pull mode, the queue full): the session is not
+            // drained until `receive` makes room; the daemon's own rules
+            // decide what it cannot take.
+            woke = ready(bridge.session.as_ref()), if connected && !bridge.paused() => {
                 if woke.is_ok() {
                     bridge.pump(&mut output).await?;
                 } else {
@@ -251,6 +263,17 @@ struct Emit<'a, W> {
     pull: Option<&'a mut PullQueue<Pulled>>,
 }
 
+impl<W> Emit<'_, W> {
+    /// How many events to take from the session now: a batch, or in pull
+    /// mode no more than the queue has room for, so nothing taken is ever
+    /// refused by it. Zero is the paused state.
+    fn room(&self) -> usize {
+        self.pull
+            .as_deref()
+            .map_or(EVENT_BATCH, |queue| queue.room().min(EVENT_BATCH))
+    }
+}
+
 impl<W: AsyncWrite + Unpin> Emit<'_, W> {
     async fn events(&mut self, events: Vec<SessionEvent>) -> std::io::Result<()> {
         for event in &events {
@@ -265,18 +288,24 @@ impl<W: AsyncWrite + Unpin> Emit<'_, W> {
                 }
                 continue;
             }
+            // Pull mode: queued as taken, never pushed -- one mode per
+            // process; the token is minted when the host takes it.
+            if let Some(queue) = self.pull.as_deref_mut() {
+                let pulled = Pulled {
+                    event: event.clone(),
+                    lease: self.state.lease_held(),
+                };
+                // Never refused: no more is taken than the queue has room
+                // for (`Emit::room`).
+                if queue.push(pulled).is_err() {
+                    eprintln!(
+                        "claude-channel: the pull queue refused an event taken past its room"
+                    );
+                }
+                continue;
+            }
             let entropy = (self.env.entropy)();
             match self.state.notification(event, entropy, (self.env.now_ms)()) {
-                // Pull mode: queued, never pushed -- one mode per process.
-                Ok(Some(notification)) if self.pull.is_some() => {
-                    let kind = match event {
-                        SessionEvent::Broadcast(_) => "broadcast",
-                        _ => "direct",
-                    };
-                    if let Some(queue) = self.pull.as_deref_mut() {
-                        queue.push(Pulled { kind, notification }, false);
-                    }
-                }
                 Ok(Some(n)) => match notification_line(&n) {
                     Ok(line) => write_line(self.out, &line).await?,
                     Err(e) => eprintln!("claude-channel: a notification did not serialize: {e}"),
@@ -309,9 +338,9 @@ where
         tokio::select! {
             biased;
             answer = &mut call => return Ok(answer),
-            woke = session.ready(), if draining => {
+            woke = session.ready(), if draining && emit.room() > 0 => {
                 match woke {
-                    Ok(()) => match session.events(EVENT_BATCH).await {
+                    Ok(()) => match session.events(emit.room()).await {
                         Ok(events) => emit.events(events).await?,
                         Err(_) => draining = false,
                     },
@@ -436,7 +465,14 @@ impl<B: DataSessionBinding> Bridge<B> {
         let Some(session) = self.session.as_ref() else {
             return Ok(());
         };
-        let Ok(events) = session.events(EVENT_BATCH).await else {
+        let room = self
+            .pull
+            .as_ref()
+            .map_or(EVENT_BATCH, |queue| queue.room().min(EVENT_BATCH));
+        if room == 0 {
+            return Ok(());
+        }
+        let Ok(events) = session.events(room).await else {
             self.lost();
             return Ok(());
         };
@@ -495,6 +531,20 @@ impl<B: DataSessionBinding> Bridge<B> {
             Ok(call) => call,
             Err(e) => return Ok(error_line(id, INVALID_PARAMS, &e.to_string())),
         };
+        // Paused, a tool that needs the session would wait behind events
+        // the bridge is not taking: refused at once instead.
+        if self.paused()
+            && matches!(
+                call,
+                ToolCall::Send { .. }
+                    | ToolCall::Reply { .. }
+                    | ToolCall::Broadcast { .. }
+                    | ToolCall::Join(_)
+                    | ToolCall::Leave(_)
+            )
+        {
+            return Ok(tool_result_line(id, PULL_QUEUE_FULL, true));
+        }
         Ok(match self.run(call, out).await? {
             Ok(text) => tool_result_line(id, &text, false),
             // A session that ended is noticed where it ends: `ready`
@@ -628,9 +678,16 @@ impl<B: DataSessionBinding> Bridge<B> {
         })
     }
 
-    /// `receive(max)`: at most `max` messages from the queue, `max`
-    /// clamped to its bound, never refused; none queued yet -- no session
-    /// has opened -- is an empty answer.
+    /// Whether pull mode's queue is full, so the session's draining is
+    /// paused.
+    fn paused(&self) -> bool {
+        self.pull.as_ref().is_some_and(PullQueue::is_full)
+    }
+
+    /// `receive(max)`: at most `max` messages from the queue -- `max`
+    /// defaulting to and clamped at its bound, never refused -- each
+    /// minted now under the lease it arrived under. None queued yet (no
+    /// session has opened) is an empty answer.
     fn receive(&mut self, max: Option<u64>) -> String {
         let take = match self.pull.as_mut() {
             Some(queue) => {
@@ -640,22 +697,40 @@ impl<B: DataSessionBinding> Bridge<B> {
             }
             None => interweave_claude_channel_core::Take {
                 items: Vec::new(),
-                dropped: 0,
                 remaining: 0,
             },
         };
+        let mut taken: Vec<(&'static str, ChannelNotification)> = Vec::new();
+        for pulled in take.items {
+            let kind = match pulled.event {
+                SessionEvent::Broadcast(_) => "broadcast",
+                _ => "direct",
+            };
+            let entropy = (self.env.entropy)();
+            match self.state.notification_under(
+                &pulled.event,
+                pulled.lease.as_ref(),
+                entropy,
+                (self.env.now_ms)(),
+            ) {
+                Ok(Some(notification)) => taken.push((kind, notification)),
+                Ok(None) => {}
+                // Bridge-local, as on the push path: dropped and said,
+                // never forwarded in part (CHANNEL-EVENT.md §Content).
+                Err(e) => eprintln!("claude-channel: an inbound message was dropped: {e}"),
+            }
+        }
         let received = Received {
-            events: take
-                .items
+            events: taken
                 .iter()
-                .map(|pulled| ReceivedEvent {
-                    kind: pulled.kind,
-                    content: &pulled.notification.content,
-                    meta: &pulled.notification.meta,
+                .map(|(kind, notification)| ReceivedEvent {
+                    kind,
+                    content: &notification.content,
+                    meta: &notification.meta,
                 })
                 .collect(),
-            dropped: take.dropped,
             remaining: take.remaining,
+            paused: self.paused(),
         };
         serde_json::to_string(&received).unwrap_or_default()
     }
@@ -715,11 +790,12 @@ impl<B: DataSessionBinding> Bridge<B> {
             "last_connect_error": self.last_open_error.map(|e| format!("{e:?}")),
             "reply_tokens": self.state.live_tokens(now),
         });
-        // Pull mode: what waits for `receive`, and what was dropped.
+        // Pull mode: what waits for `receive`, and whether the drain is
+        // paused for it.
         if self.config.delivery == Delivery::Pull {
             status["pull_queue"] = json!({
                 "depth": self.pull.as_ref().map_or(0, PullQueue::depth),
-                "dropped_total": self.pull.as_ref().map_or(0, PullQueue::dropped_total),
+                "paused": self.paused(),
             });
         }
         status.to_string()

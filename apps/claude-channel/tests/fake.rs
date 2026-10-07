@@ -983,8 +983,8 @@ async fn a_pulled_direct_carries_the_pushs_content_and_meta_and_is_replied_to() 
     w.peer_sends("hello pull").await;
     w.wait_depth(1).await;
     let received = w.receive(None).await;
-    assert_eq!(received["dropped"], json!(0));
     assert_eq!(received["remaining"], json!(0));
+    assert_eq!(received["paused"], json!(false));
     let event = &received["events"][0];
     assert_eq!(event["kind"], json!("direct"));
     assert_eq!(event["content"], json!("hello pull"));
@@ -1002,36 +1002,48 @@ async fn a_pulled_direct_carries_the_pushs_content_and_meta_and_is_replied_to() 
     assert_eq!(w.receive(None).await["events"], json!([]), "taken once");
 }
 
-/// Past the queue's bound (the session's granted event queue, 16 here)
-/// the oldest messages are dropped and counted -- once in the next
-/// `receive`, and in `status`'s total -- and the newest are kept. A
-/// `max` is clamped, never refused, and `remaining` says what is left.
+/// Full (the session's granted event queue, 16 here), the pull queue
+/// pauses the session's draining and drops nothing it took (relay seq
+/// 18784): a session-bound tool is refused at once with the bridge's own
+/// error while paused, `status` and `receive` answer, `receive` lifts the
+/// pause, and every message arrives in order. A `max` is clamped, never
+/// refused, and `remaining` says what is left.
 #[tokio::test]
-async fn the_pull_queue_drops_the_oldest_past_its_bound_and_counts_them() {
+async fn the_pull_queue_pauses_when_full_and_drops_nothing() {
     let mut w = World::start_pull().await;
-    for i in 0..18 {
+    for i in 0..18_u64 {
         w.peer_sends(&format!("m{i:02}")).await;
-        // Drained as it comes, as a session must be.
-        w.wait_depth(u64::try_from(i + 1).expect("small").min(16))
-            .await;
+        w.wait_depth((i + 1).min(16)).await;
     }
     let status = w.status().await;
-    assert_eq!(status["pull_queue"]["dropped_total"], json!(2), "{status}");
+    assert_eq!(status["pull_queue"]["paused"], json!(true), "{status}");
+    let (text, error) = w.tool("join", json!({"channel": "general"})).await;
+    assert!(error, "refused while paused");
+    assert_eq!(text, "the pull queue is full: call receive first");
     let first = w.receive(Some(10)).await;
-    assert_eq!(first["dropped"], json!(2));
-    assert_eq!(first["remaining"], json!(6));
+    assert_eq!(first["events"].as_array().map(Vec::len), Some(10));
     assert_eq!(
         first["events"][0]["content"],
-        json!("m02"),
-        "the two oldest went"
+        json!("m00"),
+        "nothing dropped"
     );
+    assert_eq!(first["remaining"], json!(6));
+    assert_eq!(first["paused"], json!(false), "a take lifts the pause");
+    // The two the session held meanwhile are drained now.
+    w.wait_depth(8).await;
     let rest = w.receive(Some(1_000)).await;
-    assert_eq!(rest["dropped"], json!(0), "counted once");
+    let contents: Vec<&str> = rest["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .map(|e| e["content"].as_str().expect("content"))
+        .collect();
     assert_eq!(
-        rest["events"].as_array().map(Vec::len),
-        Some(6),
-        "clamped, not refused"
+        contents,
+        ["m10", "m11", "m12", "m13", "m14", "m15", "m16", "m17"],
+        "clamped, not refused, and in order"
     );
     assert_eq!(rest["remaining"], json!(0));
-    assert_eq!(rest["events"][5]["content"], json!("m17"));
+    let (text, error) = w.tool("join", json!({"channel": "general"})).await;
+    assert!(!error, "the control, not paused: {text}");
 }
