@@ -842,10 +842,23 @@ async fn a_plain_mcp_host_receives_by_pull_across_two_daemons() {
             )
             .await
             .expect("accepted for local publish");
-        let (answer, error) = bridge.tool("receive", json!({})).await;
-        assert!(!error, "{answer}");
+        // How a host sees the answer: one text content item holding the
+        // structured JSON, not an error (relay seq 18784 asks it recorded).
+        let framed = bridge
+            .request("tools/call", json!({"name": "receive", "arguments": {}}))
+            .await;
+        assert_eq!(framed["result"]["isError"], json!(false), "{framed}");
+        assert_eq!(
+            framed["result"]["content"][0]["type"],
+            json!("text"),
+            "{framed}"
+        );
+        let answer = framed["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text")
+            .to_owned();
         let take: Value = serde_json::from_str(&answer).expect("receive is JSON");
-        assert_eq!(take["dropped"], json!(0), "{take}");
+        assert_eq!(take["paused"], json!(false), "{take}");
         received.extend(take["events"].as_array().expect("events").iter().cloned());
         assert!(
             tokio::time::Instant::now() < deadline,
