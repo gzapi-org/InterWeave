@@ -1050,6 +1050,17 @@ impl Driver {
             Ok(_) => self.overlay.set(&self.configured, &peer, allowed),
             Err(_) => None,
         };
+        // THE OVERLAY'S BOUND, beside the policy's: in step they are one
+        // bound, but an overlay left ahead holds a peer the policy does
+        // not, and an allow the policy admits could then put the next
+        // start past it -- fatal there (#215 review, persistence P3).
+        // Refused as the policy refuses at its own bound, nothing written.
+        let (decided, overlay) = match (decided, overlay) {
+            (Ok(_), Some(moved)) if moved.effective(&self.configured).is_err() => {
+                (Err(TransportError::InvalidArgument), None)
+            }
+            (decided, overlay) => (decided, overlay),
+        };
         // `None` written, or the write's error: before its rename nothing
         // changed; after it (`installed`) the new overlay is on disk, and
         // is put back below exactly as after a failed publish.
