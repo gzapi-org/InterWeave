@@ -214,6 +214,39 @@ jobs:
           # would turn this job red on every run.
           fetch-depth: 0
 
+      # AGENT-FABRIC, at the commit .agent-fabric/fabric-ref names: the
+      # tools/checks forwarders hand over to it (the pinned-SHA check
+      # first). Checked out, then MOVED out of the workspace, so this
+      # repository's guards never read the fabric's files as its own
+      # (check_guards_are_wired scans tools/ for test_*); the forwarders
+      # find it through AGENT_FABRIC_ROOT. A missing or malformed pin
+      # fails the job: "whatever the fabric's main is" is not a pin.
+      - name: agent-fabric — the commit .agent-fabric/fabric-ref pins
+        id: fabric-ref
+        run: |
+          f=.agent-fabric/fabric-ref
+          [ -f "$f" ] || { echo "::error::$f is missing: the tools/checks forwarders need agent-fabric at a pinned commit"; exit 1; }
+          ref="$(tr -d '[:space:]' < "$f")"
+          printf '%s' "$ref" | grep -Eq '^[0-9a-f]{40}$' \
+            || { echo "::error file=$f::$f must hold one 40-hex agent-fabric commit; it holds '$(head -c 80 "$f")'"; exit 1; }
+          echo "agent-fabric pinned at $ref"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: gzapi-org/agent-fabric
+          ref: ${{ steps.fabric-ref.outputs.ref }}
+          path: _agent-fabric
+      # The fleet's pinned Python (agent-fabric ADR-040): the fabric's
+      # tools run /usr/local/bin/fabric-python. The installer checks the
+      # archive's sha256 against the pin before it extracts.
+      - name: agent-fabric — moved out of the workspace, and its pinned Python installed
+        run: |
+          mv "$GITHUB_WORKSPACE/_agent-fabric" "$RUNNER_TEMP/agent-fabric"
+          echo "AGENT_FABRIC_ROOT=$RUNNER_TEMP/agent-fabric" >> "$GITHUB_ENV"
+          sudo /usr/bin/python3 "$RUNNER_TEMP/agent-fabric/tools/fabric/python_pin.py" install
+          /usr/bin/python3 "$RUNNER_TEMP/agent-fabric/tools/fabric/python_pin.py" check
+
       - name: Install validator dependencies
         run: |
           # --require-hashes: every distribution is verified against
