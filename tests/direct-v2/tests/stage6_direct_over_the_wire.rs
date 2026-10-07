@@ -2407,104 +2407,119 @@ async fn a_full_event_channel_does_not_freeze_a_held_send() {
 /// bot thread, B3): the peer's trust is revoked while the dial waits
 /// behind a slow proxy, the connection lands and is refused, and the
 /// send is `UnauthorizedPeer` well inside the ten seconds. Nothing
-/// reaches the receiver.
+/// reaches the receiver. With the sender's endpoint revoked as well, the
+/// answer is the lease's, `EndpointNotRegistered`: the send's own list in
+/// its order, as on the wire (`TRANSPORT.md`, A 2026-10-07); the
+/// trust-only run is its control.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_held_send_whose_connection_is_refused_at_retention_is_answered_at_once() {
     let ip = interweave_test_support::net::require_private_interface_v4();
-    let (sender_id, sender_peer) = who();
-    let (receiver_id, receiver_peer) = who();
-    let receiver = SwarmRuntime::start(
-        &receiver_id,
-        SubstrateConfig::default(),
-        trusting(&[&sender_peer]),
-    )
-    .expect("the receiver starts");
-    let sender = SwarmRuntime::start(
-        &sender_id,
-        SubstrateConfig::default(),
-        trusting(&[&receiver_peer]),
-    )
-    .expect("the sender starts");
-    sender
-        .configure_direct(endpoints(8))
-        .await
-        .expect("endpoints install");
-    let leases = claim_all(&sender, &["human", "claude"]).await;
-    receiver
-        .configure_direct(endpoints(8))
-        .await
-        .expect("endpoints install");
-    let held = claim_all(&receiver, &["human", "claude"]).await;
-    let _ = sender
-        .listen(format!("/ip4/{ip}/tcp/0").parse().expect("valid"))
-        .await
-        .expect("the sender listens");
-    let target = receiver
-        .listen(format!("/ip4/{ip}/tcp/0").parse().expect("valid"))
-        .await
-        .expect("the receiver listens");
-    let target_port = target
-        .iter()
-        .find_map(|p| match p {
-            libp2p::multiaddr::Protocol::Tcp(port) => Some(port),
-            _ => None,
-        })
-        .expect("a tcp port");
-    let proxy = tokio::net::TcpListener::bind((ip, 0)).await.expect("binds");
-    let proxy_port = proxy.local_addr().expect("an address").port();
-    let splice = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(1_500)).await;
-        let (mut inbound, _) = proxy.accept().await.expect("the dial arrives");
-        let mut outbound = tokio::net::TcpStream::connect((ip, target_port))
-            .await
-            .expect("the receiver answers");
-        let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
-    });
-    assert_eq!(
+    for lease_too in [false, true] {
+        let (sender_id, sender_peer) = who();
+        let (receiver_id, receiver_peer) = who();
+        let receiver = SwarmRuntime::start(
+            &receiver_id,
+            SubstrateConfig::default(),
+            trusting(&[&sender_peer]),
+        )
+        .expect("the receiver starts");
+        let sender = SwarmRuntime::start(
+            &sender_id,
+            SubstrateConfig::default(),
+            trusting(&[&receiver_peer]),
+        )
+        .expect("the sender starts");
         sender
-            .learn(
-                receiver_peer.clone(),
-                [format!("/ip4/{ip}/tcp/{proxy_port}")]
-            )
+            .configure_direct(endpoints(8))
             .await
-            .expect("delivered"),
-        1
-    );
+            .expect("endpoints install");
+        let leases = claim_all(&sender, &["human", "claude"]).await;
+        receiver
+            .configure_direct(endpoints(8))
+            .await
+            .expect("endpoints install");
+        let held = claim_all(&receiver, &["human", "claude"]).await;
+        let _ = sender
+            .listen(format!("/ip4/{ip}/tcp/0").parse().expect("valid"))
+            .await
+            .expect("the sender listens");
+        let target = receiver
+            .listen(format!("/ip4/{ip}/tcp/0").parse().expect("valid"))
+            .await
+            .expect("the receiver listens");
+        let target_port = target
+            .iter()
+            .find_map(|p| match p {
+                libp2p::multiaddr::Protocol::Tcp(port) => Some(port),
+                _ => None,
+            })
+            .expect("a tcp port");
+        let proxy = tokio::net::TcpListener::bind((ip, 0)).await.expect("binds");
+        let proxy_port = proxy.local_addr().expect("an address").port();
+        let splice = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1_500)).await;
+            let (mut inbound, _) = proxy.accept().await.expect("the dial arrives");
+            let mut outbound = tokio::net::TcpStream::connect((ip, target_port))
+                .await
+                .expect("the receiver answers");
+            let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+        });
+        assert_eq!(
+            sender
+                .learn(
+                    receiver_peer.clone(),
+                    [format!("/ip4/{ip}/tcp/{proxy_port}")]
+                )
+                .await
+                .expect("delivered"),
+            1
+        );
 
-    let asked = tokio::time::Instant::now();
-    let send = sender.send_direct(
-        &leases["human"],
-        receiver_peer.clone(),
-        frame(Some("claude"), b"refused at retention", 151),
-    );
-    let meanwhile = async {
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        sender
-            .set_trust(trusting(&[]))
+        let asked = tokio::time::Instant::now();
+        let send = sender.send_direct(
+            &leases["human"],
+            receiver_peer.clone(),
+            frame(Some("claude"), b"refused at retention", 151),
+        );
+        let meanwhile = async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            if lease_too {
+                sender
+                    .revoke_endpoint(endpoint("human"))
+                    .await
+                    .expect("the revoke reaches the task");
+            }
+            sender
+                .set_trust(trusting(&[]))
+                .await
+                .expect("the revocation reaches the task");
+        };
+        let (answer, ()) = tokio::join!(send, meanwhile);
+        assert_eq!(
+            answer.expect("the command reaches the task"),
+            Err(if lease_too {
+                TransportError::EndpointNotRegistered
+            } else {
+                TransportError::UnauthorizedPeer
+            }),
+            "after {:?}",
+            asked.elapsed()
+        );
+        assert!(
+            asked.elapsed() < Duration::from_secs(6),
+            "answered at the refusal, not at the horizon: {:?}",
+            asked.elapsed()
+        );
+        let delivered = receiver
+            .commander()
+            .drain_leased(&held["claude"], usize::MAX)
             .await
-            .expect("the revocation reaches the task");
-    };
-    let (answer, ()) = tokio::join!(send, meanwhile);
-    assert_eq!(
-        answer.expect("the command reaches the task"),
-        Err(TransportError::UnauthorizedPeer),
-        "after {:?}",
-        asked.elapsed()
-    );
-    assert!(
-        asked.elapsed() < Duration::from_secs(6),
-        "answered at the refusal, not at the horizon: {:?}",
-        asked.elapsed()
-    );
-    let delivered = receiver
-        .commander()
-        .drain_leased(&held["claude"], usize::MAX)
-        .await
-        .expect("answers");
-    assert!(delivered.is_empty(), "nothing reached the receiver");
-    splice.abort();
-    sender.shutdown().await.expect("clean shutdown");
-    receiver.shutdown().await.expect("clean shutdown");
+            .expect("answers");
+        assert!(delivered.is_empty(), "nothing reached the receiver");
+        splice.abort();
+        sender.shutdown().await.expect("clean shutdown");
+        receiver.shutdown().await.expect("clean shutdown");
+    }
 }
 
 /// A held send ends at its horizon even when the retry tick is far

@@ -2667,6 +2667,9 @@ impl SwarmRuntime {
                         // REFUSED AT RETENTION, with nothing else on its
                         // way: answered now by current policy -- not put on
                         // the wire, since the refused connection is closing.
+                        // The send's own list in its order, as on the wire
+                        // (`commands::held_send_policy`); past it, the peer
+                        // is unreachable by this connection.
                         if let Some((peer, id)) = established.as_ref()
                             && !open.contains_key(id)
                             && held_sends.holds(peer)
@@ -2674,12 +2677,14 @@ impl SwarmRuntime {
                             && !races.waits_for(peer)
                             && !open.values().any(|c| &c.peer == peer)
                         {
-                            let answer = if manager.classify(peer) == interweave_transport_runtime::ConnectionClass::DataPlaneTrusted {
-                                DirectError::PeerUnreachable
-                            } else {
-                                DirectError::UnauthorizedPeer
-                            };
                             for send in held_sends.take(peer) {
+                                let answer = commands::held_send_policy(
+                                    &manager,
+                                    &direct_state,
+                                    &send,
+                                )
+                                .err()
+                                .unwrap_or(DirectError::PeerUnreachable);
                                 let _ = send.reply.send(Err(answer));
                             }
                         }

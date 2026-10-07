@@ -1598,6 +1598,39 @@ pub(super) fn dial_peer(
     answer
 }
 
+/// What current policy answers a held send, asked wherever the runtime
+/// answers it by policy rather than by the network -- put on the wire
+/// over the retained connection ([`dispatch_held`]), or refused with the
+/// connection it waited for at retention. `TRANSPORT.md`'s send list,
+/// in its order: the lease (`EndpointNotRegistered`), the drain
+/// (`ShuttingDown`), trust with the endpoint's outbound narrowing
+/// (`UnauthorizedPeer`). What was fixed at arrival is not asked again.
+pub(super) fn held_send_policy(
+    manager: &ConnectionManager,
+    direct_state: &DirectState,
+    send: &super::held_sends::HeldSend,
+) -> Result<(), DirectError> {
+    if direct_state.source_for_lease(&send.lease).as_ref() != Some(&send.frame.source_endpoint) {
+        return Err(DirectError::EndpointNotRegistered);
+    }
+    if manager.is_draining() {
+        return Err(DirectError::ShuttingDown);
+    }
+    if manager.classify(&send.peer) != ConnectionClass::DataPlaneTrusted
+        || !matches!(
+            direct_state.registry.authorize_outbound(
+                &send.frame.source_endpoint,
+                &send.peer,
+                &direct_state.trust
+            ),
+            interweave_trust_api::TrustDecision::Allowed
+        )
+    {
+        return Err(DirectError::UnauthorizedPeer);
+    }
+    Ok(())
+}
+
 /// Put a held send on the wire now that its peer is connected, asking
 /// again what the command asked when it arrived and might have changed
 /// while it waited for its dial: the lease (a revoke, a release, a
@@ -1618,34 +1651,13 @@ pub(super) fn dispatch_held(
     pending_direct: &mut HashMap<libp2p::request_response::OutboundRequestId, PendingDirect>,
     send: super::held_sends::HeldSend,
 ) {
+    if let Err(refused) = held_send_policy(manager, direct_state, &send) {
+        let _ = send.reply.send(Err(refused));
+        return;
+    }
     let super::held_sends::HeldSend {
-        peer,
-        lease,
-        frame,
-        reply,
-        ..
+        peer, frame, reply, ..
     } = send;
-    if direct_state.source_for_lease(&lease).as_ref() != Some(&frame.source_endpoint) {
-        let _ = reply.send(Err(DirectError::EndpointNotRegistered));
-        return;
-    }
-    if manager.is_draining() {
-        let _ = reply.send(Err(DirectError::ShuttingDown));
-        return;
-    }
-    if manager.classify(&peer) != ConnectionClass::DataPlaneTrusted
-        || !matches!(
-            direct_state.registry.authorize_outbound(
-                &frame.source_endpoint,
-                &peer,
-                &direct_state.trust
-            ),
-            interweave_trust_api::TrustDecision::Allowed
-        )
-    {
-        let _ = reply.send(Err(DirectError::UnauthorizedPeer));
-        return;
-    }
     let Ok(peer_id) = to_peer_id(&peer) else {
         let _ = reply.send(Err(DirectError::InvalidArgument));
         return;
