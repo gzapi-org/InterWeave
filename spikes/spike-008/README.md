@@ -146,5 +146,6 @@ The trace and the store are read back over adb (`run-as`). No result rests on wh
 ## What this device cannot answer
 
 - **The current target API's runtime rules**, `remoteMessaging` and `dataExtractionRules`: they need an API 34+ device.
+- **Notifications on API 33 and later:** the harness declares `POST_NOTIFICATIONS` but never requests it. On API 33+ the permission must be granted first (`pm grant org.interweave.spike008 android.permission.POST_NOTIFICATIONS`, recorded), or L1 and L9 see no notification in the drawer. On API 34+ a user can dismiss an ongoing foreground-service notification, so L9's result holds for API 30 only.
 - **Other OEMs' power managers:** this is one Samsung device.
 - **Play review itself:** the policy matrix quotes the declared requirements, and only a submission tests them.
