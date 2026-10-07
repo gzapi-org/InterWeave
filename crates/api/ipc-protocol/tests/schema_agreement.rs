@@ -541,6 +541,43 @@ fn assert_valid(path: &str, instance: &Value) {
     assert!(errors.is_empty(), "{path} refuses {instance}: {errors:?}");
 }
 
+/// `ipc/trust-list` 1.1.0 ties `persisted` to `source` both ways, and
+/// the mirror refuses exactly what the schema refuses: the two shapes it
+/// names pass both, the two mixtures fail both.
+#[test]
+fn the_trust_row_shapes_agree_with_the_schema_both_ways() {
+    let path = "architecture/contracts/schemas/ipc/trust-list.schema.json";
+    let schema = validator(path);
+    for (row, legal) in [
+        (serde_json::json!({"peer": PEER, "persisted": false}), true),
+        (
+            serde_json::json!({"peer": PEER, "persisted": true, "source": "configured"}),
+            true,
+        ),
+        (
+            serde_json::json!({"peer": PEER, "persisted": true, "source": "administered"}),
+            true,
+        ),
+        (serde_json::json!({"peer": PEER, "persisted": true}), false),
+        (
+            serde_json::json!({"peer": PEER, "persisted": false, "source": "configured"}),
+            false,
+        ),
+        (
+            serde_json::json!({"peer": PEER, "persisted": true, "source": "elsewhere"}),
+            false,
+        ),
+    ] {
+        let page = serde_json::json!({ "allowed": [row] });
+        assert_eq!(schema.is_valid(&page), legal, "the schema on {page}");
+        assert_eq!(
+            serde_json::from_value::<TrustList>(page.clone()).is_ok(),
+            legal,
+            "the mirror on {page}"
+        );
+    }
+}
+
 const PEER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
 const OTHER_PEER: &str = "12D3KooWHsy9ZMqTYfTPpJd8YXhZGKrLWzkWT9BgX9DeyF8Fs3GQ";
 
@@ -730,10 +767,14 @@ fn every_result() -> Vec<(&'static str, Value)> {
                 .expect("peer"),
         ]
         .into_iter()
-        .map(|peer| interweave_local_client_api::TrustedPeer {
+        .zip([
+            interweave_local_client_api::TrustSource::Configured,
+            interweave_local_client_api::TrustSource::Administered,
+        ])
+        .map(|(peer, source)| interweave_local_client_api::TrustedPeer {
             peer,
-            persisted: false,
-            source: interweave_local_client_api::TrustSource::Configured,
+            persisted: true,
+            source,
         })
         .collect(),
     };
@@ -778,14 +819,24 @@ fn every_result() -> Vec<(&'static str, Value)> {
             }),
         ),
         // The first page names the local peer; a later one does not; an
-        // empty allowlist is a page with no rows.
+        // empty allowlist is a page with no rows. Each in both row
+        // shapes: the 2.1 row below 2.3, the persisted row with its
+        // source from it.
         (
             "architecture/contracts/schemas/ipc/trust-list.schema.json",
-            json(&TrustList::page(trust.clone(), None)),
+            json(&TrustList::page(trust.clone(), None, 2)),
         ),
         (
             "architecture/contracts/schemas/ipc/trust-list.schema.json",
-            json(&TrustList::page(trust, Some(&peer()))),
+            json(&TrustList::page(trust.clone(), None, 3)),
+        ),
+        (
+            "architecture/contracts/schemas/ipc/trust-list.schema.json",
+            json(&TrustList::page(trust.clone(), Some(&peer()), 2)),
+        ),
+        (
+            "architecture/contracts/schemas/ipc/trust-list.schema.json",
+            json(&TrustList::page(trust, Some(&peer()), 3)),
         ),
         (
             "architecture/contracts/schemas/ipc/trust-list.schema.json",
@@ -795,6 +846,7 @@ fn every_result() -> Vec<(&'static str, Value)> {
                     allowed: Vec::new(),
                 },
                 None,
+                3,
             )),
         ),
         // A row with every field and one with none of the optional ones,

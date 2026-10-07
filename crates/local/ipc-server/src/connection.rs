@@ -439,8 +439,9 @@ where
                 let counters = Arc::clone(&self.shared.counters);
                 let grace = self.shared.config.shutdown_grace;
                 let answer = id.clone();
+                let minor = self.version.minor;
                 self.in_flight.spawn(async move {
-                    dispatch::admin(&*port, &counters, grace, answer, request).await
+                    dispatch::admin(&*port, &counters, grace, answer, request, minor).await
                 })
             }
         };
