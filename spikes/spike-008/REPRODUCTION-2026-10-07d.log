@@ -1,0 +1,34 @@
+# SPIKE-008 device harness -- recorded run (part 6: the store change, RETENTION.md 8, on the device)
+# date: 2026-10-07T08:01Z-08:02Z
+# device, host and toolchain: as part 1; targetSdk 36, standard v1; phone locked
+# the harness was RE-PINNED LOCALLY, for this run only, to 03434804: the human store with secure_delete, a WAL truncate
+#   after every release and at close, and a one-time rewrite of a store written before it -- the change this run verifies.
+#   The committed harness stays pinned at d019ac06: a pin must be an ancestor of origin/main (check_spike_locks.sh), and
+#   03434804 is this PR's own commit. To reproduce: set the three rev = lines in harness/Cargo.toml to 03434804's full
+#   hash, cargo update the three packages, bash spikes/spike-008/build.sh 36, install, and run the commands below.
+# key material and content: TEST-ONLY labels and markers only
+
+## driver output, verbatim (the two "settings" lines read the store file on the host, pulled with run-as, read-only)
+## 08:01:14Z the store before this build: files/human/ as part 5 left it (written without secure_delete)
+total 88
+-rw------- 1 u0_a393 u0_a393 86016 2026-10-07 11:38 human.sqlite
+settings before: []
+## 08:01:15Z install -r (data kept) the harness pinned at 03434804, the store change; phone locked
+Success
+## 08:01:23Z census: this build's first open of that existing store
+settings after: [('released_content_scrubbed',)]
+## 08:01:33Z forensic three times, each in a store of its own
+## 08:01:48Z results since the install
+{"t":1791360090036,"up":8128146,"pid":14063,"event":"census","detail":{"pending":["P2","P3"],"unread":["C1","U2","U3"],"kept":["K2","K3"],"eligible":["C1","K2","K3","U2","U3"]}}
+{"t":1791360095289,"up":8133398,"pid":14063,"event":"forensic","detail":{"later":{"before_read_db":"true","open":{"db":"false","wal":"false"},"closed":{"db":"false","wal":"no file"}},"open":{"released":{"db":"false","wal":"false"},"kept_control":{"db":"false","wal":"true"}},"closed":{"released":{"db":"false","wal":"no file"},"kept_control":{"db":"true","wal":"no file"}}}}
+{"t":1791360099959,"up":8138069,"pid":14063,"event":"forensic","detail":{"later":{"before_read_db":"true","open":{"db":"false","wal":"false"},"closed":{"db":"false","wal":"no file"}},"open":{"released":{"db":"false","wal":"false"},"kept_control":{"db":"false","wal":"true"}},"closed":{"released":{"db":"false","wal":"no file"},"kept_control":{"db":"true","wal":"no file"}}}}
+{"t":1791360104717,"up":8142827,"pid":14063,"event":"forensic","detail":{"later":{"before_read_db":"true","open":{"db":"false","wal":"false"},"closed":{"db":"false","wal":"no file"}},"open":{"released":{"db":"false","wal":"false"},"kept_control":{"db":"false","wal":"true"}},"closed":{"released":{"db":"false","wal":"no file"},"kept_control":{"db":"true","wal":"no file"}}}}
+## 08:01:48Z done
+
+## host, the same measurement through the same store at 03434804 (harness/tests/store.rs, --nocapture)
+FORENSIC {"later":{"before_read_db":"true","open":{"db":"false","wal":"false"},"closed":{"db":"false","wal":"no file"}},"open":{"released":{"db":"false","wal":"false"},"kept_control":{"db":"false","wal":"true"}},"closed":{"released":{"db":"false","wal":"no file"},"kept_control":{"db":"true","wal":"no file"}}}
+
+## the cost, from the bench (harness at 1fb303c1, SQLite as the store runs it, 50 deletes of 8 KiB, three runs on the device)
+{"t":1791359005316,"up":7043426,"pid":8669,"event":"bench","detail":{"today":{"median_ms":4.27,"p95_ms":8.66},"secure_delete":{"median_ms":5.90,"p95_ms":16.10},"secure_delete_and_truncate":{"median_ms":22.38,"p95_ms":28.07}}}
+{"t":1791359031750,"up":7069860,"pid":8669,"event":"bench","detail":{"today":{"median_ms":4.29,"p95_ms":8.88},"secure_delete":{"median_ms":5.17,"p95_ms":26.15},"secure_delete_and_truncate":{"median_ms":14.27,"p95_ms":22.65}}}
+{"t":1791359053048,"up":7091157,"pid":8669,"event":"bench","detail":{"today":{"median_ms":5.42,"p95_ms":18.90},"secure_delete":{"median_ms":5.61,"p95_ms":18.49},"secure_delete_and_truncate":{"median_ms":18.18,"p95_ms":37.46}}}
