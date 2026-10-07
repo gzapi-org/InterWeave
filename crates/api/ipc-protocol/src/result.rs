@@ -1015,21 +1015,29 @@ mod tests {
 
     /// The bound is what the body holds: a full page of the largest rows
     /// the schema admits -- every optional field, u64-maximum times, the
-    /// longest outcome -- and a `next` serializes within `MAX_BODY_BYTES`
-    /// with room for the response frame around it.
+    /// longest outcome, an Ed25519 `PeerId`'s 52 characters (the longest a
+    /// profile's key gives; a 46-character `Qm` id understates each row
+    /// by six bytes) -- and a `next` serializes within `MAX_BODY_BYTES`
+    /// with room for the response frame around it. Serializing does not
+    /// ask the rows to differ, so one valid id fills every row.
     #[test]
     fn a_full_page_of_the_largest_rows_fits_the_body() {
+        let longest = TransportIdentity::parse(
+            "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN".to_owned(),
+        )
+        .expect("an Ed25519 PeerId");
+        assert_eq!(longest.as_str().len(), 52);
         let page = PeerList {
             peers: (0..MAX_PEER_PAGE_ROWS)
-                .map(|i| PeerRow {
-                    peer: synthetic_peer(i),
+                .map(|_| PeerRow {
+                    peer: longest.clone(),
                     connected: false,
                     backoff_until: Some(u64::MAX),
                     quarantined_until: Some(u64::MAX),
                     last_outcome: Some(PeerOutcome::IdentityMismatch),
                 })
                 .collect(),
-            next: Some(synthetic_peer(MAX_PEER_PAGE_ROWS)),
+            next: Some(longest.clone()),
         };
         let bytes = serde_json::to_vec(&page).expect("serializes").len();
         assert!(
