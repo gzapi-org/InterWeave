@@ -63,6 +63,12 @@ fn a_message_read_and_not_kept_is_not_unread_again_even_after_a_reopen() {
 fn a_full_store_degrades_and_refuses_unread_while_what_it_holds_stays_readable() {
     let db = scratch("full");
     let out = store::fill(&db).expect("fills");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("fill writes JSON");
+    assert_eq!(
+        v["readable_unread"].as_str(),
+        Some(v["committed"].to_string().as_str()),
+        "everything committed before the refusal stays readable: {out}"
+    );
     assert!(out.contains("\"health\":\"Degraded\""), "{out}");
     assert!(out.contains("\"then\":\"Degraded\""), "{out}");
     assert!(
@@ -107,5 +113,25 @@ fn the_file_level_search_labels_each_reading_where_it_was_taken() {
         let wal = reading["wal"].as_str().expect("a wal reading");
         assert_eq!(wal != "no file", open, "{name}: {out}");
     }
+    let _ = std::fs::remove_dir_all(db.parent().expect("dir"));
+}
+
+#[test]
+fn a_second_redelivery_reports_its_error_as_valid_json() {
+    let db = scratch("again-json");
+    store::seed(&db).expect("seeds");
+    store::transitions(&db).expect("transitions");
+    store::redeliver(&db).expect("first");
+    // C1 is now unread, so delivering it again meets the UNIQUE constraint,
+    // whose Debug text carries quotes.
+    let out = store::redeliver(&db).expect("second");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+    assert_eq!(v["u1_again"], "AlreadyRead", "{out}");
+    assert!(
+        v["control_c1"]
+            .as_str()
+            .is_some_and(|s| s.contains("UNIQUE")),
+        "{out}"
+    );
     let _ = std::fs::remove_dir_all(db.parent().expect("dir"));
 }

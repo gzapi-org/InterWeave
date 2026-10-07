@@ -33,6 +33,12 @@ fn open(path: &Path) -> Result<HumanStore, String> {
     HumanStore::open(path, StoreOptions::default()).map_err(|e| format!("open: {e}"))
 }
 
+/// A value written into this module's JSON strings, quotes and backslashes
+/// escaped: a store error's Debug text carries quotes (#214's re-review).
+fn esc(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 fn label(payload: &[u8]) -> String {
     String::from_utf8_lossy(payload).into_owned()
 }
@@ -211,11 +217,11 @@ pub fn redeliver(path: &Path) -> Result<String, String> {
     let mut store = open(path)?;
     let again = match store.commit_unread_inbound(&inbound(0x11, "U1", 0)?) {
         Ok(_) => "committed".to_owned(),
-        Err(e) => format!("{e:?}"),
+        Err(e) => esc(&format!("{e:?}")),
     };
     let control = match store.commit_unread_inbound(&inbound(0x31, "C1", 0)?) {
         Ok(_) => "committed".to_owned(),
-        Err(e) => format!("{e:?}"),
+        Err(e) => esc(&format!("{e:?}")),
     };
     Ok(format!(
         "{{\"u1_again\":\"{again}\",\"control_c1\":\"{control}\"}}"
@@ -245,7 +251,7 @@ pub fn fill(path: &Path) -> Result<String, String> {
         match store.commit_unread_inbound(&inbound(0x40 + n, &format!("F{n}"), 8 * 1024)?) {
             Ok(_) => committed += 1,
             Err(e) => {
-                first_error = format!("{e:?}");
+                first_error = esc(&format!("{e:?}"));
                 break;
             }
         }
@@ -253,11 +259,11 @@ pub fn fill(path: &Path) -> Result<String, String> {
     let health = format!("{:?}", store.health());
     let after = match store.commit_unread_inbound(&inbound(0xf0, "after", 16)?) {
         Ok(_) => "committed".to_owned(),
-        Err(e) => format!("{e:?}"),
+        Err(e) => esc(&format!("{e:?}")),
     };
     let readable = store
         .unread_inbound()
-        .map_or_else(|e| format!("{e:?}"), |v| v.len().to_string());
+        .map_or_else(|e| esc(&format!("{e:?}")), |v| v.len().to_string());
     Ok(format!(
         "{{\"max_pages\":{PAGES},\"committed\":{committed},\"first_error\":\"{first_error}\",\"health\":\"{health}\",\"then\":\"{after}\",\"readable_unread\":\"{readable}\"}}"
     ))
