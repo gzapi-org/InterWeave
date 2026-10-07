@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use interweave_local_client_api::{
     AdminBinding, AdminCapability, AdminPort, DataCapability, DataSessionBinding, DataSessionPort,
-    LocalSessionEvent, SessionEvent, SessionRequest, TrustAdminView,
+    LocalSessionEvent, SessionEvent, SessionRequest, TrustAdminView, TrustSource, TrustedPeer,
 };
 use interweave_transport_api::{
     BroadcastMessageV1, ChannelId, DirectDestination, EndpointId, MediaType, MessageId, Payload,
@@ -859,6 +859,46 @@ pub async fn peer_rows_answer_under_admin_status<B: AdminBinding>(
     assert_eq!(peers.len(), rows.len(), "one row per peer: {rows:?}");
 }
 
+/// The first half of item 11's restart check (ADR-0028 A 2026-10-07):
+/// `remote`, configured and persisted, is listed -- the control that the
+/// second half's absence is the revocation's -- and is revoked. The
+/// runner restarts the runtime over the same state and calls
+/// [`the_revocation_outlived_the_restart`].
+pub async fn a_revocation_is_made_before_a_restart<B: AdminBinding>(
+    binding: &B,
+    remote: &TransportIdentity,
+) {
+    let admin = port(binding, &[AdminCapability::Trust]).await;
+    let view = admin.trust().await.expect("the policy");
+    assert!(
+        view.allowed.contains(&TrustedPeer {
+            peer: remote.clone(),
+            persisted: true,
+            source: TrustSource::Configured,
+        }),
+        "listed before the revocation: {view:?}"
+    );
+    admin
+        .set_trust(remote.clone(), false)
+        .await
+        .expect("revoked");
+}
+
+/// The second half: after the runtime restarted, `remote` is still
+/// revoked, and every row the policy lists persists.
+pub async fn the_revocation_outlived_the_restart<B: AdminBinding>(
+    binding: &B,
+    remote: &TransportIdentity,
+) {
+    let admin = port(binding, &[AdminCapability::Trust]).await;
+    let view = admin.trust().await.expect("the policy");
+    assert!(!view.allows(remote), "revoked across the restart: {view:?}");
+    assert!(
+        view.allowed.iter().all(|row| row.persisted),
+        "every row persists: {view:?}"
+    );
+}
+
 /// `admin.trust` (ADR-0032, LOCAL-IPC.md; LOCAL-CLIENT.md §7 item 11): a
 /// port without the capability is refused both methods; the policy reads
 /// back the local peer, never among the allowed, and the connected
@@ -886,6 +926,16 @@ pub async fn trust_administration_revokes_as_policy<B: DataSessionBinding + Admi
     let view = admin.trust().await.expect("the policy");
     assert_eq!(view.local_peer.as_ref(), Some(local));
     assert!(view.allows(remote), "{view:?}");
+    // Every production binding persists, and `remote` is the configured
+    // peer (ADR-0028 A 2026-10-07).
+    assert!(
+        view.allowed.contains(&TrustedPeer {
+            peer: remote.clone(),
+            persisted: true,
+            source: TrustSource::Configured,
+        }),
+        "{view:?}"
+    );
     assert!(
         !view.allows(local),
         "the local peer is never among the allowed: {view:?}"
@@ -914,6 +964,29 @@ pub async fn trust_administration_revokes_as_policy<B: DataSessionBinding + Admi
         sorted(admin.trust().await.expect("the policy")),
         before,
         "revoking an unlisted peer"
+    );
+
+    // Allowing an unlisted peer lists it as administered, persisted
+    // (ADR-0028 A 2026-10-07), and revoking it takes it off again.
+    let unlisted = TransportIdentity::parse(UNLISTED_PEER).expect("a peer id");
+    admin
+        .set_trust(unlisted.clone(), true)
+        .await
+        .expect("an unlisted peer is allowed");
+    let view = admin.trust().await.expect("the policy");
+    assert!(
+        view.allowed.contains(&TrustedPeer {
+            peer: unlisted.clone(),
+            persisted: true,
+            source: TrustSource::Administered,
+        }),
+        "{view:?}"
+    );
+    admin.set_trust(unlisted, false).await.expect("and revoked");
+    assert_eq!(
+        sorted(admin.trust().await.expect("the policy")),
+        before,
+        "allowed and revoked again"
     );
 
     // Two sessions holding `events`: the revocation reaches EVERY open

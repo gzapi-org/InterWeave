@@ -509,6 +509,14 @@ async fn a_broadcast_is_a_route_once_taken() {
 }
 
 #[tokio::test]
+async fn a_revocation_survives_a_restart_of_the_runtime() {
+    let p = pair();
+    suite::a_revocation_is_made_before_a_restart(&p.a, &p.b_peer).await;
+    p.a.restart();
+    suite::the_revocation_outlived_the_restart(&p.a, &p.b_peer).await;
+}
+
+#[tokio::test]
 async fn trust_administration_revokes_as_policy() {
     let p = pair();
     suite::trust_administration_revokes_as_policy(&p.a, &p.a_peer, &p.b_peer).await;

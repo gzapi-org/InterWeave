@@ -122,8 +122,13 @@ impl FakeNetwork {
         let b = Arc::new(Node::new(b, "b"));
         *lock(&a.remote) = Arc::downgrade(&b);
         *lock(&b.remote) = Arc::downgrade(&a);
-        lock(&a.state).trusted.insert(b.peer.clone());
-        lock(&b.state).trusted.insert(a.peer.clone());
+        // Each node's configuration names the other: what a row reports
+        // as `configured`, and what a restart starts from.
+        for (node, other) in [(&a, &b), (&b, &a)] {
+            let mut state = lock(&node.state);
+            state.trusted.insert(other.peer.clone());
+            state.configured.insert(other.peer.clone());
+        }
         (FakeNode(a), FakeNode(b))
     }
 }
@@ -145,6 +150,21 @@ impl FakeNode {
     /// cannot produce.
     pub fn inject_send(&self, error: TransportError) {
         lock(&self.0.injected).push_back(error);
+    }
+
+    /// The runtime stopped and started again over the same state: every
+    /// session and lease is gone, and the allowlist is what the admin port
+    /// last made of it -- the fake keeps its trust overlay, as every
+    /// production binding does (ADR-0028 A 2026-10-07). Its endpoints,
+    /// which are not persisted, are as configured.
+    pub fn restart(&self) {
+        let mut state = lock(&self.0.state);
+        for queues in state.sessions.values_mut() {
+            queues.wake();
+        }
+        state.sessions.clear();
+        state.leases.clear();
+        state.stopped = false;
     }
 
     /// The runtime has stopped: every call from now answers
@@ -322,6 +342,8 @@ struct State {
     /// The data-plane allowlist: the pair's other node from pairing, then
     /// what the admin port's `set_trust` makes of it.
     trusted: BTreeSet<TransportIdentity>,
+    /// The allowlist this node was configured with: a row's source.
+    configured: BTreeSet<TransportIdentity>,
 }
 
 impl Node {
@@ -343,6 +365,7 @@ impl Node {
                 shutdown_requests: Vec::new(),
                 health: Health::Healthy,
                 trusted: BTreeSet::new(),
+                configured: BTreeSet::new(),
             }),
             injected: Mutex::new(VecDeque::new()),
             tag,
@@ -940,7 +963,11 @@ impl AdminPort for FakeAdmin {
                 .map(|peer| TrustedPeer {
                     peer: peer.clone(),
                     persisted: true,
-                    source: TrustSource::Configured,
+                    source: if state.configured.contains(peer) {
+                        TrustSource::Configured
+                    } else {
+                        TrustSource::Administered
+                    },
                 })
                 .collect(),
         })
