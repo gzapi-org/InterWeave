@@ -134,13 +134,6 @@ impl ToolName {
             Self::Receive => "receive",
         }
     }
-
-    /// The tool called `name` in either mode. The bridge asks
-    /// [`Delivery::tool`], which knows its own mode.
-    #[must_use]
-    pub fn parse(name: &str) -> Option<Self> {
-        Self::PULL.into_iter().find(|tool| tool.as_str() == name)
-    }
 }
 
 /// A tool call, its arguments validated.
@@ -386,9 +379,9 @@ mod tests {
             ]
         );
         for tool in ToolName::ALL {
-            assert_eq!(ToolName::parse(tool.as_str()), Some(tool));
+            assert_eq!(Delivery::Push.tool(tool.as_str()), Some(tool));
         }
-        assert_eq!(ToolName::parse("shutdown"), None);
+        assert_eq!(Delivery::Pull.tool("shutdown"), None);
     }
 
     /// Each mode's surface: push is the seven, pull is the seven and
