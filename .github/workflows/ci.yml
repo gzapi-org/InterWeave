@@ -218,7 +218,7 @@ jobs:
       # tools/checks forwarders hand over to it (the pinned-SHA check
       # first). Checked out, then MOVED out of the workspace, so this
       # repository's guards never read the fabric's files as its own
-      # (check_guards_are_wired scans tools/ for test_*); the forwarders
+      # (check_docs_integrity.py walks the whole tree); the forwarders
       # find it through AGENT_FABRIC_ROOT. A missing or malformed pin
       # fails the job: "whatever the fabric's main is" is not a pin.
       - name: agent-fabric — the commit .agent-fabric/fabric-ref pins

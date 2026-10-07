@@ -991,7 +991,9 @@ trade by a wide margin.
 #### agent-fabric beside the checkout
 
 The review tools, the dispatch hook and the status line are
-agent-fabric's, reached from this working copy as a SIBLING checkout:
+agent-fabric's, reached as a SIBLING checkout of the clone (from a git
+worktree too: `tools/gh/fabric-root.sh` finds it beside the clone the
+worktree shares its `.git` with):
 `tools/gh/pr-review-status.sh`,
 `tools/gh/post-review.sh`, `tools/gh/pr-reply.sh`,
 `tools/gh/pr-sessions.sh`, `tools/gh/pr-gate.sh` and `tools/gh/arm.sh`
@@ -1013,7 +1015,13 @@ watch" line, for a watch that has no script to run. A session in such a
 clone has no fabric context and no inbox; the empty status line and that
 orphaned instruction are the two visible signs. `actions-health.sh`
 forwards too; `wait-merged.sh` stays this repository's own copy until
-its fabric port lands. A clone with no
+its fabric port lands. One guard forwards as well:
+`tools/checks/check_actions_pinned_by_sha.sh` runs the fabric's
+`policies/check_actions_pinned_by_sha.py` on the fleet's pinned Python,
+`/usr/local/bin/fabric-python` (`AGENT_FABRIC_PYTHON` overrides it), so
+`cargo xtask checks` needs both, and says how to install the Python when
+it is missing; in CI the tree-checks job checks agent-fabric out at
+`.agent-fabric/fabric-ref`. A clone with no
 sibling is not a working development setup; the fabric's `bootstrap.sh`
 is what puts one there.
 

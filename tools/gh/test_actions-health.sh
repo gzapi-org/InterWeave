@@ -20,7 +20,7 @@
 #      degraded
 #
 # The fabric is a sandbox with a recording stub in place of the real
-# script. CI removes its agent-fabric checkout before these suites run,
+# script. The CI job that runs these suites has no agent-fabric checkout,
 # so nothing here may need the real one.
 #
 # Exit codes:
