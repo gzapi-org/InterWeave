@@ -192,7 +192,7 @@ pub fn tool_list(delivery: Delivery) -> Vec<Value> {
                     &[],
                 ),
                 ToolName::Receive => (
-                    "Take the messages waiting for this session, oldest first: each with its kind (direct or broadcast), content and meta. Never waits. dropped counts messages lost since the last receive because the queue was full; call again while remaining is not zero.",
+                    "Take the messages waiting for this session, oldest first: each with its kind (direct or broadcast), content and meta. Never waits. Call again while remaining is not zero. paused is true while the queue is full: the bridge has stopped taking messages, and send, reply, broadcast, join and leave are refused until a receive makes room.",
                     json!({"max": {"type": "integer", "minimum": 0, "description": "the most to take; a larger ask is clamped to the queue's bound"}}),
                     &[],
                 ),
