@@ -383,8 +383,7 @@ chown -R root:root "$new" \
     || die "cannot set the owner or modes on $new (nothing installed yet)"
 PROBLEMS=0; verify_tree "$new" >&2
 [[ "$PROBLEMS" -eq 0 ]] || die "the unpacked tree does not verify ($PROBLEMS problem(s), above); $SDK_DIR is untouched"
-# On an AppVM the store is mounted on SDK_DIR: unmounted only for the swap,
-# and mounted again whatever happens, so a failure leaves a visible install.
+# Unmounted for the swap only; mount_store (above) puts it back.
 if [[ "$persist" == bind ]] && mountpoint -q "$SDK_DIR"; then umount "$SDK_DIR" || die "cannot unmount the old $SDK_DIR to replace it"; fi
 [[ -e "$store" ]] && { mv "$store" "$old" || { mount_store; die "cannot move the old $store aside"; }; }
 mv "$new" "$store" || { [[ -e "$old" ]] && mv "$old" "$store"; mount_store; die "cannot move the new tree into place; the old install is restored"; }

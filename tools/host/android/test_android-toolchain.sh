@@ -319,6 +319,24 @@ if unshare -rm true 2>/dev/null; then
     inst full
     [[ "$out" == *"restored the previous install"* && -e "$SANDBOX/opt/android-sdk/previous-install" ]] \
         && pass "an interrupted swap (.old, nothing in place) is restored before anything else" || fail "the interrupted swap was not restored" "$out"
+    # ROLLBACK MOVES THE FAILED TREE ASIDE WHOLE before it puts the
+    # previous one back: with that second move failing (an `mv` shim that
+    # refuses exactly it), the failed tree is whole in .dead and the
+    # previous one whole in .old -- never a half-deleted store.
+    pack "$SANDBOX/staged"; : > "$SANDBOX/not-a-dir"
+    mkdir -p "$SANDBOX/mvshim"
+    printf '#!/bin/sh\ncase "$1" in *.old) [ "$2" = "%s" ] && exit 1;; esac\nexec /usr/bin/mv "$@"\n' "$SANDBOX/opt/android-sdk" > "$SANDBOX/mvshim/mv"
+    chmod +x "$SANDBOX/mvshim/mv"
+    PATH="$SANDBOX/mvshim:$PATH" INST_PROFILE="$SANDBOX/not-a-dir/android-sdk.sh" inst full
+    [[ "$got" -eq 2 && "$out" == *"restoring the previous install FAILED"* && -e "$SANDBOX/opt/android-sdk.old/previous-install" \
+       && -e "$SANDBOX/opt/android-sdk.dead/.android-toolchain.manifest" && ! -e "$SANDBOX/opt/android-sdk" ]] \
+        && pass "a rollback whose restore fails leaves the failed tree whole in .dead and the previous whole in .old" || fail "rollback did not move the failed tree aside" "$out"$'\n'"$(ls -a "$SANDBOX/opt")"
+    # The next run (refused at verification, so only its start-up shows)
+    # finishes it: the previous tree back, .dead swept.
+    make_tree "$SANDBOX/bad" "platforms;android-30@9"; pack "$SANDBOX/bad"
+    inst full
+    [[ -e "$SANDBOX/opt/android-sdk/previous-install" && "$(ls -A "$SANDBOX/opt")" == android-sdk ]] \
+        && pass "  and the next run finishes the rollback" || fail "the next run did not finish the rollback" "$(ls -a "$SANDBOX/opt")"
     # A step after the swap fails (the profile's directory is a file): the
     # previous tree comes back.
     pack "$SANDBOX/staged"; : > "$SANDBOX/not-a-dir"
