@@ -10,7 +10,8 @@ Names are conceptual; final packaging may namespace them to avoid collisions.
 | `join` | `channel` | acquire local subscription |
 | `leave` | `channel` | release local subscription |
 | `identity` | none | show local profile PeerId and this bridge's local EndpointId |
-| `status` | none | high-level bridge/daemon/discovery/network health, endpoint lease, and this bridge's joined channels |
+| `status` | none | high-level bridge/daemon/discovery/network health, endpoint lease, this bridge's joined channels, and in pull mode the pull queue's depth, whether the drain is paused and since when |
+| `receive` | optional `max` | **pull mode only** (ADR-0023 A 2026-10-07): take what the bridge holds for this session — direct messages and broadcasts, in the order taken from the session, never waiting — one result `{events: [{kind, content, meta}], remaining, paused}`; `max` defaults to the granted `event_queue` and is clamped to it (`CHANNEL-EVENT.md` §Delivery); absent in push mode, where delivery is the Channel notification |
 
 `content_type` is the Claude-facing name only. The bridge maps it to/from generic transport `Payload.media_type`.
 
@@ -97,6 +98,9 @@ Where each comes from (A 2026-10-06, Stage 16 step 3): `local_peer_id` is the se
 ## Tool results
 
 Wording must be exact:
+
+- receive (pull mode): events in the order taken from the session; `paused: true` means the bridge has stopped draining because its queue is full (the liveness clock starts only once the IPC client's own buffer fills behind it) — never "the daemon is refusing" (it refuses only once its own queue is full) and never "messages were lost here" (the bridge drops nothing it took; what a wedge close loses is the daemon's, `CHANNEL-EVENT.md` §Delivery); an empty queue returns `events: []` at once — the tool never waits;
+- pull queue full (pull mode): `send`, `reply`, `broadcast`, `join` and `leave` answer at once with the bridge-local error "the pull queue is full: call receive first" — never `Overloaded`, never a stall; a call in flight when the queue fills is cancelled and answered the same;
 
 - broadcast: "accepted for local publish" — never "delivered to all peers";
 - direct: "remote transport accepted at endpoint <id>" — never "remote human/Claude processed";

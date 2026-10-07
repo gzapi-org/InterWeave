@@ -2,13 +2,13 @@
 
 ## Startup
 
-1. Claude Code launches the Channel bridge over stdio.
+1. An MCP host launches the bridge over stdio with `--delivery push|pull` (required; the Claude Code plugin passes `push`, A 2026-10-07): a process started without it refuses to start and names both values.
 2. Bridge loads plugin-local non-secret routing config: profile name/data-socket + configured local EndpointId.
 3. Bridge connects only to daemon IPC v2 data socket.
 4. Hello requests non-admin capabilities and claims the configured EndpointId.
 5. Daemon grants endpoint lease/epoch or returns a clear conflict/configuration error.
 6. Bridge reads the profile PeerId from the session's creation context (`local_peer`) and the effective limits from the grant, and re-takes the channel joins it held before a reconnect — none at first start: joins are made through the join tool, never by configuration; a re-join the daemon refuses leaves `joined_channels` and is held in `status.rejoin_refused` until the next join or leave of that channel — never composed into a channel event, whose body is the payload's content alone (`contracts/CHANNEL-EVENT.md` §Sanitization), and no other notification: the bridge declares no MCP `logging` capability — so Claude learns of it through `status` and joins again through the tool (A 2026-10-06).
-7. Inbound Channel notifications begin.
+7. Inbound delivery begins: in push mode the Channel notifications; in pull mode the bridge's bounded pull queue fills and `receive` takes from it; a full queue pauses the drain, session-bound tools refuse at once while it is paused, and a pause that outlasts the keepalive ends the session as wedged, with the pipeline's bounded content lost, after which the bridge reconnects keeping its own queue (`CHANNEL-EVENT.md` §Delivery).
 
 The bridge never receives the profile private key and never becomes daemon owner merely because it started first.
 
