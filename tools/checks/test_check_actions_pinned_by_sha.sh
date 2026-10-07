@@ -3,193 +3,59 @@
 # Copyright 2026 Andrea Benetton
 # tools/checks/test_check_actions_pinned_by_sha.sh
 #
-# Self-test for check_actions_pinned_by_sha.sh.
+# Behavioural tests for check_actions_pinned_by_sha.sh, the hand-off to
+# agent-fabric's policies/check_actions_pinned_by_sha.py. What the check
+# decides is the fabric's and is tested there; what this file promises:
+#   1. the fabric's check runs on the pinned Python with the arguments
+#      untouched, and its output and exit status are the caller's
+#   2. with no --root given, --root is this working tree's top level; a
+#      given --root (or --root=) is the caller's and is not doubled
+#   3. no agent-fabric, or no pinned Python, is exit 2 and says which
+# The fabric and the Python are stubs that record what they were given.
 #
-# The cases that matter are the ones that LOOK pinned: an exact release tag
-# (`@v4.38.2` is still a tag its owner can move), a 7-character short SHA
-# (GitHub resolves it, and it can collide), and a correct SHA with no
-# version comment (runs fine, and nothing on the line says which release).
-set -u
-
+# Exit codes: 0 all assertions passed; 1 otherwise.
+set -uo pipefail
 SCRIPT_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" && pwd )"
 UNDER_TEST="$SCRIPT_DIR/check_actions_pinned_by_sha.sh"
-[[ -f "$UNDER_TEST" ]] || { echo "test: not found: $UNDER_TEST" >&2; exit 1; }
+failures=0
+pass() { echo "  ok   $1"; }
+fail() { echo "  FAIL $1"; [[ -n "${2:-}" ]] && printf '%s\n' "$2" | sed 's/^/       /'; failures=$((failures+1)); }
+SANDBOX="$(realpath -- "$(mktemp -d)")"; trap 'rm -rf "$SANDBOX"' EXIT
 
-SHA=3d3c42e5aac5ba805825da76410c181273ba90b1
-DIGEST=$(printf 'a%.0s' {1..64})
+# A working copy with the forwarder and its lookup, a stub fabric beside
+# it whose check records argv, and a stub Python that runs it with bash.
+P="$SANDBOX/projects"; C="$P/interweave"
+mkdir -p "$C/tools/checks" "$C/tools/gh" "$P/agent-fabric/policies" "$SANDBOX/bin"
+cp "$UNDER_TEST" "$C/tools/checks/"; cp "$SCRIPT_DIR/../gh/fabric-root.sh" "$C/tools/gh/"
+git -C "$C" init -q
+cat > "$P/agent-fabric/policies/check_actions_pinned_by_sha.py" <<'STUB'
+printf '%s\0' "$@" > "$RECORD"
+echo "stub check ran"
+exit "${STUB_RC:-0}"
+STUB
+printf '#!/usr/bin/env bash\nscript="$1"; shift; exec bash "$script" "$@"\n' > "$SANDBOX/bin/py"; chmod +x "$SANDBOX/bin/py"
+run() { out="$(cd "$C" && env -u AGENT_FABRIC_ROOT AGENT_FABRIC_PYTHON="$SANDBOX/bin/py" RECORD="$SANDBOX/rec" "$@" 2>&1)"; rc=$?; }
+argv() { local a=(); mapfile -d '' a < "$SANDBOX/rec"; printf '[%s]' "${a[@]}"; }
 
-fails=0
-pass() { echo "  ok:   $1"; }
-bad()  { echo "  FAIL: $1" >&2; printf '%s\n' "${2:-}" | sed 's/^/        /' >&2
-         fails=$((fails + 1)); }
+echo "hand-off: the fabric's check, on the pinned Python, with the arguments"
+run bash tools/checks/check_actions_pinned_by_sha.sh
+[[ $rc -eq 0 && "$out" == "stub check ran" ]] && pass "its output and exit status are the caller's" || fail "output or status" "rc=$rc $out"
+[[ "$(argv)" == "[--root][$C]" ]] && pass "no --root given: --root is the working tree's top level" || fail "default root" "$(argv)"
+STUB_RC=1 run bash tools/checks/check_actions_pinned_by_sha.sh
+[[ $rc -eq 1 ]] && pass "a finding (exit 1) is the caller's exit 1" || fail "exit 1 not passed through" "rc=$rc"
+run bash tools/checks/check_actions_pinned_by_sha.sh --root /elsewhere
+[[ "$(argv)" == "[--root][/elsewhere]" ]] && pass "a given --root is the caller's, not doubled" || fail "explicit --root" "$(argv)"
+run bash tools/checks/check_actions_pinned_by_sha.sh --root=/elsewhere
+[[ "$(argv)" == "[--root=/elsewhere]" ]] && pass "  --root= too" || fail "--root=" "$(argv)"
+run bash tools/checks/check_actions_pinned_by_sha.sh --help
+[[ "$(argv)" == "[--root][$C][--help]" ]] && pass "--help reaches the check" || fail "--help" "$(argv)"
 
-# expect <exit> <name> <workflow-body> [<file under .github>]
-expect() {
-    local want="$1" name="$2" body="$3" path="${4:-workflows/ci.yml}" root out got
-    root="$(mktemp -d)"; mkdir -p "$root/.github/workflows" "$(dirname "$root/.github/$path")"
-    printf '%s\n' "$body" > "$root/.github/$path"
-    out="$(bash "$UNDER_TEST" --root "$root" 2>&1)"; got=$?
-    rm -rf "$root"
-    [[ "$got" -eq "$want" ]] && pass "$name (exit $got)" \
-        || bad "$name — wanted $want, got $got" "$out"
-}
-
-step() { printf 'jobs:\n  a:\n    steps:\n%s\n' "$1"; }
-
-expect 0 "a SHA with its version comment passes (list-item form)" \
-"$(step "      - uses: actions/checkout@$SHA # v7.0.1")"
-
-expect 0 "a SHA with its version comment passes (key form)" \
-"$(step "      - if: true
-        uses: actions/checkout@$SHA # v7.0.1")"
-
-expect 0 "a sub-path action pinned by SHA passes" \
-"$(step "      - uses: github/codeql-action/init@$SHA # v4.38.2")"
-
-expect 0 "a quoted SHA pin passes" \
-"$(step "      - uses: 'actions/checkout@$SHA' # v7.0.1")"
-
-expect 1 "a major tag is rejected" \
-"$(step "      - uses: actions/checkout@v7")"
-
-# Looks exact; still a tag.
-expect 1 "an exact release tag is rejected" \
-"$(step "      - uses: github/codeql-action/init@v4.38.2")"
-
-expect 1 "a branch is rejected" \
-"$(step "      - uses: some/action@main")"
-
-expect 1 "a short SHA is rejected" \
-"$(step "      - uses: actions/checkout@3d3c42e # v7.0.1")"
-
-expect 1 "an upper-case SHA is rejected (GitHub's refs are lower-case)" \
-"$(step "      - uses: actions/checkout@${SHA^^} # v7.0.1")"
-
-expect 1 "no ref at all is rejected" \
-"$(step "      - uses: actions/checkout")"
-
-# Runs, and nothing on the line says which release it is.
-expect 1 "a SHA with no version comment is rejected" \
-"$(step "      - uses: actions/checkout@$SHA")"
-
-expect 1 "a SHA whose comment is not a version is rejected" \
-"$(step "      - uses: actions/checkout@$SHA # pinned")"
-
-expect 0 "a local action and a local reusable workflow are exempt" \
-"$(printf 'jobs:\n  a:\n    uses: ./.github/workflows/_web.yml\n  b:\n    steps:\n      - uses: ./.github/actions/setup\n')"
-
-expect 0 "a docker action pinned by digest passes" \
-"$(step "      - uses: docker://docker.io/library/alpine@sha256:$DIGEST")"
-
-expect 1 "a docker action by tag is rejected" \
-"$(step "      - uses: docker://docker.io/library/alpine:3.20")"
-
-expect 1 "a short docker digest is rejected" \
-"$(step "      - uses: docker://docker.io/library/alpine@sha256:abc")"
-
-# Valid YAML GitHub accepts, and invisible to a pattern that expects the
-# bare key at the start of the line.
-expect 1 "a tag pin under a double-quoted key is rejected" \
-"$(step "      - \"uses\": actions/checkout@v7")"
-
-expect 1 "a tag pin under a single-quoted key is rejected" \
-"$(step "      - 'uses': actions/checkout@v7")"
-
-expect 1 "a tag pin with a space before the colon is rejected" \
-"$(step "      - uses : actions/checkout@v7")"
-
-expect 1 "a tag pin in a flow mapping is rejected" \
-"$(step "      - {uses: actions/checkout@v7}")"
-
-expect 1 "a tag pin in a flow mapping, not its first key, is rejected" \
-"$(step "      - {name: co, uses: actions/checkout@v7}")"
-
-expect 0 "a SHA pin in a flow mapping, its version after the brace, passes" \
-"$(step "      - {uses: actions/checkout@$SHA, with: {fetch-depth: 0}} # v7.0.1")"
-
-expect 0 "a SHA pin whose flow mapping closes right after it passes" \
-"$(step "      - {uses: actions/checkout@$SHA} # v7.0.1")"
-
-expect 1 "a tag pin in a flow sequence of steps is rejected" \
-"$(printf 'jobs:\n  a:\n    steps: [{uses: actions/checkout@v7}]\n')"
-
-expect 1 "a tag pin in a flow mapping as a job's value is rejected" \
-"$(printf 'jobs:\n  call: {uses: org/repo/.github/workflows/w.yml@main}\n')"
-
-expect 1 "a uses: value on the next line is rejected (no comment can ride it)" \
-"$(step "      - uses:
-          actions/checkout@$SHA")"
-
-# ...and says why, rather than reporting the empty key as "no ref at all".
-root="$(mktemp -d)"; mkdir -p "$root/.github/workflows"
-step "      - uses:
-          actions/checkout@$SHA" > "$root/.github/workflows/ci.yml"
-out="$(bash "$UNDER_TEST" --root "$root" 2>&1)"
-rm -rf "$root"
-[[ "$out" == *"not on its key's line"* ]] && pass "  and names the split value" \
-    || bad "a split value should be named as such" "$out"
-
-expect 0 "a run script that prints the word uses: is not a use" \
-"$(step "      - run: echo \"uses: actions/checkout@v7\"")"
-
-# Two pins on one line would share one comment: the second's release is
-# stated nowhere. A local action beside one pin needs no version.
-expect 1 "two pinned flow uses on one line are rejected" \
-"$(printf 'jobs:\n  a:\n    steps: [{uses: actions/checkout@%s}, {uses: actions/cache@%s}] # v7.0.1\n' "$SHA" "$SHA")"
-
-# A docker digest needs no version comment, so it shares nothing.
-expect 0 "two docker digests in flow uses on one line pass" \
-"$(printf 'jobs:\n  a:\n    steps: [{uses: docker://docker.io/library/alpine@sha256:%s}, {uses: docker://docker.io/library/busybox@sha256:%s}]\n' "$DIGEST" "$DIGEST")"
-
-expect 0 "a pinned flow use beside a local one on a line passes" \
-"$(printf 'jobs:\n  a:\n    steps: [{uses: ./.github/actions/x}, {uses: actions/checkout@%s}] # v7.0.1\n' "$SHA")"
-
-# The version is read with trailing whitespace trimmed, a carriage return
-# included: a CRLF workflow is still read.
-expect 0 "a version comment with trailing blanks passes" \
-"$(step "      - uses: actions/checkout@$SHA # v7.0.1   ")"
-
-expect 0 "a CRLF line passes" \
-"$(printf 'jobs:\r\n  a:\r\n    steps:\r\n      - uses: actions/checkout@%s # v7.0.1\r\n' "$SHA")"
-
-expect 0 "a commented-out flow-mapping tag pin is not a use" \
-"$(step "      # - {uses: actions/checkout@v7}")"
-
-# The first uses key on the line sits inside a quoted run string and is
-# pinned; the step's own is a tag. Both are judged.
-expect 1 "a pinned uses inside a quoted string does not stand in for the step's own" \
-"$(step "      - {run: \"echo {x, uses: a/b@$SHA}\", uses: actions/checkout@v7} # v7.0.1")"
-
-expect 0 "a commented-out tag pin is not a use" \
-"$(step "      # - uses: actions/checkout@v4
-      - uses: actions/checkout@$SHA # v7.0.1")"
-
-expect 1 "a composite action under .github/actions is checked too" \
-"$(printf 'runs:\n  using: composite\n  steps:\n    - uses: actions/setup-node@v7\n')" \
-"actions/setup/action.yml"
-
-expect 1 "one bad use among good ones fails the file" \
-"$(step "      - uses: actions/checkout@$SHA # v7.0.1
-      - uses: actions/setup-node@v7")"
-
-# A last line without a newline is still read.
-root="$(mktemp -d)"; mkdir -p "$root/.github/workflows"
-printf 'jobs:\n  a:\n    steps:\n      - uses: actions/checkout@v7' > "$root/.github/workflows/ci.yml"
-bash "$UNDER_TEST" --root "$root" >/dev/null 2>&1; got=$?
-rm -rf "$root"
-[[ "$got" -eq 1 ]] && pass "a tag pin on a last line with no newline is rejected (exit 1)" \
-    || bad "a last line with no newline — wanted 1, got $got"
-
-# No workflows is an invocation problem, not a pass.
-root="$(mktemp -d)"
-bash "$UNDER_TEST" --root "$root" >/dev/null 2>&1; got=$?
-rm -rf "$root"
-[[ "$got" -eq 2 ]] && pass "no workflow directory is exit 2" \
-    || bad "no workflow directory — wanted 2, got $got"
+echo "refusal: no agent-fabric, or no pinned Python, is exit 2"
+out="$(cd "$C" && AGENT_FABRIC_ROOT="$SANDBOX/nowhere" AGENT_FABRIC_PYTHON="$SANDBOX/bin/py" bash tools/checks/check_actions_pinned_by_sha.sh 2>&1)"; rc=$?
+[[ $rc -eq 2 && "$out" == *"agent-fabric not found at $SANDBOX/nowhere"* ]] && pass "no agent-fabric: exit 2, the place it looked named" || fail "no fabric" "rc=$rc $out"
+out="$(cd "$C" && env -u AGENT_FABRIC_ROOT AGENT_FABRIC_PYTHON="$SANDBOX/no-python" bash tools/checks/check_actions_pinned_by_sha.sh 2>&1)"; rc=$?
+[[ $rc -eq 2 && "$out" == *"pinned Python is not installed at $SANDBOX/no-python"* ]] && pass "no pinned Python: exit 2, how to install it named" || fail "no python" "rc=$rc $out"
 
 echo
-if (( fails > 0 )); then
-    echo "test_check_actions_pinned_by_sha: $fails failure(s)" >&2
-    exit 1
-fi
-echo "test_check_actions_pinned_by_sha: all cases passed"
+if (( failures )); then echo "test_check_actions_pinned_by_sha: $failures assertion(s) FAILED"; exit 1; fi
+echo "test_check_actions_pinned_by_sha: OK — all assertions passed."
