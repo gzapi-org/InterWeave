@@ -48,7 +48,7 @@ apps/human-desktop/              # the desktop executable: app-core + ui-slint o
 apps/human-android/              # the Android host (Stage 17; a landing zone today)
 ```
 
-`core`, `chat-protocol`, `store`, `transport-client` and `ui-model` name nothing under `crates/transport/*`, no libp2p and no Slint, and `ui-slint` is the only crate whose build graph names Slint; `tools/checks/check_human_layering.sh` enforces it (built as the first blueprint's `human-*` names with the directory layout of `implementation-repository-layout.md`).
+`core`, `chat-protocol`, `store`, `transport-client` and `ui-model` name nothing under `crates/transport/*`, no libp2p and no Slint, and `ui-slint` is the only crate under `crates/human/*` that reaches Slint and the only workspace member that declares it (`apps/human-desktop` reaches it through `ui-slint`); `tools/checks/check_human_layering.sh` enforces it (built as the first blueprint's `human-*` names with the directory layout of `implementation-repository-layout.md`).
 
 ## Human application state
 
