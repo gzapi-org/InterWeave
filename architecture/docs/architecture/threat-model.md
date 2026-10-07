@@ -86,7 +86,7 @@ Kademlia is enabled by default for configured entries in the standard v1 build. 
 
 ## Mandatory Internet reachability threat boundary
 
-Phase 9 introduces infrastructure that affects availability and metadata but does not become application trust. ADR-0036 defines a separate connectivity-infrastructure class.
+The connectivity infrastructure (Stage 11, closed 2026-09-27; the old "Phase 9" release label) affects availability and metadata but does not become application trust. ADR-0036 defines a separate connectivity-infrastructure class.
 
 | Threat | Attack | Mitigation | Residual risk |
 |---|---|---|---|
@@ -99,7 +99,7 @@ Phase 9 introduces infrastructure that affects availability and metadata but doe
 
 The system does **not** promise anonymous routing, universal direct hole-punch success, or availability when every authorized relay/probe service is unreachable. Relay transport preserves authenticated encrypted peer sessions but does not hide PeerIds or traffic timing from relay operators.
 
-## Additional Phase-9 / human-platform threats
+## Additional connectivity-infrastructure / human-platform threats
 
 | Threat | Boundary | Mitigation | Residual |
 |---|---|---|---|
@@ -113,3 +113,4 @@ The system does **not** promise anonymous routing, universal direct hole-punch s
 | restored pending outbox replays old sends | portable backup/replay | pending outbound is excluded from portable message backup; future portable outbox requires new acknowledgement/replay design | manual filesystem cloning outside supported backup policy remains operator risk |
 | OS kills Android runtime | availability | explicit FGS/user-visible mode, relay recovery, honest offline/no_route semantics | no reception while process/service is absent; no hidden cloud wakeup |
 | cloned recovery phrase used on two active devices | identity/routing | ADR-0043 prohibits concurrent clone; per-device PeerIds | no automatic cryptographic human-account binding in v1 |
+| durable trust overlay tampered with or deleted | local authorisation state | `<state>/trust-overlay.json` holds the operator's `admin.trust.set` deltas (ADR-0028, amended 2026-10-07): owner-only, refused at startup unless owned by the daemon's uid and readable or writable by no one else; an overlay that does not parse, lists a peer twice or exceeds the allowlist bound is fatal, never skipped or truncated; written before the policy is published and before the answer; backed up with the profile | deleting the file re-allows every revoked peer, by design, so the backup table says never to delete it to reset; two filesystem failures in a row can leave a set ahead of the runtime, answered failed and logged, taking effect at the next start |
