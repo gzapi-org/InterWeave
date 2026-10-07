@@ -659,6 +659,8 @@ impl FakeSession {
         let id = self.session.session_id();
         state.leases.retain(|_, lease| &lease.session != id);
         state.sessions.remove(id);
+        // Its last use: an ended session leaves the set with it.
+        state.ended.remove(id);
     }
 }
 
@@ -804,7 +806,7 @@ impl DataSessionPort for FakeSession {
         self.require(DataCapability::Events)?;
         std::future::poll_fn(|cx| {
             let mut state = lock(&self.node.state);
-            if state.stopped || state.ended.contains(self.session.session_id()) {
+            if state.stopped {
                 return Poll::Ready(Ok(()));
             }
             match state.sessions.get_mut(self.session.session_id()) {

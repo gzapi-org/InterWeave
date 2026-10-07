@@ -510,9 +510,11 @@ async fn a_broadcast_is_a_route_once_taken() {
 
 /// A session opened before the fake's restart belonged to the runtime
 /// before it, and ends with it, as a real runtime's does: its `events`
-/// and `close` answer `BackendUnavailable`, and `ready` returns at once
-/// rather than leaving a loop spinning on nothing (#215 review P3). A
-/// session opened after the restart is the control.
+/// and `close` answer `BackendUnavailable` (#215 review P3) -- before,
+/// `events` answered empty, so a ready/events loop spun on nothing.
+/// `ready` returns at once, as it already did for a session the
+/// restart cleared: pinned, not changed. A session opened after the
+/// restart is the control.
 #[tokio::test]
 async fn a_session_from_before_a_restart_ends_with_it() {
     use interweave_local_client_api::{DataSessionBinding as _, DataSessionPort as _};
