@@ -1000,3 +1000,75 @@ async fn an_admin_answer_above_the_offer_is_refused_and_not_learnt() {
             .holds(AdminCapability::Trust)
     );
 }
+
+/// `peers` reads every page through its cursor on a 2.2 connection and
+/// joins them; on a 2.1 connection it is answered `ProtocolUnsupported`
+/// and nothing is sent -- the daemon would answer the name as unknown.
+#[tokio::test]
+async fn peers_reads_every_page_at_two_two_and_sends_nothing_below_it() {
+    use interweave_local_client_api::{
+        AdminBinding as _, AdminCapability, AdminPort as _, PeerOutcome,
+    };
+    use interweave_transport_api::{TransportError, TransportIdentity};
+    const OTHER: &str = "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N";
+    const THIRD: &str = "QmZyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N";
+    for minor in [2, 1] {
+        let script = Script::new();
+        let (admin, mut server) = tokio::join!(
+            script.binding.admin([AdminCapability::Status].into()),
+            async {
+                let (mut server, _) = admin_hello(&script).await;
+                admin_response(&mut server, minor, &["admin.status"]).await;
+                server
+            }
+        );
+        let admin = admin.expect("a port");
+        if minor < 2 {
+            // Bounded: a port that sent the request would wait for an
+            // answer this server never gives.
+            let (refused, nothing) =
+                tokio::join!(tokio::time::timeout(PATIENCE, admin.peers()), async {
+                    tokio::time::timeout(Duration::from_millis(200), server.read()).await
+                });
+            assert_eq!(
+                refused.expect("answered without a round trip"),
+                Err(TransportError::ProtocolUnsupported)
+            );
+            assert!(nothing.is_err(), "no request reached the daemon");
+            continue;
+        }
+        let answer = async |server: &mut Server, result: serde_json::Value| -> Option<String> {
+            let Some(Frame::Request(request)) = server.read().await else {
+                panic!("a request");
+            };
+            let after = request.params.as_ref().map(|p| p.get().to_owned());
+            server
+                .write(&json!({"type": "response", "id": request.id.as_str(), "ok": true, "result": result}))
+                .await;
+            after
+        };
+        let (rows, afters) = tokio::join!(admin.peers(), async {
+            let first = answer(
+                &mut server,
+                json!({"peers": [{"peer": OTHER, "connected": true, "last_outcome": "connected"}], "next": OTHER}),
+            )
+            .await;
+            let second = answer(
+                &mut server,
+                json!({"peers": [{"peer": THIRD, "connected": false, "backoff_until": 7, "last_outcome": "denied"}]}),
+            )
+            .await;
+            (first, second)
+        });
+        let rows = rows.expect("the rows");
+        let id = |s: &str| TransportIdentity::parse(s).expect("peer");
+        assert_eq!(
+            rows.iter().map(|r| r.peer.clone()).collect::<Vec<_>>(),
+            [id(OTHER), id(THIRD)]
+        );
+        assert_eq!(rows[1].backoff_until, Some(7));
+        assert_eq!(rows[1].last_outcome, Some(PeerOutcome::Denied));
+        assert_eq!(afters.0.as_deref(), Some("{}"), "the first page names none");
+        assert_eq!(afters.1, Some(format!(r#"{{"after":"{OTHER}"}}"#)));
+    }
+}

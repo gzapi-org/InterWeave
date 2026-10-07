@@ -6,13 +6,13 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use interweave_ipc_protocol::{
-    AdminStatusResult, EmptyResult, EndpointList, EndpointParams, MAX_SHUTDOWN_GRACE_MS, Request,
-    RequestedCapability, SetDefaultParams, SetEnabledParams, SetEnabledResult, ShutdownParams,
-    TrustList, TrustListParams, TrustSetParams,
+    AdminStatusResult, EmptyResult, EndpointList, EndpointParams, MAX_SHUTDOWN_GRACE_MS, Method,
+    PeerList, PeerListParams, Request, RequestedCapability, SetDefaultParams, SetEnabledParams,
+    SetEnabledResult, ShutdownParams, TrustList, TrustListParams, TrustSetParams,
 };
 use interweave_local_client_api::{
     AdminBinding, AdminCapability, AdminPort, AdminStatus, EndpointAdminView, Generation,
-    LocalAdminPort, TrustAdminView,
+    LocalAdminPort, PeerGateView, TrustAdminView,
 };
 use interweave_transport_api::{EndpointId, TransportError, TransportIdentity};
 
@@ -33,6 +33,10 @@ const fn requested(capability: AdminCapability) -> RequestedCapability {
 /// so. A server past this is not paging, and the read ends `Internal`
 /// rather than following it.
 const MAX_TRUST_PAGES: usize = 8;
+
+/// Pages `peers` reads at most: a full allowlist is eight (4096 peers,
+/// 512 a page), and the gate's rows may move while they are read.
+const MAX_PEER_PAGES: usize = 10;
 
 impl IpcBinding {
     /// Open an admin connection asking exactly `asked`.
@@ -122,6 +126,7 @@ impl AdminBinding for IpcBinding {
             .filter_map(|c| c.as_admin());
         Ok(IpcAdmin {
             port: LocalAdminPort::new(mint(), granted),
+            minor: opened.response.ipc_version.minor,
             connection: opened.connection,
         })
     }
@@ -131,6 +136,9 @@ impl AdminBinding for IpcBinding {
 /// connection ends.
 pub struct IpcAdmin {
     port: LocalAdminPort,
+    /// The minor this port's connection negotiated: a method above it is
+    /// not sent (`admin.peers.list`, 2.2, under the 2.0 `admin.status`).
+    minor: u64,
     connection: Connection,
 }
 
@@ -192,6 +200,46 @@ impl IpcAdmin {
             match next {
                 // A cursor that does not move would read the same page
                 // for ever.
+                Some(next) if after.as_ref().is_none_or(|after| next > *after) => {
+                    after = Some(next);
+                }
+                Some(_) => return Err(TransportError::Internal),
+                None => return Ok(pages),
+            }
+        }
+    }
+
+    /// Every page of `admin.peers.list` as the daemon sent it, in order,
+    /// for `transportctl peers list --json`: one `ipc/peer-list` each.
+    ///
+    /// Not sent on a connection that negotiated below 2.2, where the
+    /// daemon would answer it as an unknown method: answered that way
+    /// here instead, without a round trip (`LOCAL-IPC.md`,
+    /// `admin.peers.list`).
+    ///
+    /// # Errors
+    /// `ProtocolUnsupported` below 2.2; as [`AdminPort::peers`]; and
+    /// `Internal` for a daemon whose cursor does not advance or that pages
+    /// past [`MAX_PEER_PAGES`].
+    pub async fn peers_pages(&self) -> Result<Vec<PeerList>, TransportError> {
+        if self.minor < Method::AdminPeersList.entry().since_minor {
+            return Err(TransportError::ProtocolUnsupported);
+        }
+        let mut pages: Vec<PeerList> = Vec::new();
+        let mut after: Option<TransportIdentity> = None;
+        loop {
+            if pages.len() == MAX_PEER_PAGES {
+                return Err(TransportError::Internal);
+            }
+            let page = self
+                .connection
+                .call::<PeerList>(Request::AdminPeersList(PeerListParams {
+                    after: after.clone(),
+                }))
+                .await?;
+            let next = page.next.clone();
+            pages.push(page);
+            match next {
                 Some(next) if after.as_ref().is_none_or(|after| next > *after) => {
                     after = Some(next);
                 }
@@ -274,6 +322,23 @@ impl AdminPort for IpcAdmin {
 
     async fn shutdown(&self, grace: Duration) -> Result<(), TransportError> {
         self.request_shutdown(Some(grace)).await
+    }
+
+    /// Read page by page and joined, the rows in order.
+    async fn peers(&self) -> Result<Vec<PeerGateView>, TransportError> {
+        Ok(self
+            .peers_pages()
+            .await?
+            .into_iter()
+            .flat_map(|page| page.peers)
+            .map(|row| PeerGateView {
+                peer: row.peer,
+                connected: row.connected,
+                backoff_until: row.backoff_until,
+                quarantined_until: row.quarantined_until,
+                last_outcome: row.last_outcome,
+            })
+            .collect())
     }
 
     /// Read page by page and joined: the local peer from the first page,
