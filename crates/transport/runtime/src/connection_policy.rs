@@ -691,15 +691,25 @@ impl ConnectionPolicy {
         self.peers.get(peer)
     }
 
-    /// The latest moment any of `peer`'s addresses stays quarantined, if
-    /// one is quarantined at `now_ms`. Reads only `peer`'s own keys.
+    /// When EVERY address in `peer`'s book is quarantined at `now_ms`, the
+    /// earliest release among them -- the moment the peer is dialable
+    /// again (`CONNECTIVITY.md` §19, A 2026-10-06). `None` while any known
+    /// address is dialable, since quarantine is per address and a peer
+    /// with a good route is not held by it; and `None` for an empty book,
+    /// which is "nothing known", not "held". The book is what the gate
+    /// dials from, so this agrees with the gate's own refusal of a send.
     #[must_use]
     pub fn quarantined_until(&self, peer: &TransportIdentity, now_ms: u64) -> Option<u64> {
-        self.addresses
-            .range((peer.clone(), String::new())..)
-            .take_while(|((p, _), _)| p == peer)
-            .filter_map(|(_, state)| state.quarantined_until_ms.filter(|until| now_ms < *until))
-            .max()
+        let mut earliest: Option<u64> = None;
+        for address in self.book.get(peer)? {
+            let until = self
+                .addresses
+                .get(&(peer.clone(), address.clone()))
+                .and_then(|state| state.quarantined_until_ms)
+                .filter(|until| now_ms < *until)?;
+            earliest = Some(earliest.map_or(until, |e| e.min(until)));
+        }
+        earliest
     }
 
     /// Forget `peer`'s peer-scoped backoff, keeping every address record.

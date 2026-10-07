@@ -546,7 +546,8 @@ pub struct PeerRow {
         deserialize_with = "absent_or_millis"
     )]
     pub backoff_until: Option<u64>,
-    /// At least one of its addresses is quarantined until then.
+    /// Every known address of it is quarantined until then, the earliest
+    /// release; absent while any is dialable (`CONNECTIVITY.md` §19).
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

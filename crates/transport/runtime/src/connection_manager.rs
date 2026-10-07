@@ -2197,7 +2197,9 @@ pub struct RetryScheduled {
 pub struct PeerGateState {
     /// Dials to the peer are refused until then.
     pub backoff_until_ms: Option<u64>,
-    /// At least one of the peer's addresses is quarantined until then.
+    /// Every address in the peer's book is quarantined until then, the
+    /// earliest release; `None` while any is dialable (`CONNECTIVITY.md`
+    /// §19).
     pub quarantined_until_ms: Option<u64>,
     /// The scheduled retry comes due then.
     pub retry_due_at_ms: Option<u64>,
@@ -3478,19 +3480,33 @@ mod tests {
                 peer_backoff: true
             })
         );
-        // A quarantine is reported by its own deadline, and lapses.
-        let q = m
+        // A quarantine holds the peer only once EVERY known address is
+        // quarantined (section 19): one of two is not, with the other a
+        // route still -- the control -- and both are, by the earlier
+        // release, which is when the peer is dialable again; it lapses
+        // there.
+        let q_ms: u64 = 30 * 60 * 1_000;
+        assert!(m.learn_address(&peer(P2), "/q1", 0));
+        assert!(m.learn_address(&peer(P2), "/q2", 0));
+        let q1 = m
             .handle()
             .load()
-            .admit(&request(P2, "/q"), 0)
+            .admit(&request(P2, "/q1"), 0)
             .expect("admitted");
-        assert!(m.record_identity_mismatch(q, 0));
-        let held = m.peer_gate_state(&peer(P2), 1_000);
-        assert_eq!(held.quarantined_until_ms, Some(30 * 60 * 1_000));
+        assert!(m.record_identity_mismatch(q1, 0));
+        let one = m.peer_gate_state(&peer(P2), 1_000);
+        assert_eq!(one.quarantined_until_ms, None, "/q2 is still a route");
+        let q2 = m
+            .handle()
+            .load()
+            .admit(&request(P2, "/q2"), 5_000)
+            .expect("admitted");
+        assert!(m.record_identity_mismatch(q2, 5_000));
+        let held = m.peer_gate_state(&peer(P2), 6_000);
+        assert_eq!(held.quarantined_until_ms, Some(q_ms), "the earlier release");
         assert_eq!(held.backoff_until_ms, None, "a mismatch is not a backoff");
         assert_eq!(
-            m.peer_gate_state(&peer(P2), 30 * 60 * 1_000)
-                .quarantined_until_ms,
+            m.peer_gate_state(&peer(P2), q_ms).quarantined_until_ms,
             None
         );
         // A hole-punch dial schedules nothing and says so.

@@ -34,7 +34,7 @@
           "quarantined_until": {
             "type": "integer",
             "minimum": 0,
-            "description": "At least one of the peer's addresses is quarantined until then, in milliseconds since the Unix epoch; absent when none is."
+            "description": "Every known address of the peer is quarantined until then, in milliseconds since the Unix epoch: the earliest release among them, the moment the peer is dialable again. Absent while any known address is dialable, since quarantine is per address and a peer with a good route is not held by it (CONNECTIVITY.md section 19)."
           },
           "last_outcome": {
             "enum": [

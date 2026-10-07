@@ -217,7 +217,8 @@ pub struct PeerGateRow {
     /// Dials to it are refused until then, milliseconds since the Unix
     /// epoch.
     pub backoff_until_ms: Option<u64>,
-    /// One of its addresses at least is quarantined until then.
+    /// Every known address of it is quarantined until then, the earliest
+    /// release; absent while any is dialable (`CONNECTIVITY.md` §19).
     pub quarantined_until_ms: Option<u64>,
     /// How the last dial or connection to it ended, if any has since the
     /// runtime started.

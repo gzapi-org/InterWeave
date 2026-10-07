@@ -355,7 +355,8 @@ pub struct PeerGateView {
     pub connected: bool,
     /// Dials to it are refused until then.
     pub backoff_until: Option<u64>,
-    /// At least one of its addresses is quarantined until then.
+    /// Every known address of it is quarantined until then, the earliest
+    /// release; absent while any is dialable (`CONNECTIVITY.md` §19).
     pub quarantined_until: Option<u64>,
     /// How the last dial or connection ended; `None` until the first one
     /// since the runtime started.
