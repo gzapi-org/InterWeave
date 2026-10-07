@@ -3602,7 +3602,9 @@ pre-release latitude names an `approved` schema, and its major rule binds
 once the first production build speaks 2.0 (ADR-0017 A 2026-10-01, one
 bound); a flipped `ipc` schema before that build is named by neither
 clause. The owner decides whether the flip or the first production build
-is the bound; if the flip, ADR-0017 is amended to say so. The untried-address admission lift is once per
+is the bound; if the flip, ADR-0017 is amended to say so. (Decided
+2026-10-07: the first production build is the bound for a flipped schema
+as for an approved one — ADR-0017 A 2026-10-07.) The untried-address admission lift is once per
 settled attempt (ADR-0011 A 2026-10-01). `peer.disconnected` had no
 producer until #162, measured on 60a1b977 as no frame in 30 s with a
 peer's daemon terminated. Carried from (8): an awaitable `events()` (the
@@ -3650,7 +3652,9 @@ stays valid — which LOCAL-IPC.md's pre-release clause does not name (it
 covers an added property, a never-emitted one removed, and a change as
 the two): it is taken in the pull request that flips the schema, on the
 owner's arming as its approval, and the clause's silence on a pure
-relaxation is routed to the owner with the bound question above. The "Carried by name"
+relaxation is routed to the owner with the bound question above. (Decided
+2026-10-07: a pure relaxation is additive before the first production
+build, a widening after it — ADR-0017 A 2026-10-07.) The "Carried by name"
 paragraph above stands as written.
 
 ## 17. Stage 14 — first-party human application core/UI
@@ -4209,7 +4213,8 @@ provisioning call; until it lands architect-cto reviews copy against
 human-client-ui.md §5 and §12 and authors none — reviewed copy is a
 Stage 15 precondition. Open with the owner, carried from §16 unchanged:
 the pre-release bound after a flip, and whether the pre-release clause
-names a pure schema relaxation. The "Carried by name" paragraph above
+names a pure schema relaxation (both decided 2026-10-07, ADR-0017 A
+2026-10-07). The "Carried by name" paragraph above
 stands as written, read with this block: `ui-slint` and the
 accessibility-tree bullet did not stay carried — they landed in #170 —
 and what travels to Stage 15 in their place is the tree test's reach.

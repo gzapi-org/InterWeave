@@ -465,7 +465,7 @@ schema takes an additive property into 2.0 itself (`event_queue` on
 emitted, its mirror refusing the old name (`pre_auth.tracked_peers` off
 `admin-status` 1.1.0, A 2026-10-01), and treats a change as that removal
 plus that addition — its own version moving 1.x → 1.(x+1) each time
-(ADR-0017 records the rule and its one bound). A closed RESULT shape may
+(ADR-0017 records the rule and its one bound; the bound holds for a schema flipped `active` before that build as for an `approved` one, and a pure relaxation of a bound every emitted value already satisfies is additive before the build — A 2026-10-07). A closed RESULT shape may
 widen behind a new minor (ADR-0017 A 2026-10-07): a property gains a
 value or a new optional property appears only on a connection that
 negotiated that minor or later, the shape served below it stays
