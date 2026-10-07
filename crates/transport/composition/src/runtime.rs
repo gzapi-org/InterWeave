@@ -1112,10 +1112,16 @@ impl Driver {
             outcome,
             "admin.trust.set"
         );
-        if published? {
-            if let Some(overlay) = overlay {
-                self.overlay = overlay;
-            }
+        let changed = published?;
+        // ANSWERED `ok`, THE OVERLAY WRITTEN IS THE ONE KEPT -- whether or
+        // not the policy moved. After a set left ahead, a set the policy
+        // already agrees with still writes its move; kept only on a
+        // policy change, the next set on any peer wrote the old lists
+        // back and undid it (#215 re-review N2).
+        if let Some(overlay) = overlay {
+            self.overlay = overlay;
+        }
+        if changed {
             self.discovery.set_trust(next.clone());
             self.trust = next;
             if !allowed {

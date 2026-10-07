@@ -8,117 +8,16 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use interweave_local_client_api::{
-    AdminBinding, AdminCapability, AdminPort, TrustAdminView, TrustSource, TrustedPeer,
-};
-use interweave_profile_config::ProfileConfig;
-use interweave_profile_config::trust_overlay::TRUST_OVERLAY_FILE;
-use interweave_profile_identity::ProfileIdentity;
+use interweave_local_client_api::TrustSource;
 use interweave_transport_api::{TransportError, TransportIdentity};
-use interweave_transport_composition::{ComposedRuntime, CompositionError, CompositionOptions};
+use interweave_transport_composition::{ComposedRuntime, CompositionError};
 
-/// A profile allowing `trusted`, with one endpoint whose inbound subset
-/// names `subset` -- a configured peer the overlay may come to revoke.
-fn profile(trusted: &[&TransportIdentity], subset: &[&TransportIdentity]) -> ProfileConfig {
-    let list = |peers: &[&TransportIdentity]| {
-        peers
-            .iter()
-            .map(|p| format!("\"{}\"", p.as_str()))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let inbound = if subset.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "\n      inbound:\n        static_subset: [{}]",
-            list(subset)
-        )
-    };
-    let doc = format!(
-        "schema_version: 2
-trust:
-  policy: static-allowlist
-  allowed_peers: [{}]
-endpoints:
-  entries:
-    - id: human
-      enabled: true
-      advertise: false{inbound}
-discovery:
-  providers:
-    - type: static-bootstrap
-      enabled: true
-      priority: 10
-      config:
-        peers: []
-",
-        list(trusted)
-    );
-    serde_norway::from_str(&doc).expect("the document parses")
-}
+mod common;
 
-fn id() -> (ProfileIdentity, TransportIdentity) {
-    let identity = ProfileIdentity::generate();
-    let peer = identity.transport_identity().expect("peer id");
-    (identity, peer)
-}
-
-/// A private state directory and the overlay's path in it.
-fn state() -> (tempfile::TempDir, PathBuf) {
-    let dir = tempfile::tempdir().expect("a temporary directory");
-    chmod(dir.path(), 0o700);
-    let path = dir.path().join(TRUST_OVERLAY_FILE);
-    (dir, path)
-}
-
-fn chmod(path: &Path, mode: u32) {
-    use std::os::unix::fs::PermissionsExt as _;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod");
-}
-
-fn options(overlay: Option<&Path>) -> CompositionOptions {
-    CompositionOptions {
-        trust_overlay_file: overlay.map(Path::to_path_buf),
-        ..CompositionOptions::default()
-    }
-}
-
-async fn trust(runtime: &ComposedRuntime) -> TrustAdminView {
-    runtime
-        .sessions()
-        .admin([AdminCapability::Trust].into())
-        .await
-        .expect("a port")
-        .trust()
-        .await
-        .expect("the policy")
-}
-
-async fn set(
-    runtime: &ComposedRuntime,
-    peer: &TransportIdentity,
-    allowed: bool,
-) -> Result<(), TransportError> {
-    runtime
-        .sessions()
-        .admin([AdminCapability::Trust].into())
-        .await
-        .expect("a port")
-        .set_trust(peer.clone(), allowed)
-        .await
-}
-
-fn row(peer: &TransportIdentity, persisted: bool, source: TrustSource) -> TrustedPeer {
-    TrustedPeer {
-        peer: peer.clone(),
-        persisted,
-        source,
-    }
-}
+use common::{chmod, id, options, profile, row, set, state, trust};
 
 /// A configured peer revoked and an unconfigured one allowed are still
 /// so after the runtime restarts over the same overlay; the rows say
@@ -364,82 +263,15 @@ async fn an_allow_whose_write_lands_and_then_fails_is_put_back() {
             audit[0]
         );
         // The warning names no peer, so it is read from this case's own
-        // stretch of the log: no other test here writes it.
+        // stretch of the log: no other test in this binary writes it --
+        // the ahead test that does is a binary of its own
+        // (`trust_overlay_ahead.rs`; #215 re-review N1).
         assert_eq!(
             text[before..].contains("ahead of the runtime"),
             faults == [AfterRename, BeforeRename],
             "{case}: {text}"
         );
     }
-}
-
-/// A set left ahead of the runtime takes effect at the next start
-/// whatever sets follow it (ADR-0028 A 2026-10-07, f290e85c; #215 review
-/// F3): an ahead revocation survives a later allow of another peer, and
-/// after an ahead allow, a revocation of that peer -- which the runtime,
-/// never having allowed it, sees as no change -- reaches the file before
-/// it is answered `ok`.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_set_left_ahead_takes_effect_whatever_sets_follow() {
-    use interweave_profile_config::trust_overlay::TrustOverlay;
-    use interweave_transport_composition::OverlayFault::{AfterRename, BeforeRename};
-
-    let (identity, _) = id();
-    let (_, kept) = id();
-    let (_, revoked) = id();
-    let (_, other) = id();
-    let configured = profile(&[&kept, &revoked], &[]);
-    let peers = |path: &Path| {
-        TrustOverlay::load(path, &configured.trust.allowed_peers)
-            .expect("loads")
-            .1
-    };
-
-    // An ahead revocation, then an allow of another peer.
-    let (_dir, path) = state();
-    let runtime = ComposedRuntime::start(&identity, &configured, options(Some(&path)))
-        .await
-        .expect("composes");
-    runtime
-        .fail_overlay_writes(vec![AfterRename, BeforeRename])
-        .await
-        .expect("queued");
-    assert_eq!(
-        set(&runtime, &revoked, false).await,
-        Err(TransportError::Internal),
-        "left ahead"
-    );
-    assert!(
-        trust(&runtime).await.peers().any(|p| p == &revoked),
-        "not published"
-    );
-    set(&runtime, &other, true).await.expect("a later set");
-    runtime.stop().await.expect("stops");
-    let next = peers(&path);
-    assert!(!next.contains(&revoked), "the ahead revocation is in force");
-    assert!(next.contains(&other) && next.contains(&kept), "{next:?}");
-
-    // An ahead allow, then a revocation of the same peer.
-    let (_dir, path) = state();
-    let runtime = ComposedRuntime::start(&identity, &configured, options(Some(&path)))
-        .await
-        .expect("composes");
-    runtime
-        .fail_overlay_writes(vec![AfterRename, BeforeRename])
-        .await
-        .expect("queued");
-    assert_eq!(
-        set(&runtime, &other, true).await,
-        Err(TransportError::Internal),
-        "left ahead"
-    );
-    assert!(peers(&path).contains(&other), "ahead on disk");
-    set(&runtime, &other, false).await.expect("answered ok");
-    runtime.stop().await.expect("stops");
-    assert!(
-        !peers(&path).contains(&other),
-        "a revocation answered ok survives the restart"
-    );
 }
 
 /// A failed publish restores the previous overlay: answered
