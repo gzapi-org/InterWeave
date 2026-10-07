@@ -356,8 +356,11 @@ before the new policy is published to the runtime and before the set is
 answered, so an answered set survives a restart and a crash; a set whose
 write fails is answered `Internal` and changes nothing — no connection
 closes, no row moves, and the audit line's outcome is `unwritten`; a
-publish that fails after the write restores the previous overlay before
-the set is answered failed. Adding a peer already listed and removing one not
+publish that fails after the write, or a directory sync that fails after
+the rename, restores the previous overlay before the set is answered
+failed; when that restore fails too the overlay is ahead of the runtime
+(answered `Internal`, audited `failed`, logged) and the set — an allow as
+much as a revocation — takes effect at the next start (ADR-0028). Adding a peer already listed and removing one not
 listed are no-ops that answer `ok`. Both methods are granted only to a
 connection that negotiated minor 2.1 or later, and `admin.trust` is
 requested only in a hello sent after the client has learnt the daemon
