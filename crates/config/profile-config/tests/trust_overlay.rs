@@ -319,6 +319,30 @@ fn an_effective_allowlist_past_the_bound_stops_the_load() {
     }
 }
 
+/// A list on disk longer than the allowlist's bound is refused as such,
+/// before normalising could hide it -- a revoked list of any length
+/// normalises down to the configuration -- and one at the bound loads
+/// (the control). Measured on `revoked`, where only this check sees it.
+#[test]
+fn a_list_past_the_bound_on_disk_stops_the_load() {
+    let max = u32::try_from(PeerTrustPolicy::MAX_ALLOWED_PEERS).expect("fits");
+    let configured = set([nth(0)]);
+    for (len, refused) in [(max, false), (max + 1, true)] {
+        let (_dir, path) = state();
+        let revoked: Vec<TransportIdentity> = (1..=len).map(nth).collect();
+        put(&path, &lists(&[], &revoked.iter().collect::<Vec<_>>()));
+        let loaded = TrustOverlay::load(&path, &configured);
+        if refused {
+            assert!(
+                matches!(loaded, Err(OverlayError::ListTooLong)),
+                "{loaded:?}"
+            );
+        } else {
+            assert!(loaded.is_ok(), "{len}: {loaded:?}");
+        }
+    }
+}
+
 /// A normalisation rewrite that fails stops the load: the stale entry
 /// left on disk could undo the operator's next `config.yaml` edit. The
 /// same file in a writable directory is the control.
