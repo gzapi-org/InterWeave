@@ -1362,8 +1362,10 @@ mod tests {
     }
 
     /// Below 2.3 the row is the 2.1 row byte for byte, whatever the
-    /// binding knows; from 2.3 a persisted row carries its source. A row
-    /// the binding does not persist is the 2.1 row at every minor.
+    /// binding knows; from 2.3 a persisted row carries its source. The
+    /// page renders a row the binding does not persist as the 2.1 row at
+    /// every minor; at 2.3 the server refuses to serve one (ipc-server's
+    /// `an_unpersisted_trust_row_is_refused_at_two_three`).
     #[test]
     fn a_trust_row_is_the_shape_its_minor_names() {
         let (configured, administered) = (synthetic_peer(1), synthetic_peer(2));
@@ -1407,7 +1409,7 @@ mod tests {
         assert_eq!(
             rows(false, TRUST_SOURCE_SINCE_MINOR),
             [old(&configured), old(&administered)],
-            "an unpersisted row says so at 2.3 too"
+            "the page renders an unpersisted row as the 2.1 row; the server refuses it at 2.3"
         );
     }
 
