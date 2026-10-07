@@ -113,6 +113,7 @@ control.txt
 adb shell bmgr transport com.google.android.gms/.backup.BackupTransportService  (restored)
 
 ## step 5 (standard v1): L3, Doze forced with the screen off and the battery reported unplugged -- driver output
+## (its trace listing drops net-link lines -- this note added after PR #214's review)
 ## 23:07:27Z standard-v1 variant: clean install, launch, Home
 Success
 ## 23:07:40Z L3: screen off, battery unplugged (simulated), Doze forced
