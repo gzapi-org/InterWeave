@@ -474,8 +474,10 @@ pub trait AdminBinding {
 
 /// One open administrative port.
 ///
-/// Every mutation is a runtime overlay, never written to the profile:
-/// a restart returns to the configured state.
+/// No mutation is written to the profile. An endpoint change is a
+/// runtime overlay, and a restart returns to the configured state; a
+/// trust change is kept in the state directory's trust overlay and
+/// survives it (ADR-0028 A 2026-10-07).
 pub trait AdminPort {
     /// The port's identity and authorities.
     fn port(&self) -> &LocalAdminPort;
