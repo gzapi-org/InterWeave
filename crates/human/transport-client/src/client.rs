@@ -1044,7 +1044,6 @@ fn connectivity_of(health: Health, summary: Option<&ConnectivitySummary>) -> Opt
 fn trust_row(row: interweave_local_client_api::TrustedPeer) -> TrustRow {
     TrustRow {
         peer: row.peer,
-        persisted: row.persisted,
         origin: match row.source {
             interweave_local_client_api::TrustSource::Configured => TrustOrigin::Configured,
             interweave_local_client_api::TrustSource::Administered => TrustOrigin::AddedHere,

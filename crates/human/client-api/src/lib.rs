@@ -360,35 +360,32 @@ impl TrustList {
     }
 }
 
-/// One allowed peer.
+/// One allowed peer. Whether it survives a restart is not carried: over
+/// IPC 2.3 `ipc-client` refuses a row that is not persisted, so every row
+/// the desktop client reads is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustRow {
     /// The peer.
     pub peer: TransportIdentity,
-    /// The row survives a daemon restart. False only on a runtime that
-    /// keeps no trust state, which no shipped daemon is.
-    pub persisted: bool,
     /// Where the row comes from.
     pub origin: TrustOrigin,
 }
 
 impl TrustRow {
-    /// A row from the profile's configuration, kept across restarts.
+    /// A row from the profile's configuration.
     #[must_use]
     pub const fn configured(peer: TransportIdentity) -> Self {
         Self {
             peer,
-            persisted: true,
             origin: TrustOrigin::Configured,
         }
     }
 
-    /// A row added in the settings, kept across restarts.
+    /// A row added in the settings.
     #[must_use]
     pub const fn added_here(peer: TransportIdentity) -> Self {
         Self {
             peer,
-            persisted: true,
             origin: TrustOrigin::AddedHere,
         }
     }
