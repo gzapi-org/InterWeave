@@ -225,16 +225,7 @@ async fn an_overlay_that_cannot_be_trusted_stops_the_start() {
 /// directory is writable again: allowed, audited `changed`.
 #[tokio::test(flavor = "current_thread")]
 async fn a_set_whose_write_fails_changes_nothing_and_is_audited_unwritten() {
-    // A current-thread runtime, so the driver's audit line is written on
-    // this thread, under this test's subscriber.
-    let lines = Arc::new(Mutex::new(Vec::<u8>::new()));
-    let sink = Arc::clone(&lines);
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(move || Writer(Arc::clone(&sink)))
-        .with_ansi(false)
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
-
+    let _ = logged();
     let (identity, _) = id();
     let (_, stranger) = id();
     let configured = profile(&[], &[]);
@@ -256,11 +247,8 @@ async fn a_set_whose_write_fails_changes_nothing_and_is_audited_unwritten() {
     assert!(trust(&runtime).await.peers().any(|p| p == &stranger));
     runtime.stop().await.expect("stops");
 
-    let text = String::from_utf8(lines.lock().expect("lock").clone()).expect("utf-8");
-    let audit: Vec<&str> = text
-        .lines()
-        .filter(|l| l.contains("admin.trust.set"))
-        .collect();
+    let text = logged();
+    let audit = audit_of(&text, &stranger);
     assert_eq!(audit.len(), 2, "{text}");
     assert!(audit[0].contains("outcome=\"unwritten\""), "{}", audit[0]);
     assert!(audit[1].contains("outcome=\"changed\""), "{}", audit[1]);
@@ -270,6 +258,112 @@ async fn a_set_whose_write_fails_changes_nothing_and_is_audited_unwritten() {
             "no path in the audit line: {line}"
         );
     }
+}
+
+/// An allow whose overlay write lands and then fails (the directory
+/// sync, after the rename) is put back: answered `Internal`, nothing
+/// published, the file the next start loads holding the previous lists,
+/// audited `unwritten`. A restore that itself lands and then fails has
+/// put the previous lists back too. A restore that fails before its
+/// rename leaves the overlay ahead -- answered `Internal`, audited
+/// `failed`, never `unwritten`, the warning logged. No fault is the
+/// control: allowed.
+#[tokio::test(flavor = "current_thread")]
+async fn an_allow_whose_write_lands_and_then_fails_is_put_back() {
+    use interweave_profile_config::trust_overlay::TrustOverlay;
+    use interweave_transport_composition::OverlayFault::{AfterRename, BeforeRename};
+
+    let (identity, _) = id();
+    let configured = profile(&[], &[]);
+    for (faults, answer, on_disk, outcome) in [
+        (
+            vec![AfterRename],
+            Err(TransportError::Internal),
+            false,
+            "unwritten",
+        ),
+        (
+            vec![AfterRename, AfterRename],
+            Err(TransportError::Internal),
+            false,
+            "unwritten",
+        ),
+        (
+            vec![AfterRename, BeforeRename],
+            Err(TransportError::Internal),
+            true,
+            "failed",
+        ),
+        (Vec::new(), Ok(()), true, "changed"),
+    ] {
+        let case = format!("{faults:?}");
+        let (_, stranger) = id();
+        let (_dir, path) = state();
+        let before = logged().len();
+        let runtime = ComposedRuntime::start(&identity, &configured, options(Some(&path)))
+            .await
+            .expect("composes");
+        runtime
+            .fail_overlay_writes(faults.clone())
+            .await
+            .expect("queued");
+        assert_eq!(set(&runtime, &stranger, true).await, answer, "{case}");
+        assert_eq!(
+            trust(&runtime).await.peers().any(|p| p == &stranger),
+            answer.is_ok(),
+            "{case}: published only when answered ok"
+        );
+        runtime.stop().await.expect("stops");
+        // What the next start loads.
+        let (_, allowed) =
+            TrustOverlay::load(&path, &configured.trust.allowed_peers).expect("loads");
+        assert_eq!(allowed.contains(&stranger), on_disk, "{case}: on disk");
+
+        let text = logged();
+        let audit = audit_of(&text, &stranger);
+        assert_eq!(audit.len(), 1, "{case}: {text}");
+        assert!(
+            audit[0].contains(&format!("outcome=\"{outcome}\"")),
+            "{case}: {}",
+            audit[0]
+        );
+        // The warning names no peer, so it is read from this case's own
+        // stretch of the log: no other test here writes it.
+        assert_eq!(
+            text[before..].contains("ahead of the runtime"),
+            faults == [AfterRename, BeforeRename],
+            "{case}: {text}"
+        );
+    }
+}
+
+/// Everything the runtimes in this binary have logged so far. ONE
+/// subscriber for the whole binary, installed globally once: per-test
+/// scoped subscribers on two threads raced on tracing's callsite interest
+/// cache and an audit line went missing under `--test-threads 2`.
+fn logged() -> String {
+    static LOG: std::sync::OnceLock<Arc<Mutex<Vec<u8>>>> = std::sync::OnceLock::new();
+    let log = LOG.get_or_init(|| {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&log);
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || Writer(Arc::clone(&sink)))
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::set_global_default(subscriber).expect("the one subscriber");
+        log
+    });
+    String::from_utf8(log.lock().expect("lock").clone()).expect("utf-8")
+}
+
+/// The audit lines that name `peer`, in order: each test's own, since
+/// every test sets a peer of its own.
+fn audit_of<'a>(text: &'a str, peer: &TransportIdentity) -> Vec<&'a str> {
+    text.lines()
+        .filter(|l| {
+            l.contains("admin.trust.set") && l.contains("outcome=") && l.contains(peer.as_str())
+        })
+        .collect()
 }
 
 struct Writer(Arc<Mutex<Vec<u8>>>);

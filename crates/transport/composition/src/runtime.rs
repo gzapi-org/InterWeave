@@ -17,7 +17,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use interweave_local_client_api::{Generation, TrustAdminView, TrustSource, TrustedPeer};
-use interweave_profile_config::trust_overlay::TrustOverlay;
+#[cfg(feature = "test-hooks")]
+use interweave_profile_config::PersistError;
+use interweave_profile_config::trust_overlay::{OverlayError, TrustOverlay};
 use interweave_profile_config::{ProfileConfig, ProfilePaths};
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::{
@@ -156,6 +158,20 @@ pub(crate) enum Request {
     /// real runtimes reaches it without a relay. Test builds only.
     #[cfg(feature = "test-hooks")]
     InjectPathChange(TransportIdentity, PeerPath, PeerPath, oneshot::Sender<()>),
+    /// The failures the next trust overlay writes meet. Test builds only.
+    #[cfg(feature = "test-hooks")]
+    FailOverlayWrites(Vec<OverlayFault>, oneshot::Sender<()>),
+}
+
+/// A failure a test makes the next trust overlay write meet, on either
+/// side of its rename (`ComposedRuntime::fail_overlay_writes`).
+#[cfg(feature = "test-hooks")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayFault {
+    /// Nothing is written: the previous overlay stays.
+    BeforeRename,
+    /// The overlay is written in place, then syncing its directory fails.
+    AfterRename,
 }
 
 /// The `tracing` target of the record each trust change leaves in the
@@ -367,6 +383,8 @@ impl ComposedRuntime {
             configured: configured_peers,
             overlay,
             overlay_file: options.trust_overlay_file.clone(),
+            #[cfg(feature = "test-hooks")]
+            overlay_faults: std::collections::VecDeque::new(),
             outcomes: LastOutcomes::default(),
             refusals: ReconnectRefusals::default(),
         };
@@ -485,6 +503,21 @@ impl ComposedRuntime {
         self.ask(|reply| Request::InjectPathChange(peer, previous, current, reply))
             .await
     }
+
+    /// Make the next trust overlay writes meet `faults`, one each, in
+    /// order: how a test reaches a write that fails after its rename,
+    /// which no permission can produce. TEST BUILDS ONLY.
+    ///
+    /// # Errors
+    /// `BackendUnavailable` once the runtime has stopped.
+    #[cfg(feature = "test-hooks")]
+    pub async fn fail_overlay_writes(
+        &self,
+        faults: Vec<OverlayFault>,
+    ) -> Result<(), TransportError> {
+        self.ask(|reply| Request::FailOverlayWrites(faults, reply))
+            .await
+    }
 }
 
 impl TransportRuntime for ComposedRuntime {
@@ -550,6 +583,9 @@ struct Driver {
     overlay: TrustOverlay,
     /// Where the overlay is kept; `None` in a test construction.
     overlay_file: Option<PathBuf>,
+    /// The failures the next overlay writes meet, in order (test builds).
+    #[cfg(feature = "test-hooks")]
+    overlay_faults: std::collections::VecDeque<OverlayFault>,
     /// Each allowlisted peer's last dial outcome (`CONNECTIVITY.md` §19).
     outcomes: LastOutcomes,
     /// Each allowlisted peer's last reconnect refusal, logged on change.
@@ -885,7 +921,36 @@ impl Driver {
                     .await;
                 let _ = reply.send(());
             }
+            #[cfg(feature = "test-hooks")]
+            Request::FailOverlayWrites(faults, reply) => {
+                self.overlay_faults = faults.into();
+                let _ = reply.send(());
+            }
         }
+    }
+
+    /// Write `overlay` to `path`: the overlay's own write, or -- test
+    /// builds only -- the next fault a test queued for it.
+    fn write_overlay(
+        &mut self,
+        overlay: &TrustOverlay,
+        path: &std::path::Path,
+    ) -> Result<(), OverlayError> {
+        #[cfg(feature = "test-hooks")]
+        if let Some(fault) = self.overlay_faults.pop_front() {
+            return match fault {
+                OverlayFault::BeforeRename => Err(OverlayError::Write(PersistError::Io(
+                    std::io::Error::other("an injected failure before the rename"),
+                ))),
+                OverlayFault::AfterRename => {
+                    overlay.write(path)?;
+                    Err(OverlayError::Write(PersistError::Unsynced(
+                        std::io::Error::other("an injected failure to sync the directory"),
+                    )))
+                }
+            };
+        }
+        overlay.write(path)
     }
 
     /// Allow `peer` or revoke it, and publish the result to the substrate
@@ -920,15 +985,20 @@ impl Driver {
         };
         // WRITTEN BEFORE PUBLISHED (ADR-0028 A 2026-10-07): a set answered
         // `ok` survives a crash, and a set whose write fails changes
-        // nothing -- not the policy, not a connection, not a row.
+        // nothing -- not the policy, not a connection, not a row, and not
+        // what the next start loads.
         let overlay = match decided {
             Ok(true) => self.overlay.set(&self.configured, &peer, allowed),
             _ => None,
         };
-        let unwritten = match (&overlay, &self.overlay_file) {
-            (Some(overlay), Some(path)) => overlay.write(path).is_err(),
-            _ => false,
+        // `None` written, or the write's error: before its rename nothing
+        // changed; after it (`installed`) the new overlay is on disk, and
+        // is put back below exactly as after a failed publish.
+        let written = match (&overlay, self.overlay_file.clone()) {
+            (Some(overlay), Some(path)) => self.write_overlay(overlay, &path).err(),
+            _ => None,
         };
+        let unwritten = written.is_some();
         let published = match decided {
             Ok(true) if unwritten => Err(TransportError::Internal),
             Ok(true) => self
@@ -939,27 +1009,40 @@ impl Driver {
                 .map_err(|_| TransportError::BackendUnavailable),
             other => other,
         };
-        // A FAILED PUBLISH RESTORES THE OVERLAY, so a set answered failed
-        // does not take effect at the next start. If the restore fails
-        // too, the overlay is ahead of the runtime -- the conservative
-        // direction for a revocation -- and the answer is `Internal`.
-        let published = match (&published, &overlay, &self.overlay_file) {
-            (Err(TransportError::BackendUnavailable), Some(_), Some(path))
-                if self.overlay.write(path).is_err() =>
+        // THE PREVIOUS OVERLAY IS PUT BACK whenever the new one may be on
+        // disk and the set is not answered `ok` -- a failed publish, or a
+        // write that installed it and then failed -- so the next start
+        // loads what the runtime holds. A restore that itself installs
+        // and then fails to sync has put the previous bytes back, and
+        // counts as restored. One that fails before its rename leaves the
+        // overlay ahead of the runtime: it takes effect at the next start,
+        // the answer is `Internal`, and the audit says `failed`, never
+        // `unwritten`, since the file was written.
+        let restore = matches!(published, Err(TransportError::BackendUnavailable))
+            || written.as_ref().is_some_and(OverlayError::installed);
+        let mut ahead = false;
+        if let (true, Some(_), Some(path)) = (restore, &overlay, self.overlay_file.clone()) {
+            let previous = self.overlay.clone();
+            if let Err(e) = self.write_overlay(&previous, &path)
+                && !e.installed()
             {
                 tracing::warn!(
                     "admin.trust.set: the trust overlay is ahead of the runtime; \
                      the set takes effect at the next start"
                 );
-                Err(TransportError::Internal)
+                ahead = true;
             }
-            _ => published,
+        }
+        let published = if ahead {
+            Err(TransportError::Internal)
+        } else {
+            published
         };
         let outcome = match &published {
             Ok(true) => "changed",
             Ok(false) => "unchanged",
             Err(TransportError::InvalidArgument) => "refused",
-            Err(_) if unwritten => "unwritten",
+            Err(_) if unwritten && !ahead => "unwritten",
             Err(_) => "failed",
         };
         tracing::info!(
