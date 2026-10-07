@@ -92,7 +92,7 @@ pub(crate) struct Pair {
     a_restart: (ProfileIdentity, ProfileConfig, CompositionOptions),
     /// Each runtime's state directory, holding its trust overlay: every
     /// production binding keeps one (ADR-0028 A 2026-10-07).
-    _state: [tempfile::TempDir; 2],
+    state: [tempfile::TempDir; 2],
 }
 
 /// A private state directory and the options naming its trust overlay.
@@ -138,7 +138,7 @@ impl Pair {
             a_peer,
             b_peer,
             a_restart: (a_id, a_profile, a_options),
-            _state: [a_state, b_state],
+            state: [a_state, b_state],
         }
     }
 
@@ -151,7 +151,7 @@ impl Pair {
             a_peer,
             b_peer,
             a_restart,
-            _state,
+            state,
         } = self;
         a.shutdown().await.expect("a stops");
         let (identity, profile, options) = &a_restart;
@@ -164,7 +164,7 @@ impl Pair {
             a_peer,
             b_peer,
             a_restart,
-            _state,
+            state,
         }
     }
 
