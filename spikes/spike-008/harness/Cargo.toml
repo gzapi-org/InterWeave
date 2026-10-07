@@ -29,6 +29,9 @@ jni-sys = "=0.3.1"
 # device run was made.
 interweave-human-store = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "d019ac06f5149567ab37d7c59c61895c974598e6" }
 interweave-human-core = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "d019ac06f5149567ab37d7c59c61895c974598e6" }
+# Exact, the root lock's version and features: `bench` times SQLite itself,
+# the same bundled build the store runs, for the cost of the deletion rule.
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
 interweave-transport-api = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "d019ac06f5149567ab37d7c59c61895c974598e6" }
 
 [dev-dependencies]

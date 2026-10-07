@@ -362,3 +362,64 @@ pub fn forensic(path: &Path) -> Result<String, String> {
         files(&closed_kept),
     ))
 }
+
+/// The cost of `RETENTION.md` §8's deletion rule on this device: SQLite as
+/// the store runs it (WAL, `synchronous=FULL`), 50 rows of 8 KiB deleted one
+/// at a time, under three settings -- as the store is today, with
+/// `secure_delete`, and with `secure_delete` plus a `wal_checkpoint(TRUNCATE)`
+/// after every delete. Milliseconds per delete: median and the 95th
+/// percentile. A directory of its own at `dir`.
+///
+/// # Errors
+/// Any SQLite error.
+pub fn bench(dir: &Path) -> Result<String, String> {
+    use std::time::Instant;
+    let mut out = Vec::new();
+    for (name, secure, checkpoint) in [
+        ("today", false, false),
+        ("secure_delete", true, false),
+        ("secure_delete_and_truncate", true, true),
+    ] {
+        let path = dir.join(format!("{name}.sqlite"));
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+        let conn = rusqlite::Connection::open(&path).map_err(|e| e.to_string())?;
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .map_err(|e| e.to_string())?;
+        conn.pragma_update(None, "synchronous", "FULL")
+            .map_err(|e| e.to_string())?;
+        conn.pragma_update(None, "secure_delete", secure)
+            .map_err(|e| e.to_string())?;
+        conn.execute_batch("CREATE TABLE m (id INTEGER PRIMARY KEY, body BLOB)")
+            .map_err(|e| e.to_string())?;
+        let body = vec![b'x'; 8 * 1024];
+        for _ in 0..50 {
+            conn.execute("INSERT INTO m (body) VALUES (?1)", [&body])
+                .map_err(|e| e.to_string())?;
+        }
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .map_err(|e| e.to_string())?;
+        let mut times = Vec::new();
+        for id in 1..=50i64 {
+            let start = Instant::now();
+            conn.execute("DELETE FROM m WHERE id = ?1", [id])
+                .map_err(|e| e.to_string())?;
+            if checkpoint {
+                conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+                    .map_err(|e| e.to_string())?;
+            }
+            times.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+        times.sort_by(f64::total_cmp);
+        out.push(format!(
+            "\"{name}\":{{\"median_ms\":{:.2},\"p95_ms\":{:.2}}}",
+            times[25], times[47]
+        ));
+        drop(conn);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+    Ok(format!("{{{}}}", out.join(",")))
+}

@@ -25,6 +25,8 @@ import java.nio.file.Files;
  * <li>redeliver: U1 (read, not kept) delivered again, and a new message C1 as the control.</li>
  * <li>fill: a store of its own in files/human-full/ under a page quota, filled until it refuses.</li>
  * <li>forensic: a store of its own in files/human-forensic/, searched byte for byte for a released message.</li>
+ * <li>bench: the cost of RETENTION.md 8's deletion rule -- deletes timed with and without
+ * secure_delete and a WAL truncate per delete, SQLite as the store runs it.</li>
  * <li>dirmodes: the modes of files/ and the store's directory, and the store refusing one made 0771.</li>
  * <li>die: this process SIGKILLs itself, standing in for a low-memory kill.</li>
  * </ul>
@@ -115,6 +117,16 @@ public final class Cmd extends BroadcastReceiver {
             case "forensic":
                 Trace.result(c, "forensic", new String(Core.forensic(bytes(store(c, "human-forensic"))), StandardCharsets.UTF_8));
                 break;
+            case "bench": {
+                // A directory of its own, made here: it holds only the bench's
+                // scratch databases, never the store's content.
+                File dir = new File(c.getFilesDir(), "bench");
+                if (!dir.isDirectory() && !dir.mkdirs()) {
+                    throw new IllegalStateException("cannot create " + dir);
+                }
+                Trace.result(c, "bench", new String(Core.bench(bytes(dir)), StandardCharsets.UTF_8));
+                break;
+            }
             case "dirmodes": {
                 // files/ itself, the store-created files/human/, and a
                 // directory made broader than owner-only before the store

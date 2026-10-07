@@ -106,3 +106,12 @@ pub unsafe extern "system" fn Java_org_interweave_spike008_Core_forensic(
 ) -> jbyteArray {
     unsafe { run(env, path, store::forensic) }
 }
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_interweave_spike008_Core_bench(
+    env: *mut JNIEnv,
+    _: jclass,
+    path: jbyteArray,
+) -> jbyteArray {
+    unsafe { run(env, path, store::bench) }
+}
