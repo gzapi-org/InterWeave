@@ -155,8 +155,8 @@ impl FakeNode {
     /// The runtime stopped and started again over the same state: every
     /// session and lease is gone, and the allowlist is what the admin port
     /// last made of it -- the fake keeps its trust overlay, as every
-    /// production binding does (ADR-0028 A 2026-10-07). Its endpoints,
-    /// which are not persisted, are as configured.
+    /// production binding does (ADR-0028 A 2026-10-07). Its endpoints and
+    /// default, which are not persisted, return to the configuration.
     pub fn restart(&self) {
         let mut state = lock(&self.0.state);
         for queues in state.sessions.values_mut() {
@@ -164,6 +164,15 @@ impl FakeNode {
         }
         state.sessions.clear();
         state.leases.clear();
+        let State {
+            endpoints,
+            default,
+            configured_endpoints,
+            configured_default,
+            ..
+        } = &mut *state;
+        endpoints.clone_from(configured_endpoints);
+        default.clone_from(configured_default);
         state.stopped = false;
     }
 
@@ -344,20 +353,26 @@ struct State {
     trusted: BTreeSet<TransportIdentity>,
     /// The allowlist this node was configured with: a row's source.
     configured: BTreeSet<TransportIdentity>,
+    /// The endpoints and default as configured, which a restart returns
+    /// to: endpoint changes are a runtime overlay (ADR-0028).
+    configured_endpoints: BTreeMap<EndpointId, FakeEndpoint>,
+    configured_default: Option<EndpointId>,
 }
 
 impl Node {
     fn new(config: FakeConfig, tag: &'static str) -> Self {
+        let configured_endpoints: BTreeMap<EndpointId, FakeEndpoint> = config
+            .endpoints
+            .into_iter()
+            .map(|e| (e.id.clone(), e))
+            .collect();
+        let configured_default = config.default_endpoint;
         Self {
             peer: config.peer,
             remote: Mutex::new(Weak::new()),
             state: Mutex::new(State {
-                endpoints: config
-                    .endpoints
-                    .into_iter()
-                    .map(|e| (e.id.clone(), e))
-                    .collect(),
-                default: config.default_endpoint,
+                endpoints: configured_endpoints.clone(),
+                default: configured_default.clone(),
                 leases: BTreeMap::new(),
                 sessions: BTreeMap::new(),
                 queue_bound: config.queue_bound,
@@ -366,6 +381,8 @@ impl Node {
                 health: Health::Healthy,
                 trusted: BTreeSet::new(),
                 configured: BTreeSet::new(),
+                configured_endpoints,
+                configured_default,
             }),
             injected: Mutex::new(VecDeque::new()),
             tag,
