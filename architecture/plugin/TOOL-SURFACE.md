@@ -89,6 +89,7 @@ joined_channels
 profile_desired_channels
 rejoin_refused
 transport_health
+pull_queue { depth, paused, paused_since, pending: [{channel, op}] }   # pull mode only (A 2026-10-07)
 ```
 
 `joined_channels` and `profile_desired_channels` remain distinct. A profile-desired backend subscription does not authorize bridge broadcast or make it an inbound consumer.
@@ -100,7 +101,7 @@ Where each comes from (A 2026-10-06, Stage 16 step 3): `local_peer_id` is the se
 Wording must be exact:
 
 - receive (pull mode): events in the order taken from the session; `paused: true` means the bridge has stopped draining because its queue is full (the liveness clock starts only once the IPC client's own buffer fills behind it) — never "the daemon is refusing" (it refuses only once its own queue is full) and never "messages were lost here" (the bridge drops nothing it took; what a wedge close loses is the daemon's, `CHANNEL-EVENT.md` §Delivery); an empty queue returns `events: []` at once — the tool never waits;
-- pull queue full (pull mode): `send`, `reply`, `broadcast`, `join` and `leave` answer at once with the bridge-local error "the pull queue is full: call receive first" — never `Overloaded`, never a stall; a call in flight when the queue fills is cancelled and answered the same, with "outcome unknown" — the cancel is advisory, so a repeated `send` or `broadcast` may go twice and a cancelled `leave` may have left;
+- pull queue full (pull mode): `send`, `reply`, `broadcast`, `join` and `leave` answer at once with the bridge-local error "the pull queue is full: call receive first" — never `Overloaded`, never a stall; a call in flight when the queue fills is cancelled and answered the same, with "cancelled in flight, outcome unknown" — the cancel is advisory, so a repeated `send` or `broadcast` may go twice and is never re-issued; a cancelled `join`, re-join or `leave` is re-issued by the bridge once the pause lifts and listed in `status.pull_queue.pending` until its answer lands;
 
 - broadcast: "accepted for local publish" — never "delivered to all peers";
 - direct: "remote transport accepted at endpoint <id>" — never "remote human/Claude processed";
