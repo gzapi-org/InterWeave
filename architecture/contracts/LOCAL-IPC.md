@@ -314,7 +314,9 @@ here (architect-cto's ruling of 2026-10-04, below).
 `admin.trust.list` answers the profile's allowlist as `trust-api`'s `PeerTrustPolicy` holds it, ONE PAGE at a time: the allowed peers in the
 ascending order of their canonical strings, at most 1024 a page, with
 on a connection that negotiated 2.3 or later `persisted: true` on every
-row and each row's `source` — `configured` for a peer `config.yaml`
+row (a row the runtime cannot persist is answered `Internal` there, a
+state only a store-less runtime reports and `LOCAL-CLIENT.md` §7 item
+11 never serves over IPC) and each row's `source` — `configured` for a peer `config.yaml`
 lists, `administered` for one added by `admin.trust.set` (ADR-0028 A
 2026-10-07) — and below 2.3 the 2.1 row, `persisted: false` and no
 `source` (ADR-0017 A 2026-10-07, §Version negotiation: a closed result shape
@@ -339,8 +341,11 @@ denied (deny-by-default is the policy's shape, not a setting; there is
 no default to report and no `TrustDecision` on the wire — that enum and
 its `DenyReason` are local diagnostics). `admin.trust.set` takes one
 `peer` and `allowed: true | false`: `true` adds the peer to the allowlist
-and is refused with `InvalidArgument` past `PeerTrustPolicy::MAX_ALLOWED_PEERS`
-or for the local peer; `false` removes it, closes every connection
+and is refused with `InvalidArgument` past `PeerTrustPolicy::MAX_ALLOWED_PEERS`,
+for the local peer, or — while an overlay is ahead of the runtime
+(ADR-0028) — when the policy's bound admits it today but the overlay
+on disk would exceed `MAX_ALLOWED_PEERS` at the next start (audited
+`refused`, nothing written); `false` removes it, closes every connection
 the peer holds at once, drops its cached directory
 (`DirectoryCache::forget`, §16's carry), and every connection with
 `events` sees `peer.disconnected` with `reason_class: policy` (below).
