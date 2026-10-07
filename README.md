@@ -1,6 +1,6 @@
 # InterWeave
 
-**InterWeave** is a peer-to-peer transport for Claude Code Channels and for first-party human clients. One configured profile owns one persistent peer identity; many local applications share it through configured endpoints. On the wire it combines signed GossipSub broadcast, a dedicated directed-message protocol, an endpoint directory, replaceable discovery, Kademlia peer routing, and mandatory Internet reachability through AutoNAT v2, Circuit Relay v2 and DCUtR. The design is under [`architecture/`](./architecture/); the code is built one stage at a time in the order that design fixes.
+**InterWeave** is a peer-to-peer transport for agent harnesses that speak MCP and for first-party human clients. One configured profile owns one persistent peer identity; many local applications share it through configured endpoints. On the wire it combines signed GossipSub broadcast, a dedicated directed-message protocol, an endpoint directory, replaceable discovery, Kademlia peer routing, and mandatory Internet reachability through AutoNAT v2, Circuit Relay v2 and DCUtR. The design is under [`architecture/`](./architecture/); the code is built one stage at a time in the order that design fixes.
 
 > **Repository status: Stage 17 open** (`stage-17-android-human-client`). Stages 0–16 are complete. Stage 17's prerequisites, SPIKE-008 and SPIKE-009, are its first work; the Android human client follows them.
 
