@@ -1763,3 +1763,132 @@ async fn a_pending_leave_folded_at_open_clears_the_refusal() {
     assert_eq!(status["joined_channels"], json!([]), "{status}");
     assert_eq!(status["rejoin_refused"], json!([]), "cleared by the leave");
 }
+
+/// A broadcast on `general` taken from the pull queue, and its reply
+/// token.
+async fn broadcast_token(w: &mut World) -> String {
+    w.peer.join(general()).await.expect("peer joins");
+    w.peer
+        .broadcast(
+            general(),
+            BroadcastMessageV1 {
+                message_id: MessageId::from_bytes([5; 16]),
+                sent_at_ms: 0,
+                payload: Payload::new(None, b"all".to_vec(), MAX_PAYLOAD_BYTES).expect("payload"),
+            },
+        )
+        .await
+        .expect("accepted");
+    w.wait_depth(1).await;
+    let received = w.receive(None).await;
+    received["events"][0]["meta"]["reply_token"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a broadcast token: {received}"))
+        .to_owned()
+}
+
+/// End the session while a join of `general` is pending: the host join
+/// cancelled as the queue fills (unless one is pending already), then its
+/// re-issue meeting the session's end. Then a reply with `token`.
+async fn reply_while_disconnected_with_the_join_pending(
+    w: &mut World,
+    token: &str,
+    host_join: bool,
+) -> (String, bool) {
+    if host_join {
+        w.record.hold_join.store(true, Ordering::SeqCst);
+        in_flight_as_the_queue_fills(w, "join", json!({"channel": "general"}), "join").await;
+    }
+    w.record.hold_join.store(false, Ordering::SeqCst);
+    w.record.die_on_join.store(true, Ordering::SeqCst);
+    w.receive(None).await;
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while w.record.die_on_join.load(Ordering::SeqCst) {
+        assert!(tokio::time::Instant::now() < deadline, "never re-issued");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    wait_unavailable(w).await;
+    assert_eq!(
+        w.status().await["pull_queue"]["pending"],
+        json!([{"channel": "general", "op": "join"}])
+    );
+    w.tool("reply", json!({"reply_token": token, "content": "x"}))
+        .await
+}
+
+/// While disconnected with a join pending, a broadcast reply answers by
+/// whether the bridge holds the channel at that moment (CHANNEL-EVENT.md
+/// §Delivery): held -- a cancelled host join keeps it -- the session's
+/// absence; not held -- left, its re-join refused, or its re-join
+/// cancelled at a reconnect -- `ChannelNotJoined`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_disconnected_reply_with_a_join_pending_answers_by_membership() {
+    // Held, and a host join of it cancelled.
+    let mut w = World::start_pull().await;
+    let (text, error) = w.tool("join", json!({"channel": "general"})).await;
+    assert!(!error, "{text}");
+    let token = broadcast_token(&mut w).await;
+    let (text, error) = reply_while_disconnected_with_the_join_pending(&mut w, &token, true).await;
+    assert!(
+        error && text.starts_with("BackendUnavailable"),
+        "held: {text}"
+    );
+
+    // Left, then a host join cancelled.
+    let mut w = World::start_pull().await;
+    let (text, error) = w.tool("join", json!({"channel": "general"})).await;
+    assert!(!error, "{text}");
+    let token = broadcast_token(&mut w).await;
+    let (text, error) = w.tool("leave", json!({"channel": "general"})).await;
+    assert!(!error, "{text}");
+    let (text, error) = reply_while_disconnected_with_the_join_pending(&mut w, &token, true).await;
+    assert!(
+        error && text.starts_with("ChannelNotJoined"),
+        "left: {text}"
+    );
+
+    // Its re-join refused at a reconnect, then a host join cancelled.
+    let mut w = World::start_pull().await;
+    let (text, error) = w.tool("join", json!({"channel": "general"})).await;
+    assert!(!error, "{text}");
+    let token = broadcast_token(&mut w).await;
+    w.record.down.store(true, Ordering::SeqCst);
+    wait_unavailable(&mut w).await;
+    w.record.refuse_join.store(true, Ordering::SeqCst);
+    w.record.down.store(false, Ordering::SeqCst);
+    w.wait_connected().await;
+    assert_ne!(w.status().await["rejoin_refused"], json!([]));
+    w.record.refuse_join.store(false, Ordering::SeqCst);
+    let (text, error) = reply_while_disconnected_with_the_join_pending(&mut w, &token, true).await;
+    assert!(
+        error && text.starts_with("ChannelNotJoined"),
+        "refused: {text}"
+    );
+
+    // Its re-join cancelled at a reconnect as the queue filled.
+    let mut w = World::start_pull().await;
+    let (text, error) = w.tool("join", json!({"channel": "general"})).await;
+    assert!(!error, "{text}");
+    let token = broadcast_token(&mut w).await;
+    fill(&mut w, 15).await;
+    w.record.down.store(true, Ordering::SeqCst);
+    wait_unavailable(&mut w).await;
+    let record = Arc::clone(&w.record);
+    let joins = || record.calls().iter().filter(|c| *c == "join").count();
+    let before = joins();
+    w.record.hold_join.store(true, Ordering::SeqCst);
+    w.record.down.store(false, Ordering::SeqCst);
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while joins() == before {
+        assert!(tokio::time::Instant::now() < deadline, "never re-joined");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    w.peer_sends("last").await;
+    w.wait_connected().await;
+    assert_eq!(w.status().await["joined_channels"], json!([]));
+    let (text, error) = reply_while_disconnected_with_the_join_pending(&mut w, &token, false).await;
+    assert!(
+        error && text.starts_with("ChannelNotJoined"),
+        "re-join pending: {text}"
+    );
+}
