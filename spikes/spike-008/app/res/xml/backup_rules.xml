@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- fullBackupContent (API 30 reads this): every security-sensitive and
+     human-store path excluded; marker/ is left included as the control. -->
+<full-backup-content>
+    <exclude domain="file" path="identity/" />
+    <exclude domain="file" path="config/" />
+    <exclude domain="file" path="recovery-tmp/" />
+    <exclude domain="file" path="human/" />
+    <exclude domain="file" path="trace.jsonl" />
+    <exclude domain="file" path="results.jsonl" />
+</full-backup-content>

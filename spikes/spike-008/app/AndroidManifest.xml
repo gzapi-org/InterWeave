@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- SPIKE-008 device harness: EVIDENCE ONLY, never a production app. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.interweave.spike008">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- API 34+: the remoteMessaging foreground-service type's own permission. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
+    <!-- API 33+: posting the foreground notification. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Backup posture (android-key-custody.md): standard v1 sets
+         allowBackup="false" AND supplies both rule forms as defense in depth:
+         fullBackupContent is what API 30 reads, dataExtractionRules what API
+         31+ reads. build.sh substitutes ALLOW_BACKUP: false is the standard-v1
+         shape, true exercises the rules alone. -->
+    <application
+        android:label="SPIKE-008"
+        android:allowBackup="ALLOW_BACKUP"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/extraction_rules"
+        android:extractNativeLibs="true">
+
+        <!-- The only user-visible start path. -->
+        <activity
+            android:name=".Launcher"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- The recovery screen: a dedicated non-exported Activity AND task
+             (android-key-custody.md), so excludeFromRecents, which acts on a
+             task's root, applies to it. Started from inside the app only. -->
+        <activity
+            android:name=".Recovery"
+            android:exported="false"
+            android:taskAffinity="org.interweave.spike008.recovery"
+            android:excludeFromRecents="true" />
+
+        <service
+            android:name=".Keeper"
+            android:exported="false"
+            android:foregroundServiceType="remoteMessaging" />
+
+        <!-- Driven from the shell only: DUMP is held by the shell and the system. -->
+        <receiver
+            android:name=".Cmd"
+            android:exported="true"
+            android:permission="android.permission.DUMP" />
+    </application>
+</manifest>
