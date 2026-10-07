@@ -24,6 +24,8 @@ import java.nio.file.Files;
  * <li>seed, transitions, census: the production human store in files/human/ (0700).</li>
  * <li>redeliver: U1 (read, not kept) delivered again, and a new message C1 as the control.</li>
  * <li>fill: a store of its own in files/human-full/ under a page quota, filled until it refuses.</li>
+ * <li>forensic: a store of its own in files/human-forensic/, searched byte for byte for a released message.</li>
+ * <li>dirmodes: the modes of files/ and the store's directory, and the store refusing one made 0771.</li>
  * <li>die: this process SIGKILLs itself, standing in for a low-memory kill.</li>
  * </ul>
  */
@@ -49,13 +51,22 @@ public final class Cmd extends BroadcastReceiver {
         }).start();
     }
 
-    static File store(Context c) throws Exception {
-        File dir = new File(c.getFilesDir(), "human");
-        if (!dir.isDirectory() && !dir.mkdirs()) {
-            throw new IllegalStateException("cannot create " + dir);
+    /**
+     * The store's path. The directory is NOT made here: HumanStore::open
+     * creates a missing parent owner-only itself and refuses, never
+     * tightens, one that is broader (crates/human/store), so a client that
+     * chmods first would hide an exposure the store is built to refuse.
+     */
+    static File store(Context c, String dir) {
+        return new File(new File(c.getFilesDir(), dir), "human.sqlite");
+    }
+
+    static String mode(File f) {
+        try {
+            return String.format("%04o", Os.stat(f.getPath()).st_mode & 07777);
+        } catch (Exception e) {
+            return "absent";
         }
-        Os.chmod(dir.getPath(), 0700);
-        return new File(dir, "human.sqlite");
     }
 
     static void write(Context c, String rel, String text) throws Exception {
@@ -97,15 +108,27 @@ public final class Cmd extends BroadcastReceiver {
             case "redeliver":
                 Trace.result(c, "redeliver", new String(Core.redeliver(path(c)), StandardCharsets.UTF_8));
                 break;
-            case "fill": {
+            case "fill":
                 // A store of its own, so the quota run never touches the S1 store.
-                File dir = new File(c.getFilesDir(), "human-full");
-                if (!dir.isDirectory() && !dir.mkdirs()) {
-                    throw new IllegalStateException("cannot create " + dir);
+                Trace.result(c, "fill", new String(Core.fill(bytes(store(c, "human-full"))), StandardCharsets.UTF_8));
+                break;
+            case "forensic":
+                Trace.result(c, "forensic", new String(Core.forensic(bytes(store(c, "human-forensic"))), StandardCharsets.UTF_8));
+                break;
+            case "dirmodes": {
+                // files/ itself, the store-created files/human/, and a
+                // directory made broader than owner-only before the store
+                // opens it, which the store must refuse rather than tighten.
+                File broad = new File(c.getFilesDir(), "human-broad");
+                if (!broad.isDirectory() && !broad.mkdirs()) {
+                    throw new IllegalStateException("cannot create " + broad);
                 }
-                Os.chmod(dir.getPath(), 0700);
-                byte[] p = new File(dir, "human.sqlite").getPath().getBytes(StandardCharsets.UTF_8);
-                Trace.result(c, "fill", new String(Core.fill(p), StandardCharsets.UTF_8));
+                Os.chmod(broad.getPath(), 0771);
+                String opened = new String(Core.census(bytes(store(c, "human-broad"))), StandardCharsets.UTF_8);
+                Trace.result(c, "dirmodes", "{\"files\":\"" + mode(c.getFilesDir())
+                        + "\",\"files/human\":\"" + mode(new File(c.getFilesDir(), "human"))
+                        + "\",\"files/human-broad\":\"" + mode(broad)
+                        + "\",\"open_broad\":" + opened + "}");
                 break;
             }
             case "die":
@@ -120,7 +143,11 @@ public final class Cmd extends BroadcastReceiver {
         }
     }
 
-    static byte[] path(Context c) throws Exception {
-        return store(c).getPath().getBytes(StandardCharsets.UTF_8);
+    static byte[] path(Context c) {
+        return bytes(store(c, "human"));
+    }
+
+    static byte[] bytes(File f) {
+        return f.getPath().getBytes(StandardCharsets.UTF_8);
     }
 }

@@ -19,4 +19,6 @@ final class Core {
     static native byte[] redeliver(byte[] path);
 
     static native byte[] fill(byte[] path);
+
+    static native byte[] forensic(byte[] path);
 }
