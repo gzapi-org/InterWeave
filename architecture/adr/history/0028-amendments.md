@@ -50,7 +50,11 @@ entry — the supplier review found that without the normalisation a peer
 both configured and `added` would be answered `ok` on a revoke and stay
 trusted; four set moves on the normalised lists; the file written whole
 and renamed into place before the policy is published to the runtime and
-before the set is answered, so a failed write changes nothing;
+before the set is answered, so a failed write changes nothing (audit
+outcome `unwritten`), and a publish that fails after the write restores
+the previous overlay before the failed answer; the store is a port the
+composition takes at construction, supplied by the daemon and by the
+embedded runtime alike;
 `config.yaml` never written; a present overlay that does not parse,
 names a peer in both lists, is not the daemon's own or is writable by
 others fatal, never skipped; a failed normalisation rewrite at load
