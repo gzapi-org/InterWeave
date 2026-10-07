@@ -71,9 +71,9 @@ pub fn create_private_dir(dir: &Path) -> Result<(), PersistError> {
 /// cannot be enforced. A failure BEFORE the rename leaves the previous
 /// file untouched: nothing is removed until the replacement is fully on
 /// disk. The one error that arrives after it is the directory fsync,
-/// which reports that the new file is in place and its NAME may not
-/// survive a crash — a different fact, and the reason it is reported
-/// rather than swallowed.
+/// [`PersistError::Unsynced`], which reports that the new file is in
+/// place and its NAME may not survive a crash — a different fact, and the
+/// reason it is reported rather than swallowed.
 pub fn write_private_atomic(path: &Path, contents: &[u8]) -> Result<(), PersistError> {
     write_atomic_with_mode(path, contents, Some(OWNER_ONLY_FILE))
 }
@@ -242,14 +242,15 @@ pub fn create_private_exclusive(path: &Path, contents: &[u8]) -> Result<(), Pers
 /// fsync a directory, so a rename or link into it survives a crash.
 ///
 /// # Errors
-/// Returns [`PersistError::Io`] if the directory cannot be opened or
-/// synced. Both are real answers: this is called after the entry is
+/// Returns [`PersistError::Unsynced`] if the directory cannot be opened
+/// or synced. Both are real answers: this is called after the entry is
 /// published, so a failure means the name may not be durable, and the
-/// caller is the only party that can decide what to do about it.
+/// caller is the only party that can decide what to do about it -- told
+/// apart from a failure before publication, after which nothing changed.
 #[cfg(unix)]
 fn fsync_dir(parent: &Path) -> Result<(), PersistError> {
-    let dir = fs::File::open(parent).map_err(PersistError::Io)?;
-    dir.sync_all().map_err(PersistError::Io)
+    let dir = fs::File::open(parent).map_err(PersistError::Unsynced)?;
+    dir.sync_all().map_err(PersistError::Unsynced)
 }
 
 /// The directory `path` names a file in, as a path that can be opened.
@@ -614,8 +615,9 @@ mod tests {
         let refused = write_atomic(&path, b"{\"v\":2}");
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).expect("chmod back");
         assert!(
-            matches!(refused, Err(PersistError::Io(_))),
-            "a write that could not fsync its directory must not report success: {refused:?}"
+            matches!(refused, Err(PersistError::Unsynced(_))),
+            "a write that could not fsync its directory must not report success, and says \
+             the new file is in place: {refused:?}"
         );
         // And the rename really did land: the failure is about
         // durability of the NAME, not about the write not happening.
@@ -648,9 +650,9 @@ mod tests {
         let refused = create_private_exclusive(&path, b"k");
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).expect("chmod back");
         assert!(
-            matches!(refused, Err(PersistError::Io(_))),
+            matches!(refused, Err(PersistError::Unsynced(_))),
             "an exclusive create that could not fsync its directory must not \
-             report success: {refused:?}"
+             report success, and says the file is in place: {refused:?}"
         );
         assert!(
             path.exists(),

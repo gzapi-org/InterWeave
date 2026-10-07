@@ -128,6 +128,17 @@ impl core::error::Error for OverlayError {
     }
 }
 
+impl OverlayError {
+    /// Whether the failed write had already put the new overlay in place:
+    /// the rename landed and syncing the directory failed. A caller that
+    /// promises "a failed write changes nothing" puts the previous
+    /// overlay back after this one.
+    #[must_use]
+    pub const fn installed(&self) -> bool {
+        matches!(self, Self::Write(PersistError::Unsynced(_)))
+    }
+}
+
 impl TrustOverlay {
     /// The overlay's path for `paths`' profile.
     #[must_use]
@@ -279,8 +290,10 @@ impl TrustOverlay {
     /// owner-only from creation, renamed over `path`.
     ///
     /// # Errors
-    /// [`OverlayError::Write`]; a failure before the rename leaves the
-    /// previous file as it was.
+    /// [`OverlayError::Write`]. A failure before the rename leaves the
+    /// previous file as it was; one after it --
+    /// [`OverlayError::installed`] -- leaves THIS overlay in place, its
+    /// name perhaps not durable.
     pub fn write(&self, path: &Path) -> Result<(), OverlayError> {
         let text = serde_json::to_vec_pretty(self)
             .map_err(|e| OverlayError::Write(PersistError::Io(std::io::Error::other(e))))?;
