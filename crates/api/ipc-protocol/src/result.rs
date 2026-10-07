@@ -389,7 +389,8 @@ impl TrustList {
     /// `a_trust_list_pages_in_order_and_says_when_more_remain`.
     #[must_use]
     pub fn page(view: TrustAdminView, after: Option<&TransportIdentity>) -> Self {
-        let mut peers = view.allowed;
+        let mut peers: Vec<TransportIdentity> =
+            view.allowed.into_iter().map(|row| row.peer).collect();
         peers.sort();
         peers.dedup();
         let mut rest = peers
@@ -1153,7 +1154,15 @@ mod tests {
         peers.reverse();
         let view = TrustAdminView {
             local_peer: Some(local.clone()),
-            allowed: peers.clone(),
+            allowed: peers
+                .clone()
+                .into_iter()
+                .map(|peer| interweave_local_client_api::TrustedPeer {
+                    peer,
+                    persisted: false,
+                    source: interweave_local_client_api::TrustSource::Configured,
+                })
+                .collect(),
         };
         peers.sort();
 
@@ -1184,7 +1193,15 @@ mod tests {
         // Exactly one page: no `next`, so the reader stops.
         let full = TrustAdminView {
             local_peer: None,
-            allowed: peers[..MAX_TRUST_PAGE_ROWS].to_vec(),
+            allowed: peers[..MAX_TRUST_PAGE_ROWS]
+                .iter()
+                .cloned()
+                .map(|peer| interweave_local_client_api::TrustedPeer {
+                    peer,
+                    persisted: false,
+                    source: interweave_local_client_api::TrustSource::Configured,
+                })
+                .collect(),
         };
         let page = TrustList::page(full, None);
         assert_eq!(page.allowed.len(), MAX_TRUST_PAGE_ROWS);
@@ -1194,7 +1211,7 @@ mod tests {
         // A cursor naming a peer no longer listed is a position.
         let gone = peers[10].clone();
         let mut without = view.clone();
-        without.allowed.retain(|peer| *peer != gone);
+        without.allowed.retain(|row| row.peer != gone);
         let page = TrustList::page(without, Some(&gone));
         assert_eq!(page.allowed[0].peer, peers[11]);
     }

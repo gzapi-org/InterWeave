@@ -724,11 +724,18 @@ fn every_result() -> Vec<(&'static str, Value)> {
             TransportIdentity::parse("12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5")
                 .expect("peer"),
         ),
-        allowed: vec![
+        allowed: [
             peer(),
             TransportIdentity::parse("QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N")
                 .expect("peer"),
-        ],
+        ]
+        .into_iter()
+        .map(|peer| interweave_local_client_api::TrustedPeer {
+            peer,
+            persisted: false,
+            source: interweave_local_client_api::TrustSource::Configured,
+        })
+        .collect(),
     };
     let directory = DirectoryResult::from(EndpointDirectoryV1 {
         generated_at_ms: 3,

@@ -467,7 +467,7 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
         let view = admin.trust().await.map_err(classify_trust)?;
         Ok(TrustList {
             local_peer: view.local_peer,
-            allowed: view.allowed,
+            allowed: view.allowed.into_iter().map(|row| row.peer).collect(),
         })
     }
 
@@ -501,7 +501,7 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
             .map_err(|error| TrustSetFailure::MadeNotReadBack(classify_trust(error)))?;
         Ok(TrustList {
             local_peer: view.local_peer,
-            allowed: view.allowed,
+            allowed: view.allowed.into_iter().map(|row| row.peer).collect(),
         })
     }
 

@@ -583,7 +583,13 @@ async fn a_trust_change_connects_and_revokes_and_is_reported_as_policy() {
 
     admin.set_trust(b.clone(), true).await.expect("allowed");
     assert_eq!(
-        admin.trust().await.expect("the policy").allowed,
+        admin
+            .trust()
+            .await
+            .expect("the policy")
+            .peers()
+            .cloned()
+            .collect::<Vec<_>>(),
         std::slice::from_ref(&b)
     );
     admin
@@ -659,7 +665,7 @@ async fn a_profile_listing_itself_is_not_read_back_as_allowing_itself() {
         .expect("a port");
     let view = admin.trust().await.expect("the policy");
     assert_eq!(view.local_peer, Some(me));
-    assert_eq!(view.allowed, [other]);
+    assert_eq!(view.peers().cloned().collect::<Vec<_>>(), [other]);
     drop(admin);
     runtime.stop().await.expect("stops");
 }

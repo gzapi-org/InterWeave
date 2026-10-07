@@ -825,7 +825,15 @@ impl Driver {
             Request::Trust(reply) => {
                 let _ = reply.send(TrustAdminView {
                     local_peer: self.trust.local_peer().cloned(),
-                    allowed: self.trust.allowed_peers().cloned().collect(),
+                    allowed: self
+                        .trust
+                        .allowed_peers()
+                        .map(|peer| interweave_local_client_api::TrustedPeer {
+                            peer: peer.clone(),
+                            persisted: false,
+                            source: interweave_local_client_api::TrustSource::Configured,
+                        })
+                        .collect(),
                 });
             }
             Request::SetTrust(peer, allowed, reply) => {

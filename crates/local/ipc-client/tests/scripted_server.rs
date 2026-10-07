@@ -873,7 +873,10 @@ async fn trust_reads_every_page_and_refuses_a_cursor_that_does_not_move() {
     let view = view.expect("the policy");
     let id = |s: &str| TransportIdentity::parse(s).expect("peer");
     assert_eq!(view.local_peer, Some(id(PEER)));
-    assert_eq!(view.allowed, [id(OTHER), id(THIRD)]);
+    assert_eq!(
+        view.peers().cloned().collect::<Vec<_>>(),
+        [id(OTHER), id(THIRD)]
+    );
     assert_eq!(afters.0.as_deref(), Some("{}"), "the first page names none");
     assert_eq!(afters.1, Some(format!(r#"{{"after":"{OTHER}"}}"#)));
 

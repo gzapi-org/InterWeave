@@ -12,7 +12,7 @@ use interweave_ipc_protocol::{
 };
 use interweave_local_client_api::{
     AdminBinding, AdminCapability, AdminPort, AdminStatus, EndpointAdminView, Generation,
-    LocalAdminPort, PeerGateView, TrustAdminView,
+    LocalAdminPort, PeerGateView, TrustAdminView, TrustSource, TrustedPeer,
 };
 use interweave_transport_api::{EndpointId, TransportError, TransportIdentity};
 
@@ -348,7 +348,12 @@ impl AdminPort for IpcAdmin {
         let local_peer = pages.first().and_then(|page| page.local_peer.clone());
         let allowed = pages
             .into_iter()
-            .flat_map(|page| page.allowed.into_iter().map(|row| row.peer))
+            .flat_map(|page| page.allowed)
+            .map(|row| TrustedPeer {
+                peer: row.peer,
+                persisted: false,
+                source: TrustSource::Configured,
+            })
             .collect();
         Ok(TrustAdminView {
             local_peer,

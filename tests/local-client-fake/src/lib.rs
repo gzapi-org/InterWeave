@@ -48,7 +48,8 @@ use interweave_local_client_api::{
     AdminBinding, AdminCapability, AdminPort, AdminStatus, DataCapability, DataSessionBinding,
     DataSessionPort, EndpointAdminView, EndpointLease, Generation, LeaseRecord, LocalAdminPort,
     LocalDataSession, LocalSessionEvent, MAX_EVENT_QUEUE, PeerGateView, PeerOutcome,
-    ReceivedBroadcast, ReceivedDirect, SessionEvent, SessionRequest, TrustAdminView,
+    ReceivedBroadcast, ReceivedDirect, SessionEvent, SessionRequest, TrustAdminView, TrustSource,
+    TrustedPeer,
 };
 use interweave_transport_api::{
     BroadcastMessageV1, ChannelId, ConnectivitySummary, DirectDestination, DirectInboundState,
@@ -933,7 +934,15 @@ impl AdminPort for FakeAdmin {
         let state = self.node.running()?;
         Ok(TrustAdminView {
             local_peer: Some(self.node.peer.clone()),
-            allowed: state.trusted.iter().cloned().collect(),
+            allowed: state
+                .trusted
+                .iter()
+                .map(|peer| TrustedPeer {
+                    peer: peer.clone(),
+                    persisted: true,
+                    source: TrustSource::Configured,
+                })
+                .collect(),
         })
     }
 

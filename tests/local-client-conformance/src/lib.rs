@@ -885,9 +885,9 @@ pub async fn trust_administration_revokes_as_policy<B: DataSessionBinding + Admi
     let admin = port(binding, &[AdminCapability::Trust]).await;
     let view = admin.trust().await.expect("the policy");
     assert_eq!(view.local_peer.as_ref(), Some(local));
-    assert!(view.allowed.contains(remote), "{view:?}");
+    assert!(view.allows(remote), "{view:?}");
     assert!(
-        !view.allowed.contains(local),
+        !view.allows(local),
         "the local peer is never among the allowed: {view:?}"
     );
     assert_eq!(
@@ -903,7 +903,7 @@ pub async fn trust_administration_revokes_as_policy<B: DataSessionBinding + Admi
     assert_eq!(before, sorted(view.clone()), "allowing a listed peer");
     let unlisted = TransportIdentity::parse(UNLISTED_PEER).expect("a peer id");
     assert!(
-        unlisted != *local && unlisted != *remote && !view.allowed.contains(&unlisted),
+        unlisted != *local && unlisted != *remote && !view.allows(&unlisted),
         "the unlisted peer is listed by nobody: {view:?}"
     );
     admin
@@ -943,7 +943,7 @@ pub async fn trust_administration_revokes_as_policy<B: DataSessionBinding + Admi
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let view = admin.trust().await.expect("the policy");
-    assert!(!view.allowed.contains(remote), "{view:?}");
+    assert!(!view.allows(remote), "{view:?}");
     for watcher in watchers {
         watcher.close().await.expect("closes");
     }

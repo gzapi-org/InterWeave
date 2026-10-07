@@ -305,7 +305,17 @@ impl AdminPort for FakeAdmin {
         self.fake.call("trust".to_owned());
         Ok(TrustAdminView {
             local_peer: Some(peer()),
-            allowed: self.fake.script().trusted.clone(),
+            allowed: self
+                .fake
+                .script()
+                .trusted
+                .iter()
+                .map(|peer| interweave_local_client_api::TrustedPeer {
+                    peer: peer.clone(),
+                    persisted: true,
+                    source: interweave_local_client_api::TrustSource::Configured,
+                })
+                .collect(),
         })
     }
 
