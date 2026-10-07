@@ -108,14 +108,26 @@ impl Node {
         limits: Limits,
         keepalive: KeepalivePolicy,
     ) -> Self {
+        let root = tempfile::tempdir().expect("tempdir");
+        // The daemon's shape: a state directory holding the trust overlay
+        // (ADR-0028 A 2026-10-07), owner-only as the overlay requires.
+        let state = root.path().join("state");
+        std::fs::create_dir(&state).expect("a state directory");
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))
+                .expect("chmod");
+        }
         let options = CompositionOptions {
             listen: vec![listen.to_owned()],
+            trust_overlay_file: Some(
+                state.join(interweave_profile_config::trust_overlay::TRUST_OVERLAY_FILE),
+            ),
             ..CompositionOptions::default()
         };
         let runtime = ComposedRuntime::start(identity, profile, options)
             .await
             .expect("composes");
-        let root = tempfile::tempdir().expect("tempdir");
         let run_dir = root.path().join("interweave");
         let paths = SocketPaths {
             data: run_dir.join("data.sock"),

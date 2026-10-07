@@ -26,6 +26,8 @@ pub use gate::{CONNECTIVITY_TARGET, LastOutcome, PeerGateRow};
 /// composition root names it without depending on the backend.
 pub use interweave_transport_libp2p::runtime::SHUTDOWN_GRACE;
 pub use notices::{MAX_PEER_NOTICES, MAX_ROUTED_PEERS, PeerNoticeDiagnostics};
+#[cfg(feature = "test-hooks")]
+pub use runtime::OverlayFault;
 pub use runtime::{
     AUDIT_TARGET, ComposedRuntime, CompositionOptions, Diagnostics, ShutdownRequest,
 };

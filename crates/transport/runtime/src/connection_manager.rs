@@ -2133,8 +2133,9 @@ impl ConnectionManager {
     }
 
     /// What the gate holds against `peer` at `now_ms`, for diagnostics:
-    /// its peer-scoped backoff, its latest live address quarantine and its
-    /// scheduled retry. Times only -- no address leaves the manager.
+    /// its peer-scoped backoff, the earliest release once every known
+    /// address is quarantined (`CONNECTIVITY.md` §19), and its scheduled
+    /// retry. Times only -- no address leaves the manager.
     #[must_use]
     pub fn peer_gate_state(&self, peer: &TransportIdentity, now_ms: u64) -> PeerGateState {
         PeerGateState {

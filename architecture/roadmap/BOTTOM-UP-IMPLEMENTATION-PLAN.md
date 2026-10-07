@@ -4550,7 +4550,11 @@ human-client-ui.md's vocabulary (§3, §5, §8, §11, §12, §13) and not yet
 finalised by language-culture, since English has no holder — the first
 English holder reads every `UiText` once. The trust allowlist change is
 a runtime overlay lost on restart (ADR-0028), said in the copy;
-persistence stays the owner's. The "human lease never became held"
+persistence stays the owner's. (Decided 2026-10-07: the owner chose
+persistence — ADR-0028 A 2026-10-07, a persisted overlay in the state
+directory, served as the 2.3 trust row — built on #215 with the copy
+reworded to "stays until you change it again" and two source labels;
+this sentence records the close as it stood.) The "human lease never became held"
 timeout B5 first saw was never reproduced (rust-ui-dev's report at the close, 2026-10-06: 288 runs under load; #196's commits record 48); the session-timing log (#191) is in the binary for the next occurrence.
 LOCAL-CLIENT.md item 10's end-of-route clause is proved by the
 in-process tests only, not by the shared suite the IPC adapter runs

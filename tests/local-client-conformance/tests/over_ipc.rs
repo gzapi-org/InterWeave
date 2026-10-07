@@ -109,6 +109,27 @@ impl IpcPair {
         (self.a.binding.clone(), self.b.binding.clone())
     }
 
+    /// A's runtime restarted over its state, behind a new server.
+    async fn restart_a(self) -> Self {
+        let Self {
+            pair,
+            a,
+            b,
+            a_peer,
+            b_peer,
+        } = self;
+        a.stop().await;
+        let pair = pair.restart_a().await;
+        let a = Served::start(pair.bindings().0, &a_peer);
+        Self {
+            pair,
+            a,
+            b,
+            a_peer,
+            b_peer,
+        }
+    }
+
     async fn stop(self) {
         self.a.stop().await;
         self.b.stop().await;
@@ -269,6 +290,16 @@ async fn peer_rows_answer_under_admin_status() {
     let pair = IpcPair::start().await;
     let (a, _) = pair.bindings();
     suite::peer_rows_answer_under_admin_status(&a, &pair.a_peer, &pair.b_peer).await;
+    pair.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_revocation_survives_a_restart_of_the_runtime() {
+    let pair = IpcPair::start().await;
+    let b_peer = pair.b_peer.clone();
+    suite::a_revocation_is_made_before_a_restart(&pair.bindings().0, &b_peer).await;
+    let pair = pair.restart_a().await;
+    suite::the_revocation_outlived_the_restart(&pair.bindings().0, &b_peer).await;
     pair.stop().await;
 }
 

@@ -334,16 +334,71 @@ pub struct Diagnostics {
 }
 
 /// The profile's trust allowlist as the daemon holds it now
-/// (`human-client-ui.md` §8): every peer not listed is denied. A runtime
-/// overlay over the profile's configuration, lost when the daemon
-/// restarts (ADR-0028), which a settings view says.
+/// (`human-client-ui.md` §8): every peer not listed is denied. A change
+/// made in the settings lasts until it is changed again (ADR-0028 A
+/// 2026-10-07: the daemon keeps it in its state); each row says where it
+/// comes from.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TrustList {
     /// This profile's own identity, never a peer to trust; `None` when
     /// the daemon reports none.
     pub local_peer: Option<TransportIdentity>,
     /// The allowed remote peers, in the daemon's order.
-    pub allowed: Vec<TransportIdentity>,
+    pub allowed: Vec<TrustRow>,
+}
+
+impl TrustList {
+    /// Whether `peer` is allowed.
+    #[must_use]
+    pub fn allows(&self, peer: &TransportIdentity) -> bool {
+        self.allowed.iter().any(|row| &row.peer == peer)
+    }
+
+    /// The allowed peers, in the daemon's order.
+    pub fn peers(&self) -> impl Iterator<Item = &TransportIdentity> {
+        self.allowed.iter().map(|row| &row.peer)
+    }
+}
+
+/// One allowed peer. Whether it survives a restart is not carried: over
+/// IPC 2.3 `ipc-client` refuses a row that is not persisted, so every row
+/// the desktop client reads is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustRow {
+    /// The peer.
+    pub peer: TransportIdentity,
+    /// Where the row comes from.
+    pub origin: TrustOrigin,
+}
+
+impl TrustRow {
+    /// A row from the profile's configuration.
+    #[must_use]
+    pub const fn configured(peer: TransportIdentity) -> Self {
+        Self {
+            peer,
+            origin: TrustOrigin::Configured,
+        }
+    }
+
+    /// A row added in the settings.
+    #[must_use]
+    pub const fn added_here(peer: TransportIdentity) -> Self {
+        Self {
+            peer,
+            origin: TrustOrigin::AddedHere,
+        }
+    }
+}
+
+/// Where an allowed peer comes from. A peer both configured and added is
+/// `Configured`: the daemon drops the added entry when it loads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TrustOrigin {
+    /// The profile's configuration lists it.
+    Configured,
+    /// Added in the trust settings.
+    AddedHere,
 }
 
 /// Why reading or changing trust failed. A class, for a settings view;

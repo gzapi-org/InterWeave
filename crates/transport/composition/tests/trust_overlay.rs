@@ -1,0 +1,356 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Andrea Benetton
+//! The trust overlay through the composition (ADR-0028 A 2026-10-07):
+//! what `admin.trust.set` changed survives a restart of the runtime, is
+//! applied before the first admission, and a set whose write fails
+//! changes nothing and is audited `unwritten` -- each beside the control
+//! that shows the mechanism, not the harness, made the difference.
+
+#![allow(clippy::expect_used, clippy::panic)]
+
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+
+use interweave_local_client_api::TrustSource;
+use interweave_transport_api::{TransportError, TransportIdentity};
+use interweave_transport_composition::{ComposedRuntime, CompositionError};
+
+mod common;
+
+use common::{chmod, id, options, profile, row, set, state, trust};
+
+/// A configured peer revoked and an unconfigured one allowed are still
+/// so after the runtime restarts over the same overlay; the rows say
+/// where each comes from and that they persist. The control is the same
+/// sets on a runtime with no overlay: after its restart the
+/// configuration alone is in force again, and no row says it persists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_set_survives_a_restart_of_the_runtime() {
+    let (identity, _) = id();
+    let (_, kept) = id();
+    let (_, revoked) = id();
+    let (_, added) = id();
+    let configured = profile(&[&kept, &revoked], &[]);
+    for persisted in [true, false] {
+        let (_dir, path) = state();
+        let overlay = persisted.then_some(path.as_path());
+        let runtime = ComposedRuntime::start(&identity, &configured, options(overlay))
+            .await
+            .expect("composes");
+        set(&runtime, &revoked, false).await.expect("revoked");
+        set(&runtime, &added, true).await.expect("allowed");
+        runtime.stop().await.expect("stops");
+
+        let runtime = ComposedRuntime::start(&identity, &configured, options(overlay))
+            .await
+            .expect("restarts");
+        let mut rows = trust(&runtime).await.allowed;
+        rows.sort();
+        let mut expected = if persisted {
+            vec![
+                row(&kept, true, TrustSource::Configured),
+                row(&added, true, TrustSource::Administered),
+            ]
+        } else {
+            vec![
+                row(&kept, false, TrustSource::Configured),
+                row(&revoked, false, TrustSource::Configured),
+            ]
+        };
+        expected.sort();
+        assert_eq!(rows, expected, "persisted={persisted}");
+        assert_eq!(path.exists(), persisted, "the file is the store");
+        runtime.stop().await.expect("stops");
+    }
+}
+
+/// The overlay is applied at start, before anything is admitted, and
+/// against the configuration the profile validated with: a profile whose
+/// endpoint subset names a configured peer the overlay revoked still
+/// starts, and that peer is not allowed. The control is the same profile
+/// with no overlay, which allows it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_overlay_is_in_force_from_the_start_against_the_configuration() {
+    let (identity, _) = id();
+    let (_, named) = id();
+    let configured = profile(&[&named], &[&named]);
+    let (_dir, path) = state();
+    std::fs::write(
+        &path,
+        format!(r#"{{"added":[],"revoked":["{}"]}}"#, named.as_str()),
+    )
+    .expect("written");
+    chmod(&path, 0o600);
+    for overlay in [Some(path.as_path()), None] {
+        let runtime = ComposedRuntime::start(&identity, &configured, options(overlay))
+            .await
+            .expect("starts with its endpoint naming a revoked peer");
+        assert_eq!(
+            trust(&runtime).await.peers().any(|p| p == &named),
+            overlay.is_none(),
+            "overlay={overlay:?}"
+        );
+        runtime.stop().await.expect("stops");
+    }
+}
+
+/// A configuration at the allowlist's bound that names this profile's own
+/// identity -- a shared list copied into every profile does -- holds one
+/// remote peer fewer than its length, and the overlay is bounded against
+/// the same set as the live policy: an allow answered `ok` there leaves
+/// a runtime that starts again, the peer still allowed (#215 review F5:
+/// counted, the local entry made that start fatal).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_allow_at_the_bound_of_a_list_naming_itself_still_starts() {
+    let (identity, me) = id();
+    let max = interweave_trust_api::PeerTrustPolicy::MAX_ALLOWED_PEERS;
+    let others: Vec<TransportIdentity> = (1..max).map(|_| id().1).collect();
+    let listed: Vec<&TransportIdentity> = others.iter().chain(std::iter::once(&me)).collect();
+    assert_eq!(listed.len(), max, "at the bound, itself included");
+    let configured = profile(&listed, &[]);
+    let (_dir, path) = state();
+    let runtime = ComposedRuntime::start(&identity, &configured, options(Some(&path)))
+        .await
+        .expect("composes");
+    let (_, extra) = id();
+    set(&runtime, &extra, true)
+        .await
+        .expect("room for one under the policy's bound");
+    runtime.stop().await.expect("stops");
+    let runtime = ComposedRuntime::start(&identity, &configured, options(Some(&path)))
+        .await
+        .expect("an allow answered ok never makes the next start fatal");
+    let view = trust(&runtime).await;
+    assert!(view.peers().any(|p| p == &extra), "still allowed");
+    assert_eq!(
+        view.allowed.len(),
+        max,
+        "the bound, the local peer not counted"
+    );
+    runtime.stop().await.expect("stops");
+}
+
+/// A present overlay that cannot be trusted stops the start, never
+/// skipped; the same contents, private, start.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_overlay_that_cannot_be_trusted_stops_the_start() {
+    let (identity, _) = id();
+    let (_, peer) = id();
+    let configured = profile(&[&peer], &[]);
+    let (_dir, path) = state();
+    std::fs::write(&path, r#"{"added":[],"revoked":[]}"#).expect("written");
+    for (mode, starts) in [(0o600, true), (0o644, false)] {
+        chmod(&path, mode);
+        match ComposedRuntime::start(&identity, &configured, options(Some(&path))).await {
+            Ok(runtime) => {
+                assert!(starts, "mode {mode:o} started");
+                runtime.stop().await.expect("stops");
+            }
+            Err(e) => assert!(
+                !starts && matches!(e, CompositionError::TrustOverlay(_)),
+                "mode {mode:o}: {e}"
+            ),
+        }
+    }
+}
+
+/// A set whose overlay write fails is answered `Internal` and changes
+/// nothing -- the peer is not allowed, the next read says so -- and is
+/// audited `unwritten`. The control is the same set once the state
+/// directory is writable again: allowed, audited `changed`.
+#[tokio::test(flavor = "current_thread")]
+async fn a_set_whose_write_fails_changes_nothing_and_is_audited_unwritten() {
+    let _ = logged();
+    let (identity, _) = id();
+    let (_, stranger) = id();
+    let configured = profile(&[], &[]);
+    let (dir, path) = state();
+    let runtime = ComposedRuntime::start(&identity, &configured, options(Some(&path)))
+        .await
+        .expect("composes");
+    chmod(dir.path(), 0o500);
+    let refused = set(&runtime, &stranger, true).await;
+    chmod(dir.path(), 0o700);
+    assert_eq!(refused, Err(TransportError::Internal));
+    assert!(
+        !trust(&runtime).await.peers().any(|p| p == &stranger),
+        "nothing changed"
+    );
+    assert!(!path.exists(), "nothing written");
+
+    set(&runtime, &stranger, true).await.expect("the control");
+    assert!(trust(&runtime).await.peers().any(|p| p == &stranger));
+    runtime.stop().await.expect("stops");
+
+    let text = logged();
+    let audit = audit_of(&text, &stranger);
+    assert_eq!(audit.len(), 2, "{text}");
+    assert!(audit[0].contains("outcome=\"unwritten\""), "{}", audit[0]);
+    assert!(audit[1].contains("outcome=\"changed\""), "{}", audit[1]);
+    for line in audit {
+        assert!(
+            !line.contains(&dir.path().display().to_string()),
+            "no path in the audit line: {line}"
+        );
+    }
+}
+
+/// An allow whose overlay write lands and then fails (the directory
+/// sync, after the rename) is put back: answered `Internal`, nothing
+/// published, the file the next start loads holding the previous lists,
+/// audited `unwritten`. A restore that itself lands and then fails has
+/// put the previous lists back too. A restore that fails before its
+/// rename leaves the overlay ahead -- answered `Internal`, audited
+/// `failed`, never `unwritten`, the warning logged. No fault is the
+/// control: allowed.
+#[tokio::test(flavor = "current_thread")]
+async fn an_allow_whose_write_lands_and_then_fails_is_put_back() {
+    use interweave_profile_config::trust_overlay::TrustOverlay;
+    use interweave_transport_composition::OverlayFault::{AfterRename, BeforeRename};
+
+    let (identity, _) = id();
+    let configured = profile(&[], &[]);
+    for (faults, answer, on_disk, outcome) in [
+        (
+            vec![AfterRename],
+            Err(TransportError::Internal),
+            false,
+            "unwritten",
+        ),
+        (
+            vec![AfterRename, AfterRename],
+            Err(TransportError::Internal),
+            false,
+            "unwritten",
+        ),
+        (
+            vec![AfterRename, BeforeRename],
+            Err(TransportError::Internal),
+            true,
+            "failed",
+        ),
+        (Vec::new(), Ok(()), true, "changed"),
+    ] {
+        let case = format!("{faults:?}");
+        let (_, stranger) = id();
+        let (_dir, path) = state();
+        let before = logged().len();
+        let runtime = ComposedRuntime::start(&identity, &configured, options(Some(&path)))
+            .await
+            .expect("composes");
+        runtime
+            .fail_overlay_writes(faults.clone())
+            .await
+            .expect("queued");
+        assert_eq!(set(&runtime, &stranger, true).await, answer, "{case}");
+        assert_eq!(
+            trust(&runtime).await.peers().any(|p| p == &stranger),
+            answer.is_ok(),
+            "{case}: published only when answered ok"
+        );
+        runtime.stop().await.expect("stops");
+        // What the next start loads.
+        let (_, allowed) =
+            TrustOverlay::load(&path, &configured.trust.allowed_peers).expect("loads");
+        assert_eq!(allowed.contains(&stranger), on_disk, "{case}: on disk");
+
+        let text = logged();
+        let audit = audit_of(&text, &stranger);
+        assert_eq!(audit.len(), 1, "{case}: {text}");
+        assert!(
+            audit[0].contains(&format!("outcome=\"{outcome}\"")),
+            "{case}: {}",
+            audit[0]
+        );
+        // The warning names no peer, so it is read from this case's own
+        // stretch of the log: no other test in this binary writes it --
+        // the ahead test that does is a binary of its own
+        // (`trust_overlay_ahead.rs`; #215 re-review N1).
+        assert_eq!(
+            text[before..].contains("ahead of the runtime"),
+            faults == [AfterRename, BeforeRename],
+            "{case}: {text}"
+        );
+    }
+}
+
+/// A failed publish restores the previous overlay: answered
+/// `BackendUnavailable`, nothing published, the next start loads the
+/// previous lists, audited `failed`. The same set once the publish works
+/// is the control.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_publish_restores_the_previous_overlay() {
+    use interweave_profile_config::trust_overlay::TrustOverlay;
+
+    let _ = logged();
+    let (identity, _) = id();
+    let (_, stranger) = id();
+    let configured = profile(&[], &[]);
+    let (_dir, path) = state();
+    let runtime = ComposedRuntime::start(&identity, &configured, options(Some(&path)))
+        .await
+        .expect("composes");
+    runtime.fail_publishes(1).await.expect("queued");
+    assert_eq!(
+        set(&runtime, &stranger, true).await,
+        Err(TransportError::BackendUnavailable)
+    );
+    assert!(!trust(&runtime).await.peers().any(|p| p == &stranger));
+    let on_disk = |path: &Path| {
+        TrustOverlay::load(path, &configured.trust.allowed_peers)
+            .expect("loads")
+            .1
+    };
+    assert!(!on_disk(&path).contains(&stranger), "restored");
+
+    set(&runtime, &stranger, true).await.expect("the control");
+    assert!(on_disk(&path).contains(&stranger));
+    runtime.stop().await.expect("stops");
+
+    let text = logged();
+    let audit = audit_of(&text, &stranger);
+    assert_eq!(audit.len(), 2, "{text}");
+    assert!(audit[0].contains("outcome=\"failed\""), "{}", audit[0]);
+    assert!(audit[1].contains("outcome=\"changed\""), "{}", audit[1]);
+}
+
+/// Everything the runtimes in this binary have logged so far. ONE
+/// subscriber for the whole binary, installed globally once: per-test
+/// scoped subscribers on two threads raced on tracing's callsite interest
+/// cache and an audit line went missing under `--test-threads 2`.
+fn logged() -> String {
+    static LOG: std::sync::OnceLock<Arc<Mutex<Vec<u8>>>> = std::sync::OnceLock::new();
+    let log = LOG.get_or_init(|| {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&log);
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || Writer(Arc::clone(&sink)))
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::set_global_default(subscriber).expect("the one subscriber");
+        log
+    });
+    String::from_utf8(log.lock().expect("lock").clone()).expect("utf-8")
+}
+
+/// The audit lines that name `peer`, in order: each test's own, since
+/// every test sets a peer of its own.
+fn audit_of<'a>(text: &'a str, peer: &TransportIdentity) -> Vec<&'a str> {
+    text.lines()
+        .filter(|l| {
+            l.contains("admin.trust.set") && l.contains("outcome=") && l.contains(peer.as_str())
+        })
+        .collect()
+}
+
+struct Writer(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Writer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("lock").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}

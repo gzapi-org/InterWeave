@@ -44,6 +44,7 @@ pub mod persist;
 pub mod runtime;
 pub mod sections;
 pub mod transport;
+pub mod trust_overlay;
 
 pub use load::{LoadError, MAX_PROFILE_BYTES};
 pub use lock::{DAEMON_LOCK_WAIT, HUMAN_CLIENT_LOCK_FILE, HumanClientLock, LOCK_FILE, ProfileLock};
@@ -648,6 +649,12 @@ pub enum PersistError {
         /// The file.
         path: std::path::PathBuf,
     },
+    /// The new file IS in place -- the rename or link was published --
+    /// and syncing its directory failed, so the name may not survive a
+    /// crash. Apart from [`PersistError::Io`] because a caller that must
+    /// keep "a failed write changes nothing" has to put the previous
+    /// contents back: after this error the file holds the new ones.
+    Unsynced(std::io::Error),
 }
 
 impl core::fmt::Display for PersistError {
@@ -686,6 +693,10 @@ impl core::fmt::Display for PersistError {
             Self::FileNotPrivate { path } => {
                 write!(f, "{} must be owner-only (0600)", path.display())
             }
+            Self::Unsynced(e) => write!(
+                f,
+                "the file was written but its directory could not be synced: {e}"
+            ),
         }
     }
 }
@@ -693,7 +704,7 @@ impl core::fmt::Display for PersistError {
 impl core::error::Error for PersistError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
-            Self::Io(e) => Some(e),
+            Self::Io(e) | Self::Unsynced(e) => Some(e),
             _ => None,
         }
     }

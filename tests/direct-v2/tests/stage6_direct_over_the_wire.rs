@@ -2522,6 +2522,134 @@ async fn a_held_send_whose_connection_is_refused_at_retention_is_answered_at_onc
     }
 }
 
+/// A send held for a dial whose connection is refused at retention for
+/// a reason other than policy -- here the connected-peer ceiling, filled
+/// by a third peer's inbound while the dial waited behind a slow proxy --
+/// passes the send's own checks and is answered `PeerUnreachable` at
+/// once, not at its horizon (`TRANSPORT.md`, A 2026-10-07: past the
+/// policy checks, reachability). The control is the same run with room
+/// under the ceiling: the send is delivered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_send_refused_at_retention_by_the_ceiling_is_unreachable_at_once() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    for (ceiling, delivered) in [(1, false), (2, true)] {
+        let (sender_id, sender_peer) = who();
+        let (receiver_id, receiver_peer) = who();
+        let (third_id, third_peer) = who();
+        let receiver = SwarmRuntime::start(
+            &receiver_id,
+            SubstrateConfig::default(),
+            trusting(&[&sender_peer]),
+        )
+        .expect("the receiver starts");
+        let sender = SwarmRuntime::start(
+            &sender_id,
+            SubstrateConfig {
+                max_connected_peers: ceiling,
+                ..SubstrateConfig::default()
+            },
+            trusting(&[&receiver_peer, &third_peer]),
+        )
+        .expect("the sender starts");
+        let third = SwarmRuntime::start(
+            &third_id,
+            SubstrateConfig::default(),
+            trusting(&[&sender_peer]),
+        )
+        .expect("the third peer starts");
+        sender
+            .configure_direct(endpoints(8))
+            .await
+            .expect("endpoints install");
+        let leases = claim_all(&sender, &["human", "claude"]).await;
+        receiver
+            .configure_direct(endpoints(8))
+            .await
+            .expect("endpoints install");
+        let held = claim_all(&receiver, &["human", "claude"]).await;
+        let sender_addr = sender
+            .listen(format!("/ip4/{ip}/tcp/0").parse().expect("valid"))
+            .await
+            .expect("the sender listens");
+        let target = receiver
+            .listen(format!("/ip4/{ip}/tcp/0").parse().expect("valid"))
+            .await
+            .expect("the receiver listens");
+        let target_port = target
+            .iter()
+            .find_map(|p| match p {
+                libp2p::multiaddr::Protocol::Tcp(port) => Some(port),
+                _ => None,
+            })
+            .expect("a tcp port");
+        let proxy = tokio::net::TcpListener::bind((ip, 0)).await.expect("binds");
+        let proxy_port = proxy.local_addr().expect("an address").port();
+        let splice = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1_500)).await;
+            let (mut inbound, _) = proxy.accept().await.expect("the dial arrives");
+            let mut outbound = tokio::net::TcpStream::connect((ip, target_port))
+                .await
+                .expect("the receiver answers");
+            let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+        });
+        assert_eq!(
+            sender
+                .learn(
+                    receiver_peer.clone(),
+                    [format!("/ip4/{ip}/tcp/{proxy_port}")]
+                )
+                .await
+                .expect("delivered"),
+            1
+        );
+
+        let asked = tokio::time::Instant::now();
+        let send = sender.send_direct(
+            &leases["human"],
+            receiver_peer.clone(),
+            frame(Some("claude"), b"behind the ceiling", 161),
+        );
+        // The third peer takes the one place under the ceiling while the
+        // send's dial waits at the proxy.
+        let meanwhile = async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            third
+                .dial(sender_peer.clone(), sender_addr.clone())
+                .await
+                .expect("delivered")
+                .expect("admitted");
+        };
+        let (answer, ()) = tokio::join!(send, meanwhile);
+        let answer = answer.expect("the command reaches the task");
+        let got = receiver
+            .commander()
+            .drain_leased(&held["claude"], usize::MAX)
+            .await
+            .expect("answers");
+        if delivered {
+            assert_eq!(answer, Ok(endpoint("claude")), "the control");
+            assert_eq!(got.len(), 1);
+        } else {
+            assert_eq!(
+                answer,
+                Err(TransportError::PeerUnreachable),
+                "after {:?}",
+                asked.elapsed()
+            );
+            assert!(
+                asked.elapsed() < Duration::from_secs(6),
+                "answered at the refusal, not at the horizon: {:?}",
+                asked.elapsed()
+            );
+            assert!(got.is_empty(), "nothing reached the receiver");
+        }
+        splice.abort();
+        third.shutdown().await.expect("clean shutdown");
+        sender.shutdown().await.expect("clean shutdown");
+        receiver.shutdown().await.expect("clean shutdown");
+    }
+}
+
 /// A held send ends at its horizon even when the retry tick is far
 /// longer (#208 bot thread, B2): the loop wakes at the earliest held
 /// horizon, not at the tick. Here the tick and the handshake timeout are

@@ -357,6 +357,43 @@ mod tests {
         harness.stop().await;
     }
 
+    /// `admin.trust.list` answers the row its connection negotiated: the
+    /// 2.1 row (`persisted` false, no `source`) on a 2.2 connection, the
+    /// 2.3 row (`persisted` true with its `source`) on a 2.3 one -- from
+    /// the same port, the same policy.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_trust_row_is_the_shape_the_connection_negotiated() {
+        let fake = Fake::default();
+        fake.script().trusted = vec![
+            interweave_transport_api::TransportIdentity::parse(
+                "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5",
+            )
+            .expect("peer"),
+        ];
+        let harness = Harness::start(&fake, config());
+        let request = r#"{"type":"request","id":"t","method":"admin.trust.list","params":{}}"#;
+        let trust_hello = ADMIN.replace(r#""admin.status""#, r#""admin.status","admin.trust""#);
+        for (minor, persisted) in [(2, false), (3, true)] {
+            let mut client = Client::connect(&harness.paths.admin).await;
+            client
+                .hello(&trust_hello.replace(r#""minor":0"#, &format!(r#""minor":{minor}"#)))
+                .await;
+            client.send(request).await;
+            let response = client.response().await;
+            let body: serde_json::Value = serde_json::from_str(&response.body).expect("json");
+            let row = &body["result"]["allowed"][0];
+            assert_eq!(row["persisted"], persisted, "2.{minor}: {}", response.body);
+            assert_eq!(
+                row.get("source").and_then(serde_json::Value::as_str),
+                persisted.then_some("configured"),
+                "2.{minor}: {}",
+                response.body
+            );
+            drop(client);
+        }
+        harness.stop().await;
+    }
+
     /// An admin method on the data socket is refused before dispatch and
     /// COUNTED; the admin socket reports the count.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

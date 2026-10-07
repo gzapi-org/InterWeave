@@ -3753,6 +3753,7 @@ dependencies = [
  "interweave-profile-identity",
  "interweave-test-support",
  "interweave-transport-api",
+ "interweave-transport-composition",
  "interweave-transport-libp2p",
  "interweave-transport-runtime",
  "interweave-trust-api",

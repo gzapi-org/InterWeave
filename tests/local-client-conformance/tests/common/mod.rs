@@ -87,6 +87,27 @@ pub(crate) struct Pair {
     pub(crate) b: ComposedRuntime,
     pub(crate) a_peer: TransportIdentity,
     pub(crate) b_peer: TransportIdentity,
+    /// What A restarts from: its identity, profile and options, its trust
+    /// overlay among them.
+    a_restart: (ProfileIdentity, ProfileConfig, CompositionOptions),
+    /// Each runtime's state directory, holding its trust overlay: every
+    /// production binding keeps one (ADR-0028 A 2026-10-07).
+    state: [tempfile::TempDir; 2],
+}
+
+/// A private state directory and the options naming its trust overlay.
+fn with_state(options: &CompositionOptions) -> (tempfile::TempDir, CompositionOptions) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().expect("a state directory");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).expect("chmod");
+    let options = CompositionOptions {
+        trust_overlay_file: Some(
+            dir.path()
+                .join(interweave_profile_config::trust_overlay::TRUST_OVERLAY_FILE),
+        ),
+        ..options.clone()
+    };
+    (dir, options)
 }
 
 impl Pair {
@@ -99,11 +120,14 @@ impl Pair {
         };
         let (a_id, a_peer) = id();
         let (b_id, b_peer) = id();
-        let mut b = ComposedRuntime::start(&b_id, &profile(&a_peer, &[]), options.clone())
+        let (a_state, a_options) = with_state(&options);
+        let (b_state, b_options) = with_state(&options);
+        let mut b = ComposedRuntime::start(&b_id, &profile(&a_peer, &[]), b_options)
             .await
             .expect("b composes");
         let b_addr = format!("{}/p2p/{}", b.listening()[0], b_peer.as_str());
-        let mut a = ComposedRuntime::start(&a_id, &profile(&b_peer, &[b_addr]), options)
+        let a_profile = profile(&b_peer, &[b_addr]);
+        let mut a = ComposedRuntime::start(&a_id, &a_profile, a_options.clone())
             .await
             .expect("a composes");
         wait_connected(&mut a, &b_peer).await;
@@ -113,6 +137,34 @@ impl Pair {
             b,
             a_peer,
             b_peer,
+            a_restart: (a_id, a_profile, a_options),
+            state: [a_state, b_state],
+        }
+    }
+
+    /// A stopped and started again over the same state directory: what
+    /// its trust overlay kept is in force; nothing else of A is.
+    pub(crate) async fn restart_a(self) -> Self {
+        let Self {
+            a,
+            b,
+            a_peer,
+            b_peer,
+            a_restart,
+            state,
+        } = self;
+        a.shutdown().await.expect("a stops");
+        let (identity, profile, options) = &a_restart;
+        let a = ComposedRuntime::start(identity, profile, options.clone())
+            .await
+            .expect("a restarts");
+        Self {
+            a,
+            b,
+            a_peer,
+            b_peer,
+            a_restart,
+            state,
         }
     }
 

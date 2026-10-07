@@ -8,11 +8,12 @@ use std::time::Duration;
 use interweave_ipc_protocol::{
     AdminStatusResult, EmptyResult, EndpointList, EndpointParams, MAX_SHUTDOWN_GRACE_MS, Method,
     PeerList, PeerListParams, Request, RequestedCapability, SetDefaultParams, SetEnabledParams,
-    SetEnabledResult, ShutdownParams, TrustList, TrustListParams, TrustSetParams,
+    SetEnabledResult, ShutdownParams, TRUST_SOURCE_SINCE_MINOR, TrustList, TrustListParams,
+    TrustSetParams,
 };
 use interweave_local_client_api::{
     AdminBinding, AdminCapability, AdminPort, AdminStatus, EndpointAdminView, Generation,
-    LocalAdminPort, PeerGateView, TrustAdminView,
+    LocalAdminPort, PeerGateView, TrustAdminView, TrustedPeer,
 };
 use interweave_transport_api::{EndpointId, TransportError, TransportIdentity};
 
@@ -343,13 +344,36 @@ impl AdminPort for IpcAdmin {
 
     /// Read page by page and joined: the local peer from the first page,
     /// the rows in order.
+    ///
+    /// Only on a connection that negotiated 2.3 or later, whose row says
+    /// where each peer comes from: below it the 2.1 row carries no
+    /// source, and an unknown is never shown as a value, so the read is
+    /// refused `ProtocolUnsupported` without a round trip, as
+    /// [`AdminPort::peers`] is below 2.2 (`LOCAL-IPC.md` `admin.trust`;
+    /// architect-cto's ruling, relay seq 15229). `set_trust` carries no
+    /// row and is unchanged from 2.1.
     async fn trust(&self) -> Result<TrustAdminView, TransportError> {
+        if self.minor < TRUST_SOURCE_SINCE_MINOR {
+            return Err(TransportError::ProtocolUnsupported);
+        }
         let pages = self.trust_pages().await?;
         let local_peer = pages.first().and_then(|page| page.local_peer.clone());
+        // At 2.3 every row a production daemon sends is persisted with its
+        // source (a composition without a store is never served over IPC,
+        // LOCAL-CLIENT.md §7 item 11); a row without one is a daemon this
+        // client cannot read truthfully.
         let allowed = pages
             .into_iter()
-            .flat_map(|page| page.allowed.into_iter().map(|row| row.peer))
-            .collect();
+            .flat_map(|page| page.allowed)
+            .map(|row| match row.source {
+                Some(source) if row.persisted => Ok(TrustedPeer {
+                    peer: row.peer,
+                    persisted: true,
+                    source,
+                }),
+                _ => Err(TransportError::Internal),
+            })
+            .collect::<Result<_, _>>()?;
         Ok(TrustAdminView {
             local_peer,
             allowed,

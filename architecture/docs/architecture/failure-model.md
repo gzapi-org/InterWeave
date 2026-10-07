@@ -81,7 +81,7 @@
 
 ## Fatal vs recoverable
 
-Fatal profile startup includes invalid schema-v2 endpoint configuration, enabled unsupported provider, private-key corruption/unsafe permissions, a missing key without `--create-identity`, a `profile.name` that differs from the resolved profile, profile lock conflict, a non-socket or foreign-owned path at a socket location (A 2026-09-28), incompatible persisted schema, and IPC bind security failure.
+Fatal profile startup includes a present trust overlay that does not parse, names a peer in both its lists, is not owned by the daemon's uid or is readable or writable by anyone but its owner, or an effective allowlist above `MAX_ALLOWED_PEERS` after the overlay is applied (ADR-0028 A 2026-10-07: skipping or truncating it would re-allow or drop peers silently), invalid schema-v2 endpoint configuration, enabled unsupported provider, private-key corruption/unsafe permissions, a missing key without `--create-identity`, a `profile.name` that differs from the resolved profile, profile lock conflict, a non-socket or foreign-owned path at a socket location (A 2026-09-28), incompatible persisted schema, and IPC bind security failure.
 
 Recoverable includes endpoint client downtime, route staleness, trusted-peer failures, provider failures, partitions, bridge/human disconnects, empty mesh, and relay loss.
 

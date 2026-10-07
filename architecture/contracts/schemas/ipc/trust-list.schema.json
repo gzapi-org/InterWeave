@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:interweave:schemas:ipc:trust-list",
   "title": "IPC admin.trust.list result",
-  "description": "One page of the profile's data-plane allowlist as `PeerTrustPolicy` holds it (2.1): the allowed peers, ascending by canonical string, at most 1024 a page, `persisted: false` on every row (a runtime overlay, ADR-0028); `next` is the last row's peer when more remain and absent on the last page; `local_peer`, this profile's own identity, is on the first page only and absent when the policy has none. Every peer not listed is denied: deny-by-default is the policy's shape, not a setting, so there is no default here and no per-peer decision, which is a local diagnostic (ADR-0032). A page of 1024 rows is about 84 KiB, under the 128 KiB body. architect-cto's ruling of 2026-10-04 (relay message 01a10820-b85d-74e6-bf40-e23b46c77a82).",
+  "description": "One page of the profile's data-plane allowlist as `PeerTrustPolicy` holds it (2.1): the allowed peers, ascending by canonical string, at most 1024 a page, on a connection that negotiated 2.3 or later `persisted: true` on every row with its `source` — `configured` for a peer `config.yaml` lists, `administered` for one added over `admin.trust.set` and kept in the state directory's trust overlay (ADR-0028 A 2026-10-07) — and below 2.3 the 2.1 row, `persisted: false` and no `source` (1.0.0 described only that row; 1.1.0 widens it behind the minor under ADR-0017 A 2026-10-07: a closed result shape widens behind a new minor while the old shape is served below it); `next` is the last row's peer when more remain and absent on the last page; `local_peer`, this profile's own identity, is on the first page only and absent when the policy has none. Every peer not listed is denied: deny-by-default is the policy's shape, not a setting, so there is no default here and no per-peer decision, which is a local diagnostic (ADR-0032). A page of 1024 rows is about 103 KiB as 2.3 rows (84 KiB as 2.1 rows), under the 128 KiB body. architect-cto's ruling of 2026-10-04 (relay message 01a10820-b85d-74e6-bf40-e23b46c77a82).",
   "type": "object",
   "required": [
     "allowed"
@@ -27,9 +27,37 @@
             "$ref": "urn:interweave:schemas:common:peer-id"
           },
           "persisted": {
-            "const": false
+            "type": "boolean",
+            "description": "false on a connection below 2.3 (the 2.1 row); true on 2.3 and later: every row survives a daemon restart, configured rows by config.yaml, administered rows by the state directory's trust overlay (ADR-0028 A 2026-10-07)."
+          },
+          "source": {
+            "enum": [
+              "configured",
+              "administered"
+            ],
+            "description": "On 2.3 and later only, where the row comes from: `config.yaml`'s trust.allowed_peers, or an `admin.trust.set` kept in the trust overlay. A configured peer revoked over IPC is not listed; a normalised overlay has no peer in both."
           }
-        }
+        },
+        "if": {
+          "properties": {
+            "persisted": {
+              "const": true
+            }
+          }
+        },
+        "then": {
+          "required": [
+            "source"
+          ]
+        },
+        "else": {
+          "not": {
+            "required": [
+              "source"
+            ]
+          }
+        },
+        "description": "The 2.1 row (persisted false, no source) below minor 2.3; the 2.3 row (persisted true with source) on 2.3 and later (ADR-0017 A 2026-10-07)."
       },
       "description": "Unique by peer and strictly ascending; JSON Schema cannot state the order, the Rust mirror refuses a page that breaks it."
     },
@@ -40,7 +68,7 @@
   "x-contract": {
     "name": "ipc.trust-list",
     "status": "active",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "adr": [
       "0017",
       "0037",

@@ -72,11 +72,13 @@ export struct MessageRow {
     actions: [ActionRow],
 }
 
-// A trusted peer: its full PeerId, exact, and a handle the press names
-// it by.
+// A trusted peer: its full PeerId, exact, where it comes from (the
+// profile's configuration, or added here), and a handle the press names it
+// by.
 export struct TrustRow {
     handle: int,
     peer: string,
+    origin: string,
 }
 
 component ActionButton inherits FocusScope {
@@ -456,13 +458,22 @@ export component AppWindow inherits Window {
                 spacing: 8px;
                 // The exact PeerId: whole, never shortened, so a person can
                 // check every character (human-client-ui.md section 8).
-                TextInput {
-                    text: row.peer;
-                    read-only: true;
-                    single-line: true;
+                // Where the row comes from goes UNDER the PeerId, never
+                // beside it: the full PeerId already takes the width, and a
+                // narrow window must still reach every row's control.
+                VerticalLayout {
                     horizontal-stretch: 1;
-                    accessible-label: row.peer;
-                    accessible-value: self.text;
+                    TextInput {
+                        text: row.peer;
+                        read-only: true;
+                        single-line: true;
+                        accessible-label: row.peer;
+                        accessible-value: self.text;
+                    }
+                    Text {
+                        text: row.origin;
+                        color: Palette.muted-text;
+                    }
                 }
                 ActionButton {
                     text: root.remove-label;

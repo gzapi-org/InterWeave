@@ -80,13 +80,15 @@ pub(crate) async fn data<S: DataSessionPort>(
     }
 }
 
-/// Answer an admin-socket request through its port.
+/// Answer an admin-socket request through its port, in the shapes the
+/// connection's negotiated `minor` names.
 pub(crate) async fn admin<A: AdminPort>(
     port: &A,
     counters: &Counters,
     default_grace: Duration,
     id: RequestId,
     request: Request,
+    minor: u64,
 ) -> ResponseFrame {
     let empty = |id, outcome: Result<(), TransportError>| match outcome {
         Ok(()) => ResponseFrame::success(id, &EmptyResult {}),
@@ -124,9 +126,10 @@ pub(crate) async fn admin<A: AdminPort>(
             empty(id, port.shutdown(grace).await)
         }
         // One page of the policy the port answers whole: the cursor is a
-        // position in its order, so nothing is held between pages.
+        // position in its order, so nothing is held between pages. The
+        // row is the shape the connection negotiated (2.1 or 2.3).
         Request::AdminTrustList(p) => match port.trust().await {
-            Ok(view) => ResponseFrame::success(id, &TrustList::page(view, p.after.as_ref())),
+            Ok(view) => ResponseFrame::success(id, &TrustList::page(view, p.after.as_ref(), minor)),
             Err(code) => ResponseFrame::failure(id, code),
         },
         Request::AdminTrustSet(p) => empty(id, port.set_trust(p.peer, p.allowed).await),
@@ -287,7 +290,17 @@ mod tests {
         let port = fake.admin([].into()).await.expect("port");
         let counters = Counters::default();
         let grace = Duration::from_millis(1234);
-        let status = body(admin(&port, &counters, grace, id(), Request::AdminStatus).await);
+        let status = body(
+            admin(
+                &port,
+                &counters,
+                grace,
+                id(),
+                Request::AdminStatus,
+                interweave_ipc_protocol::IPC_MAX_MINOR,
+            )
+            .await,
+        );
         assert!(status.contains(r#""data_connections":0"#), "{status}");
         let cases = [
             (Method::AdminEndpointsList, serde_json::json!({}), "leases"),
@@ -326,7 +339,17 @@ mod tests {
         ];
         for (method, params, call) in cases {
             let before = fake.script().calls.len();
-            let answer = body(admin(&port, &counters, grace, id(), request(method, &params)).await);
+            let answer = body(
+                admin(
+                    &port,
+                    &counters,
+                    grace,
+                    id(),
+                    request(method, &params),
+                    interweave_ipc_protocol::IPC_MAX_MINOR,
+                )
+                .await,
+            );
             assert!(
                 answer.contains(r#""ok":true"#),
                 "{}: {answer}",
@@ -352,7 +375,17 @@ mod tests {
         let answer = body(data(&session, id(), Request::AdminStatus).await);
         assert!(answer.contains("CapabilityDenied"), "{answer}");
         let join = request(Method::ChannelJoin, &serde_json::json!({"channel": "ops"}));
-        let answer = body(admin(&port, &Counters::default(), Duration::ZERO, id(), join).await);
+        let answer = body(
+            admin(
+                &port,
+                &Counters::default(),
+                Duration::ZERO,
+                id(),
+                join,
+                interweave_ipc_protocol::IPC_MAX_MINOR,
+            )
+            .await,
+        );
         assert!(answer.contains("CapabilityDenied"), "{answer}");
         assert_eq!(fake.script().calls.len(), before);
     }
@@ -386,7 +419,15 @@ mod tests {
         let page = |params: serde_json::Value| {
             let request = request(Method::AdminPeersList, &params);
             async {
-                let frame = admin(&port, &counters, grace, id(), request).await;
+                let frame = admin(
+                    &port,
+                    &counters,
+                    grace,
+                    id(),
+                    request,
+                    interweave_ipc_protocol::IPC_MAX_MINOR,
+                )
+                .await;
                 frame.outcome::<PeerList>().expect("a page")
             }
         };
@@ -418,7 +459,15 @@ mod tests {
         let page = |params: serde_json::Value| {
             let request = request(Method::AdminTrustList, &params);
             async {
-                let frame = admin(&port, &counters, grace, id(), request).await;
+                let frame = admin(
+                    &port,
+                    &counters,
+                    grace,
+                    id(),
+                    request,
+                    interweave_ipc_protocol::IPC_MAX_MINOR,
+                )
+                .await;
                 frame.outcome::<TrustList>().expect("a page")
             }
         };

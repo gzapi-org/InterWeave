@@ -10,13 +10,16 @@
 //! request channel; a request the task can no longer answer is answered
 //! `BackendUnavailable`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use interweave_local_client_api::{Generation, TrustAdminView};
+use interweave_local_client_api::{Generation, TrustAdminView, TrustSource, TrustedPeer};
+#[cfg(feature = "test-hooks")]
+use interweave_profile_config::PersistError;
+use interweave_profile_config::trust_overlay::{OverlayError, TrustOverlay};
 use interweave_profile_config::{ProfileConfig, ProfilePaths};
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::{
@@ -49,6 +52,12 @@ pub struct CompositionOptions {
     /// The peer cache's file (`ProfilePaths::peer_cache_file`), required
     /// when the profile enables `peer-cache`.
     pub peer_cache_file: Option<PathBuf>,
+    /// The trust overlay's file (`TrustOverlay::path_for`): what
+    /// `admin.trust.set` changed, kept across restarts (ADR-0028 A
+    /// 2026-10-07). Every production binding supplies one; without one
+    /// -- a test construction -- a set lasts until the runtime stops and
+    /// every row reads `persisted: false` (`LOCAL-CLIENT.md` §7 item 11).
+    pub trust_overlay_file: Option<PathBuf>,
     /// Each endpoint's and each channel's delivery queue bound
     /// (`TRANSPORT.md` §Backpressure: 256 per client).
     pub queue_bound: usize,
@@ -67,6 +76,7 @@ impl CompositionOptions {
         Self {
             listen: profile.transport.listen.addresses.clone(),
             peer_cache_file: Some(paths.peer_cache_file()),
+            trust_overlay_file: Some(TrustOverlay::path_for(paths)),
             queue_bound: usize::try_from(profile.ipc.client_event_queue).unwrap_or(usize::MAX),
             ..Self::default()
         }
@@ -78,6 +88,7 @@ impl Default for CompositionOptions {
         Self {
             listen: Vec::new(),
             peer_cache_file: None,
+            trust_overlay_file: None,
             queue_bound: 256,
             event_capacity: 1024,
             discovery_interval: Duration::from_secs(1),
@@ -147,6 +158,24 @@ pub(crate) enum Request {
     /// real runtimes reaches it without a relay. Test builds only.
     #[cfg(feature = "test-hooks")]
     InjectPathChange(TransportIdentity, PeerPath, PeerPath, oneshot::Sender<()>),
+    /// The failures the next trust overlay writes meet. Test builds only.
+    #[cfg(feature = "test-hooks")]
+    FailOverlayWrites(Vec<OverlayFault>, oneshot::Sender<()>),
+    /// The next trust publishes fail as if the substrate were gone. Test
+    /// builds only.
+    #[cfg(feature = "test-hooks")]
+    FailPublishes(usize, oneshot::Sender<()>),
+}
+
+/// A failure a test makes the next trust overlay write meet, on either
+/// side of its rename (`ComposedRuntime::fail_overlay_writes`).
+#[cfg(feature = "test-hooks")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayFault {
+    /// Nothing is written: the previous overlay stays.
+    BeforeRename,
+    /// The overlay is written in place, then syncing its directory fails.
+    AfterRename,
 }
 
 /// The `tracing` target of the record each trust change leaves in the
@@ -249,7 +278,30 @@ impl ComposedRuntime {
                 "discovery_interval must be greater than zero",
             ));
         }
-        let composition = translate(profile, &local, options.queue_bound)?;
+        // THE OVERLAY BEFORE THE FIRST ADMISSION: loaded, normalised
+        // against the configuration and bounded here, before the
+        // substrate starts, so no connection is admitted under the
+        // configuration alone. A present overlay that cannot be trusted
+        // stops the start (ADR-0028 A 2026-10-07).
+        // The configuration WITHOUT this profile's own identity, which a
+        // shared list copied into every profile names: the live policy
+        // drops it (`with_local_peer`), so the overlay's bound and its
+        // moves are judged against the same set -- counted, it let an
+        // allow answered `ok` make the next start fatal (#215 review F5).
+        let configured_peers: BTreeSet<TransportIdentity> = profile
+            .trust
+            .allowed_peers
+            .iter()
+            .filter(|peer| **peer != local)
+            .cloned()
+            .collect();
+        let (overlay, allowed) = match &options.trust_overlay_file {
+            Some(path) => TrustOverlay::load(path, &configured_peers)
+                .map_err(CompositionError::TrustOverlay)?,
+            None => (TrustOverlay::default(), configured_peers.clone()),
+        };
+        let composition = translate(profile, &local, options.queue_bound)?
+            .with_allowed(allowed.clone(), &local)?;
         // A WALL-CLOCK ANCHOR ADVANCED BY THE MONOTONIC CLOCK. The peer
         // cache persists these timestamps and compares them against its
         // TTL after a restart, so the origin must survive the process:
@@ -265,7 +317,7 @@ impl ComposedRuntime {
             composition.discovery,
             options.peer_cache_file.as_deref(),
             composition.peer_trust,
-            profile.trust.allowed_peers.clone(),
+            allowed,
             &local,
             clock(),
         )?;
@@ -343,6 +395,13 @@ impl ComposedRuntime {
             clock: Box::new(clock),
             trust,
             infrastructure,
+            configured: configured_peers,
+            overlay,
+            overlay_file: options.trust_overlay_file.clone(),
+            #[cfg(feature = "test-hooks")]
+            overlay_faults: std::collections::VecDeque::new(),
+            #[cfg(feature = "test-hooks")]
+            publish_faults: 0,
             outcomes: LastOutcomes::default(),
             refusals: ReconnectRefusals::default(),
         };
@@ -461,6 +520,32 @@ impl ComposedRuntime {
         self.ask(|reply| Request::InjectPathChange(peer, previous, current, reply))
             .await
     }
+
+    /// Make the next `count` trust publishes fail as if the substrate
+    /// were gone, after their overlay was written: how a test reaches the
+    /// restore after a failed publish. TEST BUILDS ONLY.
+    ///
+    /// # Errors
+    /// `BackendUnavailable` once the runtime has stopped.
+    #[cfg(feature = "test-hooks")]
+    pub async fn fail_publishes(&self, count: usize) -> Result<(), TransportError> {
+        self.ask(|reply| Request::FailPublishes(count, reply)).await
+    }
+
+    /// Make the next trust overlay writes meet `faults`, one each, in
+    /// order: how a test reaches a write that fails after its rename,
+    /// which no permission can produce. TEST BUILDS ONLY.
+    ///
+    /// # Errors
+    /// `BackendUnavailable` once the runtime has stopped.
+    #[cfg(feature = "test-hooks")]
+    pub async fn fail_overlay_writes(
+        &self,
+        faults: Vec<OverlayFault>,
+    ) -> Result<(), TransportError> {
+        self.ask(|reply| Request::FailOverlayWrites(faults, reply))
+            .await
+    }
 }
 
 impl TransportRuntime for ComposedRuntime {
@@ -518,6 +603,21 @@ struct Driver {
     /// The infrastructure set the profile configured, republished
     /// unchanged with every trust change: `admin.trust` does not reach it.
     infrastructure: InfrastructureSet,
+    /// `config.yaml`'s `trust.allowed_peers` as the runtime started with
+    /// it: what the overlay is a delta against.
+    configured: BTreeSet<TransportIdentity>,
+    /// The trust overlay as last written, normalised: `trust` is
+    /// (configured ∪ added) ∖ revoked of it.
+    overlay: TrustOverlay,
+    /// Where the overlay is kept; `None` in a test construction.
+    overlay_file: Option<PathBuf>,
+    /// The failures the next overlay writes meet, in order (test builds).
+    #[cfg(feature = "test-hooks")]
+    overlay_faults: std::collections::VecDeque<OverlayFault>,
+    /// How many of the next publishes fail as if the substrate were gone
+    /// (test builds).
+    #[cfg(feature = "test-hooks")]
+    publish_faults: usize,
     /// Each allowlisted peer's last dial outcome (`CONNECTIVITY.md` §19).
     outcomes: LastOutcomes,
     /// Each allowlisted peer's last reconnect refusal, logged on change.
@@ -825,7 +925,23 @@ impl Driver {
             Request::Trust(reply) => {
                 let _ = reply.send(TrustAdminView {
                     local_peer: self.trust.local_peer().cloned(),
-                    allowed: self.trust.allowed_peers().cloned().collect(),
+                    allowed: self
+                        .trust
+                        .allowed_peers()
+                        .map(|peer| TrustedPeer {
+                            peer: peer.clone(),
+                            persisted: self.overlay_file.is_some(),
+                            // Exact, not a default: the policy is
+                            // (configured ∪ added) ∖ revoked, so a listed
+                            // peer the configuration does not name is an
+                            // administered one.
+                            source: if self.configured.contains(peer) {
+                                TrustSource::Configured
+                            } else {
+                                TrustSource::Administered
+                            },
+                        })
+                        .collect(),
                 });
             }
             Request::SetTrust(peer, allowed, reply) => {
@@ -837,7 +953,57 @@ impl Driver {
                     .await;
                 let _ = reply.send(());
             }
+            #[cfg(feature = "test-hooks")]
+            Request::FailOverlayWrites(faults, reply) => {
+                self.overlay_faults = faults.into();
+                let _ = reply.send(());
+            }
+            #[cfg(feature = "test-hooks")]
+            Request::FailPublishes(count, reply) => {
+                self.publish_faults = count;
+                let _ = reply.send(());
+            }
         }
+    }
+
+    /// Publish `next` to the substrate: whether it changed, or
+    /// `BackendUnavailable` -- or, test builds only, the failure a test
+    /// queued for the next publish.
+    async fn publish(&mut self, next: PeerTrustPolicy) -> Result<bool, TransportError> {
+        #[cfg(feature = "test-hooks")]
+        if self.publish_faults > 0 {
+            self.publish_faults -= 1;
+            return Err(TransportError::BackendUnavailable);
+        }
+        self.swarm
+            .set_trust(TrustSources::new(next, self.infrastructure.clone()))
+            .await
+            .map(|_closed| true)
+            .map_err(|_| TransportError::BackendUnavailable)
+    }
+
+    /// Write `overlay` to `path`: the overlay's own write, or -- test
+    /// builds only -- the next fault a test queued for it.
+    fn write_overlay(
+        &mut self,
+        overlay: &TrustOverlay,
+        path: &std::path::Path,
+    ) -> Result<(), OverlayError> {
+        #[cfg(feature = "test-hooks")]
+        if let Some(fault) = self.overlay_faults.pop_front() {
+            return match fault {
+                OverlayFault::BeforeRename => Err(OverlayError::Write(PersistError::Io(
+                    std::io::Error::other("an injected failure before the rename"),
+                ))),
+                OverlayFault::AfterRename => {
+                    overlay.write(path)?;
+                    Err(OverlayError::Write(PersistError::Unsynced(
+                        std::io::Error::other("an injected failure to sync the directory"),
+                    )))
+                }
+            };
+        }
+        overlay.write(path)
     }
 
     /// Allow `peer` or revoke it, and publish the result to the substrate
@@ -852,7 +1018,8 @@ impl Driver {
     /// EVERY SET THAT REACHES THE DRIVER IS LOGGED, under
     /// [`AUDIT_TARGET`], whatever came of it (ADR-0012's consequence,
     /// LOCAL-IPC.md `admin.trust.set`): the peer, the request and its
-    /// outcome -- changed, unchanged, refused by the policy, or failed --
+    /// outcome -- changed, unchanged, refused by the policy, failed, or
+    /// unwritten (the overlay write failed, so nothing changed) --
     /// timestamped by the host's log. A set that never reaches it is not:
     /// one refused at the port for want of `admin.trust`, or by the IPC
     /// server before the port, and one whose driver has gone; none of
@@ -870,19 +1037,72 @@ impl Driver {
         } else {
             Ok(next.revoke(&peer))
         };
+        // WRITTEN BEFORE PUBLISHED (ADR-0028 A 2026-10-07): a set answered
+        // `ok` survives a crash, and a set whose write fails changes
+        // nothing -- not the policy, not a connection, not a row, and not
+        // what the next start loads. The move is asked of EVERY decided
+        // set, not only one that changes the policy: the overlay can be
+        // ahead of the policy (below), and a set the policy already
+        // agrees with must still reach the file the next start loads
+        // before it is answered `ok` (#215 review F3). In step, the move
+        // is `None` exactly when the policy did not change.
+        let overlay = match decided {
+            Ok(_) => self.overlay.set(&self.configured, &peer, allowed),
+            Err(_) => None,
+        };
+        // `None` written, or the write's error: before its rename nothing
+        // changed; after it (`installed`) the new overlay is on disk, and
+        // is put back below exactly as after a failed publish.
+        let written = match (&overlay, self.overlay_file.clone()) {
+            (Some(overlay), Some(path)) => self.write_overlay(overlay, &path).err(),
+            _ => None,
+        };
+        let unwritten = written.is_some();
         let published = match decided {
-            Ok(true) => self
-                .swarm
-                .set_trust(TrustSources::new(next.clone(), self.infrastructure.clone()))
-                .await
-                .map(|_closed| true)
-                .map_err(|_| TransportError::BackendUnavailable),
+            Ok(_) if unwritten => Err(TransportError::Internal),
+            Ok(true) => self.publish(next.clone()).await,
             other => other,
+        };
+        // THE PREVIOUS OVERLAY IS PUT BACK whenever the new one may be on
+        // disk and the set is not answered `ok` -- a failed publish, or a
+        // write that installed it and then failed -- so the next start
+        // loads what the runtime holds. A restore that itself installs
+        // and then fails to sync has put the previous bytes back, and
+        // counts as restored. One that fails before its rename leaves the
+        // overlay ahead of the runtime: it takes effect at the next start,
+        // the answer is `Internal`, and the audit says `failed`, never
+        // `unwritten`, since the file was written.
+        let restore = matches!(published, Err(TransportError::BackendUnavailable))
+            || written.as_ref().is_some_and(OverlayError::installed);
+        // AHEAD, THE OVERLAY ON DISK IS THE ONE KEPT: every later set is a
+        // move on the lists the next start will load, so this set does
+        // take effect then, as the warning says, whatever sets follow it
+        // (#215 review F3: kept from the old lists, the next set on any
+        // peer rewrote them and the ahead change was lost).
+        let mut ahead = false;
+        if let (true, Some(new), Some(path)) = (restore, &overlay, self.overlay_file.clone()) {
+            let previous = self.overlay.clone();
+            if let Err(e) = self.write_overlay(&previous, &path)
+                && !e.installed()
+            {
+                tracing::warn!(
+                    "admin.trust.set: the trust overlay is ahead of the runtime; \
+                     the set takes effect at the next start"
+                );
+                ahead = true;
+                self.overlay = new.clone();
+            }
+        }
+        let published = if ahead {
+            Err(TransportError::Internal)
+        } else {
+            published
         };
         let outcome = match &published {
             Ok(true) => "changed",
             Ok(false) => "unchanged",
             Err(TransportError::InvalidArgument) => "refused",
+            Err(_) if unwritten && !ahead => "unwritten",
             Err(_) => "failed",
         };
         tracing::info!(
@@ -892,7 +1112,16 @@ impl Driver {
             outcome,
             "admin.trust.set"
         );
-        if published? {
+        let changed = published?;
+        // ANSWERED `ok`, THE OVERLAY WRITTEN IS THE ONE KEPT -- whether or
+        // not the policy moved. After a set left ahead, a set the policy
+        // already agrees with still writes its move; kept only on a
+        // policy change, the next set on any peer wrote the old lists
+        // back and undid it (#215 re-review N2).
+        if let Some(overlay) = overlay {
+            self.overlay = overlay;
+        }
+        if changed {
             self.discovery.set_trust(next.clone());
             self.trust = next;
             if !allowed {

@@ -303,15 +303,53 @@ pub struct EndpointAdminView {
 ///
 /// Deny-by-default is the policy's shape, not a setting, so there is no
 /// default here to report; and no per-peer decision, which is a local
-/// diagnostic (ADR-0032). Like the endpoint rows, the allowlist is a
-/// runtime overlay over the profile, lost on restart.
+/// diagnostic (ADR-0032). What `admin.trust.set` changed is kept in the
+/// state directory's trust overlay and survives a restart (ADR-0028 A
+/// 2026-10-07); each row says where it comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustAdminView {
     /// This profile's identity, which is never a remote to trust; `None`
     /// for a policy that was never bound to one.
     pub local_peer: Option<TransportIdentity>,
     /// The allowlisted remote peers, in order; every other peer is denied.
-    pub allowed: Vec<TransportIdentity>,
+    pub allowed: Vec<TrustedPeer>,
+}
+
+impl TrustAdminView {
+    /// The allowlisted peers' identities, in the rows' order.
+    #[must_use]
+    pub fn peers(&self) -> impl ExactSizeIterator<Item = &TransportIdentity> {
+        self.allowed.iter().map(|row| &row.peer)
+    }
+}
+
+/// One allowlisted peer (`ipc/trust-list`'s row): the peer, whether the
+/// row survives a restart, and where it comes from. Ordered by peer.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TrustedPeer {
+    /// The allowed peer.
+    pub peer: TransportIdentity,
+    /// The row survives a restart: configured rows by `config.yaml`,
+    /// administered rows by the trust overlay. False only where the
+    /// runtime keeps no overlay, which no production binding is (a test
+    /// construction, `LOCAL-CLIENT.md` §7 item 11).
+    pub persisted: bool,
+    /// Where the row comes from.
+    pub source: TrustSource,
+}
+
+/// Where an allowlisted peer comes from (ADR-0028 A 2026-10-07).
+///
+/// A peer is never both: an administered peer that `config.yaml` comes
+/// to list is dropped from the overlay when it is next loaded, so it
+/// reports `Configured` -- and revoking it adds it to the overlay's
+/// revocations rather than removing an administered entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TrustSource {
+    /// `config.yaml`'s `trust.allowed_peers`, not revoked.
+    Configured,
+    /// Added over `admin.trust.set` and kept in the trust overlay.
+    Administered,
 }
 
 /// How the last dial to, or connection with, a peer ended
@@ -430,8 +468,10 @@ pub trait AdminBinding {
 
 /// One open administrative port.
 ///
-/// Every mutation is a runtime overlay, never written to the profile:
-/// a restart returns to the configured state.
+/// No mutation is written to the profile. An endpoint change is a
+/// runtime overlay, and a restart returns to the configured state; a
+/// trust change is kept in the state directory's trust overlay and
+/// survives it (ADR-0028 A 2026-10-07).
 pub trait AdminPort {
     /// The port's identity and authorities.
     fn port(&self) -> &LocalAdminPort;
@@ -517,7 +557,9 @@ pub trait AdminPort {
     /// # Errors
     /// `CapabilityDenied` without `admin.trust`; `InvalidArgument` for
     /// this profile's own identity, or for a new peer once the allowlist
-    /// holds its ceiling (4096); or `BackendUnavailable`.
+    /// holds its ceiling (4096); `Internal` when the trust overlay could
+    /// not be written (nothing changed) or was left ahead of the runtime
+    /// (it takes effect at the next start); or `BackendUnavailable`.
     fn set_trust(
         &self,
         peer: TransportIdentity,

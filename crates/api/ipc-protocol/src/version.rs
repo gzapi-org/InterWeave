@@ -16,9 +16,10 @@ use serde::{Deserialize, Serialize};
 pub const IPC_MAJOR: u64 = 2;
 
 /// The highest IPC minor this build speaks: the first production build
-/// spoke 2.0, Stage 15's R1 brought 2.1 (`peer.path_changed`), and
-/// `admin.peers.list` brought 2.2 (A 2026-10-06).
-pub const IPC_MAX_MINOR: u64 = 2;
+/// spoke 2.0, Stage 15's R1 brought 2.1 (`peer.path_changed`),
+/// `admin.peers.list` brought 2.2 (A 2026-10-06), and the persisted
+/// trust row brought 2.3 (ADR-0017 A 2026-10-07).
+pub const IPC_MAX_MINOR: u64 = 3;
 
 /// A version pair as it crosses the wire.
 ///
@@ -135,7 +136,14 @@ mod tests {
     fn the_server_lowers_the_minor_and_keeps_its_major() {
         // min(client, server): a 2.0 client is answered 2.0, and anything
         // above this build's minor is lowered to it.
-        for (proposed, selected) in [(0, 0), (1, 1), (2, 2), (3, 2), (u64::MAX, IPC_MAX_MINOR)] {
+        for (proposed, selected) in [
+            (0, 0),
+            (1, 1),
+            (2, 2),
+            (3, 3),
+            (4, 3),
+            (u64::MAX, IPC_MAX_MINOR),
+        ] {
             assert_eq!(
                 negotiate(IpcVersion {
                     major: 2,

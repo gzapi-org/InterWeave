@@ -6,7 +6,9 @@
 use std::fmt::Write as _;
 
 use interweave_ipc_client::{IpcAdmin, IpcBinding, SocketPaths};
-use interweave_local_client_api::{AdminBinding as _, AdminCapability, AdminPort as _};
+use interweave_local_client_api::{
+    AdminBinding as _, AdminCapability, AdminPort as _, TrustSource,
+};
 use interweave_profile_config::{ProfileLock, ProfilePaths, XdgRoots};
 use interweave_transport_api::TransportError;
 
@@ -196,8 +198,17 @@ async fn call(port: &IpcAdmin, action: Admin, json: bool) -> Result<String, Tran
                 if let Some(local) = pages.first().and_then(|page| page.local_peer.as_ref()) {
                     let _ = writeln!(out, "local    {}", local.as_str());
                 }
+                // Each row's source when the negotiated row has one (2.3):
+                // configured in config.yaml, or administered and kept in
+                // the trust overlay. A 2.1 row says neither.
                 for row in pages.iter().flat_map(|page| &page.allowed) {
-                    let _ = writeln!(out, "allowed  {}", row.peer.as_str());
+                    let _ = write!(out, "allowed  {}", row.peer.as_str());
+                    match row.source {
+                        Some(TrustSource::Configured) => out += "  configured",
+                        Some(TrustSource::Administered) => out += "  administered",
+                        None => {}
+                    }
+                    out.push('\n');
                 }
                 out += "every other peer is denied\n";
             }

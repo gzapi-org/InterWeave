@@ -1100,10 +1100,12 @@ async fn transportctl_against_a_live_daemon() {
         key_before
     );
 
-    // admin.trust (2.1): the list is one `ipc/trust-list` page per line,
-    // the profile's one allowed peer and the daemon's own; the local peer
-    // is refused; a revocation leaves the list empty and is in the
-    // daemon's log (LOCAL-IPC.md: each set is written there).
+    // admin.trust (2.1, rows at 2.3): the list is one `ipc/trust-list`
+    // page per line, the profile's one allowed peer -- persisted, from the
+    // configuration -- and the daemon's own; the local peer is refused; a
+    // revocation leaves the list empty, is in the daemon's log
+    // (LOCAL-IPC.md: each set is written there), and survives a restart
+    // of the daemon (ADR-0028 A 2026-10-07).
     let trust = |home: &Home| -> Vec<serde_json::Value> {
         let out = home.transportctl(&["trust", "list", "--json"], "");
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
@@ -1127,6 +1129,22 @@ async fn transportctl_against_a_live_daemon() {
         .as_str()
         .expect("the profile's peer")
         .to_owned();
+    assert_eq!(
+        allowed[0]["allowed"][0]["persisted"], true,
+        "{}",
+        allowed[0]
+    );
+    assert_eq!(
+        allowed[0]["allowed"][0]["source"], "configured",
+        "{}",
+        allowed[0]
+    );
+    let out = home.transportctl(&["trust", "list"], "");
+    assert!(
+        stdout(&out).contains(&format!("allowed  {listed}  configured")),
+        "{}",
+        stdout(&out)
+    );
     // admin.peers.list (2.2): one `ipc/peer-list` page per line, each
     // valid against the schema, one row -- the profile's allowed peer,
     // never the daemon itself -- and the human form names it.
@@ -1171,6 +1189,19 @@ async fn transportctl_against_a_live_daemon() {
         "the revocation is in the daemon's log: {audit}"
     );
 
+    let out = home.transportctl(&["shutdown", "--grace", "200"], "");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(daemon.exit().await.success(), "{}", daemon.log());
+
+    // A RESTART KEEPS THE REVOCATION: the same profile, the same
+    // config.yaml still listing the peer, and the list is still empty.
+    let mut daemon = home.start(&[]);
+    daemon.serving(&home).await;
+    assert_eq!(
+        trust(&home)[0]["allowed"],
+        serde_json::json!([]),
+        "revoked across the restart"
+    );
     let out = home.transportctl(&["shutdown", "--grace", "200"], "");
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert!(daemon.exit().await.success(), "{}", daemon.log());

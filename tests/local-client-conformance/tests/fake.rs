@@ -508,6 +508,57 @@ async fn a_broadcast_is_a_route_once_taken() {
     );
 }
 
+/// The fake's restart keeps its trust and returns its endpoints to the
+/// configuration, as the real runtime does: an endpoint disabled over the
+/// admin port is enabled again after it, the default as configured.
+#[tokio::test]
+async fn a_restart_returns_the_fakes_endpoints_to_the_configuration() {
+    use interweave_local_client_api::{AdminBinding as _, AdminCapability, AdminPort as _};
+    let p = pair();
+    let enabled = |views: &[interweave_local_client_api::EndpointAdminView]| {
+        views
+            .iter()
+            .find(|v| v.endpoint == human())
+            .map(|v| v.enabled)
+    };
+    let admin =
+        p.a.admin([AdminCapability::Endpoints].into())
+            .await
+            .expect("a port");
+    let configured_default = admin
+        .leases()
+        .await
+        .expect("rows")
+        .iter()
+        .any(|v| v.default);
+    assert!(
+        configured_default,
+        "the pair's configuration names a default"
+    );
+    admin
+        .set_endpoint_enabled(human(), false)
+        .await
+        .expect("disabled");
+    let rows = admin.leases().await.expect("rows");
+    assert_eq!(enabled(&rows), Some(false));
+    p.a.restart();
+    let admin =
+        p.a.admin([AdminCapability::Endpoints].into())
+            .await
+            .expect("a port");
+    let rows = admin.leases().await.expect("rows");
+    assert_eq!(enabled(&rows), Some(true), "as configured again");
+    assert_eq!(rows.iter().any(|v| v.default), configured_default);
+}
+
+#[tokio::test]
+async fn a_revocation_survives_a_restart_of_the_runtime() {
+    let p = pair();
+    suite::a_revocation_is_made_before_a_restart(&p.a, &p.b_peer).await;
+    p.a.restart();
+    suite::the_revocation_outlived_the_restart(&p.a, &p.b_peer).await;
+}
+
 #[tokio::test]
 async fn trust_administration_revokes_as_policy() {
     let p = pair();

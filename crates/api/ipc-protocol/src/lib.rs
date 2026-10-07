@@ -69,6 +69,6 @@ pub use result::{
     AdminStatusResult, DirectoryResult, EmptyResult, EndpointList, EndpointRow, IngressCounters,
     IpcCounters, LeaseRow, MAX_ENDPOINT_ROWS, MAX_PEER_PAGE_ROWS, MAX_TRUST_PAGE_ROWS,
     NotPersisted, PeerList, PeerRow, PreAuthCounters, SendResult, ServerCounters, SetEnabledResult,
-    TrustList, TrustRow,
+    TRUST_SOURCE_SINCE_MINOR, TrustList, TrustRow,
 };
 pub use version::{IPC_MAJOR, IPC_MAX_MINOR, IpcVersion, UnsupportedMajor, negotiate, supported};

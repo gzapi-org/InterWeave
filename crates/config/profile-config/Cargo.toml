@@ -37,6 +37,10 @@ interweave-transport-api = { path = "../../api/transport-api" }
 interweave-kademlia-control-api = { path = "../../api/kademlia-control-api" }
 interweave-trust-api = { path = "../../api/trust-api" }
 serde = { workspace = true, features = ["derive"] }
+# The trust overlay's file (`trust_overlay.rs`, ADR-0028 A 2026-10-07):
+# two lists of peer ids in the state directory. Already in the graph
+# through the IPC crates.
+serde_json = { workspace = true }
 # The one production YAML loader (`ProfileConfig::load`), admitted by the
 # owner on 2026-09-28 (plan §16). Its parser is a C translation
 # (unsafe-libyaml-norway); what it reads is the operator's own
@@ -47,7 +51,7 @@ serde_norway = "0.9.42"
 # `O_NOFOLLOW` for the profile lock (`lock.rs`): its value differs by
 # ABI, and a hand-typed table got aarch64 wrong. Already in the graph
 # through tokio; this adds no code to what is compiled.
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 libc = "0.2.189"
 
 [dev-dependencies]
@@ -63,5 +67,4 @@ interweave-discovery-cache = { path = "../../discovery/cache" }
 # a runtime implementation and a configuration crate must not depend on
 # it to learn a number, but the two copies must not drift.
 interweave-transport-runtime = { path = "../../transport/runtime" }
-serde_json = { workspace = true }
 tempfile = { workspace = true }

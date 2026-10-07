@@ -313,19 +313,27 @@ here (architect-cto's ruling of 2026-10-04, below).
 
 `admin.trust.list` answers the profile's allowlist as `trust-api`'s `PeerTrustPolicy` holds it, ONE PAGE at a time: the allowed peers in the
 ascending order of their canonical strings, at most 1024 a page, with
-`persisted: false` on every row, and `next` — the last row's peer — when
+on a connection that negotiated 2.3 or later `persisted: true` on every
+row and each row's `source` — `configured` for a peer `config.yaml`
+lists, `administered` for one added by `admin.trust.set` (ADR-0028 A
+2026-10-07) — and below 2.3 the 2.1 row, `persisted: false` and no
+`source` (ADR-0017 A 2026-10-07, §Version negotiation: a closed result shape
+widens behind a new minor while the old shape is served below it; 2.3
+adds no method or capability), and `next` — the last row's peer — when
 more remain; `trust-list-params.after` names the previous page's `next`,
 exclusive, and is absent for the first page. The cursor is a position,
 not a row, so the server keeps no state between pages and an `after`
 naming a peer no longer listed still answers the page that follows it.
-Pages are read against the live overlay, not a snapshot: a set between
+Pages are read against the live policy, not a snapshot: a set between
 two reads may show or hide a peer across the boundary. The local peer —
 self-authorised, never an allowlist entry — is the first page's
 `local_peer`, absent on later pages and when the policy has none bound.
 A page because the allowlist holds up to
-`PeerTrustPolicy::MAX_ALLOWED_PEERS` (4096) peers, about 336 KB as
-rows, against this protocol's 128 KiB body; a page of 1024 is about
-84 KiB, so a full allowlist is four requests. Every peer not listed is
+`PeerTrustPolicy::MAX_ALLOWED_PEERS` (4096) peers, about 420 KB as
+2.3 rows (a row is up to 103 bytes with `source`; 84 bytes as the 2.1
+row), against this protocol's 128 KiB body; a page of 1024 is about
+103 KiB, so a full allowlist is four requests
+(`a_full_trust_page_of_the_largest_rows_fits_the_body` pins the page). Every peer not listed is
 denied (deny-by-default is the policy's shape, not a setting; there is
 no default to report and no `TrustDecision` on the wire — that enum and
 its `DenyReason` are local diagnostics). `admin.trust.set` takes one
@@ -343,16 +351,44 @@ the record is the composition's and binds every host (LOCAL-CLIENT.md
 §5, A 2026-10-04) — the daemon writes it to its log and admits the
 target at INFO whatever `observability.log_level` says (#186). On Unix
 every admin connection is the run-dir owner's (ADR-0037), so the log
-says a set happened, not who among the owner's processes made it. Adding a peer already listed and removing one not
+says a set happened, not who among the owner's processes made it. A set that changes the policy is written to the
+state directory's trust overlay (`<state>/trust-overlay.json`, ADR-0028 A
+2026-10-07: one of four moves on the normalised `added`/`revoked` lists)
+before the new policy is published to the runtime and before the set is
+answered, so an answered set survives a restart and a crash; a set whose
+write fails is answered `Internal` and changes nothing — no connection
+closes, no row moves, and the audit line's outcome is `unwritten`; a
+publish that fails after the write, or a directory sync that fails after
+the rename, restores the previous overlay before the set is answered
+failed; when that restore fails too the overlay is ahead of the runtime
+(answered `Internal`, audited `failed`, logged) and the set — an allow as
+much as a revocation — takes effect at the next start (ADR-0028). Adding a peer already listed and removing one not
 listed are no-ops that answer `ok`. Both methods are granted only to a
 connection that negotiated minor 2.1 or later, and `admin.trust` is
 requested only in a hello sent after the client has learnt the daemon
 speaks 2.1 (§Version negotiation's capability rule); the `close` frame's
-`supported` list was `[{major: 2, minor: 1}]` from R1 and is
-`[{major: 2, minor: 2}]` since `admin.peers.list` (A 2026-10-06). The two are the
+`supported` list was `[{major: 2, minor: 1}]` from R1, `[{major: 2,
+minor: 2}]` from `admin.peers.list` (A 2026-10-06), and is `[{major: 2,
+minor: 3}]` since the trust overlay (A 2026-10-07): it names the
+server's `IPC_MAX_MINOR`, never a literal. The two were the
 same runtime overlay as `admin.endpoints.*` — never written to
-`config.yaml`, `persisted: false` — until the owner decides persistence
-(ADR-0028's question, routed with the Stage 15 record). Their schemas, `trust-list-params`, `trust-list` and `trust-set-params`, were `approved`, and the method and capability enums carry their minor bumps (`ipc/method`
+`config.yaml`, `persisted: false` — until the owner decided persistence
+on 2026-10-07 (ADR-0028's question, routed with the Stage 15 record):
+since then a set is a persisted overlay in the state directory, still
+never `config.yaml`; the row says so behind minor 2.3 (`ipc/trust-list`
+1.1.0: `persisted` a boolean and `source` optional, each shape named
+with the minor that serves it), the 2.1 row unchanged below, the
+`close` frame's `supported` list `[{major: 2, minor: 3}]` from the batch
+that implements it, its mirror and the daemon changing in one PR. The
+client's half (A 2026-10-07): a binding that fills the neutral trust row
+(`LOCAL-CLIENT.md` §7 item 11: `persisted` and a `source` every listed
+peer has) reads `admin.trust.list` only on a connection that negotiated
+2.3 or later and refuses the read below it with `ProtocolUnsupported`,
+no round trip — as `admin.peers.list` is refused below 2.2 — because the
+2.1 row carries no `source` and an unknown is never shown as a value;
+`admin.trust.set` carries no row and is unchanged from 2.1; a raw reader
+(`transportctl trust list`) prints whatever row the negotiated minor
+gives. Their schemas, `trust-list-params`, `trust-list` and `trust-set-params`, were `approved`, and the method and capability enums carry their minor bumps (`ipc/method`
 1.1.0, `ipc/capability` 1.2.0, `ipc/request` 1.1.0), as every 2.0 shape
 did (plan §16 (3)); they flipped `active` with Stage 15's close (2026-10-06, with `ipc/path-changed`). Discovery and bootstrap administration still have no method; Stage 15's close carried them to the owner (plan §18's record, with ADR-0032's revisit).
 
@@ -393,8 +429,9 @@ the implementing batch and its mirror, as above.
 
 `hello.ipc_version.major` accepts any positive integer, so an unsupported
 major is a well-formed hello: the server answers
-`close{code: VersionIncompatible, supported: [{major: 2, minor: 2}]}` and
-closes. For major 2 the server selects `minor = min(client, server)` and
+`close{code: VersionIncompatible, supported: [{major: 2, minor: IPC_MAX_MINOR}]}`
+— the server's highest minor, 3 since the trust overlay (A 2026-10-07),
+never a literal older than the server — and closes. For major 2 the server selects `minor = min(client, server)` and
 returns it in `hello_response`. The client holds the server to that
 rule: a `hello_response` whose minor is above the minor the client
 offered, or above the highest minor the client speaks, could not have
@@ -428,7 +465,14 @@ schema takes an additive property into 2.0 itself (`event_queue` on
 emitted, its mirror refusing the old name (`pre_auth.tracked_peers` off
 `admin-status` 1.1.0, A 2026-10-01), and treats a change as that removal
 plus that addition — its own version moving 1.x → 1.(x+1) each time
-(ADR-0017 records the rule and its one bound).
+(ADR-0017 records the rule and its one bound). A closed RESULT shape may
+widen behind a new minor (ADR-0017 A 2026-10-07): a property gains a
+value or a new optional property appears only on a connection that
+negotiated that minor or later, the shape served below it stays
+byte-identical to the schema's earlier description, the schema names the
+minor each shape applies from, and the old shape is served on every
+supported minor below the new one; first use `ipc/trust-list` 1.1.0 behind
+2.3.
 The first production build spoke 2.0; Stage 15's R1 batch, which
 brought `peer.path_changed`, spoke 2.1, and R2 added `admin.trust.*` to
 it; `admin.peers.list` brought 2.2 (A 2026-10-06).

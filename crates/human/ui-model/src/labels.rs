@@ -219,16 +219,21 @@ ui_texts! {
     BackToConversations => "Back to conversations",
     /// The trust settings' heading.
     TrustHeading => "Trust",
-    /// Under the heading: what the list decides, and that a change lasts
-    /// only until the daemon restarts (ADR-0028: a runtime overlay). The
-    /// person's state: about to add or remove a peer; read once, so it
-    /// may run to two sentences.
-    TrustExplanation => "Only the peers listed here can exchange messages with this profile. A change made here lasts until the transport daemon restarts; to keep it, add it to the profile's configuration.",
+    /// Under the heading: what the list decides, and that a change made
+    /// here lasts until it is changed again (ADR-0028 A 2026-10-07: the
+    /// daemon keeps it in its state). The person's state: about to add or
+    /// remove a peer; read once, so it may run to two sentences.
+    TrustExplanation => "Only the peers listed here can exchange messages with this profile. A change made here stays until you change it again.",
     /// The label of this profile's own `PeerId`, shown in full and
     /// selectable to copy.
     OwnPeerId => "This profile's PeerId, select to copy",
     /// The heading of the trusted peers' list.
     TrustedPeers => "Trusted peers",
+    /// Beside a listed peer that the profile's configuration lists: why it
+    /// is there.
+    TrustFromConfiguration => "From the profile's configuration",
+    /// Beside a listed peer that was added in these settings.
+    TrustAddedHere => "Added here",
     /// Shown in place of the list while it is read.
     TrustReading => "Reading the trust settings",
     /// Shown in place of the list when it holds no peer.
@@ -241,7 +246,7 @@ ui_texts! {
     RemoveTrust => "Remove trust",
     /// The confirmation of an allow. `{peer}` is the exact `PeerId`,
     /// whole: the person must be able to check every character.
-    ConfirmAllow => "Trust {peer} for this profile until the transport daemon restarts? It will be able to exchange messages with this profile.",
+    ConfirmAllow => "Trust {peer} for this profile? It will be able to exchange messages with this profile until you remove its trust.",
     /// The confirmation of a removal. `{peer}` is the exact `PeerId`,
     /// whole. The warning is human-client-ui.md section 8's: connections
     /// close at once.
@@ -251,7 +256,7 @@ ui_texts! {
     /// Drop the change on show.
     CancelChange => "Do not change",
     /// Said once the daemon allowed a peer. `{peer}` the exact `PeerId`.
-    PeerTrusted => "{peer} is trusted until the transport daemon restarts.",
+    PeerTrusted => "{peer} is trusted.",
     /// Said once the daemon revoked a peer. `{peer}` the exact `PeerId`.
     PeerUntrusted => "{peer} is no longer trusted.",
     /// The typed text is not a `PeerId`.

@@ -610,7 +610,10 @@ async fn a_trust_change_reaches_the_daemon_only_once_confirmed() {
     root.pump(1).await;
     let list = root.model().trust_settings().list().cloned().expect("read");
     assert_eq!(list.local_peer.as_ref(), Some(a.peer()));
-    assert_eq!(list.allowed, vec![b.peer().clone()]);
+    assert_eq!(
+        list.peers().cloned().collect::<Vec<_>>(),
+        vec![b.peer().clone()]
+    );
 
     let stranger = peer();
     root.will(trust(TrustInput::EntryChanged(
@@ -632,9 +635,7 @@ async fn a_trust_change_reaches_the_daemon_only_once_confirmed() {
     let settings = root.model().trust_settings();
     assert_eq!(settings.outcome().0, Some(&TrustOutcome::Changed(change)));
     assert!(
-        settings
-            .list()
-            .is_some_and(|l| l.allowed.contains(&stranger)),
+        settings.list().is_some_and(|l| l.allows(&stranger)),
         "the daemon holds it, read back"
     );
 
@@ -648,7 +649,7 @@ async fn a_trust_change_reaches_the_daemon_only_once_confirmed() {
         root.model()
             .trust_settings()
             .list()
-            .is_some_and(|l| !l.allowed.contains(b.peer())),
+            .is_some_and(|l| !l.allows(b.peer())),
         "revoked, read back"
     );
 }

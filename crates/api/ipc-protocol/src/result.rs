@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 
 use interweave_local_client_api::{
     AdminStatus, EndpointAdminView, Generation, IngressCounts, LeaseRecord, MAX_CLIENT_KIND_CHARS,
-    PeerGateView, PeerOutcome, PreAuthCounts, TrustAdminView,
+    PeerGateView, PeerOutcome, PreAuthCounts, TrustAdminView, TrustSource,
 };
 use interweave_transport_api::{
     ConnectivitySummary, EndpointDirectoryV1, EndpointId, Health, MAX_DIRECTORY_ENTRIES,
@@ -27,10 +27,17 @@ use serde::{Deserialize, Serialize};
 pub const MAX_ENDPOINT_ROWS: usize = 64;
 
 /// Rows on one `ipc/trust-list` page: a full allowlist of 4096 is four
-/// pages, and a page of 82-byte rows stays under the 128 KiB body with
-/// the first page's `local_peer` (architect-cto's ruling of 2026-10-04,
-/// LOCAL-IPC.md `admin.trust.list`).
+/// pages, and a page stays under the 128 KiB body with the first page's
+/// `local_peer` -- 82-byte rows at 2.1 (architect-cto's ruling of
+/// 2026-10-04, LOCAL-IPC.md `admin.trust.list`), 103-byte rows at 2.3,
+/// which carry `source`.
+/// `a_full_trust_page_of_the_largest_rows_fits_the_body`.
 pub const MAX_TRUST_PAGE_ROWS: usize = 1024;
+
+/// The minor from which a `trust-list` row is the 2.3 row: `persisted`
+/// true with its `source` (ADR-0017 A 2026-10-07; `ipc/trust-list`
+/// 1.1.0). Below it the 2.1 row is served unchanged.
+pub const TRUST_SOURCE_SINCE_MINOR: u64 = 3;
 
 /// Rows on one `ipc/peer-list` page: a row is up to 194 bytes, so 1024
 /// would overflow the 128 KiB body and 512 is about 100 KB; a full
@@ -381,27 +388,35 @@ pub struct TrustList {
 }
 
 impl TrustList {
-    /// The page of `view` that follows `after` (the first when `None`).
+    /// The page of `view` that follows `after` (the first when `None`),
+    /// in the row shape the connection's `minor` negotiated: the 2.1 row
+    /// below [`TRUST_SOURCE_SINCE_MINOR`], byte for byte as before it, and
+    /// from it the 2.3 row a persisted view row becomes.
     ///
     /// The cursor is a POSITION, not a row: `after` need not be listed,
     /// so a peer revoked between two reads still names the page after
     /// it. Read against the live policy, so pages are not a snapshot.
-    /// `a_trust_list_pages_in_order_and_says_when_more_remain`.
+    /// `a_trust_list_pages_in_order_and_says_when_more_remain`,
+    /// `a_trust_row_is_the_shape_its_minor_names`.
     #[must_use]
-    pub fn page(view: TrustAdminView, after: Option<&TransportIdentity>) -> Self {
-        let mut peers = view.allowed;
-        peers.sort();
-        peers.dedup();
-        let mut rest = peers
+    pub fn page(view: TrustAdminView, after: Option<&TransportIdentity>, minor: u64) -> Self {
+        let mut rows = view.allowed;
+        rows.sort_by(|a, b| a.peer.cmp(&b.peer));
+        rows.dedup_by(|a, b| a.peer == b.peer);
+        let mut rest = rows
             .into_iter()
-            .filter(|peer| after.is_none_or(|after| peer > after))
+            .filter(|row| after.is_none_or(|after| row.peer > *after))
             .peekable();
         let allowed: Vec<TrustRow> = rest
             .by_ref()
             .take(MAX_TRUST_PAGE_ROWS)
-            .map(|peer| TrustRow {
-                peer,
-                persisted: NotPersisted,
+            .map(|row| {
+                let persisted = minor >= TRUST_SOURCE_SINCE_MINOR && row.persisted;
+                TrustRow {
+                    peer: row.peer,
+                    persisted,
+                    source: persisted.then_some(row.source),
+                }
             })
             .collect();
         let next = rest
@@ -615,14 +630,81 @@ mod outcome {
     }
 }
 
-/// One `trust-list` row: an allowed peer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// One `trust-list` row: an allowed peer. The 2.1 row is `persisted`
+/// false with no `source`; the 2.3 row `persisted` true with its
+/// `source` -- the schema's if/then/else, held here in both directions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TrustRow {
     /// The allowed peer.
     pub peer: TransportIdentity,
-    /// Always `false`: a runtime overlay, lost on restart (ADR-0028).
-    pub persisted: NotPersisted,
+    /// The row survives a restart (2.3): configured rows by
+    /// `config.yaml`, administered rows by the trust overlay (ADR-0028 A
+    /// 2026-10-07). Always false in the 2.1 row.
+    pub persisted: bool,
+    /// Where the row comes from, present exactly when `persisted` is.
+    #[serde(skip_serializing_if = "Option::is_none", with = "source")]
+    pub source: Option<TrustSource>,
+}
+
+impl<'de> Deserialize<'de> for TrustRow {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            peer: TransportIdentity,
+            persisted: bool,
+            #[serde(default, with = "source")]
+            source: Option<TrustSource>,
+        }
+        let wire = Wire::deserialize(d)?;
+        if wire.persisted != wire.source.is_some() {
+            return Err(serde::de::Error::custom(
+                "a persisted row names its source, and only a persisted row does",
+            ));
+        }
+        Ok(Self {
+            peer: wire.peer,
+            persisted: wire.persisted,
+            source: wire.source,
+        })
+    }
+}
+
+/// `source` on the wire: the neutral `TrustSource` by the schema's names;
+/// an explicit `null` is refused.
+mod source {
+    use interweave_local_client_api::TrustSource;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    const ALL: [(TrustSource, &str); 2] = [
+        (TrustSource::Configured, "configured"),
+        (TrustSource::Administered, "administered"),
+    ];
+
+    #[expect(
+        clippy::ref_option,
+        clippy::trivially_copy_pass_by_ref,
+        reason = "serde's `with` hands the field by reference, whatever its size"
+    )]
+    pub(super) fn serialize<S: Serializer>(
+        value: &Option<TrustSource>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value.and_then(|v| ALL.into_iter().find(|(s, _)| *s == v)) {
+            Some((_, name)) => s.serialize_str(name),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<TrustSource>, D::Error> {
+        let name = String::deserialize(d)?;
+        ALL.into_iter()
+            .find(|(_, n)| *n == name)
+            .map(|(s, _)| Some(s))
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown source {name:?}")))
+    }
 }
 
 fn absent_or_identity<'de, D: serde::Deserializer<'de>>(
@@ -631,7 +713,7 @@ fn absent_or_identity<'de, D: serde::Deserializer<'de>>(
     TransportIdentity::deserialize(d).map(Some)
 }
 
-/// The literal `false` of `persisted`.
+/// The literal `false` of an endpoint row's `persisted`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NotPersisted;
 
@@ -1153,7 +1235,15 @@ mod tests {
         peers.reverse();
         let view = TrustAdminView {
             local_peer: Some(local.clone()),
-            allowed: peers.clone(),
+            allowed: peers
+                .clone()
+                .into_iter()
+                .map(|peer| interweave_local_client_api::TrustedPeer {
+                    peer,
+                    persisted: false,
+                    source: interweave_local_client_api::TrustSource::Configured,
+                })
+                .collect(),
         };
         peers.sort();
 
@@ -1161,7 +1251,7 @@ mod tests {
         let mut read = Vec::new();
         let mut pages = 0;
         loop {
-            let page = TrustList::page(view.clone(), after.as_ref());
+            let page = TrustList::page(view.clone(), after.as_ref(), crate::IPC_MAX_MINOR);
             pages += 1;
             assert_eq!(
                 page.local_peer.as_ref(),
@@ -1184,9 +1274,17 @@ mod tests {
         // Exactly one page: no `next`, so the reader stops.
         let full = TrustAdminView {
             local_peer: None,
-            allowed: peers[..MAX_TRUST_PAGE_ROWS].to_vec(),
+            allowed: peers[..MAX_TRUST_PAGE_ROWS]
+                .iter()
+                .cloned()
+                .map(|peer| interweave_local_client_api::TrustedPeer {
+                    peer,
+                    persisted: false,
+                    source: interweave_local_client_api::TrustSource::Configured,
+                })
+                .collect(),
         };
-        let page = TrustList::page(full, None);
+        let page = TrustList::page(full, None, crate::IPC_MAX_MINOR);
         assert_eq!(page.allowed.len(), MAX_TRUST_PAGE_ROWS);
         assert_eq!(page.next, None);
         assert_eq!(page.local_peer, None, "absent when the policy has none");
@@ -1194,8 +1292,8 @@ mod tests {
         // A cursor naming a peer no longer listed is a position.
         let gone = peers[10].clone();
         let mut without = view.clone();
-        without.allowed.retain(|peer| *peer != gone);
-        let page = TrustList::page(without, Some(&gone));
+        without.allowed.retain(|row| row.peer != gone);
+        let page = TrustList::page(without, Some(&gone), crate::IPC_MAX_MINOR);
         assert_eq!(page.allowed[0].peer, peers[11]);
     }
 
@@ -1231,12 +1329,111 @@ mod tests {
             serde_json::from_value::<TrustList>(json!({"allowed": [], "next": null})).is_err(),
             "next is a peer or absent"
         );
+        // The schema's if/then/else: a persisted row names its source,
+        // and only a persisted row does.
+        let one = |row: serde_json::Value| {
+            serde_json::from_value::<TrustList>(json!({ "allowed": [row] })).map(|_| ())
+        };
+        let p = synthetic_peer(0);
         assert!(
-            serde_json::from_value::<TrustList>(
-                json!({"allowed": [{"peer": synthetic_peer(0).as_str(), "persisted": true}]})
-            )
-            .is_err(),
-            "never persisted"
+            one(json!({"peer": p.as_str(), "persisted": true, "source": "configured"})).is_ok()
+        );
+        assert!(
+            one(json!({"peer": p.as_str(), "persisted": true, "source": "administered"})).is_ok()
+        );
+        assert!(one(json!({"peer": p.as_str(), "persisted": false})).is_ok());
+        assert!(
+            one(json!({"peer": p.as_str(), "persisted": true})).is_err(),
+            "persisted without its source"
+        );
+        assert!(
+            one(json!({"peer": p.as_str(), "persisted": false, "source": "configured"})).is_err(),
+            "a source on the 2.1 row"
+        );
+        assert!(
+            one(json!({"peer": p.as_str(), "persisted": true, "source": null})).is_err(),
+            "an explicit null"
+        );
+        assert!(
+            one(json!({"peer": p.as_str(), "persisted": true, "source": "someone"})).is_err(),
+            "an unknown source"
+        );
+    }
+
+    /// Below 2.3 the row is the 2.1 row byte for byte, whatever the
+    /// binding knows; from 2.3 a persisted row carries its source. A row
+    /// the binding does not persist is the 2.1 row at every minor.
+    #[test]
+    fn a_trust_row_is_the_shape_its_minor_names() {
+        let (configured, administered) = (synthetic_peer(1), synthetic_peer(2));
+        let view = |persisted| TrustAdminView {
+            local_peer: None,
+            allowed: vec![
+                interweave_local_client_api::TrustedPeer {
+                    peer: configured.clone(),
+                    persisted,
+                    source: TrustSource::Configured,
+                },
+                interweave_local_client_api::TrustedPeer {
+                    peer: administered.clone(),
+                    persisted,
+                    source: TrustSource::Administered,
+                },
+            ],
+        };
+        let rows = |persisted, minor| {
+            let page = serde_json::to_value(TrustList::page(view(persisted), None, minor))
+                .expect("serializes");
+            let mut rows = page["allowed"].as_array().expect("rows").clone();
+            rows.sort_by(|a, b| a["peer"].as_str().cmp(&b["peer"].as_str()));
+            rows
+        };
+        let old = |p: &TransportIdentity| json!({"peer": p.as_str(), "persisted": false});
+        for minor in 0..TRUST_SOURCE_SINCE_MINOR {
+            assert_eq!(
+                rows(true, minor),
+                [old(&configured), old(&administered)],
+                "2.{minor}"
+            );
+        }
+        assert_eq!(
+            rows(true, TRUST_SOURCE_SINCE_MINOR),
+            [
+                json!({"peer": configured.as_str(), "persisted": true, "source": "configured"}),
+                json!({"peer": administered.as_str(), "persisted": true, "source": "administered"}),
+            ]
+        );
+        assert_eq!(
+            rows(false, TRUST_SOURCE_SINCE_MINOR),
+            [old(&configured), old(&administered)],
+            "an unpersisted row says so at 2.3 too"
+        );
+    }
+
+    /// A full page of the largest 2.3 rows -- 52-character Ed25519 ids,
+    /// `administered`, the first page's `local_peer` and a `next` -- fits
+    /// the body with room for the frame.
+    #[test]
+    fn a_full_trust_page_of_the_largest_rows_fits_the_body() {
+        let longest = TransportIdentity::parse(
+            "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN".to_owned(),
+        )
+        .expect("an Ed25519 PeerId");
+        let page = TrustList {
+            local_peer: Some(longest.clone()),
+            allowed: (0..MAX_TRUST_PAGE_ROWS)
+                .map(|_| TrustRow {
+                    peer: longest.clone(),
+                    persisted: true,
+                    source: Some(TrustSource::Administered),
+                })
+                .collect(),
+            next: Some(longest),
+        };
+        let bytes = serde_json::to_vec(&page).expect("serializes").len();
+        assert!(
+            bytes + 1_024 <= crate::framing::MAX_BODY_BYTES,
+            "{bytes} bytes for {MAX_TRUST_PAGE_ROWS} rows"
         );
     }
 }

@@ -58,7 +58,8 @@ pub enum Method {
     /// One page of the data-plane allowlist (2.1).
     #[serde(rename = "admin.trust.list")]
     AdminTrustList,
-    /// Allow a peer or revoke it (2.1, runtime overlay).
+    /// Allow a peer or revoke it (2.1); kept in the state directory's
+    /// trust overlay across restarts (ADR-0028 A 2026-10-07).
     #[serde(rename = "admin.trust.set")]
     AdminTrustSet,
     /// One page of the dial gate's per-peer state (2.2, under
