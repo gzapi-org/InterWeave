@@ -329,9 +329,11 @@ two reads may show or hide a peer across the boundary. The local peer —
 self-authorised, never an allowlist entry — is the first page's
 `local_peer`, absent on later pages and when the policy has none bound.
 A page because the allowlist holds up to
-`PeerTrustPolicy::MAX_ALLOWED_PEERS` (4096) peers, about 336 KB as
-rows, against this protocol's 128 KiB body; a page of 1024 is about
-84 KiB, so a full allowlist is four requests. Every peer not listed is
+`PeerTrustPolicy::MAX_ALLOWED_PEERS` (4096) peers, about 420 KB as
+2.3 rows (a row is up to 103 bytes with `source`; 84 bytes as the 2.1
+row), against this protocol's 128 KiB body; a page of 1024 is about
+103 KiB, so a full allowlist is four requests
+(`a_full_trust_page_of_the_largest_rows_fits_the_body` pins the page). Every peer not listed is
 denied (deny-by-default is the policy's shape, not a setting; there is
 no default to report and no `TrustDecision` on the wire — that enum and
 its `DenyReason` are local diagnostics). `admin.trust.set` takes one
@@ -365,8 +367,10 @@ listed are no-ops that answer `ok`. Both methods are granted only to a
 connection that negotiated minor 2.1 or later, and `admin.trust` is
 requested only in a hello sent after the client has learnt the daemon
 speaks 2.1 (§Version negotiation's capability rule); the `close` frame's
-`supported` list was `[{major: 2, minor: 1}]` from R1 and is
-`[{major: 2, minor: 2}]` since `admin.peers.list` (A 2026-10-06). The two were the
+`supported` list was `[{major: 2, minor: 1}]` from R1, `[{major: 2,
+minor: 2}]` from `admin.peers.list` (A 2026-10-06), and is `[{major: 2,
+minor: 3}]` since the trust overlay (A 2026-10-07): it names the
+server's `IPC_MAX_MINOR`, never a literal. The two were the
 same runtime overlay as `admin.endpoints.*` — never written to
 `config.yaml`, `persisted: false` — until the owner decided persistence
 on 2026-10-07 (ADR-0028's question, routed with the Stage 15 record):
@@ -425,8 +429,9 @@ the implementing batch and its mirror, as above.
 
 `hello.ipc_version.major` accepts any positive integer, so an unsupported
 major is a well-formed hello: the server answers
-`close{code: VersionIncompatible, supported: [{major: 2, minor: 2}]}` and
-closes. For major 2 the server selects `minor = min(client, server)` and
+`close{code: VersionIncompatible, supported: [{major: 2, minor: IPC_MAX_MINOR}]}`
+— the server's highest minor, 3 since the trust overlay (A 2026-10-07),
+never a literal older than the server — and closes. For major 2 the server selects `minor = min(client, server)` and
 returns it in `hello_response`. The client holds the server to that
 rule: a `hello_response` whose minor is above the minor the client
 offered, or above the highest minor the client speaks, could not have
