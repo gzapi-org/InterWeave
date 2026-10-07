@@ -50,7 +50,10 @@ first draft left the bridge's join state apart from the daemon's, the
 before the bridge drains again, because the daemon's join and leave
 are idempotent; the answer fixes the state, a re-issue cancelled again
 stays pending, `status.pull_queue.pending` lists them, and a reply on a
-channel whose join is pending is `ChannelNotJoined` until it lands; and a
+channel whose join is pending never reaches the route — the pull-queue
+refusal while paused, `ChannelNotJoined` while disconnected, the
+pending entries resolved at the reconnect before another host line is
+read (the re-review's correction of the first wording's "window"); and a
 paused bridge, reading nothing, learns of its session's end only at the
 next take, so `status` reports it true but late; `identity`,
 `status` and `receive` answer, and `receive` lifts the pause. The
