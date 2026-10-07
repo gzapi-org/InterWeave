@@ -51,6 +51,10 @@ pub enum CompositionError {
         /// Dotted path of the field.
         field: &'static str,
     },
+    /// The trust overlay cannot be trusted or its normalisation rewrite
+    /// failed: the runtime does not start, since skipping it would
+    /// re-allow every peer the operator revoked (ADR-0028 A 2026-10-07).
+    TrustOverlay(interweave_profile_config::trust_overlay::OverlayError),
 }
 
 impl core::fmt::Display for CompositionError {
@@ -73,6 +77,7 @@ impl core::fmt::Display for CompositionError {
                 f,
                 "{field} is set to a value this build cannot honour yet; only the schema's default is accepted"
             ),
+            Self::TrustOverlay(e) => write!(f, "{e}"),
         }
     }
 }
@@ -94,6 +99,31 @@ pub struct DiscoveryPlan {
     pub mdns: Option<i32>,
     /// `kademlia`: the resolved entry.
     pub kademlia: Option<(KademliaProfile, i32)>,
+}
+
+impl Composition {
+    /// The data-plane allowlist in force replaced by `allowed`: the
+    /// configuration with the trust overlay applied (ADR-0028 A
+    /// 2026-10-07). Applied AFTER the profile validated against
+    /// `config.yaml`'s own list, whose endpoint subsets name configured
+    /// peers -- validating against the effective list would refuse a
+    /// profile whose endpoint names a peer the operator revoked.
+    ///
+    /// # Errors
+    /// [`CompositionError::Translation`] past the policy's bound, which
+    /// the overlay's load already refused.
+    pub fn with_allowed(
+        mut self,
+        allowed: impl IntoIterator<Item = TransportIdentity>,
+        local: &TransportIdentity,
+    ) -> Result<Self, CompositionError> {
+        let peer_trust = PeerTrustPolicy::new(allowed)
+            .map_err(|_| CompositionError::Translation("the allowlist past its bound"))?
+            .with_local_peer(local.clone());
+        self.trust = TrustSources::new(peer_trust.clone(), self.trust.infrastructure.clone());
+        self.peer_trust = peer_trust;
+        Ok(self)
+    }
 }
 
 /// Everything [`crate::ComposedRuntime`] builds from one profile.

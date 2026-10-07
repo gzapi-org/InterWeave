@@ -10,13 +10,14 @@
 //! request channel; a request the task can no longer answer is answered
 //! `BackendUnavailable`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use interweave_local_client_api::{Generation, TrustAdminView};
+use interweave_local_client_api::{Generation, TrustAdminView, TrustSource, TrustedPeer};
+use interweave_profile_config::trust_overlay::TrustOverlay;
 use interweave_profile_config::{ProfileConfig, ProfilePaths};
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::{
@@ -49,6 +50,12 @@ pub struct CompositionOptions {
     /// The peer cache's file (`ProfilePaths::peer_cache_file`), required
     /// when the profile enables `peer-cache`.
     pub peer_cache_file: Option<PathBuf>,
+    /// The trust overlay's file (`TrustOverlay::path_for`): what
+    /// `admin.trust.set` changed, kept across restarts (ADR-0028 A
+    /// 2026-10-07). Every production binding supplies one; without one
+    /// -- a test construction -- a set lasts until the runtime stops and
+    /// every row reads `persisted: false` (`LOCAL-CLIENT.md` §7 item 11).
+    pub trust_overlay_file: Option<PathBuf>,
     /// Each endpoint's and each channel's delivery queue bound
     /// (`TRANSPORT.md` §Backpressure: 256 per client).
     pub queue_bound: usize,
@@ -67,6 +74,7 @@ impl CompositionOptions {
         Self {
             listen: profile.transport.listen.addresses.clone(),
             peer_cache_file: Some(paths.peer_cache_file()),
+            trust_overlay_file: Some(TrustOverlay::path_for(paths)),
             queue_bound: usize::try_from(profile.ipc.client_event_queue).unwrap_or(usize::MAX),
             ..Self::default()
         }
@@ -78,6 +86,7 @@ impl Default for CompositionOptions {
         Self {
             listen: Vec::new(),
             peer_cache_file: None,
+            trust_overlay_file: None,
             queue_bound: 256,
             event_capacity: 1024,
             discovery_interval: Duration::from_secs(1),
@@ -249,7 +258,19 @@ impl ComposedRuntime {
                 "discovery_interval must be greater than zero",
             ));
         }
-        let composition = translate(profile, &local, options.queue_bound)?;
+        // THE OVERLAY BEFORE THE FIRST ADMISSION: loaded, normalised
+        // against the configuration and bounded here, before the
+        // substrate starts, so no connection is admitted under the
+        // configuration alone. A present overlay that cannot be trusted
+        // stops the start (ADR-0028 A 2026-10-07).
+        let configured_peers = profile.trust.allowed_peers.clone();
+        let (overlay, allowed) = match &options.trust_overlay_file {
+            Some(path) => TrustOverlay::load(path, &configured_peers)
+                .map_err(CompositionError::TrustOverlay)?,
+            None => (TrustOverlay::default(), configured_peers.clone()),
+        };
+        let composition = translate(profile, &local, options.queue_bound)?
+            .with_allowed(allowed.clone(), &local)?;
         // A WALL-CLOCK ANCHOR ADVANCED BY THE MONOTONIC CLOCK. The peer
         // cache persists these timestamps and compares them against its
         // TTL after a restart, so the origin must survive the process:
@@ -265,7 +286,7 @@ impl ComposedRuntime {
             composition.discovery,
             options.peer_cache_file.as_deref(),
             composition.peer_trust,
-            profile.trust.allowed_peers.clone(),
+            allowed,
             &local,
             clock(),
         )?;
@@ -343,6 +364,9 @@ impl ComposedRuntime {
             clock: Box::new(clock),
             trust,
             infrastructure,
+            configured: configured_peers,
+            overlay,
+            overlay_file: options.trust_overlay_file.clone(),
             outcomes: LastOutcomes::default(),
             refusals: ReconnectRefusals::default(),
         };
@@ -518,6 +542,14 @@ struct Driver {
     /// The infrastructure set the profile configured, republished
     /// unchanged with every trust change: `admin.trust` does not reach it.
     infrastructure: InfrastructureSet,
+    /// `config.yaml`'s `trust.allowed_peers` as the runtime started with
+    /// it: what the overlay is a delta against.
+    configured: BTreeSet<TransportIdentity>,
+    /// The trust overlay as last written, normalised: `trust` is
+    /// (configured ∪ added) ∖ revoked of it.
+    overlay: TrustOverlay,
+    /// Where the overlay is kept; `None` in a test construction.
+    overlay_file: Option<PathBuf>,
     /// Each allowlisted peer's last dial outcome (`CONNECTIVITY.md` §19).
     outcomes: LastOutcomes,
     /// Each allowlisted peer's last reconnect refusal, logged on change.
@@ -828,10 +860,18 @@ impl Driver {
                     allowed: self
                         .trust
                         .allowed_peers()
-                        .map(|peer| interweave_local_client_api::TrustedPeer {
+                        .map(|peer| TrustedPeer {
                             peer: peer.clone(),
-                            persisted: false,
-                            source: interweave_local_client_api::TrustSource::Configured,
+                            persisted: self.overlay_file.is_some(),
+                            // Exact, not a default: the policy is
+                            // (configured ∪ added) ∖ revoked, so a listed
+                            // peer the configuration does not name is an
+                            // administered one.
+                            source: if self.configured.contains(peer) {
+                                TrustSource::Configured
+                            } else {
+                                TrustSource::Administered
+                            },
                         })
                         .collect(),
                 });
@@ -878,7 +918,19 @@ impl Driver {
         } else {
             Ok(next.revoke(&peer))
         };
+        // WRITTEN BEFORE PUBLISHED (ADR-0028 A 2026-10-07): a set answered
+        // `ok` survives a crash, and a set whose write fails changes
+        // nothing -- not the policy, not a connection, not a row.
+        let overlay = match decided {
+            Ok(true) => self.overlay.set(&self.configured, &peer, allowed),
+            _ => None,
+        };
+        let unwritten = match (&overlay, &self.overlay_file) {
+            (Some(overlay), Some(path)) => overlay.write(path).is_err(),
+            _ => false,
+        };
         let published = match decided {
+            Ok(true) if unwritten => Err(TransportError::Internal),
             Ok(true) => self
                 .swarm
                 .set_trust(TrustSources::new(next.clone(), self.infrastructure.clone()))
@@ -887,10 +939,27 @@ impl Driver {
                 .map_err(|_| TransportError::BackendUnavailable),
             other => other,
         };
+        // A FAILED PUBLISH RESTORES THE OVERLAY, so a set answered failed
+        // does not take effect at the next start. If the restore fails
+        // too, the overlay is ahead of the runtime -- the conservative
+        // direction for a revocation -- and the answer is `Internal`.
+        let published = match (&published, &overlay, &self.overlay_file) {
+            (Err(TransportError::BackendUnavailable), Some(_), Some(path))
+                if self.overlay.write(path).is_err() =>
+            {
+                tracing::warn!(
+                    "admin.trust.set: the trust overlay is ahead of the runtime; \
+                     the set takes effect at the next start"
+                );
+                Err(TransportError::Internal)
+            }
+            _ => published,
+        };
         let outcome = match &published {
             Ok(true) => "changed",
             Ok(false) => "unchanged",
             Err(TransportError::InvalidArgument) => "refused",
+            Err(_) if unwritten => "unwritten",
             Err(_) => "failed",
         };
         tracing::info!(
@@ -901,6 +970,9 @@ impl Driver {
             "admin.trust.set"
         );
         if published? {
+            if let Some(overlay) = overlay {
+                self.overlay = overlay;
+            }
             self.discovery.set_trust(next.clone());
             self.trust = next;
             if !allowed {
