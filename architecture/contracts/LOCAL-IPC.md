@@ -314,7 +314,9 @@ here (architect-cto's ruling of 2026-10-04, below).
 `admin.trust.list` answers the profile's allowlist as `trust-api`'s `PeerTrustPolicy` holds it, ONE PAGE at a time: the allowed peers in the
 ascending order of their canonical strings, at most 1024 a page, with
 on a connection that negotiated 2.3 or later `persisted: true` on every
-row and each row's `source` — `configured` for a peer `config.yaml`
+row (a row the runtime cannot persist is answered `Internal` there, a
+state only a store-less runtime reports and `LOCAL-CLIENT.md` §7 item
+11 never serves over IPC) and each row's `source` — `configured` for a peer `config.yaml`
 lists, `administered` for one added by `admin.trust.set` (ADR-0028 A
 2026-10-07) — and below 2.3 the 2.1 row, `persisted: false` and no
 `source` (ADR-0017 A 2026-10-07, §Version negotiation: a closed result shape
@@ -330,16 +332,20 @@ self-authorised, never an allowlist entry — is the first page's
 `local_peer`, absent on later pages and when the policy has none bound.
 A page because the allowlist holds up to
 `PeerTrustPolicy::MAX_ALLOWED_PEERS` (4096) peers, about 420 KB as
-2.3 rows (a row is up to 103 bytes with `source`; 84 bytes as the 2.1
-row), against this protocol's 128 KiB body; a page of 1024 is about
-103 KiB, so a full allowlist is four requests
+2.3 rows (a row with a 52-character peer id is 104 bytes with `source`,
+105 with its array comma; 81 bytes as the 2.1 row, 82 with the comma),
+against this protocol's 128 KiB body; a page of 1024 is about
+105 KiB, so a full allowlist is four requests
 (`a_full_trust_page_of_the_largest_rows_fits_the_body` pins the page). Every peer not listed is
 denied (deny-by-default is the policy's shape, not a setting; there is
 no default to report and no `TrustDecision` on the wire — that enum and
 its `DenyReason` are local diagnostics). `admin.trust.set` takes one
 `peer` and `allowed: true | false`: `true` adds the peer to the allowlist
-and is refused with `InvalidArgument` past `PeerTrustPolicy::MAX_ALLOWED_PEERS`
-or for the local peer; `false` removes it, closes every connection
+and is refused with `InvalidArgument` past `PeerTrustPolicy::MAX_ALLOWED_PEERS`,
+for the local peer, or — while an overlay is ahead of the runtime
+(ADR-0028) — when the policy's bound admits it today but the overlay
+on disk would exceed `MAX_ALLOWED_PEERS` at the next start (audited
+`refused`, nothing written); `false` removes it, closes every connection
 the peer holds at once, drops its cached directory
 (`DirectoryCache::forget`, §16's carry), and every connection with
 `events` sees `peer.disconnected` with `reason_class: policy` (below).
@@ -475,7 +481,8 @@ supported minor below the new one; first use `ipc/trust-list` 1.1.0 behind
 2.3.
 The first production build spoke 2.0; Stage 15's R1 batch, which
 brought `peer.path_changed`, spoke 2.1, and R2 added `admin.trust.*` to
-it; `admin.peers.list` brought 2.2 (A 2026-10-06).
+it; `admin.peers.list` brought 2.2 (A 2026-10-06); the persisted trust
+row brought 2.3 (A 2026-10-07, #215).
 
 Phases and directions, which JSON Schema cannot express and
 `tests/ipc-v2` asserts: `hello` is the client's first frame and only its
