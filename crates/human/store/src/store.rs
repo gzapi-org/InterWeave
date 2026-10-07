@@ -83,6 +83,19 @@ pub struct HumanStore {
     quota: Option<u32>,
 }
 
+/// The settings key that marks a store rewritten without the freed space a
+/// build before `secure_delete` left (`HumanStore::scrub_at_open`).
+const SCRUBBED: &str = "released_content_scrubbed";
+
+/// THE CLOSE truncates the WAL too (`RETENTION.md` §8: absent "after a
+/// clean close"). SQLite's own close of the last connection checkpoints and
+/// removes the WAL as well; this makes the store's rule not rest on that.
+impl Drop for HumanStore {
+    fn drop(&mut self) {
+        let _ = self.truncate_wal();
+    }
+}
+
 /// A public `u64` millisecond timestamp as SQLite's signed integer.
 ///
 /// REFUSED RATHER THAN SATURATED. Every one of these was
@@ -193,7 +206,8 @@ impl HumanStore {
         // `migrate` refuses that file through the WAL, and closing the
         // connection checkpoints the WAL into it -- the newer build's own
         // committed data, so nothing is lost, but the file's bytes change.
-        if let Some(version) = header_user_version(path)?
+        let existing = header_user_version(path)?;
+        if let Some(version) = existing
             && version > crate::schema::SCHEMA_VERSION
         {
             return Err(StoreError::Migration(format!(
@@ -220,7 +234,9 @@ impl HumanStore {
                 require_owner_only(&companion, what)?;
             }
         }
-        Self::from_connection(conn, options)
+        let mut store = Self::from_connection(conn, options)?;
+        store.scrub_at_open(existing.is_some_and(|v| v > 0))?;
+        Ok(store)
     }
 
     /// Open a store that exists only for this process.
@@ -246,6 +262,16 @@ impl HumanStore {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
         conn.pragma_update(None, "foreign_keys", true)?;
+        // RELEASED CONTENT LEAVES THE STORE'S OWN FILES (`RETENTION.md` §8,
+        // A 2026-10-07, on SPIKE-008's measurement): without this a deleted
+        // row's bytes stayed in its page, in plaintext, after the store
+        // closed. Read back, as the quota is: a build that cannot apply it
+        // is refused rather than run without it.
+        let secure: i64 =
+            conn.pragma_update_and_check(None, "secure_delete", true, |row| row.get(0))?;
+        if secure != 1 {
+            return Err(StoreError::SecureDeleteNotApplied);
+        }
         // READ BACK, not assumed (review R5 on fa3eab8): the pragma
         // answers with the ceiling it set, which is not the one asked for
         // when the request is zero or below the database's current size.
@@ -284,6 +310,92 @@ impl HumanStore {
             health,
             quota: options.max_pages,
         })
+    }
+
+    /// At every open of a file store (`RETENTION.md` §8: absent "after the
+    /// next open following an unclean one"). The WAL is checkpointed into
+    /// the database and truncated: what this build wrote there was deleted
+    /// under `secure_delete`, so its released bytes are already zeroed.
+    ///
+    /// A store written BEFORE `secure_delete` (an `existing` file whose
+    /// settings lack [`SCRUBBED`]) can hold released bytes in freed pages
+    /// and in the free space of pages still in use; `VACUUM` rewrites the
+    /// file without any of it, once, and the WAL it wrote is truncated. Row
+    /// ids survive: every table's key is declared. A fresh store has
+    /// nothing to scrub, and is marked at creation.
+    ///
+    /// A store that cannot write the rewrite (its quota, a full or failing
+    /// medium) opens degraded rather than not at all -- its content stays
+    /// readable and releasable -- and a later open scrubs it.
+    fn scrub_at_open(&mut self, existing: bool) -> Result<(), StoreError> {
+        // A fresh store has released nothing and is written only under
+        // `secure_delete` from here on: it is marked so, in the WAL its new
+        // schema went to, and left to the close to checkpoint.
+        if !existing {
+            if self.mark_scrubbed().is_err() {
+                self.health = StorageHealth::Degraded;
+            }
+            return Ok(());
+        }
+        if self.truncate_wal().is_err() {
+            self.health = StorageHealth::Degraded;
+            return Ok(());
+        }
+        if self.scrubbed()? {
+            return Ok(());
+        }
+        let rewrite = self
+            .conn
+            .execute_batch("VACUUM")
+            .map_err(StoreError::from)
+            .and_then(|()| self.mark_scrubbed());
+        if rewrite.is_err() || self.truncate_wal().is_err() {
+            self.health = StorageHealth::Degraded;
+        }
+        Ok(())
+    }
+
+    fn mark_scrubbed(&self) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, '1')",
+            params![SCRUBBED],
+        )?;
+        Ok(())
+    }
+
+    fn scrubbed(&self) -> Result<bool, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM settings WHERE key = ?1",
+                params![SCRUBBED],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// Checkpoint the WAL into the database and truncate it to nothing, so
+    /// the page images it held -- a released message's content among them
+    /// -- leave the log. With `secure_delete` the released bytes are
+    /// already zeroed in the page the checkpoint writes back.
+    fn truncate_wal(&self) -> Result<(), StoreError> {
+        self.conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+        Ok(())
+    }
+
+    /// After every release (`transport_terminal`, `mark_read`, `unkeep`):
+    /// the bound `RETENTION.md` §8 asks for while the store is open is
+    /// ONE RELEASE -- the content leaves the log before the call returns.
+    /// Measured on the Android test device (SPIKE-008, A40, API 30): a
+    /// delete with `secure_delete` and this truncate took 14-22 ms
+    /// (median), 23-37 ms (95th percentile), against 4-5 ms without them;
+    /// human-paced, so no larger batch is taken. A failure here does not
+    /// undo the release, which is committed: the next release, the next
+    /// open and the close each truncate again.
+    fn release_done(&self) {
+        let _ = self.truncate_wal();
     }
 
     /// Whether new unread content can still be committed durably.
@@ -517,7 +629,10 @@ impl HumanStore {
                     params![row_id.get()],
                 );
                 match result {
-                    Ok(_) => Ok(()),
+                    Ok(_) => {
+                        self.release_done();
+                        Ok(())
+                    }
                     Err(e) => Err(self.note_failure(e)),
                 }
             }
@@ -758,7 +873,10 @@ impl HumanStore {
         })();
 
         match result {
-            Ok(Some(held)) => Ok(held),
+            Ok(Some(held)) => {
+                self.release_done();
+                Ok(held)
+            }
             Ok(None) => Err(StoreError::NoSuchRow),
             Err(e) => Err(self.note_store_failure(e)),
         }
@@ -948,7 +1066,11 @@ impl HumanStore {
             Ok(Some(held))
         })();
 
-        result.map_err(|e| self.note_store_failure(e))
+        let released = result.map_err(|e| self.note_store_failure(e))?;
+        if released.is_some() {
+            self.release_done();
+        }
+        Ok(released)
     }
 
     /// Every unread inbound message, oldest first.
