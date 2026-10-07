@@ -31,4 +31,8 @@ interweave-human-store = { git = "https://github.com/gzapi-org/InterWeave.git", 
 interweave-human-core = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "d019ac06f5149567ab37d7c59c61895c974598e6" }
 interweave-transport-api = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "d019ac06f5149567ab37d7c59c61895c974598e6" }
 
+[dev-dependencies]
+# Exact, the root lock's version: the label test reads the JSON it checks.
+serde_json = "=1.0.151"
+
 [workspace]

@@ -342,19 +342,17 @@ pub fn forensic(path: &Path) -> Result<String, String> {
     let later_open = (holds(path, second), holds(&wal, second));
     drop(store);
     let later_closed = (holds(path, second), holds(&wal, second));
+    // Each object from its own named pair: a positional list of twelve
+    // values once printed the open-store readings under the wrong labels
+    // (#214's re-review), and `the_file_level_search_labels_...` pins them.
+    let files = |(db, wal): &(String, String)| format!("{{\"db\":\"{db}\",\"wal\":\"{wal}\"}}");
     Ok(format!(
-        "{{\"later\":{{\"before_read_db\":\"{before_read}\",\"open\":{{\"db\":\"{}\",\"wal\":\"{}\"}},\"closed\":{{\"db\":\"{}\",\"wal\":\"{}\"}}}},\"open\":{{\"released\":{{\"db\":\"{}\",\"wal\":\"{}\"}},\"kept_control\":{{\"db\":\"{}\",\"wal\":\"{}\"}}}},\"closed\":{{\"released\":{{\"db\":\"{}\",\"wal\":\"{}\"}},\"kept_control\":{{\"db\":\"{}\",\"wal\":\"{}\"}}}}}}",
-        open_released.0,
-        open_released.1,
-        open_kept.0,
-        open_kept.1,
-        later_open.0,
-        later_open.1,
-        later_closed.0,
-        later_closed.1,
-        closed_released.0,
-        closed_released.1,
-        closed_kept.0,
-        closed_kept.1
+        "{{\"later\":{{\"before_read_db\":\"{before_read}\",\"open\":{},\"closed\":{}}},\"open\":{{\"released\":{},\"kept_control\":{}}},\"closed\":{{\"released\":{},\"kept_control\":{}}}}}",
+        files(&later_open),
+        files(&later_closed),
+        files(&open_released),
+        files(&open_kept),
+        files(&closed_released),
+        files(&closed_kept),
     ))
 }

@@ -86,3 +86,26 @@ fn the_file_level_search_sees_the_kept_control_and_records_the_released_bytes() 
     );
     let _ = std::fs::remove_dir_all(db.parent().expect("dir"));
 }
+
+#[test]
+fn the_file_level_search_labels_each_reading_where_it_was_taken() {
+    let db = scratch("labels");
+    let out = store::forensic(&db).expect("measures");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("JSON");
+    // Structural, whatever the bytes found: a reading taken with the store
+    // open finds a WAL file, and a clean close removes it, so a reading
+    // labelled closed finds none. A swapped label breaks one of these.
+    let readings = [
+        ("later.open", &v["later"]["open"], true),
+        ("later.closed", &v["later"]["closed"], false),
+        ("open.released", &v["open"]["released"], true),
+        ("open.kept_control", &v["open"]["kept_control"], true),
+        ("closed.released", &v["closed"]["released"], false),
+        ("closed.kept_control", &v["closed"]["kept_control"], false),
+    ];
+    for (name, reading, open) in readings {
+        let wal = reading["wal"].as_str().expect("a wal reading");
+        assert_eq!(wal != "no file", open, "{name}: {out}");
+    }
+    let _ = std::fs::remove_dir_all(db.parent().expect("dir"));
+}
