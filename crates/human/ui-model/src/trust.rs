@@ -11,6 +11,8 @@
 //! change shown yields the intent that reaches the daemon. Nothing a message carries reaches
 //! here: the inputs are the settings view's alone.
 
+#[cfg(test)]
+use interweave_human_client_api::TrustRow;
 use interweave_human_client_api::{TrustList, TrustProblem, TrustSetFailure};
 use interweave_transport_api::TransportIdentity;
 
@@ -161,7 +163,7 @@ impl TrustSettings {
     /// Propose removing trust from `peer`, which must be listed: a
     /// confirmation to show.
     pub fn propose_revoke(&mut self, peer: &TransportIdentity) {
-        if self.list.as_ref().is_some_and(|l| l.allowed.contains(peer)) {
+        if self.list.as_ref().is_some_and(|l| l.allows(peer)) {
             self.pending = Some(TrustChange {
                 peer: peer.clone(),
                 allowed: false,
@@ -222,7 +224,7 @@ impl TrustSettings {
             // The list read back is the daemon's, and another local
             // administrator may have changed the same peer in between: a
             // list that says otherwise is not reported as the change made.
-            Ok(list) if list.allowed.contains(&change.peer) != change.allowed => {
+            Ok(list) if list.allows(&change.peer) != change.allowed => {
                 self.list = Some(list);
                 self.reread = true;
                 self.say(TrustOutcome::Unconfirmed(change));
@@ -310,7 +312,7 @@ impl TrustSettings {
 fn entry_problem(list: &TrustList, peer: &TransportIdentity) -> Option<EntryProblem> {
     if list.local_peer.as_ref() == Some(peer) {
         Some(EntryProblem::OwnIdentity)
-    } else if list.allowed.contains(peer) {
+    } else if list.allows(peer) {
         Some(EntryProblem::AlreadyTrusted)
     } else {
         None
@@ -335,7 +337,7 @@ mod tests {
         assert_eq!(s.opened(), None, "one read at a time");
         s.read(Ok(TrustList {
             local_peer: Some(me.clone()),
-            allowed: allowed.to_vec(),
+            allowed: allowed.iter().cloned().map(TrustRow::added_here).collect(),
         }));
         s
     }
@@ -357,7 +359,7 @@ mod tests {
             change.clone(),
             Ok(TrustList {
                 local_peer: Some(me),
-                allowed: vec![them],
+                allowed: vec![TrustRow::added_here(them)],
             }),
         );
         assert_eq!(s.outcome().0, Some(&TrustOutcome::Changed(change)));
@@ -567,7 +569,7 @@ mod tests {
         assert!(s.pending().is_some());
         s.read(Ok(TrustList {
             local_peer: Some(me),
-            allowed: vec![them],
+            allowed: vec![TrustRow::added_here(them)],
         }));
         assert_eq!(s.pending(), None, "already trusted now");
     }
@@ -587,7 +589,7 @@ mod tests {
             change.clone(),
             Ok(TrustList {
                 local_peer: Some(me),
-                allowed: vec![them],
+                allowed: vec![TrustRow::added_here(them)],
             }),
         );
         assert_eq!(s.outcome().0, Some(&TrustOutcome::Unconfirmed(change)));

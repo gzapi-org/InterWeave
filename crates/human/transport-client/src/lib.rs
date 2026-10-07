@@ -27,5 +27,5 @@ pub use client::{ClientConfig, TransportClient, WallClock};
 pub use interweave_human_client_api::{
     ClientEvent, Connectivity, Destination, Diagnostics, Origin, OutboundStatus, OutboundUpdate,
     Received, RowError, SendError, SendProblem, SessionProblem, SessionState, TrustList,
-    TrustProblem, TrustSetFailure,
+    TrustOrigin, TrustProblem, TrustRow, TrustSetFailure,
 };

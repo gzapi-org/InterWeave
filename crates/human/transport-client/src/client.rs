@@ -45,7 +45,7 @@ use crate::queue::{Capped, EventQueue};
 use interweave_human_client_api::{
     ClientEvent, Connectivity, Destination, Diagnostics, Origin, OutboundStatus, OutboundUpdate,
     Received, RowError, SendError, SendProblem, SessionProblem, SessionState, TrustList,
-    TrustProblem, TrustSetFailure,
+    TrustOrigin, TrustProblem, TrustRow, TrustSetFailure,
 };
 
 /// How many committed messages wait for hand-over at most: one session
@@ -467,7 +467,7 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
         let view = admin.trust().await.map_err(classify_trust)?;
         Ok(TrustList {
             local_peer: view.local_peer,
-            allowed: view.allowed.into_iter().map(|row| row.peer).collect(),
+            allowed: view.allowed.into_iter().map(trust_row).collect(),
         })
     }
 
@@ -501,7 +501,7 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
             .map_err(|error| TrustSetFailure::MadeNotReadBack(classify_trust(error)))?;
         Ok(TrustList {
             local_peer: view.local_peer,
-            allowed: view.allowed.into_iter().map(|row| row.peer).collect(),
+            allowed: view.allowed.into_iter().map(trust_row).collect(),
         })
     }
 
@@ -1036,6 +1036,18 @@ fn connectivity_of(health: Health, summary: Option<&ConnectivitySummary>) -> Opt
             })
         }
         (Health::Healthy | Health::Degraded, None) => None,
+    }
+}
+
+/// The neutral row in the client's words: a peer both configured and
+/// administered is already `Configured` (the daemon normalises it).
+fn trust_row(row: interweave_local_client_api::TrustedPeer) -> TrustRow {
+    TrustRow {
+        peer: row.peer,
+        origin: match row.source {
+            interweave_local_client_api::TrustSource::Configured => TrustOrigin::Configured,
+            interweave_local_client_api::TrustSource::Administered => TrustOrigin::AddedHere,
+        },
     }
 }
 
