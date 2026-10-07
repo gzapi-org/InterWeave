@@ -51,9 +51,11 @@ before the bridge drains again, because the daemon's join and leave
 are idempotent; the answer fixes the state, a re-issue cancelled again
 stays pending, `status.pull_queue.pending` lists them, and a reply on a
 channel whose join is pending never reaches the route — the pull-queue
-refusal while paused, `ChannelNotJoined` while disconnected, the
-pending entries resolved at the reconnect before another host line is
-read (the re-review's correction of the first wording's "window"); and a
+refusal while paused, the session's absence while disconnected
+(`ChannelNotJoined` only on a channel the bridge never held: a cancelled
+join never drops a channel it already holds), the pending entries
+resolved at the reconnect before another host line is read (two
+re-review corrections of the first wording's "window"); and a
 paused bridge, reading nothing, learns of its session's end only at the
 next take, so `status` reports it true but late; `identity`,
 `status` and `receive` answer, and `receive` lifts the pause. The
