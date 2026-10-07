@@ -83,6 +83,8 @@ fn no_daemon_is_three_for_every_admin_command() {
         &["endpoints", "default", "--none"][..],
         &["trust", "list"][..],
         &["trust", "list", "--json"][..],
+        &["peers", "list"][..],
+        &["peers", "list", "--json"][..],
         &[
             "trust",
             "revoke",
