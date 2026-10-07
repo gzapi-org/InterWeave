@@ -4,7 +4,7 @@ Android foreground-service/lifecycle/backup/recovery-screen platform behavior.
 
 Do not treat experiments placed here as production implementation. Evidence and final decision must be recorded against [`architecture/roadmap/SPIKES.md`](../../architecture/roadmap/SPIKES.md); the verdict is architect-cto's to write there, not this file's.
 
-**Status: RUN (2026-10-06/07, two recorded parts).** Part 1: L1, L3, L4, L5, S1, E1, R1–R3, B1, B3. Part 2: P1, L2, L6, L7, L8, L9, and S1 across a reboot. Not run: B2 (the owner's decision), B4 and B5 (a second device). No verdict is recorded; the verdict is architect-cto's.
+**Status: RUN (2026-10-06/07, four recorded parts).** Parts 3 and 4: duplicate suppression across a restart, a full store, the network in forced Doze, the store's own directory, and a released message's bytes in the database files. Part 1: L1, L3, L4, L5, S1, E1, R1–R3, B1, B3. Part 2: P1, L2, L6, L7, L8, L9, and S1 across a reboot. Not run: B2 (the owner's decision), B4 and B5 (a second device). No verdict is recorded; the verdict is architect-cto's.
 
 ## The device
 
@@ -46,7 +46,7 @@ The recorded run is [`REPRODUCTION-2026-10-06.log`](./REPRODUCTION-2026-10-06.lo
 | L3 | Screen off, battery reported unplugged, deep Doze forced for 180 s: the 30 s heartbeat ran on time throughout, the process lived, and no network loss was reported. |
 | L4 | Backgrounded, the process SIGKILLed (`killProcess` from inside, standing in for a low-memory kill the shell cannot send to another app): the service was back about 1.4 s later as a sticky restart (null intent), in the foreground at once. |
 | L5 | `am force-stop`: no process and no service record for 90 s. The launcher, a person's path, started it again. |
-| S1 | The production store, with 3 pending, 3 unread and 3 kept, after driving U1 read without Keep, K1 unkept and P1 terminal: P2, P3 · U2, U3 · K2, K3, the same after the kill and after the force-stop. The store opens on Android only in an owner-only directory: the app's `files/` is `0771`, which the store refuses, and the harness makes `files/human/` `0700`, so the production client must do the same. |
+| S1 | The production store, with 3 pending, 3 unread and 3 kept, after driving U1 read without Keep, K1 unkept and P1 terminal: P2, P3 · U2, U3 · K2, K3, the same after the kill and after the force-stop. (The part-1 harness made and `chmod`ed `files/human/` itself; part 4 corrects that, below.) |
 | E1 | The store's `backup_eligible_content`: K1–K3 and U1–U3 after seeding, K2, K3, U2 and U3 after the transitions, never a pending row. This matches the host test. |
 | R1 | The recovery screen: `screencap` refused (an empty file). The launcher control: captured. |
 | R2 | The recovery task's recents snapshot is blank while it is the current task. Once left (Home), it is not shown in recents, though the system still holds the task; the one card shown resumed the launcher. An earlier build that opened recovery inside the launcher's task had that task listed with recovery on top: `excludeFromRecents` acts on a task's root, so the requirement's "dedicated Activity/task" is load-bearing. |
@@ -55,7 +55,7 @@ The recorded run is [`REPRODUCTION-2026-10-06.log`](./REPRODUCTION-2026-10-06.lo
 | B3 | The rules alone: after backup, uninstall and reinstall, Android restored `marker/control.txt` (the included control) and nothing else. The wrapped identity, config, recovery scratch and human store were absent, and the store reopened empty. |
 
 **What part 1 did not establish:**
-- **L3, the network in Doze:** the trace shows the process and the callback, not whether a connection could be made; no traffic was attempted. Forced Doze is not natural Doze.
+- **L3, the network in Doze:** answered in part 3 (a TCP handshake every heartbeat). Forced Doze is still not natural Doze.
 - **L4, a real low-memory kill:** a self-SIGKILL stood in.
 - **R2 on other launchers and API levels:** One UI on API 30 only.
 - **B3, the onboarding:** the harness has no onboarding. That a reinstall without the identity enters recovery-required and never manufactures a PeerId (`android-key-custody.md`, `human-client-android.md`) is the production client's to show; what was shown is that nothing sensitive came back.
@@ -83,6 +83,23 @@ The recorded run is [`REPRODUCTION-2026-10-07.log`](./REPRODUCTION-2026-10-07.lo
 - **L8 with a boot receiver:** whether a production client should, or may, restart itself after boot was not tested. ADR-0042's user-presence mode could not unwrap then anyway (SPIKE-009 D4).
 - **B2, a backup through Google's transport:** **not run, by the owner's decision of 2026-10-07: no backup on Google, by design.** B1 showed standard v1 refuses backup outright.
 - **B4, device-to-device transfer, and B5, Samsung Smart Switch:** not run; each needs a second device.
+
+## What was established (parts 3 and 4)
+
+The recorded run is [`REPRODUCTION-2026-10-07b.log`](./REPRODUCTION-2026-10-07b.log), with the phone locked throughout. Part 3 ran the harness at b764f82c, part 4 at 6a385abc.
+
+| id | observation |
+|---|---|
+| S1 (duplicates) | `RETENTION.md` §5's duplicate suppression, through the production store. U1, read without Keep, delivered again: refused `AlreadyRead`, and **again after a process restart**, so the store's `read_pairs` survive it. A new message, C1, delivered: committed, the control. Delivered a second time while still unread, the store answered SQLite's `UNIQUE` constraint (2067). That is a duplicate by the store's own `is_duplicate`, which `transport-client` skips, not a failure. A reboot was not part of this run. |
+| conformance 14 | A store of its own under a 48-page quota took 12 messages of 8 KiB, then hit **SQLite's real `DiskFull`**. Its health reads `Degraded`, the next commit is refused `Degraded`, and all 12 messages are still readable. This matches the host test exactly. |
+| L3 (network) | Every heartbeat makes a TCP handshake to `1.1.1.1:443`. All 12 before Doze succeeded, as did every one during forced deep Doze (07:15:58–07:19:05Z: 13–36 ms) and every one after. In forced Doze the foreground service keeps both its process and the network. |
+| store directory | On a clean install whose harness no longer makes or `chmod`s the directory, `HumanStore::open` **created `files/human/` itself, at `0700`**. Android's `files/` is `0771`. A directory made `0771` before the store opened it was **refused**: "the state directory is mode 0771; message content must be owner-only". So the client needs to give the store a subdirectory and **must not** `chmod` it: the store refuses a directory that was ever broader rather than tighten it, so a client that tightens it first would hide that exposure. |
+| **deletion at the file level** | A byte search of `human.sqlite` and `human.sqlite-wal` for long TEST-ONLY markers, on the phone (3 runs, identical) and on the host (the same bundled SQLite). The kept control was always found, so the search is live. A message released (read, not kept) **after it had reached the database file**: gone from `human.sqlite`, but **still in `human.sqlite-wal` after the store closed**, in plaintext. A message released before it reached the file: in the WAL while the store was open, and gone from both once a clean close checkpointed and removed the WAL. The production store sets `journal_mode=WAL` and no `secure_delete`. Whether `RETENTION.md` §8's "remove … any application-owned plaintext indexes/caches that would reconstruct it" covers the store's own WAL is a contract question, raised with architect-cto. |
+
+**What parts 3 and 4 did not establish:**
+- **Duplicate suppression across a reboot**, and **the byte search across a reboot or after a WAL checkpoint by time**: neither was run.
+- **Natural Doze:** forced Doze only, on a charging, locked phone.
+- **Freed pages in the database file after `VACUUM` or reuse:** only the two release orders above were searched.
 
 ## The harness, as planned before the run
 
