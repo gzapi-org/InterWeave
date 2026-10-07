@@ -230,8 +230,7 @@ ui_texts! {
     /// The heading of the trusted peers' list.
     TrustedPeers => "Trusted peers",
     /// Beside a listed peer that the profile's configuration lists: why it
-    /// is there, and why removing it here is a revocation the daemon keeps
-    /// rather than an edit of the configuration.
+    /// is there.
     TrustFromConfiguration => "From the profile's configuration",
     /// Beside a listed peer that was added in these settings.
     TrustAddedHere => "Added here",
