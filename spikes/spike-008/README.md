@@ -4,7 +4,7 @@ Android foreground-service/lifecycle/backup/recovery-screen platform behavior.
 
 Do not treat experiments placed here as production implementation. Evidence and final decision must be recorded against [`architecture/roadmap/SPIKES.md`](../../architecture/roadmap/SPIKES.md); the verdict is architect-cto's to write there, not this file's.
 
-**Status: NOT RUN.** This file holds the plan the device run follows. No harness exists yet, and nothing has been measured. The harness is written once the Android toolchain is installed, because an Android app nobody can build is a guess, not a harness.
+**Status: PART 1 RUN (2026-10-06: L1, L3, L4, L5, S1, E1, R1–R3, B1, B3).** Not yet run: L2, L6, L7, L8, L9, P1, B2, B4, B5 (below). No verdict is recorded; the verdict is architect-cto's.
 
 ## The device
 
@@ -26,7 +26,42 @@ A dedicated test device, reachable over adb, on which the owner allowed the full
 - So the harness declares both forms, and the matrix records which one the device obeyed.
 - The current-API behaviour itself needs an API 34+ device, which is named as not run here, not inferred.
 
-## The harness (to be written)
+## The harness
+
+- **[`harness/`](./harness):** the Rust core, the **production human store** (`interweave-human-store`, pinned at d019ac06) over raw JNI. It seeds the three durable states through the store's own API, drives the transitions a client drives, and reports a census by TEST label, including the store's own `backup_eligible_content`. `harness/tests/store.rs` runs the same cycle on the host, with a reopen.
+- **[`app/`](./app):**
+  - a launcher Activity, the only start path;
+  - the recovery Activity, non-exported, in its **own task** (`taskAffinity`, started with `FLAG_ACTIVITY_NEW_TASK`), `excludeFromRecents`, `FLAG_SECURE` set before content;
+  - a `START_STICKY` foreground service of type `remoteMessaging` that traces a 30 s heartbeat, its lifecycle and the default network;
+  - a shell-only receiver (DUMP) that writes the excluded files and an included control, and drives the store.
+- **[`build.sh`](./build.sh):** a hand build from the pinned toolchain, without Gradle. It takes the target SDK and the backup posture: `allowBackup=false` with both rule forms (**standard v1**, `android-key-custody.md`), or `true` (the rules alone).
+
+## What was established (part 1)
+
+The recorded run is [`REPRODUCTION-2026-10-06.log`](./REPRODUCTION-2026-10-06.log), from a clean install of each variant.
+
+| id | observation |
+|---|---|
+| L1 | Opening the launcher starts the foreground service. `startForeground` is granted with type 512 (`remoteMessaging`, an API 34 type) on this API 30 device, without enforcement. The notification is ongoing and no-clear (flags `0x62`), on a low-importance channel, naming nothing. |
+| L3 | Screen off, battery reported unplugged, deep Doze forced for 180 s: the 30 s heartbeat ran on time throughout, the process lived, and no network loss was reported. |
+| L4 | Backgrounded, the process SIGKILLed (`killProcess` from inside, standing in for a low-memory kill the shell cannot send to another app): the service was back about 1.4 s later as a sticky restart (null intent), in the foreground at once. |
+| L5 | `am force-stop`: no process and no service record for 90 s. The launcher, a person's path, started it again. |
+| S1 | The production store, with 3 pending, 3 unread and 3 kept, after driving U1 read without Keep, K1 unkept and P1 terminal: P2, P3 · U2, U3 · K2, K3, the same after the kill and after the force-stop. The store opens on Android only in an owner-only directory: the app's `files/` is `0771`, which the store refuses, and the harness makes `files/human/` `0700`, so the production client must do the same. |
+| E1 | The store's `backup_eligible_content`: K1–K3 and U1–U3 after seeding, K2, K3, U2 and U3 after the transitions, never a pending row. This matches the host test. |
+| R1 | The recovery screen: `screencap` refused (an empty file). The launcher control: captured. |
+| R2 | The recovery task's recents snapshot is blank while it is the current task. Once left (Home), it is not shown in recents, though the system still holds the task; the one card shown resumed the launcher. An earlier build that opened recovery inside the launcher's task had that task listed with recovery on top: `excludeFromRecents` acts on a task's root, so the requirement's "dedicated Activity/task" is load-bearing. |
+| R3 | `screenrecord` of the recovery screen: black. The control: not black. |
+| B1 | Standard v1 (`allowBackup=false`): `bmgr backupnow` through the local transport answers "Backup is not allowed". The rules alone (`allowBackup=true`): the backup succeeds. |
+| B3 | The rules alone: after backup, uninstall and reinstall, Android restored `marker/control.txt` (the included control) and nothing else. The wrapped identity, config, recovery scratch and human store were absent, and the store reopened empty. |
+
+**What part 1 did not establish:**
+- **L3, the network in Doze:** the trace shows the process and the callback, not whether a connection could be made; no traffic was attempted. Forced Doze is not natural Doze.
+- **L4, a real low-memory kill:** a self-SIGKILL stood in.
+- **R2 on other launchers and API levels:** One UI on API 30 only.
+- **B3, the onboarding:** the harness has no onboarding. That a reinstall without the identity enters recovery-required and never manufactures a PeerId (`android-key-custody.md`, `human-client-android.md`) is the production client's to show; what was shown is that nothing sensitive came back.
+- **B1 through Google's transport (B2), device transfer (B4) and Smart Switch (B5):** not run. B2 uploads to the owner's account and waits on the owner's word; B4 and B5 need a second device.
+
+## The harness, as planned before the run
 
 `spikes/spike-008/harness/`: one Android app, built at two target SDKs (30 and the current Play target).
 - A foreground service that holds a small Rust core: the production identity, the production human store (`interweave-human-store`, the store under test) and a session stand-in. The service type is declared both ways, and the service writes a timestamped lifecycle trace to app-private storage.
@@ -37,7 +72,7 @@ A dedicated test device, reachable over adb, on which the owner allowed the full
 
 The trace and the store are read back over adb (`run-as`). No result rests on what the app says about itself where adb can observe it directly.
 
-## The experiments
+## The experiments, as planned before the run
 
 | id | what | driven by | recorded |
 |---|---|---|---|
