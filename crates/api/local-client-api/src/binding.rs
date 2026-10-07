@@ -314,6 +314,55 @@ pub struct TrustAdminView {
     pub allowed: Vec<TransportIdentity>,
 }
 
+/// How the last dial to, or connection with, a peer ended
+/// (`CONNECTIVITY.md` §19's `last_outcome`): a bounded class, never an
+/// address. Every refusal folds to `Denied`; the connectivity log line
+/// names the finer class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerOutcome {
+    /// A connection to it came up.
+    Connected,
+    /// A dial to it failed in the network.
+    DialFailed,
+    /// An address answered with another identity.
+    IdentityMismatch,
+    /// The dial gate, or this node's own handler, refused the dial.
+    Denied,
+}
+
+impl PeerOutcome {
+    /// The class as the wire names it.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Connected => "connected",
+            Self::DialFailed => "dial_failed",
+            Self::IdentityMismatch => "identity_mismatch",
+            Self::Denied => "denied",
+        }
+    }
+}
+
+/// The dial gate's state for one allowlisted peer (`admin.peers.list`,
+/// `CONNECTIVITY.md` §19): what the operator reads to answer "why can B
+/// not reach A". Times are milliseconds since the Unix epoch. Never an
+/// address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerGateView {
+    /// The peer.
+    pub peer: TransportIdentity,
+    /// Whether any connection to it is open.
+    pub connected: bool,
+    /// Dials to it are refused until then.
+    pub backoff_until: Option<u64>,
+    /// Every known address of it is quarantined until then, the earliest
+    /// release; absent while any is dialable (`CONNECTIVITY.md` §19).
+    pub quarantined_until: Option<u64>,
+    /// How the last dial or connection ended; `None` until the first one
+    /// since the runtime started.
+    pub last_outcome: Option<PeerOutcome>,
+}
+
 /// The read-only administrative view (`admin.status`): the raw detail a
 /// data session never sees (ADR-0036). A binding adds its own counters
 /// -- connections, cross-domain refusals -- beside these, since only it
@@ -443,6 +492,20 @@ pub trait AdminPort {
     /// # Errors
     /// `CapabilityDenied` without `admin.trust`, or `BackendUnavailable`.
     fn trust(&self) -> impl Future<Output = Result<TrustAdminView, TransportError>> + Send;
+
+    /// The dial gate's state for each allowlisted peer, one row each
+    /// (`admin.peers.list`, IPC 2.2, under `admin.status`).
+    ///
+    /// Answered `ProtocolUnsupported` by a port that does not serve the
+    /// 2.2 read -- which is what the method is for a daemon that does
+    /// not speak it -- unless the port implements it.
+    ///
+    /// # Errors
+    /// `CapabilityDenied` without `admin.status`, `ProtocolUnsupported`,
+    /// or `BackendUnavailable`.
+    fn peers(&self) -> impl Future<Output = Result<Vec<PeerGateView>, TransportError>> + Send {
+        std::future::ready(Err(TransportError::ProtocolUnsupported))
+    }
 
     /// Allow `peer` on the data plane, or revoke it. Revoking closes every
     /// connection the peer holds at once, drops its cached endpoint

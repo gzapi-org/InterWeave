@@ -808,7 +808,10 @@ impl Driver {
             Request::Diagnostics(reply) => {
                 let substrate = self.swarm.status(None).await.ok();
                 let peers = self.peer_rows().await;
-                let _ = reply.send(substrate.map(|substrate| Diagnostics {
+                // Either read failing answers no diagnostics at all, as
+                // a substrate that does not answer always has: an empty
+                // row set would read as "no allowlisted peer".
+                let _ = reply.send(substrate.zip(peers).map(|(substrate, peers)| Diagnostics {
                     substrate,
                     discovery: self.discovery.diagnostics(),
                     events_dropped: self.dropped.load(Ordering::Relaxed),
@@ -902,14 +905,13 @@ impl Driver {
     }
 
     /// One row per allowlisted peer: the substrate's deadlines beside the
-    /// outcome recorded here. Empty when the substrate does not answer --
-    /// a row of unknowns would read as "nothing holds this peer".
-    async fn peer_rows(&mut self) -> Vec<PeerGateRow> {
+    /// outcome recorded here. `None` when the substrate does not answer:
+    /// unknown, never shown as an empty set or a row of unknowns, which
+    /// would read as "no peer" or "nothing holds this peer".
+    async fn peer_rows(&mut self) -> Option<Vec<PeerGateRow>> {
         let peers: Vec<TransportIdentity> = self.trust.allowed_peers().cloned().collect();
-        let Ok(gates) = self.swarm.peer_gates(peers).await else {
-            return Vec::new();
-        };
-        gates
+        let gates = self.swarm.peer_gates(peers).await.ok()?;
+        let rows = gates
             .into_iter()
             .map(|gate| PeerGateRow {
                 last_outcome: self.outcomes.get(&gate.peer),
@@ -918,7 +920,8 @@ impl Driver {
                 quarantined_until_ms: gate.quarantined_until_ms,
                 peer: gate.peer,
             })
-            .collect()
+            .collect();
+        Some(rows)
     }
 
     /// Drain the providers, run Kademlia's schedule, and hand the book

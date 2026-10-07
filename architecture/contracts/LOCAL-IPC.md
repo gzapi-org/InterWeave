@@ -295,6 +295,7 @@ the schema-agreement test binds the two.
 | `admin.shutdown` | admin | `admin.shutdown` | `shutdown-params` | `empty-result` | 2.0 |
 | `admin.trust.list` | admin | `admin.trust` | `trust-list-params` | `trust-list` | 2.1 |
 | `admin.trust.set` | admin | `admin.trust` | `trust-set-params` | `empty-result` | 2.1 |
+| `admin.peers.list` | admin | `admin.status` | `peer-list-params` | `peer-list` | 2.2 |
 
 `admin.endpoints.set_enabled(false)` revokes a live lease at once
 (`endpoint.lease_changed`) and never auto-rebinds. The three mutating
@@ -308,7 +309,7 @@ with their schemas and the Rust mirror, in the batch that implements
 them; the list method's params were `none` there and are a page cursor
 here (architect-cto's ruling of 2026-10-04, below).
 
-A fourth administrative read is decided and not yet in the table — it joins it with the batch that implements it, as `admin.trust.*` did: `admin.peers.list` (2.2, A 2026-10-06, `CONNECTIVITY.md` §19) under the `admin.status` capability, the dial gate's state per peer — `{peer, connected, backoff_until?, quarantined_until?, last_outcome?}`, never an address — paged as `admin.trust.list` is (`{after?: peer-id}` → `{peers, next?}`, canonical order) at most 512 rows a page (`MAX_PEER_PAGE_ROWS`; ruled 2026-10-07 on p2p-network-dev's measurement: a peer-list row is about 194 bytes of compact JSON with every field present, so a trust-list page's 1024 is about 200 KB against the 128 KiB body ceiling, `MAX_BODY_BYTES`; 512 is about 100 KB worst case, and `MAX_ALLOWED_PEERS` at 4096 makes at most eight pages), its schemas `peer-list-params` and `peer-list` landing `approved` with that batch and the Rust mirror. A client requests it only on a connection that negotiated minor 2.2 or later (§Version negotiation).
+`admin.peers.list` (2.2, A 2026-10-06, `CONNECTIVITY.md` §19) moved into the table with the batch that implements it, as `admin.trust.*` did: under the `admin.status` capability, the dial gate's state for each allowlisted peer — `{peer, connected, backoff_until?, quarantined_until?, last_outcome?}`, the two times in milliseconds since the Unix epoch, `last_outcome` absent until the peer's first dial or connection since the daemon started — never an address. It is paged as `admin.trust.list` is (`{after?: peer-id}` → `{peers, next?}`, ascending by canonical string), at most 512 rows a page (`MAX_PEER_PAGE_ROWS`; ruled 2026-10-07 on p2p-network-dev's measurement: a peer-list row is up to 194 bytes of compact JSON with every field present, so a trust-list page's 1024 would be about 200 KB against the 128 KiB body ceiling, `MAX_BODY_BYTES`; 512 is about 100 KB worst case, and `MAX_ALLOWED_PEERS` at 4096 makes at most eight pages). Its schemas `peer-list-params` and `peer-list` are `approved`, and the method and request enums carry its minor (`ipc/method` 1.2.0, `ipc/request` 1.2.0). A client requests it only on a connection that negotiated minor 2.2 or later; `admin.status` being a 2.0 capability, the capability rule below does not apply, so the client reads the minor from that connection's own `hello_response` and does not send the method below 2.2, where the server answers it as an unknown method (§Version negotiation).
 
 `admin.trust.list` answers the profile's allowlist as `trust-api`'s `PeerTrustPolicy` holds it, ONE PAGE at a time: the allowed peers in the
 ascending order of their canonical strings, at most 1024 a page, with
@@ -347,7 +348,8 @@ listed are no-ops that answer `ok`. Both methods are granted only to a
 connection that negotiated minor 2.1 or later, and `admin.trust` is
 requested only in a hello sent after the client has learnt the daemon
 speaks 2.1 (§Version negotiation's capability rule); the `close` frame's
-`supported` list is `[{major: 2, minor: 1}]` since R1. The two are the
+`supported` list was `[{major: 2, minor: 1}]` from R1 and is
+`[{major: 2, minor: 2}]` since `admin.peers.list` (A 2026-10-06). The two are the
 same runtime overlay as `admin.endpoints.*` — never written to
 `config.yaml`, `persisted: false` — until the owner decides persistence
 (ADR-0028's question, routed with the Stage 15 record). Their schemas, `trust-list-params`, `trust-list` and `trust-set-params`, were `approved`, and the method and capability enums carry their minor bumps (`ipc/method`
@@ -391,7 +393,7 @@ the implementing batch and its mirror, as above.
 
 `hello.ipc_version.major` accepts any positive integer, so an unsupported
 major is a well-formed hello: the server answers
-`close{code: VersionIncompatible, supported: [{major: 2, minor: 1}]}` and
+`close{code: VersionIncompatible, supported: [{major: 2, minor: 2}]}` and
 closes. For major 2 the server selects `minor = min(client, server)` and
 returns it in `hello_response`. The client holds the server to that
 rule: a `hello_response` whose minor is above the minor the client
@@ -428,8 +430,8 @@ emitted, its mirror refusing the old name (`pre_auth.tracked_peers` off
 plus that addition — its own version moving 1.x → 1.(x+1) each time
 (ADR-0017 records the rule and its one bound).
 The first production build spoke 2.0; Stage 15's R1 batch, which
-brought `peer.path_changed`, speaks 2.1, and R2 added `admin.trust.*` to
-it.
+brought `peer.path_changed`, spoke 2.1, and R2 added `admin.trust.*` to
+it; `admin.peers.list` brought 2.2 (A 2026-10-06).
 
 Phases and directions, which JSON Schema cannot express and
 `tests/ipc-v2` asserts: `hello` is the client's first frame and only its

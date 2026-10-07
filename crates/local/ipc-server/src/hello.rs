@@ -458,7 +458,10 @@ mod tests {
             let [Frame::HelloResponse(response)] = frames.as_slice() else {
                 panic!("a response: {frames:?}")
             };
-            assert_eq!(response.ipc_version.minor, 1);
+            assert_eq!(
+                response.ipc_version.minor,
+                minor.min(interweave_ipc_protocol::IPC_MAX_MINOR)
+            );
             assert!(
                 response
                     .granted_capabilities

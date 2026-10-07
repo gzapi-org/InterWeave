@@ -170,6 +170,18 @@ impl LastOutcome {
         }
     }
 
+    /// The neutral port's name for this outcome (`AdminPort::peers`).
+    #[must_use]
+    pub const fn to_view(self) -> interweave_local_client_api::PeerOutcome {
+        use interweave_local_client_api::PeerOutcome as O;
+        match self {
+            Self::Connected => O::Connected,
+            Self::DialFailed => O::DialFailed,
+            Self::IdentityMismatch => O::IdentityMismatch,
+            Self::Denied => O::Denied,
+        }
+    }
+
     /// The outcome a failed dial's class is.
     #[must_use]
     pub const fn of_class(class: DialFailureClass) -> Self {
@@ -205,7 +217,8 @@ pub struct PeerGateRow {
     /// Dials to it are refused until then, milliseconds since the Unix
     /// epoch.
     pub backoff_until_ms: Option<u64>,
-    /// One of its addresses at least is quarantined until then.
+    /// Every known address of it is quarantined until then, the earliest
+    /// release; absent while any is dialable (`CONNECTIVITY.md` §19).
     pub quarantined_until_ms: Option<u64>,
     /// How the last dial or connection to it ended, if any has since the
     /// runtime started.

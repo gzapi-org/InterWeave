@@ -322,6 +322,41 @@ mod tests {
         harness.stop().await;
     }
 
+    /// `admin.peers.list` is a 2.2 method under the 2.0 `admin.status`:
+    /// on a connection that negotiated 2.1 it is an unknown name --
+    /// `ProtocolUnsupported`, the connection kept -- and at 2.2 the same
+    /// request is answered from the port.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_peers_read_is_unknown_below_two_two_and_answered_at_it() {
+        let fake = Fake::default();
+        let harness = Harness::start(&fake, config());
+        let request = r#"{"type":"request","id":"p","method":"admin.peers.list","params":{}}"#;
+        for (minor, answered) in [(1, false), (2, true)] {
+            let mut client = Client::connect(&harness.paths.admin).await;
+            client
+                .hello(&ADMIN.replace(r#""minor":0"#, &format!(r#""minor":{minor}"#)))
+                .await;
+            client.send(request).await;
+            let response = client.response().await;
+            if answered {
+                assert!(response.body.contains(r#""ok":true"#), "{}", response.body);
+            } else {
+                assert!(
+                    response.body.contains("ProtocolUnsupported"),
+                    "{}",
+                    response.body
+                );
+            }
+            drop(client);
+        }
+        assert_eq!(
+            fake.script().calls.iter().filter(|c| *c == "peers").count(),
+            1,
+            "only the 2.2 request reached the port"
+        );
+        harness.stop().await;
+    }
+
     /// An admin method on the data socket is refused before dispatch and
     /// COUNTED; the admin socket reports the count.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:ipc:peer-list",
+  "title": "IPC admin.peers.list result",
+  "description": "One page of the dial gate's state per allowlisted peer (2.2, CONNECTIVITY.md §19): ascending by canonical string, at most 512 rows a page (a row is up to 194 bytes, so 1024 would overflow the 128 KiB body; architect-cto's ruling of 2026-10-07), `next` the last row's peer when more remain and absent on the last page. Never an address: what holds a peer is read as times and a bounded class.",
+  "type": "object",
+  "required": [
+    "peers"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "peers": {
+      "type": "array",
+      "maxItems": 512,
+      "items": {
+        "type": "object",
+        "required": [
+          "peer",
+          "connected"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "peer": {
+            "$ref": "urn:interweave:schemas:common:peer-id"
+          },
+          "connected": {
+            "type": "boolean"
+          },
+          "backoff_until": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Dials to the peer are refused until then, in milliseconds since the Unix epoch; absent when no backoff runs."
+          },
+          "quarantined_until": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Every known address of the peer is quarantined until then, in milliseconds since the Unix epoch: the earliest release among them, the moment the peer is dialable again. Absent while any known address is dialable, since quarantine is per address and a peer with a good route is not held by it (CONNECTIVITY.md section 19)."
+          },
+          "last_outcome": {
+            "enum": [
+              "connected",
+              "dial_failed",
+              "identity_mismatch",
+              "denied"
+            ],
+            "description": "How the last dial to, or connection with, the peer ended; absent until the first since the daemon started. Every refusal folds to `denied`; the connectivity log line names the finer class."
+          }
+        }
+      },
+      "description": "Unique by peer and strictly ascending; JSON Schema cannot state the order, the Rust mirror refuses a page that breaks it."
+    },
+    "next": {
+      "$ref": "urn:interweave:schemas:common:peer-id"
+    }
+  },
+  "x-contract": {
+    "name": "ipc.peer-list",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": [
+      "0017",
+      "0037",
+      "0011"
+    ],
+    "specification": "architecture/contracts/LOCAL-IPC.md"
+  }
+}

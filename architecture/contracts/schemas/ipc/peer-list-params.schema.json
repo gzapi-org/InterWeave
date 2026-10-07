@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:ipc:peer-list-params",
+  "title": "IPC admin.peers.list params",
+  "description": "Which page of the dial gate's per-peer rows (2.2). `after` is the last peer of the previous page, EXCLUSIVE, and absent for the first; a position in the ascending order of the peers' canonical strings, not a row, exactly as `trust-list-params` is. Pages are read against the live gate and are not a snapshot. CONNECTIVITY.md §19, A 2026-10-06.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "after": {
+      "$ref": "urn:interweave:schemas:common:peer-id"
+    }
+  },
+  "x-contract": {
+    "name": "ipc.peer-list-params",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": [
+      "0017",
+      "0037",
+      "0011"
+    ],
+    "specification": "architecture/contracts/LOCAL-IPC.md"
+  }
+}

@@ -30,7 +30,7 @@ use std::time::Duration;
 use interweave_local_client_api::{
     AdminBinding, AdminCapability, AdminPort, AdminStatus, DataCapability, DataSessionBinding,
     DataSessionPort, EndpointAdminView, Generation, IngressCounts, LocalAdminPort,
-    LocalDataSession, PreAuthCounts, ReceivedBroadcast, ReceivedDirect, SessionEvent,
+    LocalDataSession, PeerGateView, PreAuthCounts, ReceivedBroadcast, ReceivedDirect, SessionEvent,
     SessionRequest, TrustAdminView,
 };
 use interweave_transport_api::{
@@ -766,6 +766,26 @@ impl AdminPort for InProcessAdmin {
     async fn trust(&self) -> Result<TrustAdminView, TransportError> {
         self.require(AdminCapability::Trust)?;
         ask_driver(&self.driver()?, Request::Trust).await
+    }
+
+    /// The `Diagnostics` rows (`CONNECTIVITY.md` §19), one per allowlisted
+    /// peer in the allowlist's order, as the neutral view.
+    async fn peers(&self) -> Result<Vec<PeerGateView>, TransportError> {
+        self.require(AdminCapability::Status)?;
+        let diagnostics = ask_driver(&self.driver()?, Request::Diagnostics)
+            .await?
+            .ok_or(TransportError::BackendUnavailable)?;
+        Ok(diagnostics
+            .peers
+            .into_iter()
+            .map(|row| PeerGateView {
+                peer: row.peer,
+                connected: row.connected,
+                backoff_until: row.backoff_until_ms,
+                quarantined_until: row.quarantined_until_ms,
+                last_outcome: row.last_outcome.map(crate::gate::LastOutcome::to_view),
+            })
+            .collect())
     }
 
     async fn set_trust(

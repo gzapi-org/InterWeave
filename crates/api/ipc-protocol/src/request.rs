@@ -207,6 +207,21 @@ pub struct TrustListParams {
     pub after: Option<TransportIdentity>,
 }
 
+/// `admin.peers.list` params: which page (2.2), a position as
+/// [`TrustListParams`]'s is.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerListParams {
+    /// The last peer of the previous page, exclusive; absent for the
+    /// first.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "absent_or_peer"
+    )]
+    pub after: Option<TransportIdentity>,
+}
+
 /// `admin.trust.set` params (2.1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -260,6 +275,8 @@ pub enum Request {
     AdminTrustList(TrustListParams),
     /// `admin.trust.set` (2.1).
     AdminTrustSet(TrustSetParams),
+    /// `admin.peers.list` (2.2).
+    AdminPeersList(PeerListParams),
 }
 
 impl Request {
@@ -280,6 +297,7 @@ impl Request {
             Self::AdminShutdown(_) => Method::AdminShutdown,
             Self::AdminTrustList(_) => Method::AdminTrustList,
             Self::AdminTrustSet(_) => Method::AdminTrustSet,
+            Self::AdminPeersList(_) => Method::AdminPeersList,
         }
     }
 
@@ -326,6 +344,7 @@ impl Request {
             Method::AdminShutdown => Self::AdminShutdown(typed(params)?),
             Method::AdminTrustList => Self::AdminTrustList(typed(params)?),
             Method::AdminTrustSet => Self::AdminTrustSet(typed(params)?),
+            Method::AdminPeersList => Self::AdminPeersList(typed(params)?),
         })
     }
 
@@ -351,6 +370,7 @@ impl Request {
             Self::AdminShutdown(p) => serde_json::value::to_raw_value(p),
             Self::AdminTrustList(p) => serde_json::value::to_raw_value(p),
             Self::AdminTrustSet(p) => serde_json::value::to_raw_value(p),
+            Self::AdminPeersList(p) => serde_json::value::to_raw_value(p),
         };
         raw.unwrap_or_else(|_| unreachable!("a params type serializes"))
     }
@@ -781,6 +801,7 @@ mod tests {
                 peer: peer(),
                 allowed: true,
             }),
+            Request::AdminPeersList(PeerListParams::default()),
         ];
         assert_eq!(
             requests.iter().map(Request::method).collect::<Vec<_>>(),
@@ -810,6 +831,25 @@ mod tests {
             frame.params.as_deref().map(RawValue::get),
             Some(r#"{"channel":"ops"}"#)
         );
+    }
+
+    #[test]
+    fn the_peers_params_are_held_to_their_shape() {
+        let raw = |v: serde_json::Value| serde_json::value::to_raw_value(&v).expect("raw");
+        let list = |v| Request::decode(Method::AdminPeersList, Some(&raw(v)));
+        assert_eq!(
+            list(json!({})),
+            Ok(Request::AdminPeersList(PeerListParams { after: None })),
+            "the first page"
+        );
+        assert!(list(json!({"after": PEER})).is_ok());
+        for bad in [
+            json!({"after": null}),
+            json!({"after": "not-a-peer"}),
+            json!({"page": 2}),
+        ] {
+            assert_eq!(list(bad), Err(TransportError::InvalidArgument));
+        }
     }
 
     #[test]

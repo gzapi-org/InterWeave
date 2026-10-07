@@ -146,6 +146,16 @@
       "name": "trust-set-params",
       "file": "trust-set-params.schema.json",
       "status": "active"
+    },
+    {
+      "name": "peer-list-params",
+      "file": "peer-list-params.schema.json",
+      "status": "approved"
+    },
+    {
+      "name": "peer-list",
+      "file": "peer-list.schema.json",
+      "status": "approved"
     }
   ]
 }

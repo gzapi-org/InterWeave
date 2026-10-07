@@ -13,14 +13,15 @@ use interweave_ipc_protocol::{
     AdminStatusResult, AuthorityDomain, Cancel, ChannelParams, ClientInfo, Close, DirectoryResult,
     EmptyResult, EndpointList, EndpointParams, Event, EventType, Frame, GrantedLease,
     HandshakeOutcome, Hello, HelloResponse, HelloTag, IPC_MAJOR, IpcVersion, MAX_BODY_BYTES,
-    MAX_REQUESTED, Method, Nonce, Ping, PublishParams, QueryParams, Request, RequestId,
-    RequestedCapability, ResponseFrame, SendParams, SendResult, ServerCounters, ServerState,
-    SetDefaultParams, SetEnabledParams, SetEnabledResult, ShutdownParams, TrustList,
+    MAX_REQUESTED, Method, Nonce, PeerList, PeerListParams, Ping, PublishParams, QueryParams,
+    Request, RequestId, RequestedCapability, ResponseFrame, SendParams, SendResult, ServerCounters,
+    ServerState, SetDefaultParams, SetEnabledParams, SetEnabledResult, ShutdownParams, TrustList,
     TrustListParams, TrustSetParams, UnsupportedMajor, encode_frame, supported,
 };
 use interweave_local_client_api::{
     AdminCapability, AdminStatus, DataCapability, EndpointAdminView, Generation, LeaseRecord,
-    LocalSessionEvent, ReceivedBroadcast, ReceivedDirect, SessionEvent, TrustAdminView,
+    LocalSessionEvent, PeerGateView, PeerOutcome, ReceivedBroadcast, ReceivedDirect, SessionEvent,
+    TrustAdminView,
 };
 use interweave_transport_api::{
     ChannelId, ConnectivitySummary, DirectInboundState, EndpointDirectoryV1, EndpointId, Health,
@@ -458,7 +459,7 @@ fn the_authority_domain_is_not_a_frame_field() {
 /// covers nothing by itself -- `check_schemas_are_tested.sh` skips
 /// this list and counts only the sites below that read each schema, so a
 /// new schema needs a test that reads it, not only a line here.
-const IPC_SCHEMAS: [&str; 29] = [
+const IPC_SCHEMAS: [&str; 31] = [
     "architecture/contracts/schemas/ipc/admin-status.schema.json",
     "architecture/contracts/schemas/ipc/broadcast-received.schema.json",
     "architecture/contracts/schemas/ipc/capability.schema.json",
@@ -476,6 +477,8 @@ const IPC_SCHEMAS: [&str; 29] = [
     "architecture/contracts/schemas/ipc/method.schema.json",
     "architecture/contracts/schemas/ipc/path-changed.schema.json",
     "architecture/contracts/schemas/ipc/payload.schema.json",
+    "architecture/contracts/schemas/ipc/peer-list-params.schema.json",
+    "architecture/contracts/schemas/ipc/peer-list.schema.json",
     "architecture/contracts/schemas/ipc/publish-params.schema.json",
     "architecture/contracts/schemas/ipc/query-params.schema.json",
     "architecture/contracts/schemas/ipc/request.schema.json",
@@ -539,6 +542,7 @@ fn assert_valid(path: &str, instance: &Value) {
 }
 
 const PEER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+const OTHER_PEER: &str = "12D3KooWHsy9ZMqTYfTPpJd8YXhZGKrLWzkWT9BgX9DeyF8Fs3GQ";
 
 fn peer() -> TransportIdentity {
     TransportIdentity::parse(PEER).expect("peer")
@@ -618,6 +622,9 @@ fn every_request() -> Vec<Request> {
         Request::AdminTrustSet(TrustSetParams {
             peer: peer(),
             allowed: false,
+        }),
+        Request::AdminPeersList(PeerListParams {
+            after: Some(peer()),
         }),
     ];
     assert_eq!(
@@ -782,6 +789,41 @@ fn every_result() -> Vec<(&'static str, Value)> {
                 },
                 None,
             )),
+        ),
+        // A row with every field and one with none of the optional ones,
+        // a later page, and an empty allowlist.
+        (
+            "architecture/contracts/schemas/ipc/peer-list.schema.json",
+            json(&PeerList::page(
+                vec![
+                    PeerGateView {
+                        peer: peer(),
+                        connected: false,
+                        backoff_until: Some(1_791_329_950_227),
+                        quarantined_until: Some(u64::MAX),
+                        last_outcome: Some(PeerOutcome::IdentityMismatch),
+                    },
+                    PeerGateView {
+                        peer: TransportIdentity::parse(OTHER_PEER).expect("a peer"),
+                        connected: true,
+                        backoff_until: None,
+                        quarantined_until: None,
+                        last_outcome: None,
+                    },
+                ],
+                None,
+            )),
+        ),
+        (
+            "architecture/contracts/schemas/ipc/peer-list.schema.json",
+            json(&PeerList {
+                peers: Vec::new(),
+                next: Some(peer()),
+            }),
+        ),
+        (
+            "architecture/contracts/schemas/ipc/peer-list.schema.json",
+            json(&PeerList::page(Vec::new(), None)),
         ),
     ]
 }
@@ -1032,6 +1074,9 @@ fn every_request_validates_against_its_catalogue_entry_and_params_schema() {
             }
             Method::AdminTrustSet => {
                 "architecture/contracts/schemas/ipc/trust-set-params.schema.json"
+            }
+            Method::AdminPeersList => {
+                "architecture/contracts/schemas/ipc/peer-list-params.schema.json"
             }
         })
     };

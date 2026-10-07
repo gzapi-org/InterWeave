@@ -1127,6 +1127,35 @@ async fn transportctl_against_a_live_daemon() {
         .as_str()
         .expect("the profile's peer")
         .to_owned();
+    // admin.peers.list (2.2): one `ipc/peer-list` page per line, each
+    // valid against the schema, one row -- the profile's allowed peer,
+    // never the daemon itself -- and the human form names it.
+    let out = home.transportctl(&["peers", "list", "--json"], "");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let pages: Vec<serde_json::Value> = stdout(&out)
+        .lines()
+        .map(|line| {
+            let page: serde_json::Value = serde_json::from_str(line).expect("a json line");
+            let errors: Vec<String> = ipc_validator("peer-list.schema.json")
+                .iter_errors(&page)
+                .map(|e| e.to_string())
+                .collect();
+            assert!(errors.is_empty(), "{page}: {errors:?}");
+            page
+        })
+        .collect();
+    assert_eq!(pages.len(), 1, "one page");
+    assert_eq!(
+        pages[0]["peers"].as_array().map(Vec::len),
+        Some(1),
+        "{}",
+        pages[0]
+    );
+    assert_eq!(pages[0]["peers"][0]["peer"], listed.as_str());
+    let out = home.transportctl(&["peers", "list"], "");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(stdout(&out).starts_with(&listed), "{}", stdout(&out));
+
     let out = home.transportctl(&["trust", "allow", peer.as_str()], "");
     assert_eq!(out.status.code(), Some(1), "the local peer is refused");
     assert!(stderr(&out).contains("InvalidArgument"), "{}", stderr(&out));

@@ -709,3 +709,93 @@ async fn a_sessions_notice_entry_goes_when_it_ends() {
     drop(deaf);
     runtime.stop().await.expect("stops");
 }
+
+/// `admin.peers.list`'s rows through the in-process port
+/// (`CONNECTIVITY.md` §19): under `admin.status` alone (a port without it
+/// is the control), one row per allowlisted peer; a connected peer reads
+/// connected, the same peer gone reads its backoff and how its redial
+/// ended, and an allowlisted peer never dialled has no outcome.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_peer_rows_reach_the_admin_port_under_admin_status() {
+    use interweave_local_client_api::PeerOutcome;
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let listen = CompositionOptions {
+        listen: vec![format!("/ip4/{ip}/tcp/0")],
+        ..CompositionOptions::default()
+    };
+    let (b_id, b) = id();
+    let (a_id, a) = id();
+    let (_never_id, never) = id();
+    let target = ComposedRuntime::start(&b_id, &profile(&[&a], &[]), listen.clone())
+        .await
+        .expect("b composes");
+    let b_addr = format!("{}/p2p/{}", target.listening()[0], b.as_str());
+    let mut subject = ComposedRuntime::start(&a_id, &profile(&[&b, &never], &[b_addr]), listen)
+        .await
+        .expect("a composes");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while !matches!(
+        next_within(&mut subject).await,
+        TransportEvent::PeerConnected { ref peer, .. } if *peer == b
+    ) {
+        assert!(tokio::time::Instant::now() < deadline, "b never connected");
+    }
+
+    let powerless = subject
+        .sessions()
+        .admin([AdminCapability::Endpoints].into())
+        .await
+        .expect("a port");
+    assert_eq!(
+        powerless.peers().await,
+        Err(TransportError::CapabilityDenied)
+    );
+    let port = subject
+        .sessions()
+        .admin([AdminCapability::Status].into())
+        .await
+        .expect("a port");
+    let rows = port.peers().await.expect("answered");
+    assert_eq!(rows.len(), 2, "one row per allowlisted peer: {rows:?}");
+    let row = |rows: &[interweave_local_client_api::PeerGateView], p: &TransportIdentity| {
+        rows.iter().find(|r| &r.peer == p).cloned().expect("a row")
+    };
+    let held = row(&rows, &b);
+    assert!(held.connected, "{held:?}");
+    assert_eq!(held.last_outcome, Some(PeerOutcome::Connected));
+    let unseen = row(&rows, &never);
+    assert_eq!(
+        (
+            unseen.connected,
+            unseen.backoff_until,
+            unseen.quarantined_until,
+            unseen.last_outcome
+        ),
+        (false, None, None, None)
+    );
+
+    target.shutdown().await.expect("clean shutdown");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let gone = loop {
+        let now = row(&port.peers().await.expect("answered"), &b);
+        if !now.connected
+            && now.backoff_until.is_some()
+            && now.last_outcome != Some(PeerOutcome::Connected)
+        {
+            break now;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never held: {now:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert!(
+        matches!(
+            gone.last_outcome,
+            Some(PeerOutcome::DialFailed | PeerOutcome::Denied)
+        ),
+        "{gone:?}"
+    );
+    subject.shutdown().await.expect("clean shutdown");
+}

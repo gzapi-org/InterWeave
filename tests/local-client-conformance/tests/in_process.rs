@@ -813,6 +813,14 @@ async fn a_revocation_forgets_the_sessions_routes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_rows_answer_under_admin_status() {
+    let pair = Pair::start().await;
+    let (a, _) = pair.bindings();
+    suite::peer_rows_answer_under_admin_status(&a, &pair.a_peer, &pair.b_peer).await;
+    pair.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn trust_administration_revokes_as_policy() {
     let pair = Pair::start().await;
     let (a, _) = pair.bindings();

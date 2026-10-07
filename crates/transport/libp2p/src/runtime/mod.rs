@@ -1604,11 +1604,6 @@ impl SwarmRuntime {
                 );
 
                 tokio::select! {
-                    // THE HEAD-START RAN OUT (§12, step 9): a circuit
-                    // route deferred behind a direct dial is dialled now
-                    // unless a direct connection to the peer landed
-                    // meanwhile -- in which case the race is over and
-                    // the relay stays a route in the book for later.
                     // A HELD SEND'S HORIZON, on its own timer: the retry
                     // tick may be far longer than the horizon.
                     () = tokio::time::sleep_until(held_due.unwrap_or_else(tokio::time::Instant::now)), if held_due.is_some() => {
@@ -1616,6 +1611,11 @@ impl SwarmRuntime {
                             let _ = send.reply.send(Err(DirectError::PeerUnreachable));
                         }
                     }
+                    // THE HEAD-START RAN OUT (§12, step 9): a circuit
+                    // route deferred behind a direct dial is dialled now
+                    // unless a direct connection to the peer landed
+                    // meanwhile -- in which case the race is over and
+                    // the relay stays a route in the book for later.
                     () = tokio::time::sleep_until(race_due.unwrap_or_else(tokio::time::Instant::now)), if race_due.is_some() => {
                         let now = now_ms(started);
                         for (peer, relayed) in races.take_due(now) {
@@ -2667,6 +2667,9 @@ impl SwarmRuntime {
                         // REFUSED AT RETENTION, with nothing else on its
                         // way: answered now by current policy -- not put on
                         // the wire, since the refused connection is closing.
+                        // The send's own list in its order, as on the wire
+                        // (`commands::held_send_policy`); past it, the peer
+                        // is unreachable by this connection.
                         if let Some((peer, id)) = established.as_ref()
                             && !open.contains_key(id)
                             && held_sends.holds(peer)
@@ -2674,12 +2677,14 @@ impl SwarmRuntime {
                             && !races.waits_for(peer)
                             && !open.values().any(|c| &c.peer == peer)
                         {
-                            let answer = if manager.classify(peer) == interweave_transport_runtime::ConnectionClass::DataPlaneTrusted {
-                                DirectError::PeerUnreachable
-                            } else {
-                                DirectError::UnauthorizedPeer
-                            };
                             for send in held_sends.take(peer) {
+                                let answer = commands::held_send_policy(
+                                    &manager,
+                                    &direct_state,
+                                    &send,
+                                )
+                                .err()
+                                .unwrap_or(DirectError::PeerUnreachable);
                                 let _ = send.reply.send(Err(answer));
                             }
                         }

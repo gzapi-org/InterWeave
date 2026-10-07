@@ -27,6 +27,7 @@ usage:
   transportctl --profile <name> endpoints default <endpoint>|--none
   transportctl --profile <name> trust list [--json]
   transportctl --profile <name> trust allow|revoke <peer>
+  transportctl --profile <name> peers list [--json]
   transportctl --profile <name> shutdown [--grace <ms>]
   transportctl --profile <name> identity backup [--to-file <new path>]
   transportctl identity verify [--expected-peer-id <peer>]
@@ -72,6 +73,8 @@ pub(crate) enum Admin {
     TrustList,
     /// `admin.trust.set`: allow the peer, or revoke it.
     SetTrust(TransportIdentity, bool),
+    /// `admin.peers.list`, every page (IPC 2.2).
+    PeersList,
 }
 
 /// An offline identity command: never over IPC (ADR-0033).
@@ -188,6 +191,7 @@ fn admin(words: &[&str], mut flags: Flags) -> Result<Command, String> {
         ["trust", "list"] => (Admin::TrustList, true),
         ["trust", "allow", id] => (Admin::SetTrust(peer(id)?, true), false),
         ["trust", "revoke", id] => (Admin::SetTrust(peer(id)?, false), false),
+        ["peers", "list"] => (Admin::PeersList, true),
         ["shutdown"] => {
             let grace = flags
                 .grace
@@ -204,7 +208,9 @@ fn admin(words: &[&str], mut flags: Flags) -> Result<Command, String> {
     };
     let json = std::mem::take(&mut flags.json);
     if json && !json_allowed {
-        return Err("--json applies to status, endpoints list and trust list only".to_owned());
+        return Err(
+            "--json applies to status, endpoints list, trust list and peers list only".to_owned(),
+        );
     }
     refuse_leftovers(&flags)?;
     Ok(Command::Admin {
@@ -349,6 +355,14 @@ mod tests {
             (Admin::TrustList, true)
         );
         assert_eq!(
+            admin_of("--profile p peers list --json"),
+            (Admin::PeersList, true)
+        );
+        assert_eq!(
+            admin_of("--profile p peers list"),
+            (Admin::PeersList, false)
+        );
+        assert_eq!(
             admin_of(
                 "--profile p trust allow 12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN"
             ),
@@ -443,6 +457,8 @@ mod tests {
             "--profile p trust allow not-a-peer",
             "--profile p trust revoke 12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN --json",
             "--profile p trust list extra",
+            "--profile p peers",
+            "--profile p peers list extra",
             "--profile p shutdown --grace soon",
             "--profile p status --grace 5",
             "--profile p --profile q status",

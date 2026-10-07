@@ -170,6 +170,12 @@ async fn an_identity_mismatch_is_classed_and_quarantined_and_schedules_no_retry(
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
         .await
         .expect("listens");
+    // The address is `expected`'s one known path -- in its book, as a
+    // real peer's is -- so its quarantine holds the peer (section 19).
+    subject
+        .add_address(expected.clone(), address.clone())
+        .await
+        .expect("delivered");
     // Dialled as `expected`; `answering` authenticates as itself.
     subject
         .dial(expected.clone(), address)

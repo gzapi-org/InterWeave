@@ -37,7 +37,7 @@ pub(crate) async fn run(profile: &str, action: Admin, json: bool) -> Result<Stri
     };
     let binding = IpcBinding::new(sockets.clone(), CLIENT_KIND);
     let capability = match action {
-        Admin::Status => AdminCapability::Status,
+        Admin::Status | Admin::PeersList => AdminCapability::Status,
         Admin::Shutdown(_) => AdminCapability::Shutdown,
         Admin::TrustList | Admin::SetTrust(..) => AdminCapability::Trust,
         _ => AdminCapability::Endpoints,
@@ -57,7 +57,16 @@ pub(crate) async fn run(profile: &str, action: Admin, json: bool) -> Result<Stri
             "the daemon does not grant {capability:?} (it is IPC 2.1's: is the daemon older?)"
         )));
     }
-    call(&port, action, json).await.map_err(code)
+    let peers = action == Admin::PeersList;
+    call(&port, action, json).await.map_err(|e| match e {
+        // `admin.status` is granted at every minor, so a daemon too old
+        // for the 2.2 read is told by the port's refusal, not by a
+        // missing capability.
+        TransportError::ProtocolUnsupported if peers => Failure::Refused(
+            "the daemon does not speak IPC 2.2's admin.peers.list: is the daemon older?".to_owned(),
+        ),
+        e => code(e),
+    })
 }
 
 /// Tell "no daemon" from "a daemon whose socket is gone" by the lock: a
@@ -191,6 +200,45 @@ async fn call(port: &IpcAdmin, action: Admin, json: bool) -> Result<String, Tran
                     let _ = writeln!(out, "allowed  {}", row.peer.as_str());
                 }
                 out += "every other peer is denied\n";
+            }
+            out
+        }
+        Admin::PeersList => {
+            let pages = port.peers_pages().await?;
+            let mut out = String::new();
+            if json {
+                // ONE `ipc/peer-list` PAGE PER LINE, as `trust list` does.
+                for page in &pages {
+                    out += &serde_json::to_string(page).unwrap_or_default();
+                    out.push('\n');
+                }
+            } else {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+                let left = |until: u64| until.saturating_sub(now).div_ceil(1_000);
+                for row in pages.iter().flat_map(|page| &page.peers) {
+                    let _ = write!(
+                        out,
+                        "{}  {}",
+                        row.peer.as_str(),
+                        if row.connected {
+                            "connected"
+                        } else {
+                            "not connected"
+                        }
+                    );
+                    if let Some(until) = row.backoff_until {
+                        let _ = write!(out, "  backoff {}s", left(until));
+                    }
+                    if let Some(until) = row.quarantined_until {
+                        let _ = write!(out, "  quarantined {}s", left(until));
+                    }
+                    if let Some(outcome) = row.last_outcome {
+                        let _ = write!(out, "  last {}", outcome.as_str());
+                    }
+                    out.push('\n');
+                }
             }
             out
         }

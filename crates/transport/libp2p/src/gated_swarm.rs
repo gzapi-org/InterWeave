@@ -39,7 +39,7 @@
 
 use futures::stream::SelectNextSome;
 use interweave_transport_runtime::ConnectionClass;
-use libp2p::core::transport::ListenerId;
+use libp2p::core::transport::{ListenerId, PortUse};
 use libp2p::gossipsub;
 use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
 use libp2p::swarm::{ConnectionId, DialError, Swarm, SwarmEvent};
@@ -213,10 +213,16 @@ impl AdmittedDial {
         // connection is accepted. Building the dial with the PeerId
         // makes the mismatch libp2p's problem, and is what produces the
         // `WrongPeerId` the runtime routes to quarantine.
-        let opts = DialOpts::peer_id(expected)
+        let builder = DialOpts::peer_id(expected)
             .addresses(vec![address])
-            .condition(PeerCondition::Always)
-            .build();
+            .condition(PeerCondition::Always);
+        // WHICH LOCAL PORT (`CONNECTIVITY.md` §12, A 2026-10-07): a redial
+        // binds a fresh one, so it never carries the reverse 4-tuple of
+        // a connection a stateful firewall still tracks as closing.
+        let opts = match port_use_for(ticket.origin()) {
+            PortUse::New => builder.allocate_new_port().build(),
+            PortUse::Reuse => builder.build(),
+        };
         Ok(Self { opts, ticket })
     }
 
@@ -230,6 +236,33 @@ impl AdmittedDial {
     #[must_use]
     pub fn connection_id(&self) -> ConnectionId {
         self.opts.connection_id()
+    }
+}
+
+/// Which local port a dial of `origin` binds (`CONNECTIVITY.md` §12,
+/// "Which local port a dial uses", A 2026-10-07).
+///
+/// A redial, a retry, a send's dial-once and a manual dial bind a FRESH
+/// port. Bound to the listen port -- libp2p's default -- the dial back
+/// to a peer restarted on its old port carries the reverse 4-tuple of
+/// the old connection, which a stateful firewall still tracks as closing
+/// and drops as invalid: measured as a SYN never answered for the host's
+/// `nf_conntrack_tcp_timeout_close` (10 s here), with nothing in TCP's
+/// own counters (j23). A hole punch and a relay dial keep the listen
+/// port, which is what a NAT's mapping and a peer's observation of it
+/// are made of. Every origin is named, so a new one is a decision.
+/// `each_dial_origin_binds_the_port_section_12_says`.
+#[must_use]
+pub const fn port_use_for(origin: DialOrigin) -> PortUse {
+    match origin {
+        DialOrigin::Manual | DialOrigin::ConnectionManager | DialOrigin::DiscoveryReconnect => {
+            PortUse::New
+        }
+        DialOrigin::KademliaQuery
+        | DialOrigin::RelayReservation
+        | DialOrigin::RelayCircuit
+        | DialOrigin::AutonatProbe
+        | DialOrigin::DcutrHolePunch => PortUse::Reuse,
     }
 }
 
@@ -769,6 +802,28 @@ mod tests {
         ConnectionManager, ConnectionPolicy, DialOrigin, DialRequest, DialTicket, TrustSources,
     };
     use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
+
+    /// The port each origin binds, every origin named: a refactor that
+    /// flips a punch or a relay dial to a fresh port, or a redial back to
+    /// the listen port, fails here (`CONNECTIVITY.md` §12, A 2026-10-07).
+    #[test]
+    fn each_dial_origin_binds_the_port_section_12_says() {
+        use super::port_use_for;
+        use interweave_transport_runtime::DialOrigin as O;
+        use libp2p::core::transport::PortUse::{New, Reuse};
+        for (origin, port) in [
+            (O::Manual, New),
+            (O::ConnectionManager, New),
+            (O::DiscoveryReconnect, New),
+            (O::KademliaQuery, Reuse),
+            (O::RelayReservation, Reuse),
+            (O::RelayCircuit, Reuse),
+            (O::AutonatProbe, Reuse),
+            (O::DcutrHolePunch, Reuse),
+        ] {
+            assert_eq!(port_use_for(origin), port, "{origin:?}");
+        }
+    }
 
     const ADMITTED: &str = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";
     const OTHER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
