@@ -1,6 +1,6 @@
 # Mandatory Internet reachability design
 
-Status: normative architecture for the standard-v1 rust-libp2p backend. No implementation exists in this repository.
+Status: normative architecture for the standard-v1 rust-libp2p backend, implemented from Stage 11 (closed 2026-09-27) in `crates/transport/libp2p` and composed from Stage 12 in `crates/transport/composition`; the dated "Where it runs" and "A <date>" paragraphs below record how each rule is built.
 
 ADR-0035 supersedes the earlier conditional reachability scope. The standard v1 build includes **AutoNAT v2 client + Circuit Relay v2 client + DCUtR**. Relay-server and AutoNAT-server roles are supported infrastructure modes but are not automatically enabled on every peer.
 
