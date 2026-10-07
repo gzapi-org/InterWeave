@@ -206,8 +206,7 @@ impl HumanStore {
         // `migrate` refuses that file through the WAL, and closing the
         // connection checkpoints the WAL into it -- the newer build's own
         // committed data, so nothing is lost, but the file's bytes change.
-        let existing = header_user_version(path)?;
-        if let Some(version) = existing
+        if let Some(version) = header_user_version(path)?
             && version > crate::schema::SCHEMA_VERSION
         {
             return Err(StoreError::Migration(format!(
@@ -218,6 +217,13 @@ impl HumanStore {
         }
 
         let conn = Connection::open(path)?;
+        // EXISTING AS THE CONNECTION SEES IT, not as the file's header
+        // says: a store whose every session ended before a checkpoint -- an
+        // Android process killed is the normal end -- holds its schema and
+        // its messages only in the WAL, with a header still at version 0
+        // (#214's review, F1). The header read above stays for the
+        // newer-build refusal only.
+        let existing: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         // The database and its WAL/SHM companions hold the same message
         // content as the directory, and SQLite creates the companions
         // itself with the process umask. Checked after the connection so
@@ -235,7 +241,7 @@ impl HumanStore {
             }
         }
         let mut store = Self::from_connection(conn, options)?;
-        store.scrub_at_open(existing.is_some_and(|v| v > 0))?;
+        store.scrub_at_open(existing > 0)?;
         Ok(store)
     }
 

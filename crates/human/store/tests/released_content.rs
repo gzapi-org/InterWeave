@@ -236,3 +236,66 @@ fn terminal_outbound_content_leaves_both_files_before_the_call_returns() {
     );
     drop(store);
 }
+
+/// A process ending before its first checkpoint is the normal end of an
+/// Android session: the schema and every message are still only in the
+/// WAL, and the database file's header still says version 0. A release then
+/// commits and the process dies before the store truncates the log. The
+/// next open must not take that store for a fresh one (#214's review, F1).
+#[test]
+fn a_never_checkpointed_store_released_and_killed_is_scrubbed_at_the_next_open() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = state(&dir);
+    let mut store = HumanStore::open(&path, StoreOptions::default()).expect("opens");
+    let kept = store
+        .commit_unread_inbound(&inbound(2, KEPT))
+        .expect("control commits");
+    let read = store.mark_read(kept, 3_000).expect("read");
+    store.keep(&read, 3_001).expect("kept");
+    // The truncate after that release checkpointed; start over from a
+    // never-checkpointed state: a fresh store that only commits.
+    drop(store);
+    let path = dir.path().join("fresh").join("human.sqlite3");
+    let mut store = HumanStore::open(&path, StoreOptions::default()).expect("opens");
+    let kept = store
+        .commit_unread_inbound(&inbound(2, KEPT))
+        .expect("control commits");
+    store
+        .commit_unread_inbound(&inbound(1, RELEASED))
+        .expect("released commits");
+    let _ = kept;
+    // Killed: no close, no checkpoint.
+    std::mem::forget(store);
+    let header = std::fs::read(&path).expect("db");
+    assert!(
+        header.len() < 100 || header[60..64] == [0, 0, 0, 0],
+        "the setup: the database file's header still says version 0"
+    );
+    // The release commits through the WAL, and the process dies before the
+    // truncate (a raw connection standing in for this build's own delete).
+    let release = rusqlite::Connection::open(&path).expect("raw open");
+    release
+        .execute_batch(
+            "PRAGMA secure_delete=ON;
+             DELETE FROM unread_inbound WHERE payload = CAST('RETENTION8-RELEASED-CONTENT-3e5a7c9b1d2f4a6c8e0b2d4f6a8c' AS BLOB);",
+        )
+        .expect("release commits");
+    std::mem::forget(release);
+    assert!(
+        in_files(&path, RELEASED).1,
+        "the setup: the released content is in the WAL"
+    );
+
+    let store = HumanStore::open(&path, StoreOptions::default()).expect("the next open");
+    assert_eq!(
+        in_files(&path, RELEASED),
+        (false, false),
+        "released content left"
+    );
+    let control = in_files(&path, KEPT);
+    assert!(
+        control.0 || control.1,
+        "the control: the search sees kept content"
+    );
+    drop(store);
+}
