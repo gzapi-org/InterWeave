@@ -36,7 +36,8 @@
 
         <!-- The recovery screen: a dedicated non-exported Activity AND task
              (android-key-custody.md), so excludeFromRecents, which acts on a
-             task's root, applies to it. Started from inside the app only. -->
+             task's root, applies to it. Started by the Launcher's harness-only
+             recovery extra, which any app can send (see Launcher.java). -->
         <activity
             android:name=".Recovery"
             android:exported="false"

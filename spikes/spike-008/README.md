@@ -58,6 +58,7 @@ The recorded run is [`REPRODUCTION-2026-10-06.log`](./REPRODUCTION-2026-10-06.lo
 - **L3, the network in Doze:** answered in part 3 (a TCP handshake every heartbeat). Forced Doze is still not natural Doze.
 - **L4, a real low-memory kill:** a self-SIGKILL stood in.
 - **R2 on other launchers and API levels:** One UI on API 30 only.
+- **The recovery entry point:** the harness opens Recovery through an extra on its exported Launcher, which any app can send. That is a harness convenience; a production client must not route recovery through an exported entry point.
 - **B3, the onboarding:** the harness has no onboarding. That a reinstall without the identity enters recovery-required and never manufactures a PeerId (`android-key-custody.md`, `human-client-android.md`) is the production client's to show; what was shown is that nothing sensitive came back.
 - **B1 through Google's transport (B2), device transfer (B4) and Smart Switch (B5):** see part 2.
 

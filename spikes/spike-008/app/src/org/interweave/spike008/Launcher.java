@@ -9,8 +9,11 @@ import android.widget.TextView;
 
 /**
  * The only user-visible start path: opening the app starts the foreground
- * service. With {@code --ez recovery true} it opens the recovery screen,
- * which is not exported and cannot be started from outside.
+ * service. With {@code --ez recovery true} it opens the recovery screen.
+ * Recovery is not exported, but this exported Launcher is a trampoline to
+ * it: ANY app can send it that extra. That is a harness convenience only,
+ * and a production client must not route recovery through an exported
+ * entry point.
  */
 public final class Launcher extends Activity {
     @Override
