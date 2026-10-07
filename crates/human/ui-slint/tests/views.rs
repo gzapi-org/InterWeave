@@ -19,7 +19,7 @@ use i_slint_backend_testing::ElementHandle;
 use interweave_human_chat_protocol::{HumanChatV2, MessageKind};
 use interweave_human_client_api::{
     ClientEvent, Connectivity, Destination, Origin, OutboundStatus, OutboundUpdate, Received,
-    SessionProblem, SessionState, TrustList,
+    SessionProblem, SessionState, TrustList, TrustRow,
 };
 use interweave_human_core::{AppMessageId, RowId};
 use interweave_human_ui_model::{
@@ -1922,9 +1922,51 @@ fn trust_settings(
     assert_eq!(intents(view, model), vec![Intent::ReadTrust]);
     model.trust_settings_mut().read(Ok(TrustList {
         local_peer: Some(me.clone()),
-        allowed: allowed.to_vec(),
+        allowed: allowed.iter().cloned().map(TrustRow::configured).collect(),
     }));
     view.render(model);
+}
+
+/// Each listed peer says where it comes from: the profile's configuration,
+/// or added in these settings (ADR-0028 A 2026-10-07), beside its exact
+/// `PeerId`.
+#[test]
+fn each_trusted_peer_says_whether_it_is_configured_or_added_here() {
+    use slint::Model as _;
+    let mut view = view();
+    let mut model = UiModel::new();
+    let me = peer();
+    let (carol, dave) = (peer(), peer());
+    the(&view, text(UiText::TrustSettings)).invoke_accessible_default_action();
+    assert_eq!(intents(&mut view, &mut model), vec![Intent::ReadTrust]);
+    model.trust_settings_mut().read(Ok(TrustList {
+        local_peer: Some(me),
+        allowed: vec![
+            TrustRow::configured(carol.clone()),
+            TrustRow::added_here(dave.clone()),
+        ],
+    }));
+    view.render(&model);
+    let rows = view.window().get_trusted();
+    let drawn: Vec<(String, String)> = (0..rows.row_count())
+        .map(|i| {
+            let row = rows.row_data(i).expect("a row");
+            (row.peer.to_string(), row.origin.to_string())
+        })
+        .collect();
+    assert_eq!(
+        drawn,
+        vec![
+            (
+                carol.as_str().to_owned(),
+                text(UiText::TrustFromConfiguration).to_owned()
+            ),
+            (
+                dave.as_str().to_owned(),
+                text(UiText::TrustAddedHere).to_owned()
+            ),
+        ]
+    );
 }
 
 /// human-client-ui.md section 8 and section 13's trust bullet, at the
@@ -2029,7 +2071,7 @@ fn a_typed_peer_id_is_confirmed_whole_and_its_outcome_announced() {
         change,
         Ok(TrustList {
             local_peer: Some(me),
-            allowed: vec![dave.clone()],
+            allowed: vec![TrustRow::added_here(dave.clone())],
         }),
     );
     view.render(&model);

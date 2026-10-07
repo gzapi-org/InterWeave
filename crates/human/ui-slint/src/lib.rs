@@ -23,6 +23,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::rc::Rc;
 
+use interweave_human_client_api::TrustOrigin;
 use interweave_human_ui_model::{
     ConversationKey, Direction, Intent, ItemKey, ItemStatus, MessageItem, Reply, Retention,
     SessionNotice, TrustChange, TrustInput, TrustOutcome, UiModel, UiText, fill, placeholder_en,
@@ -897,13 +898,19 @@ impl View {
             _ => "",
         };
         window.set_trust_placeholder(placeholder.into());
-        let keys: Vec<TransportIdentity> = list.map(|l| l.allowed.clone()).unwrap_or_default();
+        let listed = list.map(|l| l.allowed.as_slice()).unwrap_or_default();
+        let keys: Vec<TransportIdentity> = listed.iter().map(|row| row.peer.clone()).collect();
         self.trusted_handles.retain(&keys);
-        let rows: Vec<TrustRow> = keys
+        let rows: Vec<TrustRow> = listed
             .iter()
-            .map(|peer| TrustRow {
-                handle: self.trusted_handles.of(peer),
-                peer: peer.as_str().into(),
+            .map(|row| TrustRow {
+                handle: self.trusted_handles.of(&row.peer),
+                peer: row.peer.as_str().into(),
+                origin: placeholder_en::text(match row.origin {
+                    TrustOrigin::Configured => UiText::TrustFromConfiguration,
+                    TrustOrigin::AddedHere => UiText::TrustAddedHere,
+                })
+                .into(),
             })
             .collect();
         self.shared.borrow_mut().trusted = rows
