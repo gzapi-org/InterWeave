@@ -251,7 +251,10 @@ impl TrustOverlay {
     /// - revoke a configured peer: add it to `revoked`;
     /// - revoke any other peer: remove it from `added`.
     ///
-    /// Bounds are the policy's to decide; this only moves the lists.
+    /// This only moves the lists: the caller checks the moved overlay's
+    /// bound ([`TrustOverlay::effective`]) beside the policy's before
+    /// writing it, since an overlay left ahead can hold a peer the
+    /// policy does not.
     #[must_use]
     pub fn set(
         &self,

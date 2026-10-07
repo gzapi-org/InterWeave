@@ -1018,7 +1018,8 @@ impl Driver {
     /// EVERY SET THAT REACHES THE DRIVER IS LOGGED, under
     /// [`AUDIT_TARGET`], whatever came of it (ADR-0012's consequence,
     /// LOCAL-IPC.md `admin.trust.set`): the peer, the request and its
-    /// outcome -- changed, unchanged, refused by the policy, failed, or
+    /// outcome -- changed, unchanged, refused (by the policy, or by the
+    /// bound of an overlay left ahead), failed, or
     /// unwritten (the overlay write failed, so nothing changed) --
     /// timestamped by the host's log. A set that never reaches it is not:
     /// one refused at the port for want of `admin.trust`, or by the IPC
