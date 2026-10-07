@@ -69,10 +69,28 @@ public final class Keeper extends Service {
         getSystemService(ConnectivityManager.class).registerDefaultNetworkCallback(callback, handler);
     }
 
+    /**
+     * Each heartbeat also tries the network: a TCP handshake (no data) to a
+     * public anycast address, 3 s at most, so L3 shows whether the service
+     * can reach the network inside Doze and not only that it is alive.
+     */
     private void beat() {
         beats++;
-        Trace.trace(this, "heartbeat", "n=" + beats);
+        Trace.trace(this, "heartbeat", "n=" + beats + " net=" + probe());
         handler.postDelayed(this::beat, HEARTBEAT_MS);
+    }
+
+    static final String PROBE_HOST = "1.1.1.1";
+    static final int PROBE_PORT = 443;
+
+    private static String probe() {
+        long start = android.os.SystemClock.elapsedRealtime();
+        try (java.net.Socket s = new java.net.Socket()) {
+            s.connect(new java.net.InetSocketAddress(PROBE_HOST, PROBE_PORT), 3_000);
+            return "ok:" + (android.os.SystemClock.elapsedRealtime() - start) + "ms";
+        } catch (Exception e) {
+            return "fail:" + e.getClass().getSimpleName();
+        }
     }
 
     @Override
