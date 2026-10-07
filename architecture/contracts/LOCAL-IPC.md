@@ -372,7 +372,16 @@ never `config.yaml`; the row says so behind minor 2.3 (`ipc/trust-list`
 1.1.0: `persisted` a boolean and `source` optional, each shape named
 with the minor that serves it), the 2.1 row unchanged below, the
 `close` frame's `supported` list `[{major: 2, minor: 3}]` from the batch
-that implements it, its mirror and the daemon changing in one PR. Their schemas, `trust-list-params`, `trust-list` and `trust-set-params`, were `approved`, and the method and capability enums carry their minor bumps (`ipc/method`
+that implements it, its mirror and the daemon changing in one PR. The
+client's half (A 2026-10-07): a binding that fills the neutral trust row
+(`LOCAL-CLIENT.md` §7 item 11: `persisted` and a `source` every listed
+peer has) reads `admin.trust.list` only on a connection that negotiated
+2.3 or later and refuses the read below it with `ProtocolUnsupported`,
+no round trip — as `admin.peers.list` is refused below 2.2 — because the
+2.1 row carries no `source` and an unknown is never shown as a value;
+`admin.trust.set` carries no row and is unchanged from 2.1; a raw reader
+(`transportctl trust list`) prints whatever row the negotiated minor
+gives. Their schemas, `trust-list-params`, `trust-list` and `trust-set-params`, were `approved`, and the method and capability enums carry their minor bumps (`ipc/method`
 1.1.0, `ipc/capability` 1.2.0, `ipc/request` 1.1.0), as every 2.0 shape
 did (plan §16 (3)); they flipped `active` with Stage 15's close (2026-10-06, with `ipc/path-changed`). Discovery and bootstrap administration still have no method; Stage 15's close carried them to the owner (plan §18's record, with ADR-0032's revisit).
 
