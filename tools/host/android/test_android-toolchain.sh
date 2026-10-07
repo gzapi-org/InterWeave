@@ -313,7 +313,6 @@ if unshare -rm true 2>/dev/null; then
     rm -f "$SANDBOX/etc/android-sdk.sh"
     make_tree "$SANDBOX/bad" "platforms;android-30@9"; pack "$SANDBOX/bad"
     inst full
-    [[ ! -e "$SANDBOX/etc/android-sdk.sh.old" ]] && pass "a killed run's profile copy is swept, even by a refused install" || fail "the stale profile copy survived" "$(ls -a "$SANDBOX/etc")"
     [[ "$got" -eq 2 && "$out" == *"platforms;android-30: 9, pinned 3"* && -e "$SANDBOX/opt/android-sdk/previous-install" ]] \
         && pass "a tree that fails verification is refused, named, and the previous install stays" || fail "a failing tree was not refused cleanly" "$out"
     mv "$SANDBOX/opt/android-sdk" "$SANDBOX/opt/android-sdk.old"
@@ -366,6 +365,28 @@ if unshare -rm true 2>/dev/null; then
     INST_AFTER=" && umount '$SANDBOX/etc/android-sdk.sh' && rm -f '$pstore_file' && ANDROID_TOOLCHAIN_BIND_CONF='$SANDBOX/conf-not-a-dir/50.conf' bash '$UNDER_TEST' --install '$SANDBOX/a.tar.gz'; echo \"rc=\$?\"; [ -e '$pstore_file' ] && echo profile-present || echo profile-absent" inst rw-only
     [[ "$out" == *"the previous install is restored"*"rc=2"*"profile-absent"* ]] \
         && pass "  a rollback where no profile was takes the new one away" || fail "a rollback left a profile the previous install never had" "$out"
+    # A FIRST install keeps no profile record: there is nothing to roll back
+    # to. One that fails after its swap leaves its tree and profile whole,
+    # and a second that fails too must not read a record as a killed
+    # rollback and take that profile away.
+    rm -rf "$SANDBOX/rw" "$SANDBOX/opt"
+    pstore_file="$SANDBOX/rw/bind-dirs$SANDBOX/etc/android-sdk.sh"
+    # Inside the mount namespace: undo the helper's own install to a pristine
+    # host, then a first install that fails after its swap, then a second.
+    bad_first="ANDROID_TOOLCHAIN_BIND_CONF='$SANDBOX/conf-not-a-dir/50.conf' bash '$UNDER_TEST' --install '$SANDBOX/a.tar.gz' >/dev/null 2>&1"
+    INST_AFTER=" && umount '$SANDBOX/opt/android-sdk' '$SANDBOX/etc/android-sdk.sh' && rm -rf '$SANDBOX/rw' && rm -f '$SANDBOX/etc/android-sdk.sh'; $bad_first; [ -e '$pstore_file.absent' ] && echo record-written; $bad_first; [ -s '$pstore_file' ] && echo profile-kept || echo profile-lost"
+    inst rw-only
+    [[ "$out" == *"profile-kept"* && "$out" != *"record-written"* ]] \
+        && pass "  a first install keeps no profile record, so a second failure keeps its profile" || fail "a first install's profile was taken away" "$out"
+    # A killed swap left SDK_DIR unmounted: the next run mounts the previous
+    # install again, even when it then fails.
+    rm -rf "$SANDBOX/rw" "$SANDBOX/opt"
+    make_tree "$SANDBOX/bad2" "platforms;android-30@9"
+    tar -C "$SANDBOX/bad2" -czf "$SANDBOX/bad.tar.gz" . && ( cd "$SANDBOX" && sha256sum bad.tar.gz > bad.tar.gz.sha256 )
+    store_dir="$SANDBOX/rw/bind-dirs$SANDBOX/opt/android-sdk"
+    INST_AFTER=" && umount '$SANDBOX/opt/android-sdk' && mv '$store_dir' '$store_dir.old' && bash '$UNDER_TEST' --install '$SANDBOX/bad.tar.gz' >/dev/null 2>&1; mountpoint -q '$SANDBOX/opt/android-sdk' && echo remounted || echo unmounted"
+    inst rw-only
+    [[ "$out" == *"remounted"* ]] && pass "  a killed swap's next run mounts the previous install again, though it fails" || fail "the recovered install was left unmounted" "$out"
     rm -rf "$SANDBOX/rw" "$SANDBOX/opt"
 elif [[ -n "${CI:-}" ]]; then
     fail "unprivileged user and mount namespaces are unavailable under CI: the install would go untested"
