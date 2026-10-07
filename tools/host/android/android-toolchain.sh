@@ -316,28 +316,55 @@ old="$store.old"
 if [[ "$persist" == bind ]]; then say "== $me --install into $SDK_DIR (kept by bind-dirs in $store) =="
 else say "== $me --install into $SDK_DIR =="; fi
 mkdir -p "$(dirname "$store")" || die "cannot create $(dirname "$store")"
-# ONE INSTALL AT A TIME: everything below treats .old, .new.* and the
-# profile copy as a killed run's leftovers, and a second run would take
+# ONE INSTALL AT A TIME: everything below treats .old, .dead, .new.* and
+# the profile record (.old or .absent) as a killed run's leftovers, and a second run would take
 # the first's live state for them. Held until this process exits; the
 # file lives in /run/lock (a tmpfs, never beside the SDK).
 lock="${ANDROID_TOOLCHAIN_LOCK:-/run/lock/android-toolchain.lock}"
 exec 9>"$lock" || die "cannot open the install lock $lock"
 flock -n 9 || die "another --install is running on this host (it holds $lock)"
+# On an AppVM the store is mounted on SDK_DIR: unmounted only for a swap
+# or a rollback, and mounted again whatever happens, so a failure (or a
+# killed run's next run) leaves a visible install.
+mount_store() { [[ "$persist" == bind ]] || return 0; mkdir -p "$SDK_DIR" && { mountpoint -q "$SDK_DIR" || mount --bind "$store" "$SDK_DIR"; }; }
+# What a run keeps of the profile before rewriting it: a copy at
+# $pstore.old, or, where there was none, the marker $pstore.absent. Both
+# are files, so a killed run's next run reads them as it would have. Kept
+# only when there is a previous tree to roll back to: with none, a record
+# would read at the next start as a killed rollback and take the profile
+# from the tree the killed run left whole.
+# The profile is restored IN PLACE: on an AppVM $PROFILE is bind-mounted
+# from $pstore's inode, and a rename would leave the mount on the new text.
+restore_profile() {
+    if [[ -e "$pstore.old" ]]; then
+        cat "$pstore.old" > "$pstore" && rm -f "$pstore.old"
+    elif [[ -e "$pstore.absent" ]]; then
+        { [[ "$persist" != bind ]] || ! mountpoint -q "$PROFILE" || umount "$PROFILE"; } \
+            && rm -f "$pstore" && rm -f "$pstore.absent"
+    else
+        return 0
+    fi
+}
 # A run killed between moving the old tree aside and moving the new one in
 # left the old one at .old and nothing in place: put it back first, so
 # this run's failure cannot leave the host with no install at all.
-if [[ -e "$old" && ! -e "$store" ]]; then mv "$old" "$store" && say "  restored the previous install from $old"; fi
-# A killed run's copy of the profile is made only after its swap. With its
-# .old tree still beside the store, it got past the swap and the new tree
-# stays, so the copy is dropped; without one, it was killed rolling back
-# (the final cleanup drops the copy before the .old tree), so the
-# previous tree is in place and the copy is its profile: put back, in
-# place, as rollback would have.
-if [[ -e "$pstore.old" ]]; then
-    if [[ -e "$old" ]]; then rm -f "$pstore.old"
-    else cat "$pstore.old" > "$pstore" && rm -f "$pstore.old" && say "  restored the previous profile from $pstore.old"; fi
+if [[ -e "$old" && ! -e "$store" ]]; then
+    mv "$old" "$store" || die "cannot put the previous install back from $old; it is still there"
+    say "  restored the previous install from $old"
 fi
-rm -rf "$old"
+# A killed run's record of the profile is made only after its swap. With
+# its .old tree still beside the store, it got past the swap and the new
+# tree stays, so the record is dropped; without one, it was killed rolling
+# back (rollback moves the store aside to .dead whole, and the final
+# cleanup drops the record before the .old tree), so the previous tree is
+# in place and the record is its profile: restored, as rollback would have.
+if [[ -e "$pstore.old" || -e "$pstore.absent" ]]; then
+    if [[ -e "$old" ]]; then rm -f "$pstore.old" "$pstore.absent"
+    else restore_profile && say "  restored the previous profile (a killed rollback)"; fi
+fi
+rm -rf "$old" "$store.dead"
+# A killed swap or rollback left SDK_DIR unmounted on an AppVM.
+[[ ! -e "$store" ]] || mount_store || die "cannot bind-mount $store onto $SDK_DIR"
 # Staging trees a killed run left (random names, so nothing else finds
 # them).
 rm -rf "$(dirname "$store")"/.android-sdk.new.* 2>/dev/null
@@ -356,41 +383,34 @@ chown -R root:root "$new" \
     || die "cannot set the owner or modes on $new (nothing installed yet)"
 PROBLEMS=0; verify_tree "$new" >&2
 [[ "$PROBLEMS" -eq 0 ]] || die "the unpacked tree does not verify ($PROBLEMS problem(s), above); $SDK_DIR is untouched"
-# On an AppVM the store is mounted on SDK_DIR: unmounted only for the swap,
-# and mounted again whatever happens, so a failure leaves a visible install.
-mount_store() { [[ "$persist" == bind ]] || return 0; mkdir -p "$SDK_DIR" && { mountpoint -q "$SDK_DIR" || mount --bind "$store" "$SDK_DIR"; }; }
+# Unmounted for the swap only; mount_store (above) puts it back.
 if [[ "$persist" == bind ]] && mountpoint -q "$SDK_DIR"; then umount "$SDK_DIR" || die "cannot unmount the old $SDK_DIR to replace it"; fi
 [[ -e "$store" ]] && { mv "$store" "$old" || { mount_store; die "cannot move the old $store aside"; }; }
 mv "$new" "$store" || { [[ -e "$old" ]] && mv "$old" "$store"; mount_store; die "cannot move the new tree into place; the old install is restored"; }
 trap - EXIT
 # The previous tree (and profile) stay until every step below has
 # succeeded; a failure puts them back.
-# The profile is restored IN PLACE: on an AppVM $PROFILE is bind-mounted
-# from $pstore's inode, and a rename would leave the mount on the new text.
-# One this run wrote where there was none is taken away again.
-restore_profile() {
-    if [[ -e "$pstore.old" ]]; then
-        cat "$pstore.old" > "$pstore" && rm -f "$pstore.old"
-    elif [[ "${profile_written:-0}" == 1 && "${profile_before:-1}" == 0 ]]; then
-        { [[ "$persist" != bind ]] || ! mountpoint -q "$PROFILE" || umount "$PROFILE"; } && rm -f "$pstore"
-    fi
-}
 rollback() {  # rollback <message>
     [[ -e "$old" ]] || die "$1"
+    # The failed tree is moved aside whole, not deleted in place: a run
+    # killed half-way through deleting it left a half tree as the store
+    # beside the intact .old, which the next run took for "past the swap"
+    # and deleted the previous tree. .dead goes last, and is swept at start.
     if { [[ "$persist" != bind ]] || ! mountpoint -q "$SDK_DIR" || umount "$SDK_DIR"; } \
-        && rm -rf "$store" && mv "$old" "$store" && mount_store \
+        && rm -rf "$store.dead" && mv "$store" "$store.dead" && mv "$old" "$store" && mount_store \
         && restore_profile; then
+        rm -rf "$store.dead"
         die "$1; the previous install is restored"
     fi
-    die "$1; restoring the previous install FAILED as well: the previous tree is at ${old}, if not at ${store}$( [[ -e "$pstore.old" ]] && printf ' (and its profile at %s)' "$pstore.old" )"
+    die "$1; restoring the previous install FAILED as well: the previous tree is at ${old}, if not at ${store}$( [[ -e "$pstore.old" ]] && printf ' (and its profile at %s)' "$pstore.old" )$( [[ -e "$pstore.absent" ]] && printf ' (it had no profile: %s says so)' "$pstore.absent" )"
 }
 mount_store || rollback "the new install is in $store but cannot be bind-mounted onto $SDK_DIR"
 
 ndk_path="$(pkgs | sed -n 's/^ndk;\([^@]*\)@.*/\1/p' | head -1)"
 mkdir -p "$(dirname "$pstore")" || rollback "cannot create $(dirname "$pstore")"
-profile_before=0
-if [[ -e "$pstore" ]]; then profile_before=1; cp -p "$pstore" "$pstore.old" || rollback "cannot keep a copy of $pstore"; fi
-profile_written=1
+if [[ ! -e "$old" ]]; then :   # a first install: nothing to roll back to (above)
+elif [[ -e "$pstore" ]]; then cp -p "$pstore" "$pstore.old" || rollback "cannot keep a copy of $pstore"
+else : > "$pstore.absent" || rollback "cannot record that $pstore was absent"; fi
 {
     echo "# Written by InterWeave tools/host/android/android-toolchain.sh --install."
     printf 'export ANDROID_HOME=%q\n' "$SDK_DIR"
@@ -413,7 +433,7 @@ if [[ "$persist" == bind ]]; then
             || rollback "cannot bind-mount $pstore onto $PROFILE"
     fi
 fi
-rm -f "$pstore.old"; rm -rf "$old"
+rm -f "$pstore.old" "$pstore.absent"; rm -rf "$old"
 say "== installed =="
 say "Each Android account runs, once: bash tools/host/android/rust-android.sh"
 say "Any account, any time:            bash tools/host/android/android-toolchain.sh --check"
