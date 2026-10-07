@@ -16,7 +16,7 @@ use interweave_human_store::{HumanStore, StoreOptions};
 use interweave_human_transport_client::{
     ClientConfig, ClientEvent, Connectivity, Destination, Origin, OutboundStatus, Received,
     SendError, SendProblem, SessionProblem, SessionState, TransportClient, TrustList, TrustProblem,
-    TrustSetFailure,
+    TrustRow, TrustSetFailure,
 };
 use interweave_local_client_api::{
     AdminBinding, AdminCapability, AdminPort, DataCapability, DataSessionBinding, DataSessionPort,
@@ -1441,7 +1441,7 @@ async fn trust_is_read_allowed_and_revoked_and_read_back() {
         read,
         TrustList {
             local_peer: Some(a.peer().clone()),
-            allowed: vec![b.peer().clone()],
+            allowed: vec![TrustRow::configured(b.peer().clone())],
         }
     );
 
@@ -1453,18 +1453,17 @@ async fn trust_is_read_allowed_and_revoked_and_read_back() {
         .await
         .expect("allowed");
     assert!(
-        after.allowed.contains(&stranger),
-        "read back with it: {after:?}"
+        after
+            .allowed
+            .contains(&TrustRow::added_here(stranger.clone())),
+        "read back with it, as added here: {after:?}"
     );
 
     let after = settings
         .set_trust(b.peer().clone(), false)
         .await
         .expect("revoked");
-    assert!(
-        !after.allowed.contains(b.peer()),
-        "read back without it: {after:?}"
-    );
+    assert!(!after.allows(b.peer()), "read back without it: {after:?}");
     let _ = session.drain(16, 1).await;
     assert!(
         events(&mut session).contains(&ClientEvent::PeerDisconnected {
@@ -1486,7 +1485,7 @@ async fn trusting_this_profiles_own_identity_is_refused() {
     );
     assert_eq!(
         settings.trust().await.expect("the allowlist").allowed,
-        vec![b.peer().clone()]
+        vec![TrustRow::configured(b.peer().clone())]
     );
 }
 
@@ -1660,6 +1659,6 @@ async fn a_trust_failure_says_whether_the_change_was_made() {
         );
         let (settings, _) = trusting(&a);
         let held = settings.trust().await.expect("the allowlist");
-        assert_eq!(held.allowed.contains(&stranger), made, "{expected:?}");
+        assert_eq!(held.allows(&stranger), made, "{expected:?}");
     }
 }
