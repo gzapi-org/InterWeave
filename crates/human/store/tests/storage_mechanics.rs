@@ -1205,6 +1205,62 @@ fn an_already_open_state_directory_is_refused_rather_than_tightened() {
 }
 
 #[test]
+fn a_too_open_write_ahead_log_is_refused_and_left_as_it_was() {
+    // The same rule for a companion: a WAL that was broadly readable
+    // (restored, copied, an older build's umask) is refused, and the
+    // refusal must not touch it. An open that READ the database before
+    // checking ran WAL recovery, and the refused connection -- the last
+    // one -- checkpointed and deleted the WAL as it closed: refused once,
+    // the evidence gone, and the next open healthy (#214's re-review).
+    use std::os::unix::fs::PermissionsExt as _;
+
+    const CHILD: &str = "INTERWEAVE_TOO_OPEN_WAL_DB";
+    if let Some(path) = std::env::var_os(CHILD) {
+        // The child: commit, then end the process with no close, so the
+        // WAL keeps its frames and no connection to it survives.
+        let mut store =
+            HumanStore::open(std::path::Path::new(&path), StoreOptions::default()).expect("opens");
+        store
+            .commit_unread_inbound(&inbound(ID_A, b"body".to_vec()))
+            .expect("commit");
+        std::process::exit(0);
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    let status = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+        .args([
+            "--exact",
+            "a_too_open_write_ahead_log_is_refused_and_left_as_it_was",
+        ])
+        .env(CHILD, &path)
+        .status()
+        .expect("the child runs");
+    assert!(status.success(), "the child failed: {status}");
+    let mut wal = path.as_os_str().to_owned();
+    wal.push("-wal");
+    let wal = std::path::PathBuf::from(wal);
+    assert!(wal.exists(), "the setup: the dead process left its WAL");
+    std::fs::set_permissions(&wal, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+
+    for attempt in 1..=2 {
+        match HumanStore::open(&path, StoreOptions::default()) {
+            Err(StoreError::PermissionsTooOpen { mode, .. }) => assert_eq!(mode, 0o644),
+            other => panic!("open {attempt}: expected a permissions refusal, got {other:?}"),
+        }
+        let mode = std::fs::metadata(&wal)
+            .unwrap_or_else(|e| panic!("open {attempt} removed the refused WAL: {e}"))
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o644,
+            "open {attempt} changed the refused WAL"
+        );
+    }
+}
+
+#[test]
 fn a_new_column_inside_a_permitted_table_is_a_retention_violation() {
     // The name allowlist catches the clumsy version and misses the one
     // that fits inside a permitted name:

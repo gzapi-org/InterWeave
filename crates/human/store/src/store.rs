@@ -219,13 +219,6 @@ impl HumanStore {
         }
 
         let conn = Connection::open(path)?;
-        // EXISTING AS THE CONNECTION SEES IT, not as the file's header
-        // says: a store whose every session ended before a checkpoint -- an
-        // Android process killed is the normal end -- holds its schema and
-        // its messages only in the WAL, with a header still at version 0
-        // (#214's review, F1). The header read above stays for the
-        // newer-build refusal only.
-        let existing: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         // The database and its WAL/SHM companions hold the same message
         // content as the directory, and SQLite creates the companions
         // itself with the process umask. Checked after the connection so
@@ -242,6 +235,16 @@ impl HumanStore {
                 require_owner_only(&companion, what)?;
             }
         }
+        // EXISTING AS THE CONNECTION SEES IT, not as the file's header
+        // says: a store whose every session ended before a checkpoint -- an
+        // Android process killed is the normal end -- holds its schema and
+        // its messages only in the WAL, with a header still at version 0
+        // (#214's review, F1). The header read above stays for the
+        // newer-build refusal only. AFTER the owner-only checks above: reading
+        // runs WAL recovery, and a refused connection, the last one, then
+        // checkpoints and deletes the WAL as it closes -- the refusal
+        // destroying what it refused (#214's re-review).
+        let existing: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         let mut store = Self::from_connection(conn, options)?;
         store.scrub_at_open(existing > 0)?;
         Ok(store)
