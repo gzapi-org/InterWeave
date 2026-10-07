@@ -304,6 +304,17 @@ impl TrustOverlay {
     }
 }
 
+/// The uid an overlay must be owned by, or -- this process's uid
+/// unreadable -- a refusal on READ: the owner cannot be checked, so the
+/// file cannot be trusted; never a write failure (#215 review P3).
+/// `an_unreadable_uid_refuses_the_overlay_on_read`.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn owner_uid(read: Result<u32, PersistError>) -> Result<u32, OverlayError> {
+    read.map_err(|_| OverlayError::NotPrivate {
+        detail: "its owner cannot be checked: this process's uid is unreadable".to_owned(),
+    })
+}
+
 /// Open `path` for reading only if it is a regular file, not a link,
 /// owned by this process's uid and readable or writable by nobody else
 /// -- the identity key's rule. Judged on the OPENED file, so the file
@@ -327,11 +338,7 @@ fn open_private(path: &Path) -> Result<std::fs::File, OverlayError> {
                 }
             })?;
         let meta = file.metadata().map_err(OverlayError::Read)?;
-        // A refusal on READ: the owner cannot be checked, so the file
-        // cannot be trusted -- not a write failure (#215 review P3).
-        let uid = persist::effective_uid().map_err(|_| OverlayError::NotPrivate {
-            detail: "its owner cannot be checked: this process's uid is unreadable".to_owned(),
-        })?;
+        let uid = owner_uid(persist::effective_uid())?;
         if !meta.file_type().is_file() {
             return Err(OverlayError::NotPrivate {
                 detail: "it is not a regular file".to_owned(),
@@ -361,5 +368,20 @@ fn open_private(path: &Path) -> Result<std::fs::File, OverlayError> {
                 detail: "owner-only permissions cannot be checked on this platform".to_owned(),
             }),
         }
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "android")))]
+mod tests {
+    use super::{OverlayError, PersistError, owner_uid};
+
+    #[test]
+    fn an_unreadable_uid_refuses_the_overlay_on_read() {
+        assert!(matches!(
+            owner_uid(Err(PersistError::UnsupportedPlatform)),
+            Err(OverlayError::NotPrivate { .. })
+        ));
+        // The control: a uid read is the owner checked against.
+        assert_eq!(owner_uid(Ok(1000)).ok(), Some(1000));
     }
 }
