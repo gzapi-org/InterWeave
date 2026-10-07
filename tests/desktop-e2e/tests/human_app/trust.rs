@@ -6,9 +6,15 @@
 //! over the admin socket alone -- never the data socket, whatever the
 //! client asks there.
 //!
+//! And the change outlives the daemon (ADR-0028 A 2026-10-07): after a
+//! restart the daemon still does not allow the revoked peer, and the client
+//! shows no trusted peer. Before it, B's row says it comes from the
+//! profile's configuration -- the IPC 2.3 source, through the real daemon.
+//!
 //! What this does not prove: an allow typed into the field (its view and
-//! root tests are `ui-slint`'s and `app-core`'s), or that a change outlives
-//! the daemon -- by decision it does not (ADR-0028), and the view says so.
+//! root tests are `ui-slint`'s and `app-core`'s), or an added peer's row
+//! across a restart (the daemon's own tests carry the overlay's both
+//! halves).
 
 use interweave_human_ui_model::{UiText, fill, placeholder_en};
 use interweave_local_client_api::{AdminBinding as _, AdminCapability, AdminPort as _};
@@ -26,7 +32,7 @@ fn text(key: UiText) -> &'static str {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_trust_removal_shows_the_exact_peer_id_and_reaches_the_daemon_only_over_admin() {
     let _focus = display::exclusive().await;
-    let world = two_daemons().await;
+    let mut world = two_daemons().await;
     let data = Tap::install(&world.a.data_socket());
     let admin = Tap::install(&world.a.admin_socket());
     let bus = Bus::connect().await;
@@ -56,6 +62,13 @@ async fn a_trust_removal_shows_the_exact_peer_id_and_reaches_the_daemon_only_ove
         .until(
             "B's PeerId, whole, on its row",
             |e: &Element| e.name == b,
+            log,
+        )
+        .await;
+    window
+        .until(
+            "B's row, saying it comes from the profile's configuration",
+            |e: &Element| e.name == text(UiText::TrustFromConfiguration),
             log,
         )
         .await;
@@ -158,4 +171,48 @@ async fn a_trust_removal_shows_the_exact_peer_id_and_reaches_the_daemon_only_ove
         !administrative(&on_data.capabilities) && !administrative(&on_data.methods),
         "no administrative authority asked for or used on the data socket: {on_data:?}"
     );
+
+    // THE CHANGE OUTLIVES THE DAEMON: restarted, it still does not allow B.
+    drop(port);
+    assert!(
+        world.a_daemon.terminate().await.success(),
+        "{}",
+        world.a_daemon.log()
+    );
+    world.a_daemon = world.a.start(&[]);
+    world.a_daemon.serving(&world.a).await;
+    let port = world
+        .a
+        .binding()
+        .admin([AdminCapability::Trust].into())
+        .await
+        .expect("an admin port after the restart");
+    let view = port.trust().await.expect("the allowlist after the restart");
+    assert!(
+        !view.peers().any(|p| p == &world.b_peer),
+        "the revocation outlived the restart: {view:?}"
+    );
+
+    // And the client shows it: no trusted peer, after its own restart.
+    let mut client = app::start(&world.a);
+    until_lease(&world.a.binding(), true, &client).await;
+    let window = bus.window_of(client.child.id(), || client.log()).await;
+    display::focus(client.child.id(), || client.log()).await;
+    let log = || client.log();
+    let open = window
+        .until(
+            "the trust settings' control, after the restart",
+            button(text(UiText::TrustSettings)),
+            log,
+        )
+        .await;
+    window.activate(&open, "click").await;
+    window
+        .until(
+            "no trusted peer, after the restart",
+            |e: &Element| e.name == text(UiText::NoTrustedPeer),
+            log,
+        )
+        .await;
+    assert!(client.terminate().success(), "{}", client.log());
 }
