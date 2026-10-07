@@ -1,0 +1,90 @@
+# SPIKE-008 device harness -- recorded run (parts 3 and 4: duplicate suppression across a restart, a full store,
+#   the network in forced Doze, the store's directory, and a released message's bytes in the database files)
+# date: 2026-10-07T07:07Z-07:24Z
+# device, host and toolchain: as part 1; this repository pinned at d019ac06 (harness/Cargo.toml); targetSdk 36, standard v1
+# part 3 ran the harness at b764f82c (redeliver, fill, the heartbeat's TCP handshake); part 4 at 6a385abc (the harness
+#   no longer makes or chmods the store directory -- HumanStore::open does -- plus dirmodes and forensic)
+# key material and content: TEST-ONLY labels and markers; the probe is a TCP handshake to 1.1.1.1:443, no data sent
+# the phone was locked throughout (the keyguard showing); nothing needed a person
+
+## part 3 -- driver output (verbatim as far as it went; see the notes after it)
+## 07:07:40Z clean install of the targetSdk 36 standard-v1 build; launch from the launcher (keyguard: isKeyguardShowing=true)
+Success
+pid=12123 fg=1
+## 07:13:56Z S1 duplicate suppression: seed, transitions, redeliver
+## 07:14:06Z a process restart (self-SIGKILL, sticky restart), then redeliver again
+pid=24707 fg=1
+## 07:14:19Z conformance 14: fill a quota-limited store of its own
+## 07:14:28Z L3 network: 90 s of heartbeats outside Doze (the control)
+## 07:15:58Z L3 network: screen off, battery reported unplugged, deep Doze forced for 180 s
+Now forced in to deep idle mode
+IDLE
+Light state: OVERRIDE, deep state: IDLE
+## 07:19:03Z Doze lifted; 70 s more
+(note: `am start -W` waited for an activity a locked screen cannot display; the launcher had been created and the
+ service started (the trace below, 07:08:00Z), so that wait was ended by hand at 07:13:43Z and the driver went on.
+ The driver then hit its own 15-minute limit while printing; Doze had been unforced and the battery reset first,
+ which the next lines confirm. The results and the trace were read from the phone afterwards.)
+deep state and power as read when this log was written (07:25Z): ACTIVE; AC powered: true
+
+## part 3 -- the harness's result lines (files/results.jsonl), read from the phone at 07:20Z, verbatim
+## (part 4's clean install then removed the app's files; these are as captured then)
+{"t":1791357237862,"up":5275971,"pid":12123,"event":"seed","detail":{"pending":["P1","P2","P3"],"unread":["U1","U2","U3"],"kept":["K1","K2","K3"],"eligible":["K1","K2","K3","U1","U2","U3"]}}
+{"t":1791357241161,"up":5279271,"pid":12123,"event":"transitions","detail":{"pending":["P2","P3"],"unread":["U2","U3"],"kept":["K2","K3"],"eligible":["K2","K3","U2","U3"]}}
+{"t":1791357244390,"up":5282499,"pid":12123,"event":"redeliver","detail":{"u1_again":"AlreadyRead","control_c1":"committed"}}
+{"t":1791357247615,"up":5285724,"pid":12123,"event":"die","detail":"pid=12123"}
+{"t":1791357254201,"up":5292310,"pid":24707,"event":"redeliver","detail":{"u1_again":"AlreadyRead","control_c1":"Sql(SqliteFailure(Error { code: ConstraintViolation, extended_code: 2067 }, Some("UNIQUE constraint failed: unread_inbound.source_peer, unread_inbound.source_endpoint_key, unread_inbound.channel_key, unread_inbound.app_message_id")))"}}
+{"t":1791357257794,"up":5295904,"pid":24707,"event":"census","detail":{"pending":["P2","P3"],"unread":["C1","U2","U3"],"kept":["K2","K3"],"eligible":["C1","K2","K3","U2","U3"]}}
+{"t":1791357261170,"up":5299279,"pid":24707,"event":"fill","detail":{"max_pages":48,"committed":12,"first_error":"Sql(SqliteFailure(Error { code: DiskFull, extended_code: 13 }, Some("database or disk is full")))","health":"Degraded","then":"Degraded","readable_unread":"12"}}
+
+## part 3 -- the service's heartbeats and starts (files/trace.jsonl), read at 07:22Z; printed with the UTC time of each
+## line's "t" prepended and the "t" and "up" fields removed (the listing as captured; the raw file is gone)
+## Doze: forced 07:15:58Z (screen off, battery reported unplugged), unforced about 07:19:05Z
+07:08:00Z "pid":12123,"event":"service-created","detail":""}
+07:08:30Z "pid":12123,"event":"heartbeat","detail":"n=1 net=ok:32ms"}
+07:09:00Z "pid":12123,"event":"heartbeat","detail":"n=2 net=ok:15ms"}
+07:09:30Z "pid":12123,"event":"heartbeat","detail":"n=3 net=ok:19ms"}
+07:10:00Z "pid":12123,"event":"heartbeat","detail":"n=4 net=ok:27ms"}
+07:10:30Z "pid":12123,"event":"heartbeat","detail":"n=5 net=ok:19ms"}
+07:11:00Z "pid":12123,"event":"heartbeat","detail":"n=6 net=ok:26ms"}
+07:11:30Z "pid":12123,"event":"heartbeat","detail":"n=7 net=ok:18ms"}
+07:12:00Z "pid":12123,"event":"heartbeat","detail":"n=8 net=ok:18ms"}
+07:12:30Z "pid":12123,"event":"heartbeat","detail":"n=9 net=ok:43ms"}
+07:13:01Z "pid":12123,"event":"heartbeat","detail":"n=10 net=ok:27ms"}
+07:13:31Z "pid":12123,"event":"heartbeat","detail":"n=11 net=ok:18ms"}
+07:14:01Z "pid":12123,"event":"heartbeat","detail":"n=12 net=ok:11ms"}
+07:14:08Z "pid":24707,"event":"service-created","detail":""}
+07:14:38Z "pid":24707,"event":"heartbeat","detail":"n=1 net=ok:21ms"}
+07:15:08Z "pid":24707,"event":"heartbeat","detail":"n=2 net=ok:27ms"}
+07:15:38Z "pid":24707,"event":"heartbeat","detail":"n=3 net=ok:36ms"}
+07:16:08Z "pid":24707,"event":"heartbeat","detail":"n=4 net=ok:13ms"}
+07:16:38Z "pid":24707,"event":"heartbeat","detail":"n=5 net=ok:19ms"}
+07:17:08Z "pid":24707,"event":"heartbeat","detail":"n=6 net=ok:24ms"}
+07:17:38Z "pid":24707,"event":"heartbeat","detail":"n=7 net=ok:28ms"}
+07:18:08Z "pid":24707,"event":"heartbeat","detail":"n=8 net=ok:19ms"}
+07:18:38Z "pid":24707,"event":"heartbeat","detail":"n=9 net=ok:18ms"}
+07:19:08Z "pid":24707,"event":"heartbeat","detail":"n=10 net=ok:19ms"}
+07:19:38Z "pid":24707,"event":"heartbeat","detail":"n=11 net=ok:30ms"}
+07:20:08Z "pid":24707,"event":"heartbeat","detail":"n=12 net=ok:27ms"}
+07:20:38Z "pid":24707,"event":"heartbeat","detail":"n=13 net=ok:24ms"}
+07:21:08Z "pid":24707,"event":"heartbeat","detail":"n=14 net=ok:27ms"}
+07:21:38Z "pid":24707,"event":"heartbeat","detail":"n=15 net=ok:19ms"}
+07:22:09Z "pid":24707,"event":"heartbeat","detail":"n=16 net=ok:19ms"}
+07:22:39Z "pid":24707,"event":"heartbeat","detail":"n=17 net=ok:29ms"}
+
+## part 4 -- driver output, verbatim
+## 07:23:19Z clean install of the F2-fixed targetSdk 36 standard-v1 build (the harness no longer makes or chmods the store directory)
+Success
+## 07:23:32Z census on a fresh install: the store creates files/human/ itself
+## 07:23:46Z dirmodes: files/, the store-created files/human/, and files/human-broad/ made 0771 before the store opens it
+## 07:23:50Z forensic: the released message's bytes in the database file and the WAL, with a kept control (run 3 times)
+## 07:24:04Z results
+{"t":1791357823032,"up":5861141,"pid":3624,"event":"census","detail":{"pending":[],"unread":[],"kept":[],"eligible":[]}}
+{"t":1791357827420,"up":5865530,"pid":3624,"event":"dirmodes","detail":{"files":"0771","files/human":"0700","files/human-broad":"0771","open_broad":{"error":"open: the state directory is mode 0771; message content must be owner-only"}}}
+{"t":1791357831906,"up":5870016,"pid":3624,"event":"forensic","detail":{"later":{"before_read_db":"true","open":{"db":"false","wal":"true"},"closed":{"db":"false","wal":"true"}},"open":{"released":{"db":"true","wal":"true"},"kept_control":{"db":"true","wal":"no file"}},"closed":{"released":{"db":"false","wal":"no file"},"kept_control":{"db":"true","wal":"no file"}}}}
+{"t":1791357836505,"up":5874615,"pid":3624,"event":"forensic","detail":{"later":{"before_read_db":"true","open":{"db":"false","wal":"true"},"closed":{"db":"false","wal":"true"}},"open":{"released":{"db":"true","wal":"true"},"kept_control":{"db":"true","wal":"no file"}},"closed":{"released":{"db":"false","wal":"no file"},"kept_control":{"db":"true","wal":"no file"}}}}
+{"t":1791357841073,"up":5879183,"pid":3624,"event":"forensic","detail":{"later":{"before_read_db":"true","open":{"db":"false","wal":"true"},"closed":{"db":"false","wal":"true"}},"open":{"released":{"db":"true","wal":"true"},"kept_control":{"db":"true","wal":"no file"}},"closed":{"released":{"db":"false","wal":"no file"},"kept_control":{"db":"true","wal":"no file"}}}}
+## 07:24:04Z done
+
+## host, the same measurement through the same bundled SQLite (harness/tests/store.rs, file_level test, --nocapture)
+FORENSIC {"later":{"before_read_db":"true","open":{"db":"false","wal":"true"},"closed":{"db":"false","wal":"true"}},"open":{"released":{"db":"true","wal":"true"},"kept_control":{"db":"true","wal":"no file"}},"closed":{"released":{"db":"false","wal":"no file"},"kept_control":{"db":"true","wal":"no file"}}}
