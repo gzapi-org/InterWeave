@@ -85,6 +85,9 @@ struct Record {
     hold_send: AtomicBool,
     /// Joins never answer, recorded `join cancelled` the same way.
     hold_join: AtomicBool,
+    /// Joins and leaves take effect at the daemon and then never answer:
+    /// a cancel that races a completed call.
+    land_then_hold: AtomicBool,
     /// `ready` does not resolve, so events gather at the daemon until it
     /// is lifted and the bridge sees them all at once.
     hold_ready: AtomicBool,
@@ -162,6 +165,12 @@ impl DataSessionPort for RecordedSession {
             let _cancelled = Cancelled(Arc::clone(&self.record), "join");
             std::future::pending::<()>().await;
         }
+        if self.record.land_then_hold.load(Ordering::SeqCst) {
+            self.inner.join(channel).await?;
+            let _cancelled = Cancelled(Arc::clone(&self.record), "join");
+            std::future::pending::<()>().await;
+            unreachable!("held");
+        }
         if self.record.refuse_join.load(Ordering::SeqCst) {
             return Err(TransportError::Overloaded);
         }
@@ -176,6 +185,12 @@ impl DataSessionPort for RecordedSession {
         self.record.down()?;
         if self.record.refuse_leave.load(Ordering::SeqCst) {
             return Err(TransportError::Overloaded);
+        }
+        if self.record.land_then_hold.load(Ordering::SeqCst) {
+            self.inner.leave(channel).await?;
+            let _cancelled = Cancelled(Arc::clone(&self.record), "leave");
+            std::future::pending::<()>().await;
+            unreachable!("held");
         }
         if self.record.die_on_leave.swap(false, Ordering::SeqCst) {
             self.record.down.store(true, Ordering::SeqCst);
@@ -1195,6 +1210,15 @@ async fn a_call_in_flight_when_the_queue_fills_is_cancelled() {
         w.receive(None).await["events"][15]["content"],
         json!("last")
     );
+    let sends = |w: &World| {
+        w.record
+            .calls()
+            .iter()
+            .filter(|c| *c == "send_direct")
+            .count()
+    };
+    assert_eq!(sends(&w), 1, "a cancelled send is never re-issued");
+    assert_eq!(w.status().await["pull_queue"]["pending"], json!([]));
     w.wait_depth(1).await;
     assert_eq!(
         w.receive(None).await["events"][0]["content"],
@@ -1270,7 +1294,8 @@ async fn the_queue_outlives_a_reconnect_and_only_a_direct_token_goes_stale() {
         assert!(tokio::time::Instant::now() < deadline, "never saw it go");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let joins = || w.record.calls().iter().filter(|c| *c == "join").count();
+    let record = Arc::clone(&w.record);
+    let joins = || record.calls().iter().filter(|c| *c == "join").count();
     let joins_before = joins();
     w.record.hold_join.store(true, Ordering::SeqCst);
     w.record.down.store(false, Ordering::SeqCst);
@@ -1283,9 +1308,14 @@ async fn the_queue_outlives_a_reconnect_and_only_a_direct_token_goes_stale() {
     w.wait_connected().await;
     let status = w.status().await;
     assert_eq!(
-        status["rejoin_refused"],
-        json!([{"channel": "general", "error": "PullQueueFull"}]),
+        status["pull_queue"]["pending"],
+        json!([{"channel": "general", "op": "join"}]),
         "{status}"
+    );
+    assert_eq!(
+        status["rejoin_refused"],
+        json!([]),
+        "the daemon refused nothing"
     );
     assert_eq!(status["joined_channels"], json!([]));
     assert!(
@@ -1294,10 +1324,13 @@ async fn the_queue_outlives_a_reconnect_and_only_a_direct_token_goes_stale() {
     );
     assert_eq!(status["pull_queue"]["depth"], json!(16), "kept");
     w.record.hold_join.store(false, Ordering::SeqCst);
+    let joins_before = joins();
     w.receive(None).await;
-    let (text, error) = w.tool("join", json!({"channel": "general"})).await;
-    assert!(!error, "{text}");
-    assert_eq!(w.status().await["rejoin_refused"], json!([]));
+    wait_pending_empty(&mut w).await;
+    assert_eq!(joins(), joins_before + 1, "re-issued by the bridge");
+    let status = w.status().await;
+    assert_eq!(status["joined_channels"], json!(["general"]), "{status}");
+    assert_eq!(status["rejoin_refused"], json!([]));
 }
 
 /// A pulled event's reply token is minted when the host takes it, so its
@@ -1369,4 +1402,106 @@ async fn every_session_tool_is_refused_while_paused() {
         .await;
     assert!(!error, "the control after the take: {text}");
     assert!(w.record.calls().len() > before, "reached the daemon");
+}
+
+/// Wait until nothing is pending.
+async fn wait_pending_empty(w: &mut World) {
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while w.status().await["pull_queue"]["pending"] != json!([]) {
+        assert!(tokio::time::Instant::now() < deadline, "never resolved");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Call `tool` while the queue has room for one, let two messages gather
+/// at the daemon, and return the answer: the drain fills the queue with
+/// the call in flight, so it is cancelled.
+async fn in_flight_as_the_queue_fills(
+    w: &mut World,
+    tool: &str,
+    arguments: Value,
+    call: &str,
+) -> Value {
+    fill(w, 15).await;
+    w.record.hold_ready.store(true, Ordering::SeqCst);
+    let before = w.record.calls().iter().filter(|c| *c == call).count();
+    w.next_id += 1;
+    let id = w.next_id;
+    let line = json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+        "params": {"name": tool, "arguments": arguments}});
+    w.host_in
+        .write_all(format!("{line}\n").as_bytes())
+        .await
+        .expect("written");
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while w.record.calls().iter().filter(|c| *c == call).count() == before {
+        assert!(tokio::time::Instant::now() < deadline, "never called");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    w.peer_sends("last").await;
+    w.peer_sends("after").await;
+    w.record.hold_ready.store(false, Ordering::SeqCst);
+    let answer = w.line().await;
+    assert_eq!(answer["id"], json!(id), "{answer}");
+    answer
+}
+
+/// A join cancelled in flight that the daemon had already taken: its
+/// outcome is unknown, so it is pending -- not joined, no refusal -- and
+/// re-issued once a take lifts the pause, after which the bridge holds
+/// the join the daemon holds (relay seq 19026).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_join_is_pending_and_reissued() {
+    let mut w = World::start_pull().await;
+    w.record.land_then_hold.store(true, Ordering::SeqCst);
+    let answer =
+        in_flight_as_the_queue_fills(&mut w, "join", json!({"channel": "general"}), "join").await;
+    let text = answer["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(text.ends_with("outcome unknown"), "{answer}");
+    let status = w.status().await;
+    assert_eq!(
+        status["pull_queue"]["pending"],
+        json!([{"channel": "general", "op": "join"}]),
+        "{status}"
+    );
+    assert_eq!(status["joined_channels"], json!([]));
+    assert_eq!(status["rejoin_refused"], json!([]));
+    w.record.land_then_hold.store(false, Ordering::SeqCst);
+    let joins = |w: &World| w.record.calls().iter().filter(|c| *c == "join").count();
+    let before = joins(&w);
+    w.receive(None).await;
+    wait_pending_empty(&mut w).await;
+    assert_eq!(joins(&w), before + 1, "re-issued once");
+    assert_eq!(w.status().await["joined_channels"], json!(["general"]));
+}
+
+/// A leave cancelled in flight that the daemon had already taken: the
+/// bridge keeps the join while it is pending, then re-issues it and
+/// holds what the daemon holds -- nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_leave_is_pending_and_reissued() {
+    let mut w = World::start_pull().await;
+    let (text, error) = w.tool("join", json!({"channel": "general"})).await;
+    assert!(!error, "{text}");
+    w.record.land_then_hold.store(true, Ordering::SeqCst);
+    let answer =
+        in_flight_as_the_queue_fills(&mut w, "leave", json!({"channel": "general"}), "leave").await;
+    assert_eq!(answer["result"]["isError"], json!(true), "{answer}");
+    let status = w.status().await;
+    assert_eq!(
+        status["pull_queue"]["pending"],
+        json!([{"channel": "general", "op": "leave"}]),
+        "{status}"
+    );
+    assert_eq!(
+        status["joined_channels"],
+        json!(["general"]),
+        "kept meanwhile"
+    );
+    w.record.land_then_hold.store(false, Ordering::SeqCst);
+    w.receive(None).await;
+    wait_pending_empty(&mut w).await;
+    assert_eq!(w.status().await["joined_channels"], json!([]));
 }

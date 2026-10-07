@@ -151,21 +151,23 @@ impl Pull {
     }
 }
 
-/// Why a channel the bridge held was not re-joined at a reconnect: the
-/// daemon refused it, or the pull queue filled while the join was in
-/// flight and it was cancelled. Either stands until the next join or
-/// leave of that channel.
-#[derive(Debug, Clone, Copy)]
-enum RejoinRefusal {
-    Daemon(TransportError),
-    PullQueueFull,
+/// A join or leave cancelled in flight as the pull queue filled: the
+/// daemon may or may not have done it (the cancel is advisory), so it is
+/// re-issued once the pause lifts -- the daemon's join and leave are
+/// idempotent -- and its answer fixes the state (CHANNEL-EVENT.md
+/// §Delivery, A 2026-10-07). A send or broadcast is never re-issued: the
+/// daemon does not deduplicate a new message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingOp {
+    Join,
+    Leave,
 }
 
-impl RejoinRefusal {
-    fn label(self) -> String {
+impl PendingOp {
+    const fn as_str(self) -> &'static str {
         match self {
-            Self::Daemon(e) => format!("{e:?}"),
-            Self::PullQueueFull => "PullQueueFull".to_owned(),
+            Self::Join => "join",
+            Self::Leave => "leave",
         }
     }
 }
@@ -228,7 +230,10 @@ struct Bridge<B: DataSessionBinding> {
     local_peer: Option<TransportIdentity>,
     /// Re-joins the daemon refused at a reconnect, each until the next
     /// join or leave of that channel (LIFECYCLE.md step 6).
-    rejoin_refused: BTreeMap<ChannelId, RejoinRefusal>,
+    rejoin_refused: BTreeMap<ChannelId, TransportError>,
+    /// Joins and leaves cancelled in flight, by channel, the latest
+    /// wanted outcome each; re-issued once the pause lifts.
+    pending: BTreeMap<ChannelId, PendingOp>,
     /// Why the last open failed, for `status`.
     last_open_error: Option<TransportError>,
     attempt: u32,
@@ -270,6 +275,7 @@ where
         session: None,
         local_peer: None,
         rejoin_refused: BTreeMap::new(),
+        pending: BTreeMap::new(),
         last_open_error: None,
         attempt: 0,
         reconnect_at: Instant::now(),
@@ -280,6 +286,14 @@ where
     let mut lines = input.lines();
     loop {
         let connected = bridge.session.is_some();
+        // The pause lifted with joins or leaves of unknown outcome: they
+        // are re-issued before anything is drained again.
+        if connected && !bridge.paused() && !bridge.pending.is_empty() {
+            if bridge.resolve_pending(&mut output).await? {
+                bridge.lost();
+            }
+            continue;
+        }
         tokio::select! {
             line = lines.next_line() => {
                 let Some(line) = line? else { return Ok(()) };
@@ -490,12 +504,20 @@ impl<B: DataSessionBinding> Bridge<B> {
             self.state
                 .leased(lease.endpoint.clone(), lease.epoch.clone());
         }
+        // A new session holds no joins: what was pending is the intent.
+        for (channel, op) in std::mem::take(&mut self.pending) {
+            match op {
+                PendingOp::Join => self.state.joined(channel),
+                PendingOp::Leave => self.state.left(&channel),
+            }
+        }
         let joined: Vec<ChannelId> = self.state.joined_channels().cloned().collect();
         let Self {
             state,
             env,
             health,
             rejoin_refused,
+            pending,
             pull,
             ..
         } = self;
@@ -511,8 +533,8 @@ impl<B: DataSessionBinding> Bridge<B> {
             // The queue may be full here (an earlier re-join cancelled,
             // then the session ended): `drive` then takes nothing and
             // cancels at once.
-            let refusal = match drive(&session, session.join(channel.clone()), &mut emit).await? {
-                Some(Ok(())) => continue,
+            match drive(&session, session.join(channel.clone()), &mut emit).await? {
+                Some(Ok(())) => {}
                 // A session that ended refused nothing, whatever code its
                 // end came with: the joins are kept for the next open
                 // (`a_daemon_stopping_during_the_rejoin_keeps_the_join`).
@@ -520,11 +542,17 @@ impl<B: DataSessionBinding> Bridge<B> {
                     died = true;
                     break;
                 }
-                Some(Err(e)) => RejoinRefusal::Daemon(e),
-                None => RejoinRefusal::PullQueueFull,
-            };
-            emit.state.left(&channel);
-            rejoin_refused.insert(channel, refusal);
+                Some(Err(e)) => {
+                    emit.state.left(&channel);
+                    rejoin_refused.insert(channel, e);
+                }
+                // Cancelled as the queue filled: not joined until the
+                // re-issue says so.
+                None => {
+                    emit.state.left(&channel);
+                    pending.insert(channel, PendingOp::Join);
+                }
+            }
         }
         if died {
             self.state.lease_lost();
@@ -698,6 +726,7 @@ impl<B: DataSessionBinding> Bridge<B> {
             env,
             health,
             rejoin_refused,
+            pending,
             pull,
             ..
         } = self;
@@ -705,6 +734,7 @@ impl<B: DataSessionBinding> Bridge<B> {
             if let ToolCall::Leave(channel) = &call {
                 state.left(channel);
                 rejoin_refused.remove(channel);
+                pending.remove(channel);
                 return Ok(Some(Ok(format!("left {}", channel.as_str()))));
             }
             return Ok(Some(Err(absent)));
@@ -720,21 +750,25 @@ impl<B: DataSessionBinding> Bridge<B> {
             ToolCall::Join(channel) => {
                 let Some(joined) = drive(session, session.join(channel.clone()), &mut emit).await?
                 else {
+                    pending.insert(channel, PendingOp::Join);
                     return Ok(None);
                 };
                 rejoin_refused.remove(&channel);
+                pending.remove(&channel);
                 joined.map(|()| {
                     emit.state.joined(channel.clone());
                     format!("joined {}", channel.as_str())
                 })
             }
             ToolCall::Leave(channel) => {
-                // Cancelled, the bridge keeps the join it holds: the host
-                // may leave again once it has taken.
+                // Cancelled: the join is kept until the re-issued leave
+                // answers.
                 let Some(left) = drive(session, session.leave(channel.clone()), &mut emit).await?
                 else {
+                    pending.insert(channel, PendingOp::Leave);
                     return Ok(None);
                 };
+                pending.remove(&channel);
                 // A live daemon that refused the leave still holds the join,
                 // so the bridge keeps it. Taken, or the session ended and
                 // took the join with it: left, as the no-session branch
@@ -787,6 +821,73 @@ impl<B: DataSessionBinding> Bridge<B> {
                 unreachable!("answered above")
             }
         }))
+    }
+
+    /// Re-issue each pending join and leave, in channel order, until one
+    /// is cancelled again (the queue refilled: it stays pending, with the
+    /// rest) or the session ends (the next open takes them up). True when
+    /// the session ended, so the caller treats it as lost rather than
+    /// asking again.
+    async fn resolve_pending<W: AsyncWrite + Unpin>(
+        &mut self,
+        out: &mut W,
+    ) -> std::io::Result<bool> {
+        let Self {
+            session,
+            state,
+            env,
+            health,
+            rejoin_refused,
+            pending,
+            pull,
+            ..
+        } = self;
+        let Some(session) = session.as_ref() else {
+            return Ok(false);
+        };
+        let mut emit = Emit {
+            state,
+            env,
+            health,
+            out,
+            pull: pull.as_mut(),
+        };
+        let ops: Vec<(ChannelId, PendingOp)> =
+            pending.iter().map(|(c, op)| (c.clone(), *op)).collect();
+        for (channel, op) in ops {
+            let answer = match op {
+                PendingOp::Join => drive(session, session.join(channel.clone()), &mut emit).await?,
+                PendingOp::Leave => {
+                    drive(session, session.leave(channel.clone()), &mut emit).await?
+                }
+            };
+            let Some(answer) = answer else {
+                return Ok(false);
+            };
+            if answer.is_err() && ended(session).await {
+                return Ok(true);
+            }
+            pending.remove(&channel);
+            match (op, answer) {
+                (PendingOp::Join, Ok(())) => {
+                    emit.state.joined(channel.clone());
+                    rejoin_refused.remove(&channel);
+                }
+                // The daemon refused the join: a status row, as a refused
+                // re-join is.
+                (PendingOp::Join, Err(e)) => {
+                    emit.state.left(&channel);
+                    rejoin_refused.insert(channel, e);
+                }
+                (PendingOp::Leave, Ok(())) => {
+                    emit.state.left(&channel);
+                    rejoin_refused.remove(&channel);
+                }
+                // A live daemon that refused the leave holds the join.
+                (PendingOp::Leave, Err(_)) => {}
+            }
+        }
+        Ok(false)
     }
 
     /// Whether pull mode's queue is full, so the session's draining is
@@ -876,9 +977,7 @@ impl<B: DataSessionBinding> Bridge<B> {
         let refused: Vec<Value> = self
             .rejoin_refused
             .iter()
-            .map(
-                |(channel, refusal)| json!({"channel": channel.as_str(), "error": refusal.label()}),
-            )
+            .map(|(channel, error)| json!({"channel": channel.as_str(), "error": format!("{error:?}")}))
             .collect();
         let (health, connectivity) = match &self.health {
             Some((health, connectivity)) => (
@@ -910,6 +1009,11 @@ impl<B: DataSessionBinding> Bridge<B> {
                 "depth": self.pull.as_ref().map_or(0, |pull| pull.queue.depth()),
                 "paused": self.paused(),
                 "paused_since": self.pull.as_ref().and_then(|pull| pull.paused_since),
+                "pending": self
+                    .pending
+                    .iter()
+                    .map(|(channel, op)| json!({"channel": channel.as_str(), "op": op.as_str()}))
+                    .collect::<Vec<_>>(),
             });
         }
         status.to_string()
