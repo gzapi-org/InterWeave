@@ -313,12 +313,18 @@ here (architect-cto's ruling of 2026-10-04, below).
 
 `admin.trust.list` answers the profile's allowlist as `trust-api`'s `PeerTrustPolicy` holds it, ONE PAGE at a time: the allowed peers in the
 ascending order of their canonical strings, at most 1024 a page, with
-`persisted: false` on every row, and `next` — the last row's peer — when
+on a connection that negotiated 2.3 or later `persisted: true` on every
+row and each row's `source` — `configured` for a peer `config.yaml`
+lists, `administered` for one added by `admin.trust.set` (ADR-0028 A
+2026-10-07) — and below 2.3 the 2.1 row, `persisted: false` and no
+`source` (ADR-0017 A 2026-10-07, §Version negotiation: a closed result shape
+widens behind a new minor while the old shape is served below it; 2.3
+adds no method or capability), and `next` — the last row's peer — when
 more remain; `trust-list-params.after` names the previous page's `next`,
 exclusive, and is absent for the first page. The cursor is a position,
 not a row, so the server keeps no state between pages and an `after`
 naming a peer no longer listed still answers the page that follows it.
-Pages are read against the live overlay, not a snapshot: a set between
+Pages are read against the live policy, not a snapshot: a set between
 two reads may show or hide a peer across the boundary. The local peer —
 self-authorised, never an allowlist entry — is the first page's
 `local_peer`, absent on later pages and when the policy has none bound.
@@ -343,16 +349,28 @@ the record is the composition's and binds every host (LOCAL-CLIENT.md
 §5, A 2026-10-04) — the daemon writes it to its log and admits the
 target at INFO whatever `observability.log_level` says (#186). On Unix
 every admin connection is the run-dir owner's (ADR-0037), so the log
-says a set happened, not who among the owner's processes made it. Adding a peer already listed and removing one not
+says a set happened, not who among the owner's processes made it. A set that changes the policy is written to the
+state directory's trust overlay (`<state>/trust-overlay.json`, ADR-0028 A
+2026-10-07: one of four moves on the normalised `added`/`revoked` lists)
+before the new policy is published to the runtime and before the set is
+answered, so an answered set survives a restart and a crash; a set whose
+write fails is answered `Internal` and changes nothing — no connection
+closes, no row moves. Adding a peer already listed and removing one not
 listed are no-ops that answer `ok`. Both methods are granted only to a
 connection that negotiated minor 2.1 or later, and `admin.trust` is
 requested only in a hello sent after the client has learnt the daemon
 speaks 2.1 (§Version negotiation's capability rule); the `close` frame's
 `supported` list was `[{major: 2, minor: 1}]` from R1 and is
-`[{major: 2, minor: 2}]` since `admin.peers.list` (A 2026-10-06). The two are the
+`[{major: 2, minor: 2}]` since `admin.peers.list` (A 2026-10-06). The two were the
 same runtime overlay as `admin.endpoints.*` — never written to
-`config.yaml`, `persisted: false` — until the owner decides persistence
-(ADR-0028's question, routed with the Stage 15 record). Their schemas, `trust-list-params`, `trust-list` and `trust-set-params`, were `approved`, and the method and capability enums carry their minor bumps (`ipc/method`
+`config.yaml`, `persisted: false` — until the owner decided persistence
+on 2026-10-07 (ADR-0028's question, routed with the Stage 15 record):
+since then a set is a persisted overlay in the state directory, still
+never `config.yaml`; the row says so behind minor 2.3 (`ipc/trust-list`
+1.1.0: `persisted` a boolean and `source` optional, each shape named
+with the minor that serves it), the 2.1 row unchanged below, the
+`close` frame's `supported` list `[{major: 2, minor: 3}]` from the batch
+that implements it, its mirror and the daemon changing in one PR. Their schemas, `trust-list-params`, `trust-list` and `trust-set-params`, were `approved`, and the method and capability enums carry their minor bumps (`ipc/method`
 1.1.0, `ipc/capability` 1.2.0, `ipc/request` 1.1.0), as every 2.0 shape
 did (plan §16 (3)); they flipped `active` with Stage 15's close (2026-10-06, with `ipc/path-changed`). Discovery and bootstrap administration still have no method; Stage 15's close carried them to the owner (plan §18's record, with ADR-0032's revisit).
 
@@ -428,7 +446,14 @@ schema takes an additive property into 2.0 itself (`event_queue` on
 emitted, its mirror refusing the old name (`pre_auth.tracked_peers` off
 `admin-status` 1.1.0, A 2026-10-01), and treats a change as that removal
 plus that addition — its own version moving 1.x → 1.(x+1) each time
-(ADR-0017 records the rule and its one bound).
+(ADR-0017 records the rule and its one bound). A closed RESULT shape may
+widen behind a new minor (ADR-0017 A 2026-10-07): a property gains a
+value or a new optional property appears only on a connection that
+negotiated that minor or later, the shape served below it stays
+byte-identical to the schema's earlier description, the schema names the
+minor each shape applies from, and the old shape is served on every
+supported minor below the new one; first use `ipc/trust-list` 1.1.0 behind
+2.3.
 The first production build spoke 2.0; Stage 15's R1 batch, which
 brought `peer.path_changed`, spoke 2.1, and R2 added `admin.trust.*` to
 it; `admin.peers.list` brought 2.2 (A 2026-10-06).

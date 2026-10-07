@@ -8,6 +8,7 @@
 | identity data | libp2p Ed25519 private key | yes, securely | **yes** | no, changes PeerId |
 | offline recovery record | 24 words + expected PeerId | yes, offline | **yes** (words) | no if it is the only backup |
 | mutable state | the profile lock (`profile.lock`, held exclusively by the daemon and by `transportctl identity backup`/`restore`; released, never unlinked), runtime state, endpoint leases | usually no | no | usually |
+| trust overlay | `trust-overlay.json`: the operator's `admin.trust.set` deltas over `config.yaml` (ADR-0028 A 2026-10-07) — durable authorisation | **yes**, with the profile | no (PeerIds) | **no** — deleting it re-allows every revoked peer |
 | peer cache | observed peers/addresses + bounded transport protocol observations | optional | no | **yes** |
 | remote endpoint cache | short-lived advertised EndpointIds | no | no | **yes** |
 | runtime IPC endpoints | data socket/pipe + admin socket/pipe | no | no | recreated |
