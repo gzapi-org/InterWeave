@@ -44,6 +44,7 @@ pub mod persist;
 pub mod runtime;
 pub mod sections;
 pub mod transport;
+pub mod trust_overlay;
 
 pub use load::{LoadError, MAX_PROFILE_BYTES};
 pub use lock::{DAEMON_LOCK_WAIT, HUMAN_CLIENT_LOCK_FILE, HumanClientLock, LOCK_FILE, ProfileLock};
