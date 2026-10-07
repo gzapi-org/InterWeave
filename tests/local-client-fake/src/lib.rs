@@ -162,6 +162,8 @@ impl FakeNode {
         for queues in state.sessions.values_mut() {
             queues.wake();
         }
+        let ended: Vec<Generation> = state.sessions.keys().cloned().collect();
+        state.ended.extend(ended);
         state.sessions.clear();
         state.leases.clear();
         let State {
@@ -357,6 +359,9 @@ struct State {
     /// to: endpoint changes are a runtime overlay (ADR-0028).
     configured_endpoints: BTreeMap<EndpointId, FakeEndpoint>,
     configured_default: Option<EndpointId>,
+    /// The sessions a restart ended: theirs was the runtime before it, so
+    /// each answers `BackendUnavailable`, as a stopped runtime's does.
+    ended: BTreeSet<Generation>,
 }
 
 impl Node {
@@ -383,6 +388,7 @@ impl Node {
                 configured: BTreeSet::new(),
                 configured_endpoints,
                 configured_default,
+                ended: BTreeSet::new(),
             }),
             injected: Mutex::new(VecDeque::new()),
             tag,
@@ -625,6 +631,16 @@ impl FakeSession {
         }
     }
 
+    /// The node's state while this session's runtime runs: a stopped
+    /// runtime, or a session a restart ended, is `BackendUnavailable`.
+    fn running(&self) -> Result<MutexGuard<'_, State>, TransportError> {
+        let state = self.node.running()?;
+        if state.ended.contains(self.session.session_id()) {
+            return Err(TransportError::BackendUnavailable);
+        }
+        Ok(state)
+    }
+
     /// Whether this session's lease is still the live one: a revoked or
     /// replaced lease sends nothing.
     fn lease_is_live(state: &State, lease: &EndpointLease) -> bool {
@@ -643,6 +659,8 @@ impl FakeSession {
         let id = self.session.session_id();
         state.leases.retain(|_, lease| &lease.session != id);
         state.sessions.remove(id);
+        // Its last use: an ended session leaves the set with it.
+        state.ended.remove(id);
     }
 }
 
@@ -659,7 +677,7 @@ impl DataSessionPort for FakeSession {
 
     async fn join(&self, channel: ChannelId) -> Result<(), TransportError> {
         self.require(DataCapability::Commands)?;
-        let mut state = self.node.running()?;
+        let mut state = self.running()?;
         let queues = state
             .sessions
             .get_mut(self.session.session_id())
@@ -670,7 +688,7 @@ impl DataSessionPort for FakeSession {
 
     async fn leave(&self, channel: ChannelId) -> Result<(), TransportError> {
         self.require(DataCapability::Commands)?;
-        let mut state = self.node.running()?;
+        let mut state = self.running()?;
         if let Some(queues) = state.sessions.get_mut(self.session.session_id()) {
             queues.joins.remove(&channel);
         }
@@ -684,7 +702,7 @@ impl DataSessionPort for FakeSession {
     ) -> Result<(), TransportError> {
         self.require(DataCapability::Commands)?;
         {
-            let state = self.node.running()?;
+            let state = self.running()?;
             let joined = state
                 .sessions
                 .get(self.session.session_id())
@@ -712,7 +730,7 @@ impl DataSessionPort for FakeSession {
             return Err(TransportError::EndpointNotRegistered);
         };
         let live = {
-            let state = self.node.running()?;
+            let state = self.running()?;
             Self::lease_is_live(&state, lease)
         };
         if !live {
@@ -745,7 +763,7 @@ impl DataSessionPort for FakeSession {
 
     async fn events(&self, max: usize) -> Result<Vec<SessionEvent>, TransportError> {
         self.require(DataCapability::Events)?;
-        let mut state = self.node.running()?;
+        let mut state = self.running()?;
         let Some(queues) = state.sessions.get_mut(self.session.session_id()) else {
             return Ok(Vec::new());
         };
@@ -811,7 +829,7 @@ impl DataSessionPort for FakeSession {
         peer: TransportIdentity,
     ) -> Result<EndpointDirectoryV1, TransportError> {
         self.require(DataCapability::EndpointsQuery)?;
-        drop(self.node.running()?);
+        drop(self.running()?);
         let remote = self.node.remote()?;
         if peer != remote.peer {
             return Err(TransportError::PeerUnknown);
@@ -835,7 +853,10 @@ impl DataSessionPort for FakeSession {
     }
 
     async fn close(mut self) -> Result<(), TransportError> {
-        let stopped = lock(&self.node.state).stopped;
+        let stopped = {
+            let state = lock(&self.node.state);
+            state.stopped || state.ended.contains(self.session.session_id())
+        };
         self.end();
         if stopped {
             Err(TransportError::BackendUnavailable)
