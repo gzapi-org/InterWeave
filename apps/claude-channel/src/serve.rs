@@ -508,7 +508,13 @@ impl<B: DataSessionBinding> Bridge<B> {
         for (channel, op) in std::mem::take(&mut self.pending) {
             match op {
                 PendingOp::Join => self.state.joined(channel),
-                PendingOp::Leave => self.state.left(&channel),
+                // A leave settles the channel as one taken at once does:
+                // its refused-re-join row goes with it
+                // (`a_pending_leave_folded_at_open_clears_the_refusal`).
+                PendingOp::Leave => {
+                    self.state.left(&channel);
+                    self.rejoin_refused.remove(&channel);
+                }
             }
         }
         let joined: Vec<ChannelId> = self.state.joined_channels().cloned().collect();
@@ -534,7 +540,11 @@ impl<B: DataSessionBinding> Bridge<B> {
             // then the session ended): `drive` then takes nothing and
             // cancels at once.
             match drive(&session, session.join(channel.clone()), &mut emit).await? {
-                Some(Ok(())) => {}
+                // Taken: a refusal from an earlier re-join no longer
+                // stands (`a_rejoin_after_a_resolution_the_session_ended_clears_the_refusal`).
+                Some(Ok(())) => {
+                    rejoin_refused.remove(&channel);
+                }
                 // A session that ended refused nothing, whatever code its
                 // end came with: the joins are kept for the next open
                 // (`a_daemon_stopping_during_the_rejoin_keeps_the_join`).
