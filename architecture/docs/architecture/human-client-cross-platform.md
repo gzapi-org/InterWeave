@@ -1,6 +1,6 @@
 # First-party human client — cross-platform architecture
 
-Status: architecture/design only. No client implementation is included.
+Status: the shared crates and the desktop client are built (Stages 14 and 15, closed 2026-10-03 and 2026-10-06; `apps/human-desktop` over `crates/human/*`); the Android binding is Stage 17's, open as of 2026-10-07, with `apps/human-android` and `crates/human/android-platform` as landing zones. The design below is the one the build followed; where the built layout differs from the first blueprint, the built one is named.
 
 ## Selected product architecture
 
@@ -11,9 +11,9 @@ The first-party human client is a Rust application family with a shared Rust dom
         +------------------------+-------------------------+
         |                        |                         |
         v                        v                         v
-   human-core               human-store               human-ui
- contacts/routes          SQLite application DB       Slint UI model
- conversations            migrations/indexes          shared components
+   human-core               human-store           ui-model + ui-slint
+ retention state          SQLite application DB    presentation model and
+ machine, validation      migrations/indexes       the reference Slint views
         |                        |                         |
         +------------------------+-------------------------+
                                  |
@@ -35,18 +35,20 @@ Application/business/network logic is Rust. Android may contain the minimum Java
 ## Shared crate blueprint
 
 ```text
-human-core/                 # NO libp2p; contacts, conversations, commands, validation
-human-chat-protocol/        # first-party application envelope; NO transport internals
-human-store/                # application SQLite model/migrations
-human-ui-model/             # presentation state, NO OS/network backend
-human-ui-slint/             # shared Slint components
-human-transport-client/     # neutral LocalDataSession facade
-human-desktop/              # Slint desktop executable + IPC adapter
-human-android/              # Android Rust cdylib/Slint entry + embedded adapter
-android-platform-bridge/    # tiny OS glue surface only; no domain/network logic
+crates/human/core/               # NO libp2p; the retention state machine, validation
+crates/human/chat-protocol/      # HumanChatV2 envelope, subset validator, bounded decoder, render model
+crates/human/store/              # application SQLite model/migrations
+crates/human/client-api/         # the neutral client-facing port the facade implements
+crates/human/transport-client/   # the LocalDataSession facade: outbox, inbox, re-open, retention
+crates/human/ui-model/           # presentation state, NO OS/network backend
+crates/human/app-core/           # the headless application root the windows bind to
+crates/human/ui-slint/           # the reference Slint views; the only crate naming slint
+crates/human/android-platform/   # tiny OS glue surface only (Stage 17; a landing zone today)
+apps/human-desktop/              # the desktop executable: app-core + ui-slint over ipc-client
+apps/human-android/              # the Android host (Stage 17; a landing zone today)
 ```
 
-`human-core`, `human-chat-protocol`, `human-store`, and `human-ui-model` have no libp2p dependency.
+`core`, `chat-protocol`, `store`, `transport-client` and `ui-model` name nothing under `crates/transport/*`, no libp2p and no Slint, and `ui-slint` is the only crate under `crates/human/*` that reaches Slint and the only workspace member that declares it (`apps/human-desktop` reaches it through `ui-slint`); `tools/checks/check_human_layering.sh` enforces it (built as the first blueprint's `human-*` names with the directory layout of `implementation-repository-layout.md`).
 
 ## Human application state
 

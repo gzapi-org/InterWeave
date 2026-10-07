@@ -1,6 +1,6 @@
 # Discovery contract
 
-Status: **architecture contract, v1 draft**.
+Status: **architecture contract, v1** — built and gated through Stages 9–12: `crates/discovery/{static,cache,mdns}` under `tests/discovery-conformance`, `crates/discovery/kademlia` under `tests/kademlia`; the event names at §Events, and the trait signature stated there, are the built ones as of 2026-10-07 (the conceptual interface below is the shape's illustration).
 
 The prose here is normative for **behaviour**. The candidate and descriptor shapes are also defined as JSON Schema under [`schemas/discovery/`](./schemas/discovery/) — normative for **shape** (ADR-0049). The candidate schema is closed, which is what mechanically keeps EndpointIds, channels, roles, and presence out of discovery metadata.
 
@@ -69,11 +69,12 @@ Candidate quality is derived from explicit provenance, freshness/expiry, address
 ## Events
 
 ```text
-Discovered { candidate }
-Updated { candidate }
-Expired { peer_id, source, addresses? }
-ProviderStateChanged { previous, current, reason_class? }
+CandidateObserved { candidate }            # a candidate seen for the first time or seen again
+CandidateExpired { peer_id, source, addresses? }   # absent or empty: the whole (peer_id, source) candidate is retracted
+HealthChanged { source, health }
 ```
+
+The first draft named `Discovered`/`Updated`, `Expired` and `ProviderStateChanged { previous, current, reason_class? }`; the built `DiscoveryEvent` (`crates/api/discovery-api`) folds the first two into one observation and reports health as a state, not a transition (A 2026-10-07, aligning this text with the crate). The provider trait is pull-shaped and synchronous — `start(now_ms)`, `drain_events(now_ms, max)`, `add_hint(hint, now_ms)`, `health()`, `shutdown(now_ms)` — the manager owning every clock and the batch size, each provider bounding its own pending queue; the async stream shown above it is the shape's illustration, not its signature.
 
 Provider event streams are the primary interface. Polling is reserved for health/diagnostics.
 
