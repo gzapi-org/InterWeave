@@ -1,4 +1,9 @@
 # SPIKE-008 device harness -- recorded run (parts 3 and 4: duplicate suppression across a restart, a full store,
+# ERRATUM (added after PR #214's re-review): part 4's `forensic` lines below print the "later" readings under
+#   "open" and the "open" readings under "later" (a positional format! list in the harness at 6a385abc). Read
+#   correctly, a message released after it reached the database file is STILL IN human.sqlite after close, and
+#   no WAL remains. The corrected harness and its re-run are REPRODUCTION-2026-10-07c.log. The "closed" readings,
+#   the host line at the end, and everything else in this log are unaffected.
 #   the network in forced Doze, the store's directory, and a released message's bytes in the database files)
 # date: 2026-10-07T07:07Z-07:24Z
 # device, host and toolchain: as part 1; this repository pinned at d019ac06 (harness/Cargo.toml); targetSdk 36, standard v1
