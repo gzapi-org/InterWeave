@@ -1011,8 +1011,9 @@ the status line renders nothing and the `[ -f … ] && …; true` hooks
 note) run nothing, quietly — the inbox entry still prints its "start the
 watch" line, for a watch that has no script to run. A session in such a
 clone has no fabric context and no inbox; the empty status line and that
-orphaned instruction are the two visible signs. `wait-merged.sh` and
-`actions-health.sh` stay this repository's own copies. A clone with no
+orphaned instruction are the two visible signs. `actions-health.sh`
+forwards too; `wait-merged.sh` stays this repository's own copy until
+its fabric port lands. A clone with no
 sibling is not a working development setup; the fabric's `bootstrap.sh`
 is what puts one there.
 
