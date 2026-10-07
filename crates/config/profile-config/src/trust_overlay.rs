@@ -306,7 +306,7 @@ impl TrustOverlay {
 /// -- the identity key's rule. Judged on the OPENED file, so the file
 /// checked is the file read.
 fn open_private(path: &Path) -> Result<std::fs::File, OverlayError> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
         let file = std::fs::OpenOptions::new()
@@ -343,9 +343,16 @@ fn open_private(path: &Path) -> Result<std::fs::File, OverlayError> {
         }
         Ok(file)
     }
-    #[cfg(not(target_os = "linux"))]
+    // Elsewhere ownership and mode cannot be checked here, so a present
+    // overlay is refused -- but an absent one is still the empty overlay,
+    // not a reason not to start.
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
-        let _ = path;
-        Err(OverlayError::Write(PersistError::UnsupportedPlatform))
+        match std::fs::symlink_metadata(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(OverlayError::Read(e)),
+            _ => Err(OverlayError::NotPrivate {
+                detail: "owner-only permissions cannot be checked on this platform".to_owned(),
+            }),
+        }
     }
 }

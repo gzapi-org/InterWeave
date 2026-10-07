@@ -51,7 +51,7 @@ serde_norway = "0.9.42"
 # `O_NOFOLLOW` for the profile lock (`lock.rs`): its value differs by
 # ABI, and a hand-typed table got aarch64 wrong. Already in the graph
 # through tokio; this adds no code to what is compiled.
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 libc = "0.2.189"
 
 [dev-dependencies]
