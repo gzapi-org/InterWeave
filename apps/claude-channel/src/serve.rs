@@ -93,6 +93,13 @@ pub struct Config {
 /// says the transport is busy (architect-cto's ruling, relay seq 18798).
 pub const PULL_QUEUE_FULL: &str = "the pull queue is full: call receive first";
 
+/// The same, for a call cancelled in flight as the queue filled: the
+/// cancel is advisory, so the daemon may have done it -- a repeated send
+/// or broadcast may go twice, a cancelled leave may have left
+/// (TOOL-SURFACE.md, A 2026-10-07).
+pub const PULL_QUEUE_FULL_CANCELLED: &str =
+    "the pull queue is full: call receive first; the call was cancelled in flight, outcome unknown";
+
 /// One message waiting in the pull queue, as the session gave it, with
 /// the lease it arrived under: its token is minted when the host takes
 /// it, under that lease, so its TTL runs from the reading and a message
@@ -501,8 +508,9 @@ impl<B: DataSessionBinding> Bridge<B> {
         };
         let mut died = false;
         for channel in joined {
-            // Never paused at the first: a session's end is noticed only
-            // while draining, so the queue had room when it was lost.
+            // The queue may be full here (an earlier re-join cancelled,
+            // then the session ended): `drive` then takes nothing and
+            // cancels at once.
             let refusal = match drive(&session, session.join(channel.clone()), &mut emit).await? {
                 Some(Ok(())) => continue,
                 // A session that ended refused nothing, whatever code its
@@ -636,7 +644,7 @@ impl<B: DataSessionBinding> Bridge<B> {
             // resolves once it has, and the loop reconnects from there.
             Some(Err(e)) => tool_result_line(id, &error_text(e), true),
             // Cancelled in flight as the queue filled (`drive`).
-            None => tool_result_line(id, PULL_QUEUE_FULL, true),
+            None => tool_result_line(id, PULL_QUEUE_FULL_CANCELLED, true),
         })
     }
 

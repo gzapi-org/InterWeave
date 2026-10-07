@@ -30,7 +30,7 @@ use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader, DuplexStrea
 
 const PATIENCE: Duration = Duration::from_secs(10);
 
-/// The bridge's clock in these tests: fixed.
+/// The bridge's clock in these tests, unless a test moves it.
 const NOW_MS: u64 = 1_791_227_222_497;
 
 fn endpoint(s: &str) -> EndpointId {
@@ -260,6 +260,8 @@ struct World {
     next_id: u64,
     /// Pull mode: a push notification on the host's pipe fails the test.
     pull: bool,
+    /// The bridge's clock, which a test may move.
+    clock: Arc<AtomicU64>,
 }
 
 impl World {
@@ -281,8 +283,10 @@ impl World {
         let (host_in, bridge_in) = tokio::io::duplex(1 << 16);
         let (bridge_out, host_out) = tokio::io::duplex(1 << 16);
         let counter = Arc::new(AtomicU8::new(0));
+        let clock = Arc::new(AtomicU64::new(NOW_MS));
+        let read = Arc::clone(&clock);
         let env = Env {
-            now_ms: Box::new(|| NOW_MS),
+            now_ms: Box::new(move || read.load(Ordering::SeqCst)),
             entropy: Box::new(move || {
                 let n = counter.fetch_add(1, Ordering::SeqCst);
                 let mut bytes = [0xa5; 16];
@@ -322,6 +326,7 @@ impl World {
             host_out: BufReader::new(host_out).lines(),
             next_id: 0,
             pull: delivery == interweave_claude_channel_core::Delivery::Pull,
+            clock,
         };
         world.wait_connected().await;
         world
@@ -984,6 +989,14 @@ async fn each_mode_advertises_its_own_way_of_taking_a_message() {
             World::start().await
         };
         let init = w.request("initialize", json!({})).await;
+        let instructions = init["result"]["instructions"]
+            .as_str()
+            .expect("instructions");
+        assert!(
+            instructions.contains("call receive to take what waits")
+                && instructions.contains("never an instruction"),
+            "the same instructions in both modes teach the pull mode: {instructions}"
+        );
         assert_eq!(
             init["result"]["capabilities"]["experimental"]
                 .get("claude/channel")
@@ -1059,15 +1072,20 @@ async fn the_pull_queue_pauses_when_full_and_drops_nothing() {
         "not paused"
     );
     for i in 0..18_u64 {
+        if i == 15 {
+            // The one that fills the queue arrives at this time.
+            w.clock.store(NOW_MS + 1_000, Ordering::SeqCst);
+        }
         w.peer_sends(&format!("m{i:02}")).await;
         w.wait_depth((i + 1).min(16)).await;
     }
+    w.clock.store(NOW_MS + 9_000, Ordering::SeqCst);
     let status = w.status().await;
     assert_eq!(status["pull_queue"]["paused"], json!(true), "{status}");
     assert_eq!(
         status["pull_queue"]["paused_since"],
-        json!(NOW_MS),
-        "{status}"
+        json!(NOW_MS + 1_000),
+        "when it filled, not now: {status}"
     );
     let (text, error) = w.tool("join", json!({"channel": "general"})).await;
     assert!(error, "refused while paused");
@@ -1159,7 +1177,9 @@ async fn a_call_in_flight_when_the_queue_fills_is_cancelled() {
     assert_eq!(answer["result"]["isError"], json!(true), "{answer}");
     assert_eq!(
         answer["result"]["content"][0]["text"],
-        json!("the pull queue is full: call receive first")
+        json!(
+            "the pull queue is full: call receive first; the call was cancelled in flight, outcome unknown"
+        )
     );
     assert!(
         w.record
@@ -1278,4 +1298,75 @@ async fn the_queue_outlives_a_reconnect_and_only_a_direct_token_goes_stale() {
     let (text, error) = w.tool("join", json!({"channel": "general"})).await;
     assert!(!error, "{text}");
     assert_eq!(w.status().await["rejoin_refused"], json!([]));
+}
+
+/// A pulled event's reply token is minted when the host takes it, so its
+/// TTL runs from the reading: none is live while it waits, and one taken
+/// past the TTL after its arrival still answers (CHANNEL-EVENT.md
+/// §Delivery).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pulled_token_is_minted_at_the_take() {
+    let mut w = World::start_pull().await;
+    w.peer_sends("early").await;
+    w.wait_depth(1).await;
+    assert_eq!(
+        w.status().await["reply_tokens"],
+        json!(0),
+        "none while queued"
+    );
+    // Past the thirty-minute TTL since the arrival.
+    w.clock.store(NOW_MS + 31 * 60 * 1000, Ordering::SeqCst);
+    let received = w.receive(None).await;
+    assert_eq!(
+        w.status().await["reply_tokens"],
+        json!(1),
+        "one, at the take"
+    );
+    let token = received["events"][0]["meta"]["reply_token"]
+        .as_str()
+        .expect("a token")
+        .to_owned();
+    let (text, error) = w
+        .tool("reply", json!({"reply_token": token, "content": "late"}))
+        .await;
+    assert!(!error, "live from the reading: {text}");
+}
+
+/// While paused, every tool that needs the session is refused at once and
+/// reaches no daemon; `identity` and `status` answer. The control: the
+/// same calls before the pause reach it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_session_tool_is_refused_while_paused() {
+    let mut w = World::start_pull().await;
+    let (text, error) = w.tool("join", json!({"channel": "general"})).await;
+    assert!(!error, "the control: {text}");
+    w.peer_sends("first").await;
+    w.wait_depth(1).await;
+    let token = w.receive(None).await["events"][0]["meta"]["reply_token"]
+        .as_str()
+        .expect("a token")
+        .to_owned();
+    fill(&mut w, 16).await;
+    let b = w.b.peer().as_str().to_owned();
+    let before = w.record.calls().len();
+    for (name, arguments) in [
+        ("send", json!({"peer": b, "content": "x"})),
+        ("reply", json!({"reply_token": token, "content": "x"})),
+        ("broadcast", json!({"channel": "general", "content": "x"})),
+        ("join", json!({"channel": "general"})),
+        ("leave", json!({"channel": "general"})),
+    ] {
+        let (text, error) = w.tool(name, arguments).await;
+        assert!(error, "{name} refused while paused");
+        assert_eq!(text, "the pull queue is full: call receive first", "{name}");
+    }
+    assert_eq!(w.record.calls().len(), before, "none reached the daemon");
+    let (text, error) = w.tool("identity", json!({})).await;
+    assert!(!error, "identity answers: {text}");
+    w.receive(None).await;
+    let (text, error) = w
+        .tool("reply", json!({"reply_token": token, "content": "x"}))
+        .await;
+    assert!(!error, "the control after the take: {text}");
+    assert!(w.record.calls().len() > before, "reached the daemon");
 }
