@@ -135,7 +135,10 @@ pub(crate) const fn classify_open(error: TransportError) -> OpenFailure {
 /// Classify a trust read's or change's failure (`human-client-ui.md` §8).
 /// `InvalidArgument` is the port's refusal of this profile's own identity
 /// or of a new peer past the allowlist's ceiling (`LOCAL-CLIENT.md` §7
-/// item 11), a refusal the person can act on.
+/// item 11), a refusal the person can act on. A daemon that does not speak
+/// the version trust needs -- one negotiating IPC below 2.3, whose trust
+/// read `ipc-client` refuses `ProtocolUnsupported` -- is `Incompatible`,
+/// as a send's is: the person is told the cause, which no retry mends.
 pub(crate) const fn classify_trust(error: TransportError) -> TrustProblem {
     match error {
         TransportError::BackendUnavailable
@@ -146,6 +149,9 @@ pub(crate) const fn classify_trust(error: TransportError) -> TrustProblem {
         | TransportError::CancellationRaced => TrustProblem::Unavailable,
         TransportError::CapabilityDenied => TrustProblem::NotPermitted,
         TransportError::InvalidArgument => TrustProblem::Refused,
+        TransportError::ProtocolUnsupported
+        | TransportError::VersionIncompatible
+        | TransportError::ProtocolViolation => TrustProblem::Incompatible,
         TransportError::PayloadTooLarge
         | TransportError::ChannelNotJoined
         | TransportError::EndpointNotRegistered
@@ -157,9 +163,6 @@ pub(crate) const fn classify_trust(error: TransportError) -> TrustProblem {
         | TransportError::PeerUnknown
         | TransportError::PeerUnreachable
         | TransportError::RemoteEndpointUnavailable
-        | TransportError::ProtocolUnsupported
-        | TransportError::ProtocolViolation
-        | TransportError::VersionIncompatible
         | TransportError::Internal => TrustProblem::Internal,
     }
 }
@@ -284,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn a_trust_failure_is_unavailable_not_permitted_refused_or_internal() {
+    fn a_trust_failure_is_unavailable_not_permitted_refused_incompatible_or_internal() {
         assert_eq!(
             classify_trust(TransportError::BackendUnavailable),
             TrustProblem::Unavailable
@@ -302,6 +305,15 @@ mod tests {
             assert_eq!(
                 classify_trust(error) == TrustProblem::Refused,
                 error == TransportError::InvalidArgument,
+                "{error:?}"
+            );
+            // A version problem reads as one wherever a send's does.
+            assert_eq!(
+                classify_trust(error) == TrustProblem::Incompatible,
+                matches!(
+                    classify_send(error),
+                    AttemptFailure::NeedsAttention(SendProblem::Incompatible)
+                ),
                 "{error:?}"
             );
         }
