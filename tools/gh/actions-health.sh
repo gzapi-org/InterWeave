@@ -29,8 +29,9 @@
 # <<< help
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-root="$(git -C "$here" rev-parse --show-toplevel 2>/dev/null || { cd "$here/../.." && pwd; })"
-fabric="${AGENT_FABRIC_ROOT:-$root/../agent-fabric}"
+# shellcheck source=tools/gh/fabric-root.sh
+. "$here/fabric-root.sh"
+fabric="$(interweave_fabric_root "$here")"
 target="$fabric/runtime/github/actions-health.sh"
 [[ -f "$target" ]] || {
     echo "actions-health: agent-fabric not found at $fabric (expected beside this working copy, as projects/agent-fabric, carrying runtime/github/actions-health.sh); set AGENT_FABRIC_ROOT or update it. See CLAUDE.md §9, agent-fabric beside the checkout." >&2

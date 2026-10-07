@@ -84,7 +84,7 @@ run "$SANDBOX/r5" INTERWEAVE_ACTIONS_INCLUDED_MINUTES= -- --quiet
 
 echo "resolution: AGENT_FABRIC_ROOT wins; otherwise the sibling of this working copy"
 SIB="$SANDBOX/projects"; mkdir -p "$SIB/interweave/tools/gh" "$SIB/agent-fabric/runtime/github"
-cp "$UNDER_TEST" "$SIB/interweave/tools/gh/actions-health.sh"
+cp "$UNDER_TEST" "$SCRIPT_DIR/fabric-root.sh" "$SIB/interweave/tools/gh/"
 git -C "$SIB/interweave" init -q 2>/dev/null
 printf '#!/usr/bin/env bash\necho "sibling copy"\n' > "$SIB/agent-fabric/runtime/github/actions-health.sh"
 out="$(cd "$SIB/interweave" && env -u AGENT_FABRIC_ROOT bash tools/gh/actions-health.sh 2>&1)"
