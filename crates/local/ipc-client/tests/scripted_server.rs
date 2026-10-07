@@ -838,11 +838,11 @@ async fn trust_reads_every_page_and_refuses_a_cursor_that_does_not_move() {
         script.binding.admin([AdminCapability::Trust].into()),
         async {
             let (mut probe, _) = admin_hello(&script).await;
-            admin_response(&mut probe, 1, &[]).await;
+            admin_response(&mut probe, 3, &[]).await;
             assert!(probe.read().await.is_none());
             drop(probe);
             let (mut real, _) = admin_hello(&script).await;
-            admin_response(&mut real, 1, &["admin.trust"]).await;
+            admin_response(&mut real, 3, &["admin.trust"]).await;
             real
         }
     );
@@ -860,12 +860,12 @@ async fn trust_reads_every_page_and_refuses_a_cursor_that_does_not_move() {
     let (view, afters) = tokio::join!(admin.trust(), async {
         let first = answer(
             &mut server,
-            json!({"local_peer": PEER, "allowed": [{"peer": OTHER, "persisted": false}], "next": OTHER}),
+            json!({"local_peer": PEER, "allowed": [{"peer": OTHER, "persisted": true, "source": "configured"}], "next": OTHER}),
         )
         .await;
         let second = answer(
             &mut server,
-            json!({"allowed": [{"peer": THIRD, "persisted": false}]}),
+            json!({"allowed": [{"peer": THIRD, "persisted": true, "source": "administered"}]}),
         )
         .await;
         (first, second)
@@ -874,8 +874,19 @@ async fn trust_reads_every_page_and_refuses_a_cursor_that_does_not_move() {
     let id = |s: &str| TransportIdentity::parse(s).expect("peer");
     assert_eq!(view.local_peer, Some(id(PEER)));
     assert_eq!(
-        view.peers().cloned().collect::<Vec<_>>(),
-        [id(OTHER), id(THIRD)]
+        view.allowed,
+        [
+            interweave_local_client_api::TrustedPeer {
+                peer: id(OTHER),
+                persisted: true,
+                source: interweave_local_client_api::TrustSource::Configured,
+            },
+            interweave_local_client_api::TrustedPeer {
+                peer: id(THIRD),
+                persisted: true,
+                source: interweave_local_client_api::TrustSource::Administered,
+            },
+        ]
     );
     assert_eq!(afters.0.as_deref(), Some("{}"), "the first page names none");
     assert_eq!(afters.1, Some(format!(r#"{{"after":"{OTHER}"}}"#)));
@@ -884,7 +895,7 @@ async fn trust_reads_every_page_and_refuses_a_cursor_that_does_not_move() {
         for _ in 0..2 {
             answer(
                 &mut server,
-                json!({"allowed": [{"peer": OTHER, "persisted": false}], "next": OTHER}),
+                json!({"allowed": [{"peer": OTHER, "persisted": true, "source": "configured"}], "next": OTHER}),
             )
             .await;
         }
@@ -1073,5 +1084,81 @@ async fn peers_reads_every_page_at_two_two_and_sends_nothing_below_it() {
         assert_eq!(rows[1].last_outcome, Some(PeerOutcome::Denied));
         assert_eq!(afters.0.as_deref(), Some("{}"), "the first page names none");
         assert_eq!(afters.1, Some(format!(r#"{{"after":"{OTHER}"}}"#)));
+    }
+}
+
+/// Below 2.3 the trust read is refused `ProtocolUnsupported` and nothing
+/// is sent -- the 2.1 row carries no source, and an unknown is never
+/// shown as a value -- while `set_trust`, which carries no row, is sent
+/// at 2.1 as before. At 2.3 a row without its source is a daemon this
+/// client cannot read truthfully: `Internal`, not a guessed source.
+#[tokio::test]
+async fn trust_is_read_only_at_two_three_and_set_is_sent_below_it() {
+    use interweave_local_client_api::{AdminBinding as _, AdminCapability, AdminPort as _};
+    use interweave_transport_api::{TransportError, TransportIdentity};
+    const OTHER: &str = "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N";
+    for minor in [1, 2, 3] {
+        let script = Script::new();
+        let (admin, mut server) = tokio::join!(
+            script.binding.admin([AdminCapability::Trust].into()),
+            async {
+                // The binding probes which capabilities the daemon grants,
+                // then opens the port it asked for.
+                let (mut probe, _) = admin_hello(&script).await;
+                admin_response(&mut probe, minor, &[]).await;
+                assert!(probe.read().await.is_none());
+                drop(probe);
+                let (mut server, _) = admin_hello(&script).await;
+                admin_response(&mut server, minor, &["admin.trust"]).await;
+                server
+            }
+        );
+        let admin = admin.expect("a port");
+        if minor < 3 {
+            let (refused, nothing) =
+                tokio::join!(tokio::time::timeout(PATIENCE, admin.trust()), async {
+                    tokio::time::timeout(Duration::from_millis(200), server.read()).await
+                });
+            assert_eq!(
+                refused.expect("answered without the daemon"),
+                Err(TransportError::ProtocolUnsupported),
+                "2.{minor}"
+            );
+            assert!(nothing.is_err(), "2.{minor}: no request reached the daemon");
+            // The control: the set is still sent, and answered.
+            let (set, ()) = tokio::join!(
+                tokio::time::timeout(
+                    PATIENCE,
+                    admin.set_trust(TransportIdentity::parse(OTHER).expect("peer"), true)
+                ),
+                async {
+                    let Some(Frame::Request(request)) = server.read().await else {
+                        panic!("the set reaches the daemon");
+                    };
+                    assert_eq!(request.method.as_str(), "admin.trust.set");
+                    server
+                        .write(&json!({"type": "response", "id": request.id.as_str(), "ok": true, "result": {}}))
+                        .await;
+                }
+            );
+            assert_eq!(set.expect("answered"), Ok(()), "2.{minor}");
+            continue;
+        }
+        let (read, ()) = tokio::join!(tokio::time::timeout(PATIENCE, admin.trust()), async {
+            let Some(Frame::Request(request)) = server.read().await else {
+                panic!("a request");
+            };
+            server
+                .write(
+                    &json!({"type": "response", "id": request.id.as_str(), "ok": true,
+                    "result": {"allowed": [{"peer": OTHER, "persisted": false}]}}),
+                )
+                .await;
+        });
+        assert_eq!(
+            read.expect("answered"),
+            Err(TransportError::Internal),
+            "a 2.1 row on a 2.3 connection"
+        );
     }
 }
