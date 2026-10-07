@@ -52,8 +52,10 @@ are idempotent; the answer fixes the state, a re-issue cancelled again
 stays pending, `status.pull_queue.pending` lists them, and a reply on a
 channel whose join is pending never reaches the route — the pull-queue
 refusal while paused, the session's absence while disconnected
-(`ChannelNotJoined` only on a channel the bridge never held: a cancelled
-join never drops a channel it already holds), the pending entries
+on a channel the bridge holds (a cancelled HOST join never drops one),
+`ChannelNotJoined` on a channel never held or whose RE-JOIN is pending
+(a re-join cancelled at a reconnect leaves the channel until its
+re-issue lands — the #222 review's correction), the pending entries
 resolved at the reconnect before another host line is read (two
 re-review corrections of the first wording's "window"); and a
 paused bridge, reading nothing, learns of its session's end only at the
