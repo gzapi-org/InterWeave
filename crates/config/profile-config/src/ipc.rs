@@ -2,7 +2,7 @@
 // Copyright 2026 Andrea Benetton
 //! The `ipc` block (plan §16 (13)): whether the local IPC boundary runs,
 //! its socket layout, its client ceilings, each client's event queue and
-//! the keepalive -- with the block's three cross-field rules. The two
+//! the keepalive -- with the block's four cross-field rules. The two
 //! rules tying it to `runtime.deployment` are the runtime block's
 //! ([`crate::runtime`]), which reads `enabled` from here.
 //!
@@ -104,7 +104,7 @@ impl Default for IpcConfig {
 }
 
 impl IpcConfig {
-    /// The block's ranges and its three cross-field rules.
+    /// The block's ranges and its four cross-field rules.
     pub(crate) fn validate_into(&self, errors: &mut Vec<ConfigError>) {
         let k = &self.keepalive;
         let rows: [(&'static str, u32, u32, u32); 6] = [
