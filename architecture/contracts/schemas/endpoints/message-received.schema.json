@@ -44,7 +44,7 @@
           "minLength": 1,
           "maxLength": 128,
           "pattern": "^[\\x20-\\x7E]+$",
-          "description": "1..128 ASCII bytes when present. Empty is INVALID rather than an alias for absence — the content fingerprint distinguishes the two cases."
+          "description": "1..128 printable ASCII bytes (0x20..0x7E, the pattern below) when present. Empty is INVALID rather than an alias for absence — the content fingerprint distinguishes the two cases."
         },
         "bytes": {
           "type": "string",
@@ -64,7 +64,7 @@
   "x-contract": {
     "name": "endpoints.message-received",
     "status": "active",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "adr": [
       "0030",
       "0018",

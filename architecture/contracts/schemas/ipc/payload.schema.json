@@ -14,7 +14,7 @@
       "minLength": 1,
       "maxLength": 128,
       "pattern": "^[\\x20-\\x7E]+$",
-      "description": "1..128 ASCII bytes when present. Empty is INVALID rather than an alias for absence — the content fingerprint distinguishes the two."
+      "description": "1..128 printable ASCII bytes (0x20..0x7E, the pattern below) when present. Empty is INVALID rather than an alias for absence — the content fingerprint distinguishes the two."
     },
     "bytes": {
       "type": "string",
@@ -27,7 +27,7 @@
   "x-contract": {
     "name": "ipc.payload",
     "status": "active",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "adr": [
       "0017",
       "0026"
