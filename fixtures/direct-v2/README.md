@@ -10,6 +10,18 @@ These are **derived** from the layout in `architecture/transport/libp2p/DIRECT.m
 
 Writing them surfaced a gap: the frame's byte order was never stated. `DIRECT.md` now pins big-endian, which is the only choice consistent with the IPC length prefix and the content fingerprint — three places that would otherwise disagree about one repository's byte order.
 
+## `direct-response-v2-frame.json`
+
+The `AcceptedV2`/`RejectedV2` response frame (`DIRECT.md` §Response byte layout). It has nine vectors:
+
+- an ordinary acceptance;
+- an acceptance at the 64-byte label ceiling, which is the longest legal response (82 bytes);
+- one rejection per assigned reason code, 1 through 7.
+
+Every code has a vector because the numbering is the part a second implementation would otherwise have to guess.
+
+Writing them closed a gap. Until then the layout and the numbering were stated only in the production codec, so a second implementation had nothing to agree with but that code. As with the request frame, the vectors are **derived** from `DIRECT.md` and anchored by the file's `adr` list. The verifier takes the numbering from `schemas/direct/reject-reason`'s enum order, never from this file.
+
 ## `direct-content-fingerprint-v1.json`
 
 The content fingerprint stored alongside a positive direct dedup entry (ADR-0019). It is what stops an admitted retry from being rerouted to a different local application, and what stops one idempotency key from silently aliasing two different message bodies — so implementations must agree on it byte for byte.

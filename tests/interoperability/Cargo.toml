@@ -4,9 +4,10 @@
 # Stage 12's part of the interoperability suite (plan §15 (2)): two
 # runtimes composed from two different shipped example profiles exchange
 # direct and broadcast, and the frozen fixture vectors travel through the
-# composed runtime unchanged. The desktop <-> Android, upgrade and
-# independent-codec matrices are Stage 17's. TEST-ONLY; nothing depends on
-# this package.
+# composed runtime unchanged. Stage 17 (plan §20 (c)) adds production
+# against the independent codecs and the upgrade matrix's rows that need
+# no older build; the previous-build axis and the desktop <-> Android
+# matrix are still to come. TEST-ONLY; nothing depends on this package.
 [package]
 name = "interweave-interoperability-tests"
 version = "0.0.0"
@@ -23,6 +24,10 @@ workspace = true
 [dependencies]
 
 [dev-dependencies]
+futures = { workspace = true }
+interweave-independent-codecs = { path = "../independent-codecs" }
+interweave-ipc-protocol = { path = "../../crates/api/ipc-protocol" }
+interweave-ipc-server = { path = "../../crates/local/ipc-server" }
 interweave-local-client-api = { path = "../../crates/api/local-client-api" }
 interweave-local-client-conformance-tests = { path = "../local-client-conformance" }
 interweave-profile-config = { path = "../../crates/config/profile-config" }
@@ -30,6 +35,11 @@ interweave-profile-identity = { path = "../../crates/identity/profile-identity" 
 interweave-test-support = { path = "../support" }
 interweave-transport-api = { path = "../../crates/api/transport-api" }
 interweave-transport-composition = { path = "../../crates/transport/composition" }
+interweave-transport-libp2p = { path = "../../crates/transport/libp2p" }
+interweave-transport-runtime = { path = "../../crates/transport/runtime" }
+interweave-trust-api = { path = "../../crates/api/trust-api" }
+libp2p = { workspace = true }
+serde_json = { workspace = true }
 serde_norway = "0.9.42"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

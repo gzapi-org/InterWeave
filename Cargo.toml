@@ -58,6 +58,10 @@ members = [
     "tests/human-chat",
     "tests/human-retention",
     "tests/interoperability",
+    # Stage 17 (plan section 20 (c)): the independent codecs, written from
+    # the contract text with no workspace package in their graph
+    # (tools/checks/check_independent_codecs.sh).
+    "tests/independent-codecs",
     "tests/local-client-conformance",
     "tests/local-client-fake",
     # Stage 13: the IPC v2 wire suite, raw frames over real sockets.
