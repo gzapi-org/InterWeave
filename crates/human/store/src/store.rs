@@ -1811,6 +1811,15 @@ mod private_dir_tests {
             .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir_in("/tmp")
             .expect("tempdir under /tmp");
+        assert_eq!(
+            std::fs::metadata(dir.path())
+                .expect("stat")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+            "owner-only whatever the umask"
+        );
         let a = dir.path().join("a");
         let b = a.join("b");
         std::fs::create_dir(&a).expect("mkdir");
@@ -1840,6 +1849,15 @@ mod private_dir_tests {
             .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir_in("/tmp")
             .expect("tempdir under /tmp");
+        assert_eq!(
+            std::fs::metadata(dir.path())
+                .expect("stat")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+            "owner-only whatever the umask"
+        );
         let real = dir.path().join("real");
         std::fs::create_dir_all(real.join("state")).expect("mkdir");
         for d in [&real, &real.join("state")] {
