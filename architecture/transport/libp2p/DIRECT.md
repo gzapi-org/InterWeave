@@ -2,7 +2,7 @@
 
 The prose here is normative for **behaviour**. The parts of this protocol that are document-shaped — the coarse rejection codes, the destination selector, the deduplication key — are also defined as JSON Schema under [`../../contracts/schemas/direct/`](../../contracts/schemas/direct/) (ADR-0049).
 
-The `DirectMessageV2` byte framing below is deliberately **not** modelled there: it is a fixed-width binary layout, not a JSON document, and cross-implementation agreement on it belongs in `fixtures/direct-v2/` as byte vectors. The family manifest records that boundary explicitly rather than leaving it as an apparent gap.
+The `DirectMessageV2` byte framing below — the request and the `AcceptedV2`/`RejectedV2` response — is deliberately **not** modelled there: it is a fixed-width binary layout, not a JSON document, and cross-implementation agreement on it belongs in `fixtures/direct-v2/` as byte vectors. The family manifest records that boundary explicitly rather than leaving it as an apparent gap.
 
 ## Selected primitive
 
@@ -56,6 +56,34 @@ RejectedV2 {
 ```
 
 Coarse reason codes: `no_route`, `unauthorized_peer`, `overloaded`, `malformed`, `too_large`, `shutting_down`, `unsupported`.
+
+### Response byte layout
+
+The response is the whole response substream, one of two shapes told apart by a leading tag:
+
+```text
+AcceptedV2: tag:u8 = 1 || message_id:16 || resolved_endpoint_len:u8 || resolved_destination_endpoint
+RejectedV2: tag:u8 = 2 || message_id:16 || reason:u8
+```
+
+- `message_id` is the request's 16 bytes, echoed.
+- `resolved_endpoint_len` is 1..64 and is never zero. The field is the endpoint that took the message, and the default has already been resolved by the time it is written. The label satisfies `EndpointId` grammar.
+- `reason` numbers the coarse codes in the order of `schemas/direct/reject-reason`'s enum, from 1:
+
+  | code | reason |
+  |---|---|
+  | 1 | `no_route` |
+  | 2 | `unauthorized_peer` |
+  | 3 | `overloaded` |
+  | 4 | `malformed` |
+  | 5 | `too_large` |
+  | 6 | `shutting_down` |
+  | 7 | `unsupported` |
+
+  0 and 8..255 are unassigned. A reader refuses an unassigned code as malformed response metadata, a local `ProtocolViolation`. It is never read as `unsupported`: that peer negotiated this protocol and answered on it.
+- A tag other than 1 or 2, a short field, or any byte after the last field is malformed response metadata as well. The longest legal response is therefore 82 bytes (1 + 16 + 1 + 64).
+
+This layout is the response wire of `/interweave/direct/2.0.0`. It changes only additively, and only behind a new protocol id: a new reason code, tag or field is never sent on 2.0.0. The frozen vectors are `fixtures/direct-v2/direct-response-v2-frame.json`.
 
 `no_route` deliberately collapses endpoint unknown, endpoint disabled, no active lease, missing default endpoint, and endpoint-specific policy denial. All such branches use the same wire code/response shape and shared response encoder. Exact response-time equality is **not** promised; scheduler/registry/policy differences can remain observable to a trusted probing peer, so this residual timing oracle is bounded by direct-request rate limits rather than hidden behind artificial sleeps.
 

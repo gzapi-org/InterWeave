@@ -1,0 +1,104 @@
+{
+  "fixture": "DirectMessageV2 response framing (AcceptedV2 / RejectedV2)",
+  "specification": "architecture/transport/libp2p/DIRECT.md",
+  "adr": [
+    "0005",
+    "0030"
+  ],
+  "status": "frozen",
+  "algorithm": {
+    "id": "direct-response-v2-frame",
+    "byte_order": "no multi-byte integer: every length and code is one byte",
+    "layout": "AcceptedV2: tag:u8=1 || message_id:16 || resolved_endpoint_len:u8 (1..64) || resolved_destination_endpoint; RejectedV2: tag:u8=2 || message_id:16 || reason:u8",
+    "notes": [
+      "message_id echoes the request's 16 bytes.",
+      "resolved_endpoint_len is never 0: the field names the endpoint that took the message, the default already resolved.",
+      "reason numbers schemas/direct/reject-reason's enum in order from 1: no_route 1, unauthorized_peer 2, overloaded 3, malformed 4, too_large 5, shutting_down 6, unsupported 7. 0 and 8..255 are unassigned and refused as malformed, never read as unsupported.",
+      "Any other tag, a short field, or a byte after the last field is malformed response metadata."
+    ]
+  },
+  "$comment": "Vectors are DERIVED from the layout in DIRECT.md §Response byte layout; no ADR publishes a golden response, so the file is anchored by its `adr` list, as direct-message-v2-frame.json is. Every assigned reason code has a vector, because the numbering is the part a second implementation would otherwise have to guess. No `contract` URN: the frame is a byte layout JSON Schema cannot express; the reason vocabulary it numbers is urn:interweave:schemas:direct:reject-reason.",
+  "vectors": [
+    {
+      "name": "accepted-claude",
+      "description": "The ordinary acceptance: the explicit destination `claude` took the message, echoed with the request's id.",
+      "kind": "accepted",
+      "message_id": "9f2c1d4e7a0b48c3915ed6f0a72b3c58",
+      "resolved_destination_endpoint": "claude",
+      "frame_hex": "019f2c1d4e7a0b48c3915ed6f0a72b3c5806636c61756465",
+      "frame_len": 24
+    },
+    {
+      "name": "accepted-max-label-64",
+      "description": "The longest legal response, 82 bytes: a 64-byte resolved endpoint.",
+      "kind": "accepted",
+      "message_id": "9f2c1d4e7a0b48c3915ed6f0a72b3c58",
+      "resolved_destination_endpoint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "frame_hex": "019f2c1d4e7a0b48c3915ed6f0a72b3c584061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+      "frame_len": 82
+    },
+    {
+      "name": "rejected-no-route",
+      "description": "Reason code 1. The one the privacy collapse rides on: endpoint unknown, disabled, unleased, no default, and endpoint-policy denial all answer this.",
+      "kind": "rejected",
+      "message_id": "9f2c1d4e7a0b48c3915ed6f0a72b3c58",
+      "reason": "no_route",
+      "frame_hex": "029f2c1d4e7a0b48c3915ed6f0a72b3c5801",
+      "frame_len": 18
+    },
+    {
+      "name": "rejected-unauthorized-peer",
+      "description": "Reason code 2.",
+      "kind": "rejected",
+      "message_id": "9f2c1d4e7a0b48c3915ed6f0a72b3c58",
+      "reason": "unauthorized_peer",
+      "frame_hex": "029f2c1d4e7a0b48c3915ed6f0a72b3c5802",
+      "frame_len": 18
+    },
+    {
+      "name": "rejected-overloaded",
+      "description": "Reason code 3.",
+      "kind": "rejected",
+      "message_id": "9f2c1d4e7a0b48c3915ed6f0a72b3c58",
+      "reason": "overloaded",
+      "frame_hex": "029f2c1d4e7a0b48c3915ed6f0a72b3c5803",
+      "frame_len": 18
+    },
+    {
+      "name": "rejected-malformed",
+      "description": "Reason code 4.",
+      "kind": "rejected",
+      "message_id": "9f2c1d4e7a0b48c3915ed6f0a72b3c58",
+      "reason": "malformed",
+      "frame_hex": "029f2c1d4e7a0b48c3915ed6f0a72b3c5804",
+      "frame_len": 18
+    },
+    {
+      "name": "rejected-too-large",
+      "description": "Reason code 5.",
+      "kind": "rejected",
+      "message_id": "9f2c1d4e7a0b48c3915ed6f0a72b3c58",
+      "reason": "too_large",
+      "frame_hex": "029f2c1d4e7a0b48c3915ed6f0a72b3c5805",
+      "frame_len": 18
+    },
+    {
+      "name": "rejected-shutting-down",
+      "description": "Reason code 6.",
+      "kind": "rejected",
+      "message_id": "9f2c1d4e7a0b48c3915ed6f0a72b3c58",
+      "reason": "shutting_down",
+      "frame_hex": "029f2c1d4e7a0b48c3915ed6f0a72b3c5806",
+      "frame_len": 18
+    },
+    {
+      "name": "rejected-unsupported",
+      "description": "Reason code 7.",
+      "kind": "rejected",
+      "message_id": "9f2c1d4e7a0b48c3915ed6f0a72b3c58",
+      "reason": "unsupported",
+      "frame_hex": "029f2c1d4e7a0b48c3915ed6f0a72b3c5807",
+      "frame_len": 18
+    }
+  ]
+}
