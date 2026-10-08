@@ -121,12 +121,19 @@ impl Codec for RawCodec {
 
 type Outcome = Result<Read, String>;
 
+/// How the raw peer answers a request's bytes.
+type Answer = fn(&[u8]) -> Vec<u8>;
+
+/// A send the test asks the raw peer for: where, to whom, which frame,
+/// and where its outcome goes.
+type SendCommand = (Multiaddr, PeerId, Vec<u8>, oneshot::Sender<Outcome>);
+
 /// A raw peer listing `protocols`, in that order: the order a newer build
 /// lists them, newest first.
 struct RawPeer {
     id: PeerId,
     address: Multiaddr,
-    send: mpsc::Sender<(Multiaddr, PeerId, Vec<u8>, oneshot::Sender<Outcome>)>,
+    send: mpsc::Sender<SendCommand>,
     inbound: mpsc::Receiver<Read>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -143,11 +150,7 @@ impl RawPeer {
     }
 
     /// A raw peer whose answer to each request is `answer(request)`.
-    async fn answering(
-        ip: Ipv4Addr,
-        protocols: &[&'static str],
-        answer: fn(&[u8]) -> Vec<u8>,
-    ) -> Self {
+    async fn answering(ip: Ipv4Addr, protocols: &[&'static str], answer: Answer) -> Self {
         let mut swarm = SwarmBuilder::with_new_identity()
             .with_tokio()
             .with_tcp(
@@ -176,8 +179,7 @@ impl RawPeer {
                 break address;
             }
         };
-        let (send, mut commands) =
-            mpsc::channel::<(Multiaddr, PeerId, Vec<u8>, oneshot::Sender<Outcome>)>(4);
+        let (send, mut commands) = mpsc::channel::<SendCommand>(4);
         let (inbound_tx, inbound) = mpsc::channel(16);
         let task = tokio::spawn(async move {
             let mut waiting: Vec<(PeerId, Vec<u8>, oneshot::Sender<Outcome>)> = Vec::new();
@@ -557,7 +559,7 @@ async fn a_malformed_response_is_a_local_protocol_violation_at_head() {
     );
     head.stop().await;
 
-    let cases: [(&str, fn(&[u8]) -> Vec<u8>); 3] = [
+    let cases: [(&str, Answer); 3] = [
         ("an unassigned reason code", unassigned_code),
         ("a third tag", third_tag),
         ("a trailing byte", trailing_byte),
