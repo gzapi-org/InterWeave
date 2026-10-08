@@ -395,3 +395,39 @@ fn a_failed_normalisation_rewrite_stops_the_load() {
         }
     }
 }
+
+/// An overlay that is a FIFO is refused as not a regular file, at once:
+/// opened without `O_NONBLOCK` it blocked the load until a writer
+/// appeared. The same lists as a file are the control. On a timeout the
+/// FIFO is opened for writing, which releases the blocked load, before
+/// the test fails.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_overlay_that_is_a_fifo_is_refused_without_waiting() {
+    let configured = set([nth(1)]);
+    let (_dir, path) = state();
+    put(&path, &lists(&[&nth(2)], &[]));
+    TrustOverlay::load(&path, &configured).expect("the control: a regular file");
+    std::fs::remove_file(&path).expect("removed");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&path)
+        .status()
+        .expect("mkfifo");
+    assert!(made.success(), "mkfifo");
+    chmod(&path, 0o600);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let loading = path.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(TrustOverlay::load(&loading, &configured).map(drop));
+    });
+    let Ok(result) = rx.recv_timeout(std::time::Duration::from_secs(5)) else {
+        let _ = std::fs::OpenOptions::new().write(true).open(&path);
+        panic!("the load blocked on the FIFO");
+    };
+    match result {
+        Err(OverlayError::NotPrivate { detail }) => {
+            assert_eq!(detail, "it is not a regular file");
+        }
+        other => panic!("refused: {other:?}"),
+    }
+}

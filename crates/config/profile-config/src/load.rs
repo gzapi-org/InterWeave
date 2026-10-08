@@ -119,9 +119,13 @@ fn open_guarded_as(
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+        // O_NONBLOCK so a FIFO in its place opens at once and is refused
+        // below as not a regular file, rather than holding start until a
+        // writer appears; it changes nothing for a regular file
+        // (`a_document_that_is_a_fifo_is_refused_without_waiting`).
         let file = match std::fs::OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(path)
         {
             Ok(file) => file,

@@ -221,6 +221,43 @@ fn a_document_that_is_a_link_is_refused() {
     }
 }
 
+/// A `config.yaml` that is a FIFO is refused as not a regular file, at
+/// once: opened without `O_NONBLOCK` it blocked until a writer appeared,
+/// so the process never started and never said why. The same document as
+/// a file is the control. On a timeout the FIFO is opened for writing,
+/// which releases the blocked load, before the test fails.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_document_that_is_a_fifo_is_refused_without_waiting() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = paths(dir.path(), "work");
+    write(&p, &document("profile:\n  name: work", ""));
+    ProfileConfig::load(&p).expect("the control: a regular file");
+    std::fs::remove_file(p.config_file()).expect("removed");
+    let made = std::process::Command::new("mkfifo")
+        .arg(p.config_file())
+        .status()
+        .expect("mkfifo");
+    assert!(made.success(), "mkfifo");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let loading = p.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(ProfileConfig::load(&loading).map(drop));
+    });
+    let Ok(result) = rx.recv_timeout(std::time::Duration::from_secs(5)) else {
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .open(p.config_file());
+        panic!("the load blocked on the FIFO");
+    };
+    match result {
+        Err(LoadError::ConfigFileUnguarded { detail, .. }) => {
+            assert!(detail.contains("not a regular file"), "{detail}");
+        }
+        other => panic!("refused: {other:?}"),
+    }
+}
+
 /// R4: the transport key is never kept in the human client's directory.
 /// A key file configured there -- by absolute path, or by a relative one
 /// climbing out of the configuration with `..` -- is refused at load; the
