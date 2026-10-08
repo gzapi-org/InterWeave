@@ -313,7 +313,10 @@ POSIX ACL present the group bits are the ACL mask, not the owning
 group's grant, and a named entry granting another account write hides
 behind a group-write bit, so the presence of the `system.posix_acl_access`
 attribute refuses the bit (the retired reviewer's thread on #231, judged
-real). A read that cannot be completed, or that answers no such user or
+real). POSIX access ACLs are what is inspected — `ENODATA` and `ENOTSUP`
+both read as no ACL, so a filesystem without ACL support is not refused
+for that — and a network filesystem's own ACLs (NFSv4) are outside the
+local-account threat, as the threat row says of network filesystems. A read that cannot be completed, or that answers no such user or
 group, REFUSES, with the detail "group-writable; whether group <gid> is
 the daemon user's private group could not be read". Other-write stays
 refused unless sticky; the private directory itself stays owner-only
