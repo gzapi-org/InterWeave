@@ -130,10 +130,12 @@ impl Shared {
     /// The connection is over: the code is recorded, and every waiting
     /// call is answered with it then, not when it is next polled. The
     /// first end recorded stands, except that a writer's failure is
-    /// provisional: the server's own `close` frame, read after it,
-    /// replaces its code, so a caller is told why the SERVER ended the
-    /// connection rather than that a write failed against the socket it
-    /// was closing. The writer's end answers no call: the reader, which
+    /// provisional: the reader's end that follows replaces its code with
+    /// what it read -- the server's own `close` frame, or a frame this
+    /// client refuses -- so a caller is told why the connection ended
+    /// rather than that a write failed against the socket the server was
+    /// closing, and one server behaviour gets one code whichever half saw
+    /// it first (`a_refused_frame_read_after_a_failed_write_is_the_violation`). The writer's end answers no call: the reader, which
     /// then reads what has already arrived, answers them when it stops,
     /// and its end makes the code final, so a call answers the code the
     /// session ends with (`a_failed_write_keeps_the_servers_close_code`;
@@ -148,7 +150,7 @@ impl Shared {
             *ended = Some(code);
             self.provisional
                 .store(by == EndedBy::Writer, Ordering::SeqCst);
-        } else if by == EndedBy::ServerClose && self.provisional.load(Ordering::SeqCst) {
+        } else if by != EndedBy::Writer && self.provisional.load(Ordering::SeqCst) {
             *ended = Some(code);
         }
         if by != EndedBy::Writer {

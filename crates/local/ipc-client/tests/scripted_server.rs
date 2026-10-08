@@ -435,6 +435,24 @@ async fn a_server_that_keeps_writing_after_a_failed_write_is_cut_off() {
     flood.join().expect("the flood ends with the client");
 }
 
+/// A frame the client refuses, read in the drain after a failed write,
+/// ends the connection `ProtocolViolation`, as the same frame does with no
+/// write failing first (`an_event_to_a_session_without_events_is_a_protocol_violation`,
+/// the control): one server behaviour, one code, whichever half saw the
+/// end first. Current-thread, so the writer fails before the reader runs.
+#[tokio::test(flavor = "current_thread")]
+async fn a_refused_frame_read_after_a_failed_write_is_the_violation() {
+    use interweave_transport_api::TransportError;
+    let script = Script::new();
+    let (session, mut server) = opened(&script, 8, &["commands"]).await;
+    server.event(0).await;
+    drop(server);
+    let answer = tokio::time::timeout(PATIENCE, session.join(general()))
+        .await
+        .expect("the call comes back");
+    assert_eq!(answer, Err(TransportError::ProtocolViolation));
+}
+
 /// A server granting more than a session may hold is capped, not trusted.
 #[tokio::test]
 async fn a_grant_past_the_session_ceiling_is_capped() {
