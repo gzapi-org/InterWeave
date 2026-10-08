@@ -81,4 +81,9 @@ interweave-discovery-cache = { path = "../../discovery/cache" }
 # a runtime implementation and a configuration crate must not depend on
 # it to learn a number, but the two copies must not drift.
 interweave-transport-runtime = { path = "../../transport/runtime" }
+# And for the client's silence bound: the profile states it from the
+# contract (`ipc::CLIENT_SILENCE_TIMEOUT_MS`) and the IPC protocol names
+# it for the client's timer; a configuration crate must not depend on
+# the protocol to learn a number, but the two copies must not drift.
+interweave-ipc-protocol = { path = "../../api/ipc-protocol" }
 tempfile = { workspace = true }
