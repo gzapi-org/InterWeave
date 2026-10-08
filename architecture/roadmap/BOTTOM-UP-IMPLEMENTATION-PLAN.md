@@ -5047,7 +5047,10 @@ IPC
 Claude Channel
 desktop composition/packaging
 Android platform binding
+MCP host bridge: pull delivery mode
 ```
+
+**MCP host bridge: pull delivery mode (A 2026-10-07; the owner's decision on p2p-network-dev's question from #221).** ADR-0001's top layer is an MCP host and the Channel push is one delivery mode; ADR-0002 adds the pull mode — one `receive(max)` tool over `events(max)` through one bounded pull queue that drops nothing (full, the drain pauses and the daemon's bounds decide), `--delivery push|pull` required, one mode per process, content and meta shared; ADR-0023 gains the eighth tool for pull mode (`CHANNEL-EVENT.md` §Delivery, `TOOL-SURFACE.md`, `LIFECYCLE.md`). Owner: p2p-network-dev (the tool in `channel-core`, the mode switch in `apps/claude-channel`, a scripted plain-MCP client in `tests/`); the contract text architect-cto's. Lands as one PR, #221, not on Stage 17's path.
 
 The tracks converge at the frozen `TransportRuntime` and `LocalDataSession` boundaries.
 

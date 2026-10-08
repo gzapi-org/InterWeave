@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use interweave_ipc_protocol::{
     AdminStatusResult, DirectoryResult, EmptyResult, EndpointList, PeerList, Request, RequestId,
-    ResponseFrame, SendResult, SetEnabledResult, TrustList,
+    ResponseFrame, SendResult, SetEnabledResult, TRUST_SOURCE_SINCE_MINOR, TrustList,
 };
 use interweave_local_client_api::{AdminPort, DataSessionPort};
 use interweave_transport_api::{BroadcastMessageV1, DirectDestination, TransportError};
@@ -129,6 +129,17 @@ pub(crate) async fn admin<A: AdminPort>(
         // position in its order, so nothing is held between pages. The
         // row is the shape the connection negotiated (2.1 or 2.3).
         Request::AdminTrustList(p) => match port.trust().await {
+            // A ROW THAT DOES NOT PERSIST AT 2.3 OR LATER IS REFUSED, never
+            // served in the 2.1 shape the 2.3 contract forbids there: only
+            // a store-less runtime reports one, and it is never served
+            // over IPC (LOCAL-CLIENT.md §7 item 11) -- one that is served
+            // is refused here with `Internal`, never served the row.
+            Ok(view)
+                if minor >= TRUST_SOURCE_SINCE_MINOR
+                    && view.allowed.iter().any(|row| !row.persisted) =>
+            {
+                ResponseFrame::failure(id, TransportError::Internal)
+            }
             Ok(view) => ResponseFrame::success(id, &TrustList::page(view, p.after.as_ref(), minor)),
             Err(code) => ResponseFrame::failure(id, code),
         },
@@ -437,6 +448,51 @@ mod tests {
         let second = page(serde_json::json!({"after": next.as_str()})).await;
         assert_eq!(second.peers.len(), 1);
         assert_eq!(second.next, None, "the last page");
+    }
+
+    /// A runtime whose trust rows do not persist is refused `Internal` on
+    /// a connection at 2.3 or later -- the 2.1 row its view would make is
+    /// one the 2.3 contract forbids -- and served the 2.1 row below 2.3,
+    /// where it is the contract's. Persisted rows at 2.3 are the control.
+    #[tokio::test]
+    async fn an_unpersisted_trust_row_is_refused_at_two_three() {
+        use interweave_ipc_protocol::TrustList;
+        for (unpersisted, minor, served) in [
+            (true, TRUST_SOURCE_SINCE_MINOR, false),
+            (true, TRUST_SOURCE_SINCE_MINOR - 1, true),
+            (false, TRUST_SOURCE_SINCE_MINOR, true),
+        ] {
+            let fake = Fake::default();
+            fake.script().trusted = vec![
+                interweave_transport_api::TransportIdentity::parse(
+                    "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
+                )
+                .expect("peer"),
+            ];
+            fake.script().unpersisted = unpersisted;
+            let port = fake.admin([].into()).await.expect("port");
+            let frame = admin(
+                &port,
+                &Counters::default(),
+                Duration::from_secs(1),
+                id(),
+                request(Method::AdminTrustList, &serde_json::json!({})),
+                minor,
+            )
+            .await;
+            let case = format!("unpersisted={unpersisted} minor={minor}");
+            match frame.outcome::<TrustList>() {
+                Ok(page) => {
+                    assert!(served, "{case}: served");
+                    assert_eq!(page.allowed.len(), 1, "{case}");
+                    assert_eq!(page.allowed[0].persisted, !unpersisted, "{case}");
+                }
+                Err(code) => {
+                    assert!(!served, "{case}: refused {code:?}");
+                    assert_eq!(code, TransportError::Internal, "{case}");
+                }
+            }
+        }
     }
 
     /// `admin.trust.list` answers the port's policy one page at a time:

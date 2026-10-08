@@ -54,6 +54,9 @@ pub(crate) struct Script {
     pub(crate) close_delay: std::time::Duration,
     /// The allowlist `trust` answers, in any order.
     pub(crate) trusted: Vec<TransportIdentity>,
+    /// Whether the port's trust rows say they persist: false is a
+    /// store-less runtime, which is never served over IPC.
+    pub(crate) unpersisted: bool,
     /// When set, `shutdown` stops the server with it before answering,
     /// as the daemon's port does through its owner.
     pub(crate) stop_on_shutdown: Option<tokio::sync::oneshot::Sender<()>>,
@@ -303,16 +306,17 @@ impl AdminPort for FakeAdmin {
 
     async fn trust(&self) -> Result<TrustAdminView, TransportError> {
         self.fake.call("trust".to_owned());
+        // One guard for the read: taking it again inside the map deadlocks.
+        let script = self.fake.script();
+        let persisted = !script.unpersisted;
         Ok(TrustAdminView {
             local_peer: Some(peer()),
-            allowed: self
-                .fake
-                .script()
+            allowed: script
                 .trusted
                 .iter()
                 .map(|peer| interweave_local_client_api::TrustedPeer {
                     peer: peer.clone(),
-                    persisted: true,
+                    persisted,
                     source: interweave_local_client_api::TrustSource::Configured,
                 })
                 .collect(),

@@ -18,7 +18,14 @@ fn bridge(scratch: &std::path::Path) -> Child {
     let run = scratch.join("run");
     std::fs::create_dir_all(&run).expect("run dir");
     Command::new(env!("CARGO_BIN_EXE_claude-channel"))
-        .args(["--profile", "shutdown", "--endpoint", "claude"])
+        .args([
+            "--profile",
+            "shutdown",
+            "--endpoint",
+            "claude",
+            "--delivery",
+            "push",
+        ])
         .env("XDG_RUNTIME_DIR", &run)
         .env("XDG_STATE_HOME", scratch.join("state"))
         .env("XDG_CONFIG_HOME", scratch.join("config"))

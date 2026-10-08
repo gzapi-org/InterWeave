@@ -43,11 +43,15 @@ pub(crate) const fn classify_send(error: TransportError) -> AttemptFailure {
         | TransportError::ChannelNotJoined
         | TransportError::CancelledBeforeDispatch => Retry(Some(SendProblem::ServiceUnavailable)),
         TransportError::UnauthorizedPeer => NeedsAttention(SendProblem::PeerUntrusted),
-        TransportError::ProtocolUnsupported
-        | TransportError::VersionIncompatible
-        | TransportError::ProtocolViolation => NeedsAttention(SendProblem::Incompatible),
+        // Only these two establish a version gap. `ProtocolViolation` is
+        // raised within one release too (a framing error, a reused request
+        // id: `LOCAL-IPC.md` §Close), so it is a defect, not a version.
+        TransportError::ProtocolUnsupported | TransportError::VersionIncompatible => {
+            NeedsAttention(SendProblem::Incompatible)
+        }
         TransportError::PayloadTooLarge => NeedsAttention(SendProblem::TooLarge),
-        TransportError::InvalidArgument
+        TransportError::ProtocolViolation
+        | TransportError::InvalidArgument
         | TransportError::EndpointUnknown
         | TransportError::EndpointInUse
         | TransportError::EndpointDisabled
@@ -135,7 +139,14 @@ pub(crate) const fn classify_open(error: TransportError) -> OpenFailure {
 /// Classify a trust read's or change's failure (`human-client-ui.md` §8).
 /// `InvalidArgument` is the port's refusal of this profile's own identity
 /// or of a new peer past the allowlist's ceiling (`LOCAL-CLIENT.md` §7
-/// item 11), a refusal the person can act on.
+/// item 11), a refusal the person can act on. A daemon that does not speak
+/// the version trust needs -- one negotiating IPC below 2.3, whose trust
+/// read `ipc-client` refuses `ProtocolUnsupported`, or one with no common
+/// major (`VersionIncompatible`) -- is `Incompatible`: the person is told
+/// the cause, which no retry mends. `ProtocolViolation` is not: a framing
+/// error or a reused request id raises it within one release too
+/// (`LOCAL-IPC.md` §Close), so it would name a version gap that may not be
+/// there.
 pub(crate) const fn classify_trust(error: TransportError) -> TrustProblem {
     match error {
         TransportError::BackendUnavailable
@@ -146,7 +157,11 @@ pub(crate) const fn classify_trust(error: TransportError) -> TrustProblem {
         | TransportError::CancellationRaced => TrustProblem::Unavailable,
         TransportError::CapabilityDenied => TrustProblem::NotPermitted,
         TransportError::InvalidArgument => TrustProblem::Refused,
-        TransportError::PayloadTooLarge
+        TransportError::ProtocolUnsupported | TransportError::VersionIncompatible => {
+            TrustProblem::Incompatible
+        }
+        TransportError::ProtocolViolation
+        | TransportError::PayloadTooLarge
         | TransportError::ChannelNotJoined
         | TransportError::EndpointNotRegistered
         | TransportError::EndpointUnknown
@@ -157,9 +172,6 @@ pub(crate) const fn classify_trust(error: TransportError) -> TrustProblem {
         | TransportError::PeerUnknown
         | TransportError::PeerUnreachable
         | TransportError::RemoteEndpointUnavailable
-        | TransportError::ProtocolUnsupported
-        | TransportError::ProtocolViolation
-        | TransportError::VersionIncompatible
         | TransportError::Internal => TrustProblem::Internal,
     }
 }
@@ -284,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn a_trust_failure_is_unavailable_not_permitted_refused_or_internal() {
+    fn a_trust_failure_is_unavailable_not_permitted_refused_incompatible_or_internal() {
         assert_eq!(
             classify_trust(TransportError::BackendUnavailable),
             TrustProblem::Unavailable
@@ -297,11 +309,36 @@ mod tests {
             classify_trust(TransportError::InvalidArgument),
             TrustProblem::Refused
         );
+        // A protocol violation is a defect on both sides, never a version.
+        assert_eq!(
+            classify_send(TransportError::ProtocolViolation),
+            AttemptFailure::NeedsAttention(SendProblem::Internal)
+        );
+        assert_eq!(
+            classify_trust(TransportError::ProtocolViolation),
+            TrustProblem::Internal
+        );
         for error in ALL {
             // Only the port's own refusal reads as one the person caused.
             assert_eq!(
                 classify_trust(error) == TrustProblem::Refused,
                 error == TransportError::InvalidArgument,
+                "{error:?}"
+            );
+            // Only the errors that establish a version gap read as one.
+            let version_gap = matches!(
+                error,
+                TransportError::ProtocolUnsupported | TransportError::VersionIncompatible
+            );
+            assert_eq!(
+                classify_trust(error) == TrustProblem::Incompatible,
+                version_gap,
+                "{error:?}"
+            );
+            // A send names a version gap for exactly the same errors.
+            assert_eq!(
+                classify_send(error) == AttemptFailure::NeedsAttention(SendProblem::Incompatible),
+                version_gap,
                 "{error:?}"
             );
         }

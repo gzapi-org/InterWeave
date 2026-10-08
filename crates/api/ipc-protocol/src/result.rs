@@ -29,8 +29,9 @@ pub const MAX_ENDPOINT_ROWS: usize = 64;
 /// Rows on one `ipc/trust-list` page: a full allowlist of 4096 is four
 /// pages, and a page stays under the 128 KiB body with the first page's
 /// `local_peer` -- 82-byte rows at 2.1 (architect-cto's ruling of
-/// 2026-10-04, LOCAL-IPC.md `admin.trust.list`), 103-byte rows at 2.3,
-/// which carry `source`.
+/// 2026-10-04, LOCAL-IPC.md `admin.trust.list`), 105-byte rows at 2.3,
+/// which carry `source` -- each with its array comma and a 52-character
+/// peer id; about 105 KiB a page.
 /// `a_full_trust_page_of_the_largest_rows_fits_the_body`.
 pub const MAX_TRUST_PAGE_ROWS: usize = 1024;
 
@@ -1361,8 +1362,10 @@ mod tests {
     }
 
     /// Below 2.3 the row is the 2.1 row byte for byte, whatever the
-    /// binding knows; from 2.3 a persisted row carries its source. A row
-    /// the binding does not persist is the 2.1 row at every minor.
+    /// binding knows; from 2.3 a persisted row carries its source. The
+    /// page renders a row the binding does not persist as the 2.1 row at
+    /// every minor; at 2.3 the server refuses to serve one (ipc-server's
+    /// `an_unpersisted_trust_row_is_refused_at_two_three`).
     #[test]
     fn a_trust_row_is_the_shape_its_minor_names() {
         let (configured, administered) = (synthetic_peer(1), synthetic_peer(2));
@@ -1406,7 +1409,7 @@ mod tests {
         assert_eq!(
             rows(false, TRUST_SOURCE_SINCE_MINOR),
             [old(&configured), old(&administered)],
-            "an unpersisted row says so at 2.3 too"
+            "the page renders an unpersisted row as the 2.1 row; the server refuses it at 2.3"
         );
     }
 

@@ -36,9 +36,10 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use interweave_claude_channel_core::{
-    BROADCAST_ACCEPTED, BridgeState, ReplyRoute, ToolCall, ToolName, direct_accepted, error_text,
-    parse_call,
+    BROADCAST_ACCEPTED, BridgeState, ChannelMeta, ChannelNotification, Delivery, PullQueue,
+    ReplyRoute, ToolCall, direct_accepted, error_text, parse_call,
 };
+use interweave_local_client_api::Generation;
 use interweave_local_client_api::{
     DataCapability, DataSessionBinding, DataSessionPort, LocalSessionEvent, SessionEvent,
     SessionRequest,
@@ -47,6 +48,7 @@ use interweave_transport_api::{
     BroadcastMessageV1, ChannelId, ConnectivitySummary, DirectDestination, EndpointId, Health,
     MessageId, TransportError, TransportIdentity,
 };
+use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::time::Instant;
@@ -81,6 +83,111 @@ pub struct Config {
     /// from being read -- unknown, never an empty list (TOOL-SURFACE.md
     /// §Status visibility).
     pub desired_channels: Result<Vec<ChannelId>, String>,
+    /// How inbound messages reach the host (`--delivery`, required):
+    /// pushed as `notifications/claude/channel`, or queued for `receive`.
+    pub delivery: Delivery,
+}
+
+/// A session-bound tool's answer while the pull queue is full: the
+/// bridge's own state, named, never a stall and never `Overloaded`, which
+/// says the transport is busy (architect-cto's ruling, relay seq 18798).
+pub const PULL_QUEUE_FULL: &str = "the pull queue is full: call receive first";
+
+/// The same, for a call cancelled in flight as the queue filled: the
+/// cancel is advisory, so the daemon may have done it -- a repeated send
+/// or broadcast may go twice, a cancelled leave may have left
+/// (TOOL-SURFACE.md, A 2026-10-07).
+pub const PULL_QUEUE_FULL_CANCELLED: &str =
+    "the pull queue is full: call receive first; the call was cancelled in flight, outcome unknown";
+
+/// One message waiting in the pull queue, as the session gave it, with
+/// the lease it arrived under: its token is minted when the host takes
+/// it, under that lease, so its TTL runs from the reading and a message
+/// from before a reconnect stays stale by its epoch (relay seq 18784).
+#[derive(Debug)]
+struct Pulled {
+    event: SessionEvent,
+    lease: Option<(EndpointId, Generation)>,
+}
+
+/// Pull mode's queue and when it last filled: `paused_since` is when the
+/// bridge stopped taking from its session, in the env's milliseconds --
+/// not a deadline, since the daemon's liveness clock starts only once the
+/// IPC client's own buffer fills behind it (relay seq 18835).
+#[derive(Debug)]
+struct Pull {
+    queue: PullQueue<Pulled>,
+    paused_since: Option<u64>,
+}
+
+impl Pull {
+    fn room(&self) -> usize {
+        self.queue.room()
+    }
+
+    fn is_full(&self) -> bool {
+        self.queue.is_full()
+    }
+
+    /// Queue `pulled`, false when the queue was full; the one that fills
+    /// it starts the pause.
+    fn push(&mut self, pulled: Pulled, now_ms: u64) -> bool {
+        if self.queue.push(pulled).is_err() {
+            return false;
+        }
+        if self.queue.is_full() && self.paused_since.is_none() {
+            self.paused_since = Some(now_ms);
+        }
+        true
+    }
+
+    /// Take at most `max`; a take that makes room ends the pause.
+    fn take(&mut self, max: usize) -> interweave_claude_channel_core::Take<Pulled> {
+        let take = self.queue.take(max);
+        if !self.queue.is_full() {
+            self.paused_since = None;
+        }
+        take
+    }
+}
+
+/// A join or leave cancelled in flight as the pull queue filled: the
+/// daemon may or may not have done it (the cancel is advisory), so it is
+/// re-issued once the pause lifts -- the daemon's join and leave are
+/// idempotent -- and its answer fixes the state (CHANNEL-EVENT.md
+/// §Delivery, A 2026-10-07). A send or broadcast is never re-issued: the
+/// daemon does not deduplicate a new message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingOp {
+    Join,
+    Leave,
+}
+
+impl PendingOp {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Join => "join",
+            Self::Leave => "leave",
+        }
+    }
+}
+
+/// `receive`'s answer: the events in the order taken from the session,
+/// what remains, and whether the drain is paused (architect-cto's ruling,
+/// relay seq 18784). Written by `serde` straight to text, so each `meta`
+/// keeps the contract's table order, as the push does.
+#[derive(Serialize)]
+struct Received<'a> {
+    events: Vec<ReceivedEvent<'a>>,
+    remaining: usize,
+    paused: bool,
+}
+
+#[derive(Serialize)]
+struct ReceivedEvent<'a> {
+    kind: &'static str,
+    content: &'a str,
+    meta: &'a ChannelMeta,
 }
 
 /// The bridge's clock and entropy: the caller's, so a test runs on its
@@ -124,6 +231,9 @@ struct Bridge<B: DataSessionBinding> {
     /// Re-joins the daemon refused at a reconnect, each until the next
     /// join or leave of that channel (LIFECYCLE.md step 6).
     rejoin_refused: BTreeMap<ChannelId, TransportError>,
+    /// Joins and leaves cancelled in flight, by channel, the latest
+    /// wanted outcome each; re-issued once the pause lifts.
+    pending: BTreeMap<ChannelId, PendingOp>,
     /// Why the last open failed, for `status`.
     last_open_error: Option<TransportError>,
     attempt: u32,
@@ -133,6 +243,11 @@ struct Bridge<B: DataSessionBinding> {
     /// is not retried at the first delay forever.
     opened_at: Instant,
     health: Option<(Health, Option<ConnectivitySummary>)>,
+    /// Pull mode's queue, made at the first session with its granted
+    /// event queue as the bound, and kept across reconnects so what the
+    /// host has not taken survives the daemon going away. Full, it pauses
+    /// the session's draining: nothing it took is ever dropped.
+    pull: Option<Pull>,
 }
 
 /// Serve the host on `input` and `output` until `input` ends.
@@ -160,15 +275,25 @@ where
         session: None,
         local_peer: None,
         rejoin_refused: BTreeMap::new(),
+        pending: BTreeMap::new(),
         last_open_error: None,
         attempt: 0,
         reconnect_at: Instant::now(),
         opened_at: Instant::now(),
         health: None,
+        pull: None,
     };
     let mut lines = input.lines();
     loop {
         let connected = bridge.session.is_some();
+        // The pause lifted with joins or leaves of unknown outcome: they
+        // are re-issued before anything is drained again.
+        if connected && !bridge.paused() && !bridge.pending.is_empty() {
+            if bridge.resolve_pending(&mut output).await? {
+                bridge.lost();
+            }
+            continue;
+        }
         tokio::select! {
             line = lines.next_line() => {
                 let Some(line) = line? else { return Ok(()) };
@@ -176,7 +301,10 @@ where
                     write_line(&mut output, &answer).await?;
                 }
             }
-            woke = ready(bridge.session.as_ref()), if connected => {
+            // Paused (pull mode, the queue full): the session is not
+            // drained until `receive` makes room; the daemon's own rules
+            // decide what it cannot take.
+            woke = ready(bridge.session.as_ref()), if connected && !bridge.paused() => {
                 if woke.is_ok() {
                     bridge.pump(&mut output).await?;
                 } else {
@@ -212,6 +340,25 @@ struct Emit<'a, W> {
     env: &'a mut Env,
     health: &'a mut Option<(Health, Option<ConnectivitySummary>)>,
     out: &'a mut W,
+    /// In pull mode, where each message goes instead of a push line.
+    pull: Option<&'a mut Pull>,
+}
+
+impl<W> Emit<'_, W> {
+    /// How many events to take from the session now: a batch, or in pull
+    /// mode no more than the queue has room for, so nothing taken is ever
+    /// refused by it. Zero is the paused state.
+    fn room(&self) -> usize {
+        self.pull
+            .as_deref()
+            .map_or(EVENT_BATCH, |pull| pull.room().min(EVENT_BATCH))
+    }
+
+    /// Whether the pull queue is full: the drain paused, and any call in
+    /// flight to be cancelled rather than wait behind it.
+    fn paused(&self) -> bool {
+        self.pull.as_deref().is_some_and(Pull::is_full)
+    }
 }
 
 impl<W: AsyncWrite + Unpin> Emit<'_, W> {
@@ -225,6 +372,22 @@ impl<W: AsyncWrite + Unpin> Emit<'_, W> {
                 } = notice
                 {
                     *self.health = Some((*health, connectivity.clone()));
+                }
+                continue;
+            }
+            // Pull mode: queued as taken, never pushed -- one mode per
+            // process; the token is minted when the host takes it.
+            if let Some(pull) = self.pull.as_deref_mut() {
+                let pulled = Pulled {
+                    event: event.clone(),
+                    lease: self.state.lease_held(),
+                };
+                // Never refused: no more is taken than the queue has room
+                // for (`Emit::room`).
+                if !pull.push(pulled, (self.env.now_ms)()) {
+                    eprintln!(
+                        "claude-channel: the pull queue refused an event taken past its room"
+                    );
                 }
                 continue;
             }
@@ -247,11 +410,17 @@ impl<W: AsyncWrite + Unpin> Emit<'_, W> {
 /// `call` on `session`, its events taken and written meanwhile. Once the
 /// session reports its end the draining stops and the call is left to
 /// answer with it.
+///
+/// `None` when the pull queue filled while the call was in flight: the
+/// call is dropped, which sends LOCAL-IPC's cancel for it, since its
+/// answer would otherwise wait behind events the bridge is no longer
+/// taking (architect-cto's ruling, relay seq 18835). What the daemon did
+/// with it before the cancel is not known here.
 async fn drive<S, T, W>(
     session: &S,
     call: impl std::future::Future<Output = T>,
     emit: &mut Emit<'_, W>,
-) -> std::io::Result<T>
+) -> std::io::Result<Option<T>>
 where
     S: DataSessionPort,
     W: AsyncWrite + Unpin,
@@ -261,11 +430,16 @@ where
     loop {
         tokio::select! {
             biased;
-            answer = &mut call => return Ok(answer),
+            answer = &mut call => return Ok(Some(answer)),
             woke = session.ready(), if draining => {
                 match woke {
-                    Ok(()) => match session.events(EVENT_BATCH).await {
-                        Ok(events) => emit.events(events).await?,
+                    Ok(()) => match session.events(emit.room()).await {
+                        Ok(events) => {
+                            emit.events(events).await?;
+                            if emit.paused() {
+                                return Ok(None);
+                            }
+                        }
                         Err(_) => draining = false,
                     },
                     Err(_) => draining = false,
@@ -320,9 +494,28 @@ impl<B: DataSessionBinding> Bridge<B> {
             }
         };
         self.local_peer = Some(session.session().local_peer().clone());
+        if self.config.delivery == Delivery::Pull && self.pull.is_none() {
+            self.pull = Some(Pull {
+                queue: PullQueue::new(session.session().event_queue()),
+                paused_since: None,
+            });
+        }
         if let Some(lease) = session.session().endpoint_lease() {
             self.state
                 .leased(lease.endpoint.clone(), lease.epoch.clone());
+        }
+        // A new session holds no joins: what was pending is the intent.
+        for (channel, op) in std::mem::take(&mut self.pending) {
+            match op {
+                PendingOp::Join => self.state.joined(channel),
+                // A leave settles the channel as one taken at once does:
+                // its refused-re-join row goes with it
+                // (`a_pending_leave_folded_at_open_clears_the_refusal`).
+                PendingOp::Leave => {
+                    self.state.left(&channel);
+                    self.rejoin_refused.remove(&channel);
+                }
+            }
         }
         let joined: Vec<ChannelId> = self.state.joined_channels().cloned().collect();
         let Self {
@@ -330,6 +523,8 @@ impl<B: DataSessionBinding> Bridge<B> {
             env,
             health,
             rejoin_refused,
+            pending,
+            pull,
             ..
         } = self;
         let mut emit = Emit {
@@ -337,19 +532,36 @@ impl<B: DataSessionBinding> Bridge<B> {
             env,
             health,
             out,
+            pull: pull.as_mut(),
         };
         let mut died = false;
         for channel in joined {
-            if let Err(e) = drive(&session, session.join(channel.clone()), &mut emit).await? {
+            // The queue may be full here (an earlier re-join cancelled,
+            // then the session ended): `drive` then takes nothing and
+            // cancels at once.
+            match drive(&session, session.join(channel.clone()), &mut emit).await? {
+                // Taken: a refusal from an earlier re-join no longer
+                // stands (`a_rejoin_after_a_resolution_the_session_ended_clears_the_refusal`).
+                Some(Ok(())) => {
+                    rejoin_refused.remove(&channel);
+                }
                 // A session that ended refused nothing, whatever code its
                 // end came with: the joins are kept for the next open
                 // (`a_daemon_stopping_during_the_rejoin_keeps_the_join`).
-                if ended(&session).await {
+                Some(Err(_)) if ended(&session).await => {
                     died = true;
                     break;
                 }
-                emit.state.left(&channel);
-                rejoin_refused.insert(channel, e);
+                Some(Err(e)) => {
+                    emit.state.left(&channel);
+                    rejoin_refused.insert(channel, e);
+                }
+                // Cancelled as the queue filled: not joined until the
+                // re-issue says so.
+                None => {
+                    emit.state.left(&channel);
+                    pending.insert(channel, PendingOp::Join);
+                }
             }
         }
         if died {
@@ -384,18 +596,30 @@ impl<B: DataSessionBinding> Bridge<B> {
         let Some(session) = self.session.as_ref() else {
             return Ok(());
         };
-        let Ok(events) = session.events(EVENT_BATCH).await else {
+        let room = self
+            .pull
+            .as_ref()
+            .map_or(EVENT_BATCH, |pull| pull.room().min(EVENT_BATCH));
+        if room == 0 {
+            return Ok(());
+        }
+        let Ok(events) = session.events(room).await else {
             self.lost();
             return Ok(());
         };
         let Self {
-            state, env, health, ..
+            state,
+            env,
+            health,
+            pull,
+            ..
         } = self;
         Emit {
             state,
             env,
             health,
             out,
+            pull: pull.as_mut(),
         }
         .events(events)
         .await
@@ -408,10 +632,12 @@ impl<B: DataSessionBinding> Bridge<B> {
         out: &mut W,
     ) -> std::io::Result<Option<String>> {
         Ok(match parse_line(line) {
-            Incoming::Request { id, method, params } => match protocol_answer(&id, &method) {
-                Some(answer) => Some(answer),
-                None => Some(self.tool_call(&id, params, out).await?),
-            },
+            Incoming::Request { id, method, params } => {
+                match protocol_answer(&id, &method, self.config.delivery) {
+                    Some(answer) => Some(answer),
+                    None => Some(self.tool_call(&id, params, out).await?),
+                }
+            }
             Incoming::Notification { .. } | Incoming::Malformed => None,
         })
     }
@@ -426,7 +652,7 @@ impl<B: DataSessionBinding> Bridge<B> {
         let Some(tool) = params
             .get("name")
             .and_then(Value::as_str)
-            .and_then(ToolName::parse)
+            .and_then(|name| self.config.delivery.tool(name))
         else {
             // The method exists; the tool named does not: invalid params,
             // as MCP's tools/call answers an unknown tool.
@@ -436,11 +662,27 @@ impl<B: DataSessionBinding> Bridge<B> {
             Ok(call) => call,
             Err(e) => return Ok(error_line(id, INVALID_PARAMS, &e.to_string())),
         };
+        // Paused, a tool that needs the session would wait behind events
+        // the bridge is not taking: refused at once instead.
+        if self.paused()
+            && matches!(
+                call,
+                ToolCall::Send { .. }
+                    | ToolCall::Reply { .. }
+                    | ToolCall::Broadcast { .. }
+                    | ToolCall::Join(_)
+                    | ToolCall::Leave(_)
+            )
+        {
+            return Ok(tool_result_line(id, PULL_QUEUE_FULL, true));
+        }
         Ok(match self.run(call, out).await? {
-            Ok(text) => tool_result_line(id, &text, false),
+            Some(Ok(text)) => tool_result_line(id, &text, false),
             // A session that ended is noticed where it ends: `ready`
             // resolves once it has, and the loop reconnects from there.
-            Err(e) => tool_result_line(id, &error_text(e), true),
+            Some(Err(e)) => tool_result_line(id, &error_text(e), true),
+            // Cancelled in flight as the queue filled (`drive`).
+            None => tool_result_line(id, PULL_QUEUE_FULL_CANCELLED, true),
         })
     }
 
@@ -457,14 +699,17 @@ impl<B: DataSessionBinding> Bridge<B> {
         &mut self,
         call: ToolCall,
         out: &mut W,
-    ) -> std::io::Result<Result<String, TransportError>> {
+    ) -> std::io::Result<Option<Result<String, TransportError>>> {
         let absent = self.absent();
         let now = (self.env.now_ms)();
         let message_id = MessageId::from_bytes((self.env.entropy)());
         // The route a reply resolves to, decided before any call.
         let call = match call {
-            ToolCall::Identity => return Ok(Ok(self.identity())),
-            ToolCall::Status => return Ok(Ok(self.status())),
+            ToolCall::Identity => return Ok(Some(Ok(self.identity()))),
+            ToolCall::Status => return Ok(Some(Ok(self.status()))),
+            // From the queue, with or without a session: what was taken
+            // before the daemon went away is still the host's.
+            ToolCall::Receive { max } => return Ok(Some(Ok(self.receive(max)))),
             ToolCall::Reply {
                 reply_token,
                 payload,
@@ -481,7 +726,7 @@ impl<B: DataSessionBinding> Bridge<B> {
                     payload,
                 },
                 Ok(ReplyRoute::Broadcast { channel }) => ToolCall::Broadcast { channel, payload },
-                Err(e) => return Ok(Err(e)),
+                Err(e) => return Ok(Some(Err(e))),
             },
             other => other,
         };
@@ -491,33 +736,49 @@ impl<B: DataSessionBinding> Bridge<B> {
             env,
             health,
             rejoin_refused,
+            pending,
+            pull,
             ..
         } = self;
         let Some(session) = session.as_ref() else {
             if let ToolCall::Leave(channel) = &call {
                 state.left(channel);
                 rejoin_refused.remove(channel);
-                return Ok(Ok(format!("left {}", channel.as_str())));
+                pending.remove(channel);
+                return Ok(Some(Ok(format!("left {}", channel.as_str()))));
             }
-            return Ok(Err(absent));
+            return Ok(Some(Err(absent)));
         };
         let mut emit = Emit {
             state,
             env,
             health,
             out,
+            pull: pull.as_mut(),
         };
-        Ok(match call {
+        Ok(Some(match call {
             ToolCall::Join(channel) => {
-                let joined = drive(session, session.join(channel.clone()), &mut emit).await?;
+                let Some(joined) = drive(session, session.join(channel.clone()), &mut emit).await?
+                else {
+                    pending.insert(channel, PendingOp::Join);
+                    return Ok(None);
+                };
                 rejoin_refused.remove(&channel);
+                pending.remove(&channel);
                 joined.map(|()| {
                     emit.state.joined(channel.clone());
                     format!("joined {}", channel.as_str())
                 })
             }
             ToolCall::Leave(channel) => {
-                let left = drive(session, session.leave(channel.clone()), &mut emit).await?;
+                // Cancelled: the join is kept until the re-issued leave
+                // answers.
+                let Some(left) = drive(session, session.leave(channel.clone()), &mut emit).await?
+                else {
+                    pending.insert(channel, PendingOp::Leave);
+                    return Ok(None);
+                };
+                pending.remove(&channel);
                 // A live daemon that refused the leave still holds the join,
                 // so the bridge keeps it. Taken, or the session ended and
                 // took the join with it: left, as the no-session branch
@@ -541,24 +802,159 @@ impl<B: DataSessionBinding> Bridge<B> {
                     sent_at_ms: now,
                     payload,
                 };
-                drive(session, session.broadcast(channel, message), &mut emit)
-                    .await?
-                    .map(|()| BROADCAST_ACCEPTED.to_owned())
+                let Some(sent) =
+                    drive(session, session.broadcast(channel, message), &mut emit).await?
+                else {
+                    return Ok(None);
+                };
+                sent.map(|()| BROADCAST_ACCEPTED.to_owned())
             }
             ToolCall::Send {
                 destination,
                 payload,
-            } => drive(
-                session,
-                session.send_direct(destination, message_id, payload),
-                &mut emit,
-            )
-            .await?
-            .map(|accepted| direct_accepted(&accepted)),
-            ToolCall::Identity | ToolCall::Status | ToolCall::Reply { .. } => {
+            } => {
+                let Some(sent) = drive(
+                    session,
+                    session.send_direct(destination, message_id, payload),
+                    &mut emit,
+                )
+                .await?
+                else {
+                    return Ok(None);
+                };
+                sent.map(|accepted| direct_accepted(&accepted))
+            }
+            ToolCall::Identity
+            | ToolCall::Status
+            | ToolCall::Reply { .. }
+            | ToolCall::Receive { .. } => {
                 unreachable!("answered above")
             }
-        })
+        }))
+    }
+
+    /// Re-issue each pending join and leave, in channel order, until one
+    /// is cancelled again (the queue refilled: it stays pending, with the
+    /// rest) or the session ends (the next open takes them up). True when
+    /// the session ended, so the caller treats it as lost rather than
+    /// asking again.
+    async fn resolve_pending<W: AsyncWrite + Unpin>(
+        &mut self,
+        out: &mut W,
+    ) -> std::io::Result<bool> {
+        let Self {
+            session,
+            state,
+            env,
+            health,
+            rejoin_refused,
+            pending,
+            pull,
+            ..
+        } = self;
+        let Some(session) = session.as_ref() else {
+            return Ok(false);
+        };
+        let mut emit = Emit {
+            state,
+            env,
+            health,
+            out,
+            pull: pull.as_mut(),
+        };
+        let ops: Vec<(ChannelId, PendingOp)> =
+            pending.iter().map(|(c, op)| (c.clone(), *op)).collect();
+        for (channel, op) in ops {
+            let answer = match op {
+                PendingOp::Join => drive(session, session.join(channel.clone()), &mut emit).await?,
+                PendingOp::Leave => {
+                    drive(session, session.leave(channel.clone()), &mut emit).await?
+                }
+            };
+            let Some(answer) = answer else {
+                return Ok(false);
+            };
+            if answer.is_err() && ended(session).await {
+                return Ok(true);
+            }
+            pending.remove(&channel);
+            match (op, answer) {
+                (PendingOp::Join, Ok(())) => {
+                    emit.state.joined(channel.clone());
+                    rejoin_refused.remove(&channel);
+                }
+                // The daemon refused the join: a status row, as a refused
+                // re-join is.
+                (PendingOp::Join, Err(e)) => {
+                    emit.state.left(&channel);
+                    rejoin_refused.insert(channel, e);
+                }
+                (PendingOp::Leave, Ok(())) => {
+                    emit.state.left(&channel);
+                    rejoin_refused.remove(&channel);
+                }
+                // A live daemon that refused the leave holds the join.
+                (PendingOp::Leave, Err(_)) => {}
+            }
+        }
+        Ok(false)
+    }
+
+    /// Whether pull mode's queue is full, so the session's draining is
+    /// paused.
+    fn paused(&self) -> bool {
+        self.pull.as_ref().is_some_and(Pull::is_full)
+    }
+
+    /// `receive(max)`: at most `max` messages from the queue -- `max`
+    /// defaulting to and clamped at its bound, never refused -- each
+    /// minted now under the lease it arrived under. None queued yet (no
+    /// session has opened) is an empty answer.
+    fn receive(&mut self, max: Option<u64>) -> String {
+        let take = match self.pull.as_mut() {
+            Some(pull) => {
+                let bound = pull.queue.bound();
+                let max = max.map_or(bound, |m| usize::try_from(m).unwrap_or(usize::MAX));
+                pull.take(max)
+            }
+            None => interweave_claude_channel_core::Take {
+                items: Vec::new(),
+                remaining: 0,
+            },
+        };
+        let mut taken: Vec<(&'static str, ChannelNotification)> = Vec::new();
+        for pulled in take.items {
+            let kind = match pulled.event {
+                SessionEvent::Broadcast(_) => "broadcast",
+                _ => "direct",
+            };
+            let entropy = (self.env.entropy)();
+            match self.state.notification_under(
+                &pulled.event,
+                pulled.lease.as_ref(),
+                entropy,
+                (self.env.now_ms)(),
+            ) {
+                Ok(Some(notification)) => taken.push((kind, notification)),
+                Ok(None) => {}
+                // Bridge-local, as on the push path: dropped and said,
+                // never forwarded in part (CHANNEL-EVENT.md §Content).
+                Err(e) => eprintln!("claude-channel: an inbound message was dropped: {e}"),
+            }
+        }
+        let received = Received {
+            events: taken
+                .iter()
+                .map(|(kind, notification)| ReceivedEvent {
+                    kind,
+                    content: &notification.content,
+                    meta: &notification.meta,
+                })
+                .collect(),
+            remaining: take.remaining,
+            paused: self.paused(),
+        };
+        serde_json::to_string(&received).unwrap_or_default()
     }
 
     fn identity(&self) -> String {
@@ -603,7 +999,7 @@ impl<B: DataSessionBinding> Bridge<B> {
             ),
             None => (Value::Null, Value::Null),
         };
-        json!({
+        let mut status = json!({
             "local_peer_id": self.local_peer.as_ref().map(TransportIdentity::as_str),
             "local_endpoint": self.config.endpoint.as_str(),
             "endpoint_lease_state": lease_state,
@@ -615,8 +1011,22 @@ impl<B: DataSessionBinding> Bridge<B> {
             "connectivity": connectivity,
             "last_connect_error": self.last_open_error.map(|e| format!("{e:?}")),
             "reply_tokens": self.state.live_tokens(now),
-        })
-        .to_string()
+        });
+        // Pull mode: what waits for `receive`, whether the drain is
+        // paused for it, and since when.
+        if self.config.delivery == Delivery::Pull {
+            status["pull_queue"] = json!({
+                "depth": self.pull.as_ref().map_or(0, |pull| pull.queue.depth()),
+                "paused": self.paused(),
+                "paused_since": self.pull.as_ref().and_then(|pull| pull.paused_since),
+                "pending": self
+                    .pending
+                    .iter()
+                    .map(|(channel, op)| json!({"channel": channel.as_str(), "op": op.as_str()}))
+                    .collect::<Vec<_>>(),
+            });
+        }
+        status.to_string()
     }
 }
 

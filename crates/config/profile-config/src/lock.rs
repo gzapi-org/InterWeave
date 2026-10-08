@@ -24,7 +24,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::persist::effective_uid;
-use crate::{PersistError, ProfilePaths, create_private_dir, require_owned_private_dir};
+use crate::{
+    PersistError, ProfilePaths, create_private_dir, require_owned_private_dir,
+    resolve_owned_private_dir,
+};
 
 /// The lock file's name inside the profile's state directory.
 pub const LOCK_FILE: &str = "profile.lock";
@@ -236,14 +239,14 @@ const O_NOFOLLOW: Option<i32> = None;
 ///    and owned by this process (`tests/lock.rs`: a planted symlink, a
 ///    dangling one, a hard link, a wide mode).
 ///
-/// NOT CLOSED: swapping the OUTERMOST directory -- the state directory --
-/// between (1) and (3) needs write access to its parent, and without
-/// `openat` the path is resolved twice. That parent is
-/// `<XDG state root>/interweave/profiles`, shared by every profile and
-/// judged by nothing here (created owner-only when this crate makes it),
-/// and a directory whose parent another account can write is the
-/// operator's to avoid. Every directory inside it is
-/// judged here, so a swap there needs a directory (1) refused.
+/// The swap this once left open -- the OUTERMOST directory, the state
+/// directory, replaced between (1) and (3) by an account that can write
+/// its parent -- is closed by (1) itself since ADR-0028 A 2026-10-08:
+/// each directory's ancestors and the links on its path are judged with
+/// it, root's or this uid's and writable by no one else, and the open
+/// goes through the directory as that judgement resolved it, so no
+/// account but root and this one can change what the path names
+/// between the check and the open.
 fn open_lock_file(dirs: &[&Path], path: &Path, create: bool) -> Result<File, PersistError> {
     #[cfg(unix)]
     {
@@ -271,6 +274,10 @@ fn open_lock_file(dirs: &[&Path], path: &Path, create: bool) -> Result<File, Per
         for dir in dirs {
             require_owned_private_dir(dir)?;
         }
+        // Opened under its directory as resolved, not the configured text.
+        let resolved = resolve_owned_private_dir(crate::persist::parent_dir(path))?
+            .join(crate::persist::file_name(path)?);
+        let path = resolved.as_path();
         let not_private = || PersistError::FileNotPrivate {
             path: path.to_path_buf(),
         };

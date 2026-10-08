@@ -1519,6 +1519,8 @@ async fn a_trust_call_opens_a_connection_holding_admin_trust_alone() {
 /// after it, with a chosen error -- the failures a fake never produces.
 struct Faulty {
     inner: <FakeNode as AdminBinding>::Admin,
+    /// Every read fails with it, as a pre-2.3 daemon's does over IPC.
+    read: Option<TransportError>,
     set: Option<TransportError>,
     read_back: Option<TransportError>,
     set_called: std::sync::atomic::AtomicBool,
@@ -1553,6 +1555,9 @@ impl AdminPort for Faulty {
         self.inner.set_default_endpoint(endpoint).await
     }
     async fn trust(&self) -> Result<interweave_local_client_api::TrustAdminView, TransportError> {
+        if let Some(error) = self.read {
+            return Err(error);
+        }
         if self.set_called.load(std::sync::atomic::Ordering::SeqCst)
             && let Some(error) = self.read_back
         {
@@ -1581,6 +1586,7 @@ impl AdminPort for Faulty {
 #[derive(Clone)]
 struct FaultyBinding {
     node: FakeNode,
+    read: Option<TransportError>,
     set: Option<TransportError>,
     read_back: Option<TransportError>,
 }
@@ -1596,6 +1602,7 @@ impl AdminBinding for FaultyBinding {
         async move {
             Ok(Faulty {
                 inner: this.node.admin(capabilities).await?,
+                read: this.read,
                 set: this.set,
                 read_back: this.read_back,
                 set_called: std::sync::atomic::AtomicBool::new(false),
@@ -1633,6 +1640,7 @@ async fn a_trust_failure_says_whether_the_change_was_made() {
         let (a, _b) = FakeNetwork::pair(node_config(), node_config());
         let binding = FaultyBinding {
             node: a.clone(),
+            read: None,
             set,
             read_back,
         };
@@ -1661,4 +1669,42 @@ async fn a_trust_failure_says_whether_the_change_was_made() {
         let held = settings.trust().await.expect("the allowlist");
         assert_eq!(held.allows(&stranger), made, "{expected:?}");
     }
+}
+
+/// A daemon that does not speak trust's version -- `ipc-client` refuses a
+/// trust read `ProtocolUnsupported` below IPC 2.3 -- reads as
+/// `Incompatible`, the cause the person can act on, never the generic
+/// failure; a change made there is reported made but not read back, under
+/// the same cause.
+#[tokio::test]
+async fn a_daemon_without_trusts_version_reads_as_incompatible() {
+    let (a, _b) = FakeNetwork::pair(node_config(), node_config());
+    let binding = FaultyBinding {
+        node: a.clone(),
+        read: Some(TransportError::ProtocolUnsupported),
+        set: None,
+        read_back: None,
+    };
+    let client = TransportClient::new(
+        a.clone(),
+        binding,
+        memory(),
+        ClientConfig {
+            client_kind: "human-client".to_owned(),
+            endpoint: Some(human()),
+            channels: Vec::new(),
+            max_payload_bytes: LIMIT,
+        },
+        wall(),
+        0,
+    )
+    .expect("an empty store");
+    assert_eq!(client.trust().await, Err(TrustProblem::Incompatible));
+    let stranger = ProfileIdentity::generate()
+        .transport_identity()
+        .expect("a peer");
+    assert_eq!(
+        client.set_trust(stranger, true).await,
+        Err(TrustSetFailure::MadeNotReadBack(TrustProblem::Incompatible))
+    );
 }

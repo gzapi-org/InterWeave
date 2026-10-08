@@ -181,6 +181,33 @@ fn an_absent_overlay_is_empty_and_is_not_created() {
     assert!(!path.exists());
 }
 
+/// The overlay is read under its directory as judged (ADR-0028 A
+/// 2026-10-08): a state directory under a group-writable ancestor stops
+/// the load, though the overlay itself is owner-only. The same file under
+/// the ancestor at 0755 loading is the control.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_overlay_under_a_writable_ancestor_is_refused() {
+    let root = tempfile::tempdir().expect("a temporary directory");
+    chmod(root.path(), 0o700);
+    let above = root.path().join("above");
+    let state = above.join("state");
+    std::fs::create_dir_all(&state).expect("mkdir");
+    chmod(&above, 0o755);
+    chmod(&state, 0o700);
+    let path = state.join(TRUST_OVERLAY_FILE);
+    let configured = set([nth(1)]);
+    put(&path, &lists(&[&nth(2)], &[]));
+    TrustOverlay::load(&path, &configured).expect("the control");
+    chmod(&above, 0o775);
+    match TrustOverlay::load(&path, &configured) {
+        Err(OverlayError::NotPrivate { detail }) => {
+            assert!(detail.contains("not sticky"), "{detail}");
+        }
+        other => panic!("refused: {other:?}"),
+    }
+}
+
 /// A normalised overlay is not rewritten: the file loaded is the file
 /// left, byte for byte.
 #[test]

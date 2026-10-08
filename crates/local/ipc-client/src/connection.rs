@@ -50,6 +50,10 @@ struct Shared {
     pending: Mutex<HashMap<String, oneshot::Sender<ResponseFrame>>>,
     /// Why the connection ended, once it has.
     ended: Mutex<Option<TransportError>>,
+    /// The recorded end is the writer's own failure, which a server's
+    /// `close` read afterwards replaces with the code it named (#224
+    /// review B F1). Read and written under `ended`'s lock.
+    provisional: AtomicBool,
     /// Set by `close` before it asks the server to end.
     closing: AtomicBool,
     /// The end was not the answer to `close`: anything but a clean end of
@@ -96,14 +100,24 @@ impl Shared {
     }
 
     /// The connection is over: every waiting call is dropped, and reads
-    /// the code.
-    fn end(&self, code: TransportError, clean: bool) {
+    /// the code. The first end recorded stands, except that a writer's
+    /// failure is provisional: the server's own `close` frame, read after
+    /// it, replaces its code, so a caller is told why the SERVER ended the
+    /// connection rather than that a write failed against the socket it
+    /// was closing (`a_failed_write_keeps_the_servers_close_code`).
+    fn end(&self, code: TransportError, clean: bool, by: EndedBy) {
         let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
         let mut ended = self.ended.lock().unwrap_or_else(PoisonError::into_inner);
-        if ended.is_none() && !(clean && self.closing.load(Ordering::SeqCst)) {
-            self.uninvited.store(true, Ordering::SeqCst);
+        if ended.is_none() {
+            if !(clean && self.closing.load(Ordering::SeqCst)) {
+                self.uninvited.store(true, Ordering::SeqCst);
+            }
+            *ended = Some(code);
+            self.provisional
+                .store(by == EndedBy::Writer, Ordering::SeqCst);
+        } else if by == EndedBy::ServerClose && self.provisional.swap(false, Ordering::SeqCst) {
+            *ended = Some(code);
         }
-        ended.get_or_insert(code);
         pending.clear();
     }
 }
@@ -236,7 +250,14 @@ pub(crate) async fn open(
     // reading -- the server closed it, or broke the protocol -- is shut on
     // this side too, so the server sees it end and releases the session.
     let (ended, ended_rx) = watch::channel(false);
-    let writer = tokio::spawn(write_loop(write, out_rx, pong_rx, ended_rx));
+    let inbox = events_tx.as_ref().map(|(_, inbox)| Arc::clone(inbox));
+    let writer = tokio::spawn(write_loop(
+        write,
+        out_rx,
+        pong_rx,
+        ended_rx,
+        (Arc::clone(&shared), inbox),
+    ));
     let reader = tokio::spawn(read_loop(
         reader,
         response.ipc_version,
@@ -377,11 +398,40 @@ impl Drop for CancelOnDrop {
     }
 }
 
+/// Which half saw the end, and how: what decides whether a later end may
+/// replace the recorded code ([`Shared::end`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EndedBy {
+    /// The writer failed on its own.
+    Writer,
+    /// The reader read the server's `close` frame.
+    ServerClose,
+    /// The reader saw any other end.
+    Reader,
+}
+
+/// The connection is over, for either half: the end recorded, every
+/// waiting call answered with it, and a session waiting in `ready` woken
+/// to read it from `events`.
+fn finish(shared: &Shared, inbox: Option<&Inbox>, code: TransportError, clean: bool, by: EndedBy) {
+    shared.end(code, clean, by);
+    if let Some(inbox) = inbox {
+        inbox.wake_all();
+    }
+}
+
+/// The writer. One that stops for its own reason -- a failed write, a
+/// frame past the ceiling -- ends the connection BEFORE it drops its
+/// queue, so a call that fails on the dropped queue finds the end already
+/// recorded and `events` already refusing: the reader may never see the
+/// end, a server that stopped reading and kept writing being one way
+/// (`a_failed_write_ends_the_session_before_the_reader_sees_it`).
 async fn write_loop(
     mut write: OwnedWriteHalf,
     mut out: mpsc::Receiver<Outgoing>,
     mut pong: watch::Receiver<Option<Frame>>,
     mut ended: watch::Receiver<bool>,
+    (shared, inbox): (Arc<Shared>, Option<Arc<Inbox>>),
 ) {
     loop {
         // An echo goes ahead of whatever requests are queued: the server
@@ -402,9 +452,23 @@ async fn write_loop(
             break;
         };
         let Ok(bytes) = frame.encode() else {
+            finish(
+                &shared,
+                inbox.as_deref(),
+                TransportError::PayloadTooLarge,
+                false,
+                EndedBy::Writer,
+            );
             break;
         };
         if write.write_all(&bytes).await.is_err() {
+            finish(
+                &shared,
+                inbox.as_deref(),
+                TransportError::BackendUnavailable,
+                false,
+                EndedBy::Writer,
+            );
             break;
         }
     }
@@ -419,7 +483,7 @@ async fn read_loop(
     events: Option<(mpsc::Sender<SessionEvent>, Arc<Inbox>)>,
     ended: watch::Sender<bool>,
 ) {
-    let (code, clean) = loop {
+    let (code, clean, by) = loop {
         match reader.next().await {
             Ok(Some(Frame::Response(response))) => {
                 // An id no call waits for was cancelled: discarded.
@@ -432,13 +496,13 @@ async fn read_loop(
                 // is sent none: one it could never drain would wedge the
                 // reader once the buffer filled.
                 let Some((events, inbox)) = &events else {
-                    break (TransportError::ProtocolViolation, false);
+                    break (TransportError::ProtocolViolation, false, EndedBy::Reader);
                 };
                 // A type above the selected minor is the server's
                 // violation, as an unknown one is.
                 let event = match frame.event(version) {
                     Ok(event) => event.into_session(),
-                    Err(code) => break (code, false),
+                    Err(code) => break (code, false, EndedBy::Reader),
                 };
                 // THE BOUND: a full buffer holds the reader here, with this
                 // one event in hand, so the socket is not read until the
@@ -463,19 +527,21 @@ async fn read_loop(
                     }));
                 }
             }
-            Ok(Some(Frame::Close(close))) => break (close.code, false),
-            Ok(Some(_)) => break (TransportError::ProtocolViolation, false),
+            Ok(Some(Frame::Close(close))) => break (close.code, false, EndedBy::ServerClose),
+            Ok(Some(_)) => break (TransportError::ProtocolViolation, false, EndedBy::Reader),
             // A clean end of stream: the answer to a Finish, if one was sent.
-            Ok(None) => break (TransportError::BackendUnavailable, true),
-            Err(code) => break (code, false),
+            Ok(None) => break (TransportError::BackendUnavailable, true, EndedBy::Reader),
+            Err(code) => break (code, false, EndedBy::Reader),
         }
     };
-    shared.end(code, clean);
+    finish(
+        &shared,
+        events.as_ref().map(|(_, inbox)| &**inbox),
+        code,
+        clean,
+        by,
+    );
     let _ = ended.send(true);
-    // A session waiting in `ready` reads the end from `events`.
-    if let Some((_, inbox)) = &events {
-        inbox.wake_all();
-    }
 }
 
 /// Frames off the read half.

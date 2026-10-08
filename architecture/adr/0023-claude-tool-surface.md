@@ -16,13 +16,14 @@ Expose conceptual tools:
 - `join(channel)`;
 - `leave(channel)`;
 - `identity()`;
-- `status()`.
+- `status()`;
+- `receive(max?)` — in PULL delivery mode only (ADR-0002 A 2026-10-07): takes the direct messages and broadcasts the bridge holds for the session, never waits, one structured result `{events, remaining, paused}`; absent in push mode, where the Channel notification delivers (A 2026-10-07).
 
 The bridge itself owns one configured EndpointId lease over IPC v2. `send.endpoint` selects the **remote** endpoint; source endpoint always comes from the bridge lease. Omitting remote endpoint asks the remote profile to use its configured default endpoint.
 
 `reply` uses route metadata captured from the inbound event, including direct remote source endpoint and this bridge's local lease epoch.
 
-`status` includes local profile PeerId, this bridge's EndpointId/lease health, bridge-owned joined channels, profile desired channels, and high-level transport health.
+`status` includes local profile PeerId, this bridge's EndpointId/lease health, bridge-owned joined channels, profile desired channels, high-level transport health, and in pull mode the pull queue's depth, whether the drain is paused and since when (A 2026-10-07); while the drain is paused, `send`, `reply`, `broadcast`, `join` and `leave` refuse at once with a bridge-local error naming the state, never a stall (A 2026-10-07).
 
 Do not expose trust approval/revocation, endpoint creation/rebinding, identity rotation/recovery, daemon shutdown, forced discovery/Kademlia queries, private keys, or raw Swarm/multiaddr internals as Channel tools. **`peer_endpoints` is deliberately not a Claude-facing v2 tool and `claude-channel` is not granted `endpoints.query` by default.**
 
@@ -32,7 +33,7 @@ Expose every daemon operation; hide endpoint destination inside payload conventi
 
 ## Consequences
 
-Claude can address a human or another local service under one PeerId without learning libp2p internals. The seven-tool surface remains compact; endpoint is an optional parameter rather than a new tool.
+Claude can address a human or another local service under one PeerId without learning libp2p internals. The surface remains compact — seven tools in push mode, eight in pull mode, where the one addition is the delivery itself (A 2026-10-07); endpoint is an optional parameter rather than a new tool.
 
 ## Security implications
 
@@ -49,3 +50,12 @@ Bridge handshake includes configured endpoint claim. Tool schemas add optional r
 ## Revisit conditions
 
 Revisit `peer_endpoints` only if a concrete user workflow requires Claude to enumerate remote endpoint directories **and** a separate tool-surface/security review approves granting `endpoints.query`; also revisit if richer application-specific service discovery is intentionally added above transport.
+
+## Amendments
+
+Full notes: [`history/0023-amendments.md`](./history/0023-amendments.md).
+
+| Date | Amendment | Effect |
+|---|---|---|
+| 2026-10-07 | `receive` is the eighth tool, in pull delivery mode only | Decision: `receive(max?)` takes the direct messages and broadcasts the bridge holds for the session, never waits, one structured result `{events, remaining, paused}`, absent in push mode; `status` reports the pull queue's depth and whether the drain is paused and since when; while paused the five session-bound tools refuse at once with a bridge-local error; the surface is seven tools in push mode and eight in pull mode (ADR-0002 A 2026-10-07, `CHANNEL-EVENT.md` §Delivery, `TOOL-SURFACE.md`). |
+

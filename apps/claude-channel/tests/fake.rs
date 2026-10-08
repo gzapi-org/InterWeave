@@ -10,7 +10,7 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -29,6 +29,9 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader, DuplexStream, Lines};
 
 const PATIENCE: Duration = Duration::from_secs(10);
+
+/// The bridge's clock in these tests, unless a test moves it.
+const NOW_MS: u64 = 1_791_227_222_497;
 
 fn endpoint(s: &str) -> EndpointId {
     EndpointId::parse(s).expect("endpoint")
@@ -76,6 +79,32 @@ struct Record {
     /// Every open succeeds and the session it gives has already ended:
     /// a daemon that accepts and closes at once.
     accept_and_close: AtomicBool,
+    /// Direct sends never answer, as a daemon whose answer waits behind
+    /// undrained events: each is recorded `send_direct cancelled` when the
+    /// bridge drops it, which is what sends the IPC binding's cancel.
+    hold_send: AtomicBool,
+    /// Joins never answer, recorded `join cancelled` the same way.
+    hold_join: AtomicBool,
+    /// Leaves never answer, recorded `leave cancelled`: the daemon still
+    /// holds the join.
+    hold_leave: AtomicBool,
+    /// Joins and leaves take effect at the daemon and then never answer:
+    /// a cancel that races a completed call.
+    land_then_hold: AtomicBool,
+    /// `ready` does not resolve, so events gather at the daemon until it
+    /// is lifted and the bridge sees them all at once.
+    hold_ready: AtomicBool,
+    /// How many times the bridge has asked `ready`.
+    readies: AtomicU64,
+}
+
+/// Records `<call> cancelled` when a held call is dropped unanswered.
+struct Cancelled(Arc<Record>, &'static str);
+
+impl Drop for Cancelled {
+    fn drop(&mut self) {
+        self.0.call(&format!("{} cancelled", self.1));
+    }
 }
 
 impl Record {
@@ -135,6 +164,16 @@ impl DataSessionPort for RecordedSession {
     async fn join(&self, channel: ChannelId) -> Result<(), TransportError> {
         self.record.call("join");
         self.record.down()?;
+        if self.record.hold_join.load(Ordering::SeqCst) {
+            let _cancelled = Cancelled(Arc::clone(&self.record), "join");
+            std::future::pending::<()>().await;
+        }
+        if self.record.land_then_hold.load(Ordering::SeqCst) {
+            self.inner.join(channel).await?;
+            let _cancelled = Cancelled(Arc::clone(&self.record), "join");
+            std::future::pending::<()>().await;
+            unreachable!("held");
+        }
         if self.record.refuse_join.load(Ordering::SeqCst) {
             return Err(TransportError::Overloaded);
         }
@@ -147,8 +186,18 @@ impl DataSessionPort for RecordedSession {
     async fn leave(&self, channel: ChannelId) -> Result<(), TransportError> {
         self.record.call("leave");
         self.record.down()?;
+        if self.record.hold_leave.load(Ordering::SeqCst) {
+            let _cancelled = Cancelled(Arc::clone(&self.record), "leave");
+            std::future::pending::<()>().await;
+        }
         if self.record.refuse_leave.load(Ordering::SeqCst) {
             return Err(TransportError::Overloaded);
+        }
+        if self.record.land_then_hold.load(Ordering::SeqCst) {
+            self.inner.leave(channel).await?;
+            let _cancelled = Cancelled(Arc::clone(&self.record), "leave");
+            std::future::pending::<()>().await;
+            unreachable!("held");
         }
         if self.record.die_on_leave.swap(false, Ordering::SeqCst) {
             self.record.down.store(true, Ordering::SeqCst);
@@ -173,6 +222,10 @@ impl DataSessionPort for RecordedSession {
     ) -> Result<EndpointId, TransportError> {
         self.record.call("send_direct");
         self.record.down()?;
+        if self.record.hold_send.load(Ordering::SeqCst) {
+            let _cancelled = Cancelled(Arc::clone(&self.record), "send_direct");
+            std::future::pending::<()>().await;
+        }
         self.inner
             .send_direct(destination, message_id, payload)
             .await
@@ -185,10 +238,15 @@ impl DataSessionPort for RecordedSession {
         self.inner.events(max).await
     }
     async fn ready(&self) -> Result<(), TransportError> {
+        self.record.readies.fetch_add(1, Ordering::SeqCst);
         // Polled: a daemon taken away is seen within a tick, as a real
         // connection's end would be.
         loop {
             self.record.down()?;
+            if self.record.hold_ready.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                continue;
+            }
             if self.record.accept_and_close.load(Ordering::SeqCst) {
                 return Err(TransportError::BackendUnavailable);
             }
@@ -222,10 +280,22 @@ struct World {
     host_in: DuplexStream,
     host_out: Lines<BufReader<DuplexStream>>,
     next_id: u64,
+    /// Pull mode: a push notification on the host's pipe fails the test.
+    pull: bool,
+    /// The bridge's clock, which a test may move.
+    clock: Arc<AtomicU64>,
 }
 
 impl World {
     async fn start() -> Self {
+        Self::start_in(interweave_claude_channel_core::Delivery::Push).await
+    }
+
+    async fn start_pull() -> Self {
+        Self::start_in(interweave_claude_channel_core::Delivery::Pull).await
+    }
+
+    async fn start_in(delivery: interweave_claude_channel_core::Delivery) -> Self {
         let (a, b) = FakeNetwork::pair(config(), config());
         let record = Arc::new(Record::default());
         let binding = Recorded {
@@ -235,8 +305,10 @@ impl World {
         let (host_in, bridge_in) = tokio::io::duplex(1 << 16);
         let (bridge_out, host_out) = tokio::io::duplex(1 << 16);
         let counter = Arc::new(AtomicU8::new(0));
+        let clock = Arc::new(AtomicU64::new(NOW_MS));
+        let read = Arc::clone(&clock);
         let env = Env {
-            now_ms: Box::new(|| 1_791_227_222_497),
+            now_ms: Box::new(move || read.load(Ordering::SeqCst)),
             entropy: Box::new(move || {
                 let n = counter.fetch_add(1, Ordering::SeqCst);
                 let mut bytes = [0xa5; 16];
@@ -247,6 +319,7 @@ impl World {
         let config = Config {
             endpoint: endpoint("claude"),
             desired_channels: Ok(vec![general()]),
+            delivery,
         };
         tokio::spawn(serve(
             binding,
@@ -274,6 +347,8 @@ impl World {
             host_in,
             host_out: BufReader::new(host_out).lines(),
             next_id: 0,
+            pull: delivery == interweave_claude_channel_core::Delivery::Pull,
+            clock,
         };
         world.wait_connected().await;
         world
@@ -305,6 +380,7 @@ impl World {
                 answer.get("method").is_some(),
                 "only notifications between: {answer}"
             );
+            assert!(!self.pull, "pull mode pushes nothing: {answer}");
         }
     }
 
@@ -340,6 +416,26 @@ impl World {
             if line["method"] == json!("notifications/claude/channel") {
                 return line["params"].clone();
             }
+        }
+    }
+
+    /// `receive(max)`'s structured answer.
+    async fn receive(&mut self, max: Option<u64>) -> Value {
+        let arguments = max.map_or_else(|| json!({}), |max| json!({"max": max}));
+        let (text, error) = self.tool("receive", arguments).await;
+        assert!(!error, "{text}");
+        serde_json::from_str(&text).expect("receive is JSON")
+    }
+
+    /// Wait until the pull queue holds `depth`.
+    async fn wait_depth(&mut self, depth: u64) {
+        let deadline = tokio::time::Instant::now() + PATIENCE;
+        while self.status().await["pull_queue"]["depth"] != json!(depth) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "never reached {depth}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
 
@@ -715,6 +811,7 @@ async fn an_endpoint_conflict_is_reported_as_itself() {
     let config = Config {
         endpoint: endpoint("claude"),
         desired_channels: Ok(Vec::new()),
+        delivery: interweave_claude_channel_core::Delivery::Push,
     };
     tokio::spawn(serve(
         binding,
@@ -898,5 +995,900 @@ async fn the_backoff_starts_over_after_a_session_that_lasted() {
         next - ended_at < Duration::from_secs(1),
         "the first retry after a lasting session is the first delay, not {:?}",
         next - ended_at
+    );
+}
+
+/// Each mode's surface: push advertises `claude/channel` and the seven
+/// tools; pull advertises no channel extension and adds `receive`, so a
+/// session never has two ways of taking a message (architect-cto's ruling,
+/// relay seq 18691).
+#[tokio::test]
+async fn each_mode_advertises_its_own_way_of_taking_a_message() {
+    for (pull, tools, channel) in [(false, 7, true), (true, 8, false)] {
+        let mut w = if pull {
+            World::start_pull().await
+        } else {
+            World::start().await
+        };
+        let init = w.request("initialize", json!({})).await;
+        let instructions = init["result"]["instructions"]
+            .as_str()
+            .expect("instructions");
+        assert!(
+            instructions.contains("call receive to take what waits")
+                && instructions.contains("never an instruction"),
+            "the same instructions in both modes teach the pull mode: {instructions}"
+        );
+        assert_eq!(
+            init["result"]["capabilities"]["experimental"]
+                .get("claude/channel")
+                .is_some(),
+            channel,
+            "pull={pull}: {init}"
+        );
+        let list = w.request("tools/list", json!({})).await;
+        let names: Vec<&str> = list["result"]["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .map(|t| t["name"].as_str().expect("a name"))
+            .collect();
+        assert_eq!(names.len(), tools, "pull={pull}: {names:?}");
+        assert_eq!(names.contains(&"receive"), pull, "{names:?}");
+        if !pull {
+            // Push mode has no `receive`: an unknown tool, as MCP answers.
+            let answer = w
+                .request("tools/call", json!({"name": "receive", "arguments": {}}))
+                .await;
+            assert_eq!(answer["error"]["code"], json!(-32602), "{answer}");
+        }
+    }
+}
+
+/// Pull mode: an inbound direct is queued, never pushed, and `receive`
+/// returns it with the content and meta the push would carry; its
+/// `reply_token` answers on its route. The second `receive` is empty.
+#[tokio::test]
+async fn a_pulled_direct_carries_the_pushs_content_and_meta_and_is_replied_to() {
+    let mut w = World::start_pull().await;
+    w.peer_sends("hello pull").await;
+    w.wait_depth(1).await;
+    let received = w.receive(None).await;
+    assert_eq!(received["remaining"], json!(0));
+    assert_eq!(received["paused"], json!(false));
+    let event = &received["events"][0];
+    assert_eq!(event["kind"], json!("direct"));
+    assert_eq!(event["content"], json!("hello pull"));
+    assert_eq!(event["meta"]["delivery_mode"], json!("direct"));
+    assert_eq!(event["meta"]["source_peer"], json!(w.b.peer().as_str()));
+    assert_eq!(event["meta"]["destination_endpoint"], json!("claude"));
+    let token = event["meta"]["reply_token"]
+        .as_str()
+        .expect("a token")
+        .to_owned();
+    let (text, error) = w
+        .tool("reply", json!({"reply_token": token, "content": "back"}))
+        .await;
+    assert!(!error, "{text}");
+    assert_eq!(w.receive(None).await["events"], json!([]), "taken once");
+}
+
+/// Full (the session's granted event queue, 16 here), the pull queue
+/// pauses the session's draining and drops nothing it took (relay seq
+/// 18784): a session-bound tool is refused at once with the bridge's own
+/// error while paused, `status` and `receive` answer, `receive` lifts the
+/// pause, and every message arrives in order. A `max` is clamped, never
+/// refused, and `remaining` says what is left.
+///
+/// A take of one with two held at the daemon gives room for one: the
+/// bridge takes no more than that, so the queue fills again with nothing
+/// refused. `paused_since` is the env's clock at the fill, null after.
+/// On two workers, so a bridge that spins while paused fails the test's
+/// own deadlines rather than hanging it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_pull_queue_pauses_when_full_and_drops_nothing() {
+    let mut w = World::start_pull().await;
+    assert_eq!(
+        w.status().await["pull_queue"]["paused_since"],
+        Value::Null,
+        "not paused"
+    );
+    for i in 0..18_u64 {
+        if i == 15 {
+            // The one that fills the queue arrives at this time.
+            w.clock.store(NOW_MS + 1_000, Ordering::SeqCst);
+        }
+        w.peer_sends(&format!("m{i:02}")).await;
+        w.wait_depth((i + 1).min(16)).await;
+    }
+    w.clock.store(NOW_MS + 9_000, Ordering::SeqCst);
+    let status = w.status().await;
+    assert_eq!(status["pull_queue"]["paused"], json!(true), "{status}");
+    assert_eq!(
+        status["pull_queue"]["paused_since"],
+        json!(NOW_MS + 1_000),
+        "when it filled, not now: {status}"
+    );
+    let (text, error) = w.tool("join", json!({"channel": "general"})).await;
+    assert!(error, "refused while paused");
+    assert_eq!(text, "the pull queue is full: call receive first");
+    // Paused with two held at the daemon, the bridge does not ask the
+    // session again: a loop that did would spin on events it cannot take.
+    let readies = w.record.readies.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        w.record.readies.load(Ordering::SeqCst),
+        readies,
+        "no wake while paused"
+    );
+    let one = w.receive(Some(1)).await;
+    assert_eq!(one["events"][0]["content"], json!("m00"), "nothing dropped");
+    assert_eq!(one["paused"], json!(false), "a take lifts the pause");
+    // Room for one, two held at the daemon: one taken, the queue full
+    // again, one still held.
+    w.wait_depth(16).await;
+    assert_eq!(w.status().await["pull_queue"]["paused"], json!(true));
+    let first = w.receive(Some(10)).await;
+    assert_eq!(first["events"].as_array().map(Vec::len), Some(10));
+    assert_eq!(first["events"][0]["content"], json!("m01"));
+    assert_eq!(first["remaining"], json!(6));
+    assert_eq!(first["paused"], json!(false));
+    // The one the session held meanwhile is drained now.
+    w.wait_depth(7).await;
+    let rest = w.receive(Some(1_000)).await;
+    let contents: Vec<&str> = rest["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .map(|e| e["content"].as_str().expect("content"))
+        .collect();
+    assert_eq!(
+        contents,
+        ["m11", "m12", "m13", "m14", "m15", "m16", "m17"],
+        "clamped, not refused, and in order"
+    );
+    assert_eq!(
+        w.status().await["pull_queue"]["paused_since"],
+        Value::Null,
+        "cleared once a take leaves room"
+    );
+    assert_eq!(rest["remaining"], json!(0));
+    let (text, error) = w.tool("join", json!({"channel": "general"})).await;
+    assert!(!error, "the control, not paused: {text}");
+}
+
+/// Fill the pull queue to `depth`, one message at a time.
+async fn fill(w: &mut World, depth: u64) {
+    for i in 0..depth {
+        w.peer_sends(&format!("f{i:02}")).await;
+        w.wait_depth(i + 1).await;
+    }
+}
+
+/// A call in flight when the queue fills is cancelled -- dropped, which
+/// is what sends the IPC binding's cancel -- and answered with the pull
+/// queue's own error, never left waiting behind the paused drain (relay
+/// seq 18835). The control: the same send, not held, is accepted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_in_flight_when_the_queue_fills_is_cancelled() {
+    let mut w = World::start_pull().await;
+    fill(&mut w, 15).await;
+    w.record.hold_send.store(true, Ordering::SeqCst);
+    w.record.hold_ready.store(true, Ordering::SeqCst);
+    w.next_id += 1;
+    let id = w.next_id;
+    let b = w.b.peer().as_str().to_owned();
+    let line = json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+        "params": {"name": "send", "arguments": {"peer": b, "content": "x"}}});
+    w.host_in
+        .write_all(format!("{line}\n").as_bytes())
+        .await
+        .expect("written");
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while !w.record.calls().iter().any(|c| c == "send_direct") {
+        assert!(tokio::time::Instant::now() < deadline, "never sent");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // Two gather at the daemon while the send is in flight; the drain
+    // takes the one there is room for, which fills the queue.
+    w.peer_sends("last").await;
+    w.peer_sends("after").await;
+    w.record.hold_ready.store(false, Ordering::SeqCst);
+    let answer = w.line().await;
+    assert_eq!(answer["id"], json!(id), "{answer}");
+    assert_eq!(answer["result"]["isError"], json!(true), "{answer}");
+    assert_eq!(
+        answer["result"]["content"][0]["text"],
+        json!(
+            "the pull queue is full: call receive first; the call was cancelled in flight, outcome unknown"
+        )
+    );
+    assert!(
+        w.record
+            .calls()
+            .iter()
+            .any(|c| c == "send_direct cancelled"),
+        "the call was dropped: {:?}",
+        w.record.calls()
+    );
+    assert_eq!(w.status().await["pull_queue"]["depth"], json!(16));
+    w.record.hold_send.store(false, Ordering::SeqCst);
+    assert_eq!(
+        w.receive(None).await["events"][15]["content"],
+        json!("last")
+    );
+    let sends = |w: &World| {
+        w.record
+            .calls()
+            .iter()
+            .filter(|c| *c == "send_direct")
+            .count()
+    };
+    assert_eq!(sends(&w), 1, "a cancelled send is never re-issued");
+    assert_eq!(w.status().await["pull_queue"]["pending"], json!([]));
+    w.wait_depth(1).await;
+    assert_eq!(
+        w.receive(None).await["events"][0]["content"],
+        json!("after"),
+        "the one there was no room for stayed at the daemon"
+    );
+    let (text, error) = w.tool("send", json!({"peer": b, "content": "x"})).await;
+    assert!(!error, "the control: {text}");
+}
+
+/// The queue survives a reconnect; a held direct message's token is stale
+/// after it (the epoch moved), a held broadcast's maps to its channel and
+/// survives the re-join (relay seq 18835). A join the bridge held is not
+/// re-taken while the queue is full -- it would wait behind the pause --
+/// and is a status row until the next join.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_queue_outlives_a_reconnect_and_only_a_direct_token_goes_stale() {
+    let mut w = World::start_pull().await;
+    let (text, error) = w.tool("join", json!({"channel": "general"})).await;
+    assert!(!error, "{text}");
+    w.peer.join(general()).await.expect("peer joins");
+    w.peer_sends("direct").await;
+    w.peer
+        .broadcast(
+            general(),
+            BroadcastMessageV1 {
+                message_id: MessageId::from_bytes([3; 16]),
+                sent_at_ms: 0,
+                payload: Payload::new(None, b"all".to_vec(), MAX_PAYLOAD_BYTES).expect("payload"),
+            },
+        )
+        .await
+        .expect("accepted");
+    w.wait_depth(2).await;
+
+    w.record.down.store(true, Ordering::SeqCst);
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while w.status().await["endpoint_lease_state"] != json!("daemon unavailable") {
+        assert!(tokio::time::Instant::now() < deadline, "never saw it go");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    w.record.down.store(false, Ordering::SeqCst);
+    w.wait_connected().await;
+    assert_eq!(w.status().await["joined_channels"], json!(["general"]));
+
+    let received = w.receive(None).await;
+    let token_of = |kind: &str| {
+        received["events"]
+            .as_array()
+            .expect("events")
+            .iter()
+            .find(|e| e["kind"] == json!(kind))
+            .and_then(|e| e["meta"]["reply_token"].as_str())
+            .unwrap_or_else(|| panic!("a {kind} token: {received}"))
+            .to_owned()
+    };
+    let (direct, broadcast) = (token_of("direct"), token_of("broadcast"));
+    let (text, error) = w
+        .tool("reply", json!({"reply_token": direct, "content": "stale"}))
+        .await;
+    assert!(error && text.starts_with("InvalidArgument"), "{text}");
+    let (text, error) = w
+        .tool("reply", json!({"reply_token": broadcast, "content": "ok"}))
+        .await;
+    assert!(!error, "the broadcast token survives: {text}");
+
+    // A re-join in flight when the queue fills is cancelled the same
+    // way, and says why until the next join.
+    fill(&mut w, 15).await;
+    w.record.down.store(true, Ordering::SeqCst);
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while w.status().await["endpoint_lease_state"] != json!("daemon unavailable") {
+        assert!(tokio::time::Instant::now() < deadline, "never saw it go");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let record = Arc::clone(&w.record);
+    let joins = || record.calls().iter().filter(|c| *c == "join").count();
+    let joins_before = joins();
+    w.record.hold_join.store(true, Ordering::SeqCst);
+    w.record.down.store(false, Ordering::SeqCst);
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while joins() == joins_before {
+        assert!(tokio::time::Instant::now() < deadline, "never re-joined");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    w.peer_sends("last").await;
+    w.wait_connected().await;
+    let status = w.status().await;
+    assert_eq!(
+        status["pull_queue"]["pending"],
+        json!([{"channel": "general", "op": "join"}]),
+        "{status}"
+    );
+    assert_eq!(
+        status["rejoin_refused"],
+        json!([]),
+        "the daemon refused nothing"
+    );
+    assert_eq!(status["joined_channels"], json!([]));
+    assert!(
+        w.record.calls().iter().any(|c| c == "join cancelled"),
+        "the re-join was dropped"
+    );
+    assert_eq!(status["pull_queue"]["depth"], json!(16), "kept");
+    w.record.hold_join.store(false, Ordering::SeqCst);
+    let joins_before = joins();
+    w.receive(None).await;
+    wait_pending_empty(&mut w).await;
+    assert_eq!(joins(), joins_before + 1, "re-issued by the bridge");
+    let status = w.status().await;
+    assert_eq!(status["joined_channels"], json!(["general"]), "{status}");
+    assert_eq!(status["rejoin_refused"], json!([]));
+}
+
+/// A pulled event's reply token is minted when the host takes it, so its
+/// TTL runs from the reading: none is live while it waits, and one taken
+/// past the TTL after its arrival still answers (CHANNEL-EVENT.md
+/// §Delivery).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pulled_token_is_minted_at_the_take() {
+    let mut w = World::start_pull().await;
+    w.peer_sends("early").await;
+    w.wait_depth(1).await;
+    assert_eq!(
+        w.status().await["reply_tokens"],
+        json!(0),
+        "none while queued"
+    );
+    // Past the thirty-minute TTL since the arrival.
+    w.clock.store(NOW_MS + 31 * 60 * 1000, Ordering::SeqCst);
+    let received = w.receive(None).await;
+    assert_eq!(
+        w.status().await["reply_tokens"],
+        json!(1),
+        "one, at the take"
+    );
+    let token = received["events"][0]["meta"]["reply_token"]
+        .as_str()
+        .expect("a token")
+        .to_owned();
+    let (text, error) = w
+        .tool("reply", json!({"reply_token": token, "content": "late"}))
+        .await;
+    assert!(!error, "live from the reading: {text}");
+}
+
+/// While paused, every tool that needs the session is refused at once and
+/// reaches no daemon; `identity` and `status` answer. The control: the
+/// same calls before the pause reach it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_session_tool_is_refused_while_paused() {
+    let mut w = World::start_pull().await;
+    let (text, error) = w.tool("join", json!({"channel": "general"})).await;
+    assert!(!error, "the control: {text}");
+    w.peer_sends("first").await;
+    w.wait_depth(1).await;
+    let token = w.receive(None).await["events"][0]["meta"]["reply_token"]
+        .as_str()
+        .expect("a token")
+        .to_owned();
+    fill(&mut w, 16).await;
+    let b = w.b.peer().as_str().to_owned();
+    let before = w.record.calls().len();
+    for (name, arguments) in [
+        ("send", json!({"peer": b, "content": "x"})),
+        ("reply", json!({"reply_token": token, "content": "x"})),
+        ("broadcast", json!({"channel": "general", "content": "x"})),
+        ("join", json!({"channel": "general"})),
+        ("leave", json!({"channel": "general"})),
+    ] {
+        let (text, error) = w.tool(name, arguments).await;
+        assert!(error, "{name} refused while paused");
+        assert_eq!(text, "the pull queue is full: call receive first", "{name}");
+    }
+    assert_eq!(w.record.calls().len(), before, "none reached the daemon");
+    let (text, error) = w.tool("identity", json!({})).await;
+    assert!(!error, "identity answers: {text}");
+    w.receive(None).await;
+    let (text, error) = w
+        .tool("reply", json!({"reply_token": token, "content": "x"}))
+        .await;
+    assert!(!error, "the control after the take: {text}");
+    assert!(w.record.calls().len() > before, "reached the daemon");
+}
+
+/// Wait until nothing is pending.
+async fn wait_pending_empty(w: &mut World) {
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while w.status().await["pull_queue"]["pending"] != json!([]) {
+        assert!(tokio::time::Instant::now() < deadline, "never resolved");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Call `tool` while the queue has room for one, let two messages gather
+/// at the daemon, and return the answer: the drain fills the queue with
+/// the call in flight, so it is cancelled.
+async fn in_flight_as_the_queue_fills(
+    w: &mut World,
+    tool: &str,
+    arguments: Value,
+    call: &str,
+) -> Value {
+    fill(w, 15).await;
+    w.record.hold_ready.store(true, Ordering::SeqCst);
+    let before = w.record.calls().iter().filter(|c| *c == call).count();
+    w.next_id += 1;
+    let id = w.next_id;
+    let line = json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+        "params": {"name": tool, "arguments": arguments}});
+    w.host_in
+        .write_all(format!("{line}\n").as_bytes())
+        .await
+        .expect("written");
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while w.record.calls().iter().filter(|c| *c == call).count() == before {
+        assert!(tokio::time::Instant::now() < deadline, "never called");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    w.peer_sends("last").await;
+    w.peer_sends("after").await;
+    w.record.hold_ready.store(false, Ordering::SeqCst);
+    let answer = w.line().await;
+    assert_eq!(answer["id"], json!(id), "{answer}");
+    answer
+}
+
+/// A join cancelled in flight that the daemon had already taken: its
+/// outcome is unknown, so it is pending -- not joined, no refusal -- and
+/// re-issued once a take lifts the pause, after which the bridge holds
+/// the join the daemon holds (relay seq 19026).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_join_is_pending_and_reissued() {
+    let mut w = World::start_pull().await;
+    w.record.land_then_hold.store(true, Ordering::SeqCst);
+    let answer =
+        in_flight_as_the_queue_fills(&mut w, "join", json!({"channel": "general"}), "join").await;
+    let text = answer["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(text.ends_with("outcome unknown"), "{answer}");
+    let status = w.status().await;
+    assert_eq!(
+        status["pull_queue"]["pending"],
+        json!([{"channel": "general", "op": "join"}]),
+        "{status}"
+    );
+    assert_eq!(status["joined_channels"], json!([]));
+    assert_eq!(status["rejoin_refused"], json!([]));
+    w.record.land_then_hold.store(false, Ordering::SeqCst);
+    let joins = |w: &World| w.record.calls().iter().filter(|c| *c == "join").count();
+    let before = joins(&w);
+    w.receive(None).await;
+    wait_pending_empty(&mut w).await;
+    assert_eq!(joins(&w), before + 1, "re-issued once");
+    assert_eq!(w.status().await["joined_channels"], json!(["general"]));
+}
+
+/// A leave cancelled in flight that the daemon had already taken: the
+/// bridge keeps the join while it is pending, then re-issues it and
+/// holds what the daemon holds -- nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_leave_is_pending_and_reissued() {
+    let mut w = World::start_pull().await;
+    let (text, error) = w.tool("join", json!({"channel": "general"})).await;
+    assert!(!error, "{text}");
+    w.record.land_then_hold.store(true, Ordering::SeqCst);
+    let answer =
+        in_flight_as_the_queue_fills(&mut w, "leave", json!({"channel": "general"}), "leave").await;
+    assert_eq!(answer["result"]["isError"], json!(true), "{answer}");
+    let status = w.status().await;
+    assert_eq!(
+        status["pull_queue"]["pending"],
+        json!([{"channel": "general", "op": "leave"}]),
+        "{status}"
+    );
+    assert_eq!(
+        status["joined_channels"],
+        json!(["general"]),
+        "kept meanwhile"
+    );
+    w.record.land_then_hold.store(false, Ordering::SeqCst);
+    w.receive(None).await;
+    wait_pending_empty(&mut w).await;
+    assert_eq!(w.status().await["joined_channels"], json!([]));
+}
+
+/// Wait until the bridge sees the daemon gone.
+async fn wait_unavailable(w: &mut World) {
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while w.status().await["endpoint_lease_state"] != json!("daemon unavailable") {
+        assert!(tokio::time::Instant::now() < deadline, "never saw it go");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// A refused re-join's row, then a host join cancelled into pending whose
+/// re-issue the session's end interrupts: the next open folds the
+/// pending join into the intent and takes it, and the taken join clears
+/// the earlier refusal (LIFECYCLE.md step 6: a row "until the next join").
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rejoin_after_a_resolution_the_session_ended_clears_the_refusal() {
+    let mut w = World::start_pull().await;
+    let (text, error) = w.tool("join", json!({"channel": "general"})).await;
+    assert!(!error, "{text}");
+    w.record.down.store(true, Ordering::SeqCst);
+    wait_unavailable(&mut w).await;
+    w.record.refuse_join.store(true, Ordering::SeqCst);
+    w.record.down.store(false, Ordering::SeqCst);
+    w.wait_connected().await;
+    let refused = json!([{"channel": "general", "error": "Overloaded"}]);
+    assert_eq!(w.status().await["rejoin_refused"], refused);
+
+    w.record.refuse_join.store(false, Ordering::SeqCst);
+    w.record.hold_join.store(true, Ordering::SeqCst);
+    let answer =
+        in_flight_as_the_queue_fills(&mut w, "join", json!({"channel": "general"}), "join").await;
+    assert_eq!(answer["result"]["isError"], json!(true), "{answer}");
+    let status = w.status().await;
+    assert_eq!(
+        status["pull_queue"]["pending"],
+        json!([{"channel": "general", "op": "join"}]),
+        "{status}"
+    );
+    assert_eq!(
+        status["rejoin_refused"], refused,
+        "a cancel decides nothing"
+    );
+
+    w.record.hold_join.store(false, Ordering::SeqCst);
+    w.record.die_on_join.store(true, Ordering::SeqCst);
+    w.receive(None).await;
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while w.record.die_on_join.load(Ordering::SeqCst) {
+        assert!(tokio::time::Instant::now() < deadline, "never re-issued");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    wait_unavailable(&mut w).await;
+    assert_eq!(
+        w.status().await["pull_queue"]["pending"],
+        json!([{"channel": "general", "op": "join"}]),
+        "kept for the next open"
+    );
+    w.record.down.store(false, Ordering::SeqCst);
+    w.wait_connected().await;
+    let status = w.status().await;
+    assert_eq!(status["pull_queue"]["pending"], json!([]), "{status}");
+    assert_eq!(status["joined_channels"], json!(["general"]), "{status}");
+    assert_eq!(status["rejoin_refused"], json!([]), "cleared by the join");
+}
+
+/// A pending join the daemon refuses when it is re-issued is a status
+/// row, as a refused re-join is; `a_cancelled_join_is_pending_and_reissued`
+/// is the control, where the re-issue is taken.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pending_join_refused_on_reissue_is_a_status_row() {
+    let mut w = World::start_pull().await;
+    w.record.hold_join.store(true, Ordering::SeqCst);
+    in_flight_as_the_queue_fills(&mut w, "join", json!({"channel": "general"}), "join").await;
+    assert_eq!(
+        w.status().await["pull_queue"]["pending"],
+        json!([{"channel": "general", "op": "join"}])
+    );
+    w.record.hold_join.store(false, Ordering::SeqCst);
+    w.record.refuse_join.store(true, Ordering::SeqCst);
+    let joins = |w: &World| w.record.calls().iter().filter(|c| *c == "join").count();
+    let before = joins(&w);
+    w.receive(None).await;
+    wait_pending_empty(&mut w).await;
+    assert_eq!(joins(&w), before + 1, "re-issued once");
+    let status = w.status().await;
+    assert_eq!(status["joined_channels"], json!([]), "{status}");
+    assert_eq!(
+        status["rejoin_refused"],
+        json!([{"channel": "general", "error": "Overloaded"}])
+    );
+}
+
+/// A pending leave the live daemon refuses when it is re-issued leaves
+/// the join held; `a_cancelled_leave_is_pending_and_reissued` is the
+/// control, where the re-issue is taken and the join goes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pending_leave_refused_on_reissue_keeps_the_join() {
+    let mut w = World::start_pull().await;
+    let (text, error) = w.tool("join", json!({"channel": "general"})).await;
+    assert!(!error, "{text}");
+    w.record.hold_leave.store(true, Ordering::SeqCst);
+    in_flight_as_the_queue_fills(&mut w, "leave", json!({"channel": "general"}), "leave").await;
+    assert_eq!(
+        w.status().await["pull_queue"]["pending"],
+        json!([{"channel": "general", "op": "leave"}])
+    );
+    w.record.hold_leave.store(false, Ordering::SeqCst);
+    w.record.refuse_leave.store(true, Ordering::SeqCst);
+    let leaves = |w: &World| w.record.calls().iter().filter(|c| *c == "leave").count();
+    let before = leaves(&w);
+    w.receive(None).await;
+    wait_pending_empty(&mut w).await;
+    assert_eq!(leaves(&w), before + 1, "re-issued once");
+    let status = w.status().await;
+    assert_eq!(status["joined_channels"], json!(["general"]), "{status}");
+    assert_eq!(status["rejoin_refused"], json!([]));
+}
+
+/// A re-issue in flight when the queue fills again is cancelled again and
+/// stays pending, re-issued at the next take.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reissue_cancelled_again_stays_pending() {
+    let mut w = World::start_pull().await;
+    w.record.hold_join.store(true, Ordering::SeqCst);
+    in_flight_as_the_queue_fills(&mut w, "join", json!({"channel": "general"}), "join").await;
+    let cancels = |w: &World| {
+        w.record
+            .calls()
+            .iter()
+            .filter(|c| *c == "join cancelled")
+            .count()
+    };
+    assert_eq!(cancels(&w), 1);
+    let joins = |w: &World| w.record.calls().iter().filter(|c| *c == "join").count();
+    let before = joins(&w);
+    w.record.hold_ready.store(true, Ordering::SeqCst);
+    w.receive(None).await;
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while joins(&w) == before {
+        assert!(tokio::time::Instant::now() < deadline, "never re-issued");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // Fifteen more gather beside the helper's "after" while the re-issue
+    // is held -- the sixteen the daemon's queue holds -- and the drain
+    // fills the bridge's with them.
+    for i in 0..15 {
+        w.peer_sends(&format!("r{i:02}")).await;
+    }
+    w.record.hold_ready.store(false, Ordering::SeqCst);
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while cancels(&w) < 2 {
+        assert!(tokio::time::Instant::now() < deadline, "never cancelled");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let status = w.status().await;
+    assert_eq!(status["pull_queue"]["depth"], json!(16), "{status}");
+    assert_eq!(
+        status["pull_queue"]["pending"],
+        json!([{"channel": "general", "op": "join"}]),
+        "{status}"
+    );
+    assert_eq!(status["joined_channels"], json!([]));
+    w.record.hold_join.store(false, Ordering::SeqCst);
+    w.receive(None).await;
+    wait_pending_empty(&mut w).await;
+    assert_eq!(joins(&w), before + 2, "re-issued at the next take");
+    assert_eq!(w.status().await["joined_channels"], json!(["general"]));
+}
+
+/// A pending leave whose re-issue the session's end interrupts is kept,
+/// and the next open folds it into the intent: the channel is not
+/// re-taken. `a_rejoin_after_a_resolution_the_session_ended_clears_the_refusal`
+/// is the join's side, where the folded join is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pending_leave_the_session_ended_is_not_retaken() {
+    let mut w = World::start_pull().await;
+    let (text, error) = w.tool("join", json!({"channel": "general"})).await;
+    assert!(!error, "{text}");
+    w.record.land_then_hold.store(true, Ordering::SeqCst);
+    in_flight_as_the_queue_fills(&mut w, "leave", json!({"channel": "general"}), "leave").await;
+    w.record.land_then_hold.store(false, Ordering::SeqCst);
+    w.record.die_on_leave.store(true, Ordering::SeqCst);
+    w.receive(None).await;
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while w.record.die_on_leave.load(Ordering::SeqCst) {
+        assert!(tokio::time::Instant::now() < deadline, "never re-issued");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    wait_unavailable(&mut w).await;
+    let status = w.status().await;
+    assert_eq!(
+        status["pull_queue"]["pending"],
+        json!([{"channel": "general", "op": "leave"}]),
+        "kept for the next open: {status}"
+    );
+    let joins = |w: &World| w.record.calls().iter().filter(|c| *c == "join").count();
+    let before = joins(&w);
+    w.record.down.store(false, Ordering::SeqCst);
+    w.wait_connected().await;
+    let status = w.status().await;
+    assert_eq!(status["pull_queue"]["pending"], json!([]), "{status}");
+    assert_eq!(status["joined_channels"], json!([]), "{status}");
+    assert_eq!(joins(&w), before, "not re-taken");
+}
+
+/// A refused re-join's row, then a host leave of that channel cancelled
+/// into pending whose re-issue the session's end interrupts: the next
+/// open folds the leave, and the leave clears the row (LIFECYCLE.md step
+/// 6: a row "until the next join or leave"). The row standing until the
+/// fold is the control.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pending_leave_folded_at_open_clears_the_refusal() {
+    let mut w = World::start_pull().await;
+    let (text, error) = w.tool("join", json!({"channel": "general"})).await;
+    assert!(!error, "{text}");
+    w.record.down.store(true, Ordering::SeqCst);
+    wait_unavailable(&mut w).await;
+    w.record.refuse_join.store(true, Ordering::SeqCst);
+    w.record.down.store(false, Ordering::SeqCst);
+    w.wait_connected().await;
+    let refused = json!([{"channel": "general", "error": "Overloaded"}]);
+    assert_eq!(w.status().await["rejoin_refused"], refused);
+    w.record.refuse_join.store(false, Ordering::SeqCst);
+
+    w.record.hold_leave.store(true, Ordering::SeqCst);
+    let answer =
+        in_flight_as_the_queue_fills(&mut w, "leave", json!({"channel": "general"}), "leave").await;
+    assert_eq!(answer["result"]["isError"], json!(true), "{answer}");
+    w.record.hold_leave.store(false, Ordering::SeqCst);
+    w.record.die_on_leave.store(true, Ordering::SeqCst);
+    w.receive(None).await;
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while w.record.die_on_leave.load(Ordering::SeqCst) {
+        assert!(tokio::time::Instant::now() < deadline, "never re-issued");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    wait_unavailable(&mut w).await;
+    let status = w.status().await;
+    assert_eq!(
+        status["pull_queue"]["pending"],
+        json!([{"channel": "general", "op": "leave"}]),
+        "{status}"
+    );
+    assert_eq!(status["rejoin_refused"], refused, "standing until the fold");
+    w.record.down.store(false, Ordering::SeqCst);
+    w.wait_connected().await;
+    let status = w.status().await;
+    assert_eq!(status["pull_queue"]["pending"], json!([]), "{status}");
+    assert_eq!(status["joined_channels"], json!([]), "{status}");
+    assert_eq!(status["rejoin_refused"], json!([]), "cleared by the leave");
+}
+
+/// A broadcast on `general` taken from the pull queue, and its reply
+/// token.
+async fn broadcast_token(w: &mut World) -> String {
+    w.peer.join(general()).await.expect("peer joins");
+    w.peer
+        .broadcast(
+            general(),
+            BroadcastMessageV1 {
+                message_id: MessageId::from_bytes([5; 16]),
+                sent_at_ms: 0,
+                payload: Payload::new(None, b"all".to_vec(), MAX_PAYLOAD_BYTES).expect("payload"),
+            },
+        )
+        .await
+        .expect("accepted");
+    w.wait_depth(1).await;
+    let received = w.receive(None).await;
+    received["events"][0]["meta"]["reply_token"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a broadcast token: {received}"))
+        .to_owned()
+}
+
+/// End the session while a join of `general` is pending: the host join
+/// cancelled as the queue fills (unless one is pending already), then its
+/// re-issue meeting the session's end. Then a reply with `token`.
+async fn reply_while_disconnected_with_the_join_pending(
+    w: &mut World,
+    token: &str,
+    host_join: bool,
+) -> (String, bool) {
+    if host_join {
+        w.record.hold_join.store(true, Ordering::SeqCst);
+        in_flight_as_the_queue_fills(w, "join", json!({"channel": "general"}), "join").await;
+    }
+    w.record.hold_join.store(false, Ordering::SeqCst);
+    w.record.die_on_join.store(true, Ordering::SeqCst);
+    w.receive(None).await;
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while w.record.die_on_join.load(Ordering::SeqCst) {
+        assert!(tokio::time::Instant::now() < deadline, "never re-issued");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    wait_unavailable(w).await;
+    assert_eq!(
+        w.status().await["pull_queue"]["pending"],
+        json!([{"channel": "general", "op": "join"}])
+    );
+    w.tool("reply", json!({"reply_token": token, "content": "x"}))
+        .await
+}
+
+/// While disconnected with a join pending, a broadcast reply answers by
+/// whether the bridge holds the channel at that moment (CHANNEL-EVENT.md
+/// §Delivery): held -- a cancelled host join keeps it -- the session's
+/// absence; not held -- left, its re-join refused, or its re-join
+/// cancelled at a reconnect -- `ChannelNotJoined`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_disconnected_reply_with_a_join_pending_answers_by_membership() {
+    // Held, and a host join of it cancelled.
+    let mut w = World::start_pull().await;
+    let (text, error) = w.tool("join", json!({"channel": "general"})).await;
+    assert!(!error, "{text}");
+    let token = broadcast_token(&mut w).await;
+    let (text, error) = reply_while_disconnected_with_the_join_pending(&mut w, &token, true).await;
+    assert!(
+        error && text.starts_with("BackendUnavailable"),
+        "held: {text}"
+    );
+
+    // Left, then a host join cancelled.
+    let mut w = World::start_pull().await;
+    let (text, error) = w.tool("join", json!({"channel": "general"})).await;
+    assert!(!error, "{text}");
+    let token = broadcast_token(&mut w).await;
+    let (text, error) = w.tool("leave", json!({"channel": "general"})).await;
+    assert!(!error, "{text}");
+    let (text, error) = reply_while_disconnected_with_the_join_pending(&mut w, &token, true).await;
+    assert!(
+        error && text.starts_with("ChannelNotJoined"),
+        "left: {text}"
+    );
+
+    // Its re-join refused at a reconnect, then a host join cancelled.
+    let mut w = World::start_pull().await;
+    let (text, error) = w.tool("join", json!({"channel": "general"})).await;
+    assert!(!error, "{text}");
+    let token = broadcast_token(&mut w).await;
+    w.record.down.store(true, Ordering::SeqCst);
+    wait_unavailable(&mut w).await;
+    w.record.refuse_join.store(true, Ordering::SeqCst);
+    w.record.down.store(false, Ordering::SeqCst);
+    w.wait_connected().await;
+    assert_ne!(w.status().await["rejoin_refused"], json!([]));
+    w.record.refuse_join.store(false, Ordering::SeqCst);
+    let (text, error) = reply_while_disconnected_with_the_join_pending(&mut w, &token, true).await;
+    assert!(
+        error && text.starts_with("ChannelNotJoined"),
+        "refused: {text}"
+    );
+
+    // Its re-join cancelled at a reconnect as the queue filled.
+    let mut w = World::start_pull().await;
+    let (text, error) = w.tool("join", json!({"channel": "general"})).await;
+    assert!(!error, "{text}");
+    let token = broadcast_token(&mut w).await;
+    fill(&mut w, 15).await;
+    w.record.down.store(true, Ordering::SeqCst);
+    wait_unavailable(&mut w).await;
+    let record = Arc::clone(&w.record);
+    let joins = || record.calls().iter().filter(|c| *c == "join").count();
+    let before = joins();
+    w.record.hold_join.store(true, Ordering::SeqCst);
+    w.record.down.store(false, Ordering::SeqCst);
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while joins() == before {
+        assert!(tokio::time::Instant::now() < deadline, "never re-joined");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    w.peer_sends("last").await;
+    w.wait_connected().await;
+    assert_eq!(w.status().await["joined_channels"], json!([]));
+    let (text, error) = reply_while_disconnected_with_the_join_pending(&mut w, &token, false).await;
+    assert!(
+        error && text.starts_with("ChannelNotJoined"),
+        "re-join pending: {text}"
     );
 }

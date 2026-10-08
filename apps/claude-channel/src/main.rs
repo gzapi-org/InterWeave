@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
-//! `claude-channel --profile <name> --endpoint <id>`: started by Claude
-//! Code over stdio (`plugin/LIFECYCLE.md` §Startup).
+//! `claude-channel --profile <name> --endpoint <id> --delivery push|pull`:
+//! started by an MCP host over stdio (`plugin/LIFECYCLE.md` §Startup) --
+//! Claude Code with `push`, any other host with `pull`.
 //!
-//! The profile name and the endpoint are the plugin's non-secret routing
-//! configuration (the `.mcp.json` arguments). From the name it derives the
+//! The profile name, the endpoint and the delivery mode are the host's
+//! non-secret configuration (the plugin's `.mcp.json` arguments). From the name it derives the
 //! daemon's data socket and reads the profile's desired channels for
 //! `status`; it connects to nothing but the data socket.
 //!
@@ -32,12 +33,14 @@ mod unix {
     use std::process::ExitCode;
 
     use interweave_claude_channel::serve::{CLIENT_KIND, Config, Env, serve};
+    use interweave_claude_channel_core::Delivery;
     use interweave_ipc_client::{IpcBinding, SocketPaths};
     use interweave_profile_config::{LoadError, ProfileConfig, ProfilePaths, XdgRoots};
     use interweave_transport_api::EndpointId;
     use tokio::io::BufReader;
 
-    const USAGE: &str = "usage: claude-channel --profile <name> --endpoint <id>";
+    const USAGE: &str =
+        "usage: claude-channel --profile <name> --endpoint <id> --delivery push|pull";
 
     pub(crate) fn main() -> ExitCode {
         match run() {
@@ -50,7 +53,7 @@ mod unix {
     }
 
     fn run() -> Result<(), String> {
-        let (profile, endpoint) = arguments(std::env::args().skip(1))?;
+        let (profile, endpoint, delivery) = arguments(std::env::args().skip(1))?;
         let roots = XdgRoots::from_env().map_err(|e| format!("the XDG directories: {e}"))?;
         let paths = ProfilePaths::resolve(&profile, &roots)
             .map_err(|e| format!("the profile's paths: {e}"))?;
@@ -70,6 +73,7 @@ mod unix {
         let config = Config {
             endpoint,
             desired_channels,
+            delivery,
         };
         let env = Env {
             now_ms: Box::new(wall_ms),
@@ -102,9 +106,15 @@ mod unix {
         ended
     }
 
-    /// `--profile <name> --endpoint <id>`, in either order, nothing else.
-    fn arguments(mut args: impl Iterator<Item = String>) -> Result<(String, EndpointId), String> {
-        let (mut profile, mut endpoint) = (None, None);
+    /// `--profile <name> --endpoint <id> --delivery push|pull`, in any
+    /// order, nothing else. `--delivery` is REQUIRED, with no default: a
+    /// host does not declare whether it takes Claude Code's channel push,
+    /// so a missing flag never puts the one harness that does into pull
+    /// (architect-cto's ruling, relay seq 18691).
+    fn arguments(
+        mut args: impl Iterator<Item = String>,
+    ) -> Result<(String, EndpointId, Delivery), String> {
+        let (mut profile, mut endpoint, mut delivery) = (None, None, None);
         while let Some(flag) = args.next() {
             let value = args.next().ok_or_else(|| USAGE.to_owned())?;
             match flag.as_str() {
@@ -113,11 +123,17 @@ mod unix {
                     endpoint =
                         Some(EndpointId::parse(value).map_err(|e| format!("--endpoint: {e}"))?);
                 }
+                "--delivery" if delivery.is_none() => {
+                    delivery = Some(
+                        Delivery::parse(&value)
+                            .ok_or_else(|| format!("--delivery is push or pull, not {value:?}"))?,
+                    );
+                }
                 _ => return Err(USAGE.to_owned()),
             }
         }
-        match (profile, endpoint) {
-            (Some(profile), Some(endpoint)) => Ok((profile, endpoint)),
+        match (profile, endpoint, delivery) {
+            (Some(profile), Some(endpoint), Some(delivery)) => Ok((profile, endpoint, delivery)),
             _ => Err(USAGE.to_owned()),
         }
     }
@@ -133,6 +149,8 @@ mod unix {
             LoadError::Invalid(_) => "Invalid",
             LoadError::KeyFileInHumanDir { .. } => "KeyFileInHumanDir",
             LoadError::KeyFileUnresolved { .. } => "KeyFileUnresolved",
+            LoadError::ConfigDirUnguarded(_) => "ConfigDirUnguarded",
+            LoadError::ConfigFileUnguarded { .. } => "ConfigFileUnguarded",
         }
     }
 
@@ -161,23 +179,78 @@ mod unix {
     mod tests {
         use super::*;
 
-        fn args(list: &[&str]) -> Result<(String, EndpointId), String> {
+        fn args(list: &[&str]) -> Result<(String, EndpointId, Delivery), String> {
             arguments(list.iter().map(|s| (*s).to_owned()))
         }
 
+        /// A profile, an endpoint and a delivery mode, in any order and
+        /// nothing else; `--delivery` is required, with no default.
         #[test]
-        fn the_arguments_are_a_profile_and_an_endpoint_and_nothing_else() {
-            let (profile, endpoint) =
-                args(&["--endpoint", "claude", "--profile", "work"]).expect("parsed");
+        fn the_arguments_are_a_profile_an_endpoint_and_a_delivery_mode() {
+            let (profile, endpoint, delivery) = args(&[
+                "--endpoint",
+                "claude",
+                "--delivery",
+                "push",
+                "--profile",
+                "work",
+            ])
+            .expect("parsed");
             assert_eq!(profile, "work");
             assert_eq!(endpoint.as_str(), "claude");
+            assert_eq!(delivery, Delivery::Push);
+            let (.., pull) =
+                args(&["--profile", "w", "--endpoint", "c", "--delivery", "pull"]).expect("parsed");
+            assert_eq!(pull, Delivery::Pull);
+            let missing =
+                args(&["--profile", "work", "--endpoint", "claude"]).expect_err("refused");
+            assert!(
+                missing.contains("--delivery push|pull"),
+                "names both: {missing}"
+            );
             for bad in [
                 &[][..],
-                &["--profile", "work"],
+                &["--profile", "work", "--delivery", "push"],
                 &["--profile", "work", "--endpoint"],
-                &["--profile", "a", "--profile", "b", "--endpoint", "claude"],
-                &["--profile", "work", "--endpoint", "claude", "--admin", "x"],
-                &["--profile", "work", "--endpoint", ""],
+                &[
+                    "--profile",
+                    "a",
+                    "--profile",
+                    "b",
+                    "--endpoint",
+                    "claude",
+                    "--delivery",
+                    "push",
+                ],
+                &[
+                    "--profile",
+                    "work",
+                    "--endpoint",
+                    "claude",
+                    "--delivery",
+                    "auto",
+                ],
+                &[
+                    "--profile",
+                    "w",
+                    "--endpoint",
+                    "c",
+                    "--delivery",
+                    "push",
+                    "--delivery",
+                    "pull",
+                ],
+                &[
+                    "--profile",
+                    "work",
+                    "--endpoint",
+                    "claude",
+                    "--delivery",
+                    "push",
+                    "--admin",
+                    "x",
+                ],
+                &["--profile", "work", "--endpoint", "", "--delivery", "push"],
             ] {
                 assert!(args(bad).is_err(), "{bad:?}");
             }

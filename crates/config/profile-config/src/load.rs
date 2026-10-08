@@ -14,6 +14,7 @@
 
 use std::io::Read as _;
 
+use crate::paths::CONFIG_FILE;
 use crate::{ConfigError, ProfileConfig, ProfilePaths};
 
 /// The largest profile document read, in bytes.
@@ -72,6 +73,90 @@ pub enum LoadError {
         /// Why.
         source: std::io::Error,
     },
+    /// The configuration directory, an ancestor of it or a link on its
+    /// path can be changed by an account other than root and this one
+    /// (ADR-0028 A 2026-10-08): `config.yaml` names the key path and the
+    /// allowlist, so an account that could replace it would choose the
+    /// key's directory and admit its own peer. Refused before the file is
+    /// read, as a parse failure is fatal.
+    ConfigDirUnguarded(crate::PersistError),
+    /// `config.yaml` itself is a symbolic link, not a regular file, or
+    /// can be written by an account other than root and this one -- owned
+    /// by another, or group- or other-writable (ADR-0028 A 2026-10-08).
+    /// Readable by others is allowed: it is not secret.
+    ConfigFileUnguarded {
+        /// The file.
+        path: std::path::PathBuf,
+        /// Which rule it broke, with its owner uid and mode.
+        detail: String,
+    },
+}
+
+/// Open `config.yaml` without following a final link and accept the
+/// opened handle only when no account but root and this one can write it
+/// (ADR-0028 A 2026-10-08): its directory's judgement is worth nothing if
+/// the file in it is someone else's to rewrite. Judged on the HANDLE, so
+/// the file judged is the file read.
+fn open_guarded(path: &std::path::Path) -> Result<std::fs::File, LoadError> {
+    open_guarded_as(
+        path,
+        crate::effective_uid().map_err(LoadError::ConfigDirUnguarded),
+    )
+}
+
+/// [`open_guarded`] with the owner compared against `uid` -- this
+/// process's effective uid, or why it cannot be read -- apart so a test
+/// can name another uid: a file another account owns needs that account
+/// (`a_document_another_uid_owns_is_refused`).
+fn open_guarded_as(
+    path: &std::path::Path,
+    uid: Result<u32, LoadError>,
+) -> Result<std::fs::File, LoadError> {
+    let refuse = |detail: String| LoadError::ConfigFileUnguarded {
+        path: path.to_path_buf(),
+        detail,
+    };
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+                return Err(refuse("it is a symbolic link".to_owned()));
+            }
+            Err(e) => return Err(LoadError::Read(e)),
+        };
+        let uid = uid?;
+        let meta = file.metadata().map_err(LoadError::Read)?;
+        let (owner, mode) = (meta.uid(), meta.mode() & 0o7777);
+        if !meta.is_file() {
+            return Err(refuse(format!(
+                "owned by uid {owner}, mode {mode:04o}: not a regular file"
+            )));
+        }
+        if owner != 0 && owner != uid {
+            return Err(refuse(format!(
+                "owned by uid {owner}, mode {mode:04o}: owned by neither root nor uid {uid}"
+            )));
+        }
+        if mode & 0o022 != 0 {
+            return Err(refuse(format!(
+                "owned by uid {owner}, mode {mode:04o}: group- or other-writable"
+            )));
+        }
+        Ok(file)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (refuse, uid);
+        Err(LoadError::ConfigDirUnguarded(
+            crate::PersistError::UnsupportedPlatform,
+        ))
+    }
 }
 
 impl core::fmt::Display for LoadError {
@@ -108,6 +193,19 @@ impl core::fmt::Display for LoadError {
                 "{} cannot be resolved to judge identity.key_file's place: {source}",
                 path.display()
             ),
+            Self::ConfigFileUnguarded { path, detail } => write!(
+                f,
+                "{} can be changed by another account: {detail}",
+                path.display()
+            ),
+            Self::ConfigDirUnguarded(crate::PersistError::UnsupportedPlatform) => write!(
+                f,
+                "the profile's configuration directory cannot be judged on this platform"
+            ),
+            Self::ConfigDirUnguarded(e) => write!(
+                f,
+                "the profile's configuration directory can be changed by another account: {e}"
+            ),
             Self::Invalid(errors) => {
                 write!(f, "the profile breaks {} rule(s):", errors.len())?;
                 for e in errors {
@@ -123,6 +221,7 @@ impl core::error::Error for LoadError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Read(e) | Self::KeyFileUnresolved { source: e, .. } => Some(e),
+            Self::ConfigDirUnguarded(e) => Some(e),
             _ => None,
         }
     }
@@ -145,7 +244,15 @@ impl ProfileConfig {
     /// [`LoadError`], naming which step refused: read, size, parse, name,
     /// validation, or a key file inside the human client's directory.
     pub fn load(paths: &ProfilePaths) -> Result<Self, LoadError> {
-        let file = std::fs::File::open(paths.config_file()).map_err(LoadError::Read)?;
+        // The directory judged for who can change it, and the file read
+        // under it as resolved (ADR-0028 A 2026-10-08): an absent one is
+        // still a read failure.
+        let dir = match crate::resolve_guarded_dir(paths.config_dir()) {
+            Ok(dir) => dir,
+            Err(crate::PersistError::Io(e)) => return Err(LoadError::Read(e)),
+            Err(e) => return Err(LoadError::ConfigDirUnguarded(e)),
+        };
+        let file = open_guarded(&dir.join(CONFIG_FILE))?;
         let mut text = String::new();
         file.take(MAX_PROFILE_BYTES + 1)
             .read_to_string(&mut text)
@@ -239,4 +346,34 @@ fn resolve_existing_prefix(path: &std::path::Path) -> std::io::Result<std::path:
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LoadError, open_guarded_as};
+
+    /// `config.yaml`'s owner clause (ADR-0028 A 2026-10-08): a file of
+    /// ours at 0644, readable by all and written by no one else, is
+    /// accepted as ours -- the control -- and refused asked as another
+    /// uid, the owner named. In a sticky configuration directory this
+    /// clause is the one that refuses a file another account placed.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[allow(clippy::expect_used, clippy::panic)]
+    fn a_document_another_uid_owns_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, b"schema_version: 2\n").expect("write");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        let uid = crate::effective_uid().expect("the uid");
+        open_guarded_as(&path, Ok(uid)).expect("the control: ours");
+        match open_guarded_as(&path, Ok(uid.wrapping_add(1))) {
+            Err(LoadError::ConfigFileUnguarded { path: at, detail }) => {
+                assert_eq!(at, path);
+                assert!(detail.contains("owned by neither root nor uid"), "{detail}");
+            }
+            other => panic!("refused as another's: {:?}", other.err()),
+        }
+    }
 }

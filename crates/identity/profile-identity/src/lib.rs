@@ -39,7 +39,8 @@ pub mod recovery;
 use std::path::Path;
 
 use interweave_profile_config::{
-    PersistError, create_private_exclusive, require_owned_private_dir, write_private_atomic,
+    PersistError, create_private_exclusive, effective_uid, resolve_owned_private_dir_as,
+    write_private_atomic,
 };
 use interweave_transport_api::{IdError, TransportIdentity};
 use libp2p_identity::{Keypair, PeerId, ed25519};
@@ -610,7 +611,8 @@ impl ProfileIdentity {
     /// which that `load` applies to the stored identity exactly as it does
     /// to a direct one -- or
     /// [`IdentityError::Storage`] if the write fails OR if the directory
-    /// holding the stored key is a symlink or accessible to group or other
+    /// holding the stored key is a symlink, accessible to group or other,
+    /// or under an ancestor or link breaking ADR-0028 A 2026-10-08's rule
     /// -- the read-side cause `load` documents, reached through the same
     /// `load` as the three variants above, and not something a caller would
     /// expect from a sentence about writing.
@@ -648,7 +650,10 @@ impl ProfileIdentity {
     ///
     /// Returns [`IdentityError::Storage`] if the DIRECTORY holding the key
     /// is a symlink, is accessible to group or other, or is owned by
-    /// another uid than this process's effective one. This is a separate
+    /// another uid than this process's effective one -- or if an ancestor
+    /// of it or a link on its path breaks ADR-0028 A 2026-10-08's rule
+    /// (owned by root or this uid, writable by no one else unless
+    /// sticky). This is a separate
     /// object from the file mode below and surfaces as a different variant,
     /// which the operator-visible contract did not say: a state directory
     /// that drifted to `0755` -- what a hand-made `mkdir` gives under the
@@ -665,6 +670,15 @@ impl ProfileIdentity {
     /// has been exposed should be treated as disclosed, and tightening
     /// the mode quietly would hide that it ever was.
     pub fn load(path: &Path) -> Result<Self, IdentityError> {
+        Self::load_as(path, effective_uid())
+    }
+
+    /// [`load`](Self::load) with the directory's owner compared against
+    /// `uid` -- this process's effective uid, or why it cannot be read --
+    /// apart so a test can name another uid: staging a directory another
+    /// account owns needs that account
+    /// (`a_key_directory_owned_by_another_uid_is_refused`).
+    fn load_as(path: &Path, uid: Result<u32, PersistError>) -> Result<Self, IdentityError> {
         use std::io::Read as _;
 
         // ONE HANDLE, CHECKED AND READ. Every check here used to be a
@@ -688,8 +702,8 @@ impl ProfileIdentity {
         // `require_same_owner(parent, &file)` against a file they just
         // made, and a parent whose uid differs is a directory somebody
         // else can rewrite whatever its mode says; a reader has no file of
-        // its own, so it asks `require_owned_private_dir`, which compares
-        // against the effective uid as the profile lock does. Until then
+        // its own, so it asks `resolve_owned_private_dir_as` with the
+        // effective uid `load` read, as the profile lock does. Until then
         // this check took the mode and the link and not the owner (review
         // finding on PR #86; the external review of 2026-10-04, P3-3).
         // Linux only, as that uid is: elsewhere this refuses, as the lock
@@ -704,17 +718,26 @@ impl ProfileIdentity {
         // on PR #86.
         // Unconditional: every path has a directory to check, because
         // `parent_or_dot` supplies `.` for the one shape that has no
-        // directory component. The braces scope the `match` and are not a
-        // condition that went missing.
-        {
-            match require_owned_private_dir(parent_or_dot(path)) {
-                Ok(()) => {}
+        // directory component.
+        //
+        // AND READ UNDER THE DIRECTORY AS JUDGED: the check resolves the
+        // directory on disk, its ancestors and the links on its path
+        // judged with it (ADR-0028 A 2026-10-08), and the key is opened
+        // under that resolved directory, so what was judged is what is
+        // read.
+        let resolved =
+            match uid.and_then(|uid| resolve_owned_private_dir_as(parent_or_dot(path), uid)) {
+                Ok(dir) => dir,
                 Err(PersistError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
                     return Err(IdentityError::NotFound);
                 }
                 Err(e) => return Err(IdentityError::Storage(e)),
-            }
-        }
+            };
+        let Some(name) = path.file_name() else {
+            return Err(IdentityError::NotAFile);
+        };
+        let resolved = resolved.join(name);
+        let path = resolved.as_path();
 
         // What is AT the path, before opening: a symlink is refused
         // rather than followed, because an identity that has been
@@ -777,7 +800,7 @@ impl ProfileIdentity {
             }
         }
         // UNREACHABLE SINCE THE DIRECTORY CHECK MOVED ABOVE IT.
-        // `require_owned_private_dir` answers `UnsupportedPlatform` off unix and
+        // The directory check answers `UnsupportedPlatform` off unix and
         // now runs first, so `load` fails before this branch. No
         // behavioural change -- `is_owner_only` returned the same error
         // from here, so non-unix `load` already failed -- but the branch
@@ -890,5 +913,47 @@ mod tests {
             parent_or_dot(Path::new("state/identity.key")),
             Path::new("state")
         );
+    }
+
+    /// The loader asks the directory's OWNER, not only its mode: a key in
+    /// an owner-only directory owned by another uid is refused. That uid
+    /// is named, since staging a directory another account owns needs
+    /// that account; the control is the same key loaded as its owner.
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn a_key_directory_owned_by_another_uid_is_refused() {
+        use super::{IdentityError, PersistError, ProfileIdentity, effective_uid};
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        // Straight under `/tmp`, root's and sticky, so another uid is
+        // refused at the key's directory itself and not at an ancestor of
+        // ours (#224 review A F1); owner-only whatever the umask gave it.
+        let tmp = std::fs::symlink_metadata("/tmp").expect("/tmp");
+        assert!(
+            tmp.uid() == 0 && tmp.permissions().mode() & 0o1000 != 0,
+            "the precondition: /tmp is root's and sticky"
+        );
+        let dir = tempfile::Builder::new()
+            .tempdir_in("/tmp")
+            .expect("a directory under /tmp");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("owner-only");
+        let path = dir.path().join("identity.key");
+        let identity = ProfileIdentity::generate();
+        identity.save(&path).expect("saved");
+        let uid = effective_uid().expect("the uid");
+        let loaded = ProfileIdentity::load_as(&path, Ok(uid)).expect("the control: ours");
+        assert_eq!(
+            loaded.transport_identity().expect("a peer"),
+            identity.transport_identity().expect("a peer")
+        );
+        let refused = ProfileIdentity::load_as(&path, Ok(uid.wrapping_add(1)));
+        match refused {
+            Err(IdentityError::Storage(PersistError::DirectoryNotPrivate { path, detail })) => {
+                assert_eq!(path, dir.path(), "refused at the key's directory");
+                assert!(detail.starts_with("owned by uid"), "{detail}");
+            }
+            other => panic!("refused as another's: {:?}", other.err()),
+        }
     }
 }

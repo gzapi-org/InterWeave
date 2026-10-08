@@ -65,7 +65,8 @@ pub(crate) const CLOSE_GRACE: Duration = Duration::from_secs(1);
 /// paused -- an answer for each request in flight or waiting, a probe per
 /// tolerated miss -- with room to spare. A close never joins it: it
 /// goes out on a control slot reserved before anything owed is sent,
-/// when the lane has one; with the lane full, no close is sent. Past it the invariant
+/// when the lane has one; with the lane full, no close is sent
+/// (`the_close_keeps_its_slot_ahead_of_the_answers`). Past it the invariant
 /// that bounds the outbox is broken, and the connection is closed rather
 /// than grown.
 const OUTBOX_LIMIT: usize = MAX_IN_FLIGHT + MAX_PENDING + 16;
@@ -733,7 +734,8 @@ mod tests {
     /// One slot left and a finished answer: the close takes the slot and
     /// the answer is dropped -- its request ended by the close -- rather
     /// than the answer taking it and the client reading EOF with no
-    /// reason. With room for both, both go, the answer first.
+    /// reason. With room for both, both go, the answer first. With no
+    /// room at all, neither: the close is never queued behind the lane.
     #[tokio::test]
     async fn the_close_keeps_its_slot_ahead_of_the_answers() {
         let (connection, rx) = ending(3, 2).await;
@@ -747,5 +749,14 @@ mod tests {
             .end(End::Close(TransportError::ShuttingDown))
             .await;
         assert_eq!(drained(rx), ["f0", "f1", "a", "close ShuttingDown"]);
+
+        let (connection, rx) = ending(2, 2).await;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            connection.end(End::Close(TransportError::ShuttingDown)),
+        )
+        .await
+        .expect("the end waits for no slot");
+        assert_eq!(drained(rx), ["f0", "f1"]);
     }
 }
