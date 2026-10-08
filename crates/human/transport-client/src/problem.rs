@@ -309,6 +309,15 @@ mod tests {
             classify_trust(TransportError::InvalidArgument),
             TrustProblem::Refused
         );
+        // A protocol violation is a defect on both sides, never a version.
+        assert_eq!(
+            classify_send(TransportError::ProtocolViolation),
+            AttemptFailure::NeedsAttention(SendProblem::Internal)
+        );
+        assert_eq!(
+            classify_trust(TransportError::ProtocolViolation),
+            TrustProblem::Internal
+        );
         for error in ALL {
             // Only the port's own refusal reads as one the person caused.
             assert_eq!(
