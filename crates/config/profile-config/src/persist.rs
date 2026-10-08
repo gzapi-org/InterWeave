@@ -1238,12 +1238,13 @@ mod tests {
     }
 
     /// A name service a test stages: users and groups by id, or a read
-    /// that fails.
+    /// that fails -- every read, or the group read alone.
     #[cfg(unix)]
     struct FakeNames {
         users: Vec<(u32, &'static str)>,
         groups: Vec<(u32, &'static str, Vec<&'static str>)>,
         fails: bool,
+        group_fails: bool,
     }
 
     #[cfg(unix)]
@@ -1259,7 +1260,7 @@ mod tests {
                 .map(|(_, name)| (*name).to_owned()))
         }
         fn group(&self, gid: u32) -> std::io::Result<Option<(String, Vec<String>)>> {
-            if self.fails {
+            if self.fails || self.group_fails {
                 return Err(std::io::ErrorKind::Other.into());
             }
             Ok(self
@@ -1298,6 +1299,7 @@ mod tests {
                 (1002, "alice", vec!["bob"]),
             ],
             fails: false,
+            group_fails: false,
         };
         let judge = |gid: u32, mode: u32, names: &FakeNames| {
             judge_ancestor_with(path, Ok((1000, gid, mode)), 1000, names, || Ok(false))
@@ -1377,6 +1379,19 @@ mod tests {
         assert!(
             failed.contains("the account of uid 1000: other error"),
             "the io error is kept: {failed}"
+        );
+        let group_failed = refused(judge(
+            1001,
+            0o40775,
+            &FakeNames {
+                group_fails: true,
+                ..names_clone(&names)
+            },
+        ));
+        assert!(
+            group_failed.contains("group 1001: other error")
+                && group_failed.contains("alice, uid 1000"),
+            "the group read's error, with our account: {group_failed}"
         );
         // The ACL is asked of a group-writable directory only: a 0755
         // one passes without the read, whether it would answer or fail.
@@ -1461,6 +1476,7 @@ mod tests {
             users: names.users.clone(),
             groups: names.groups.clone(),
             fails: names.fails,
+            group_fails: names.group_fails,
         }
     }
 
