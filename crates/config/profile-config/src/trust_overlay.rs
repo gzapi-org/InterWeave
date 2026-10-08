@@ -183,7 +183,27 @@ impl TrustOverlay {
 
     /// The overlay as it is on disk, unnormalised: `None` when absent.
     fn read(path: &Path) -> Result<Option<Self>, OverlayError> {
-        let file = match open_private(path) {
+        // Read under the state directory AS RESOLVED (ADR-0028 A
+        // 2026-10-08), as the overlay's write is: `ProfileLock` judged the
+        // same directory before load, and this resolves it once more so
+        // the read opens where that judgement led. An absent directory
+        // holds no overlay.
+        let dir = match persist::resolve_private_dir(persist::parent_dir(path)) {
+            Ok(dir) => dir,
+            Err(PersistError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            Err(PersistError::Io(e)) => return Err(OverlayError::Read(e)),
+            Err(e) => {
+                return Err(OverlayError::NotPrivate {
+                    detail: e.to_string(),
+                });
+            }
+        };
+        let resolved = dir.join(persist::file_name(path).map_err(|_| {
+            OverlayError::Read(std::io::Error::from(std::io::ErrorKind::InvalidInput))
+        })?);
+        let file = match open_private(&resolved) {
             Ok(file) => file,
             Err(OverlayError::Read(e)) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(None);
@@ -320,10 +340,8 @@ fn owner_uid(read: Result<u32, PersistError>) -> Result<u32, OverlayError> {
 /// -- the identity key's rule. Judged on the OPENED file, so the file
 /// checked is the file read.
 ///
-/// Its DIRECTORY is not walked here: the overlay lives in the state
-/// directory, which `ProfileLock` judges -- the directory, its ancestors
-/// and the links on its path (ADR-0028 A 2026-10-08) -- before any
-/// overlay is loaded, and a second walk would judge the same path again.
+/// Its DIRECTORY is judged and resolved by the caller (`read`), which
+/// hands this the path under the directory as resolved.
 fn open_private(path: &Path) -> Result<std::fs::File, OverlayError> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
