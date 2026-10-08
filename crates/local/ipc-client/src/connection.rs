@@ -8,7 +8,7 @@
 //! carries requests, cancels and pongs.
 
 use std::collections::HashMap;
-use std::io::Read as _;
+use std::io::Read;
 use std::os::fd::AsFd as _;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -41,7 +41,8 @@ const OUTGOING: usize = 64;
 /// buffer queued when it closes -- 208 KiB at Linux's default -- so its
 /// `close` is inside the bound; a daemon that shut its read half and
 /// keeps writing is cut off here rather than holding every waiting call
-/// (`a_server_that_keeps_writing_after_a_failed_write_is_cut_off`).
+/// (`the_drain_stops_at_its_budget_however_much_keeps_arriving`; over a
+/// socket, `a_server_that_keeps_writing_after_a_failed_write_is_cut_off`).
 const DRAIN_BUDGET: usize = 1024 * 1024;
 
 /// How long `close` waits for the server to finish the session -- it
@@ -752,39 +753,51 @@ impl Reader {
     /// (`a_failed_write_ends_the_session_though_the_server_keeps_writing_open`, whose
     /// server keeps its write half open, would hang if it did).
     fn next_now(&mut self) -> Result<Option<Frame>, TransportError> {
-        loop {
-            match decode_frame(&self.buf) {
-                Ok(DecodedFrame { body, consumed }) => {
-                    self.buf.drain(..consumed);
-                    return Frame::parse(&body).map(Some);
-                }
-                Err(FrameError::Incomplete { .. }) => {}
-                Err(_) => return Err(TransportError::ProtocolViolation),
+        let socket = match &mut self.now {
+            Some(socket) => socket,
+            None => self.now.insert(
+                self.inner
+                    .as_ref()
+                    .as_fd()
+                    .try_clone_to_owned()
+                    .map(std::os::unix::net::UnixStream::from)
+                    .map_err(|_| TransportError::BackendUnavailable)?,
+            ),
+        };
+        drain_next(&mut self.buf, &mut self.drained, socket)
+    }
+}
+
+/// One step of the drain: the next frame already in `buf`, else one read
+/// from `source` while `drained` is under [`DRAIN_BUDGET`]; `None` when
+/// the source has nothing more now, has ended, or the budget is spent
+/// (`the_drain_stops_at_its_budget_however_much_keeps_arriving`).
+fn drain_next(
+    buf: &mut Vec<u8>,
+    drained: &mut usize,
+    source: &mut impl Read,
+) -> Result<Option<Frame>, TransportError> {
+    loop {
+        match decode_frame(buf) {
+            Ok(DecodedFrame { body, consumed }) => {
+                buf.drain(..consumed);
+                return Frame::parse(&body).map(Some);
             }
-            let socket = match &mut self.now {
-                Some(socket) => socket,
-                None => self.now.insert(
-                    self.inner
-                        .as_ref()
-                        .as_fd()
-                        .try_clone_to_owned()
-                        .map(std::os::unix::net::UnixStream::from)
-                        .map_err(|_| TransportError::BackendUnavailable)?,
-                ),
-            };
-            if self.drained >= DRAIN_BUDGET {
-                return Ok(None);
+            Err(FrameError::Incomplete { .. }) => {}
+            Err(_) => return Err(TransportError::ProtocolViolation),
+        }
+        if *drained >= DRAIN_BUDGET {
+            return Ok(None);
+        }
+        let mut chunk = [0_u8; 8192];
+        match source.read(&mut chunk) {
+            Ok(0) => return Ok(None),
+            Ok(read) => {
+                *drained += read;
+                buf.extend_from_slice(&chunk[..read]);
             }
-            let mut chunk = [0_u8; 8192];
-            match socket.read(&mut chunk) {
-                Ok(0) => return Ok(None),
-                Ok(read) => {
-                    self.drained += read;
-                    self.buf.extend_from_slice(&chunk[..read]);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
-                Err(_) => return Err(TransportError::BackendUnavailable),
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
+            Err(_) => return Err(TransportError::BackendUnavailable),
         }
     }
 }
@@ -842,6 +855,54 @@ mod tests {
             shared.register(&id, late),
             Err(TransportError::ProtocolViolation),
             "final: refused"
+        );
+    }
+
+    /// A source that never runs dry: ping frames end to end, as a daemon
+    /// that keeps writing would supply them, which refuses to be read far
+    /// past the budget -- so a drain without one fails here rather than
+    /// spinning.
+    struct Flood {
+        frame: Vec<u8>,
+        at: usize,
+        served: usize,
+    }
+
+    impl Read for Flood {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            assert!(
+                self.served < 4 * DRAIN_BUDGET,
+                "the drain read past its budget"
+            );
+            for byte in out.iter_mut() {
+                *byte = self.frame[self.at];
+                self.at = (self.at + 1) % self.frame.len();
+            }
+            self.served += out.len();
+            Ok(out.len())
+        }
+    }
+
+    /// The drain takes at most its budget, plus the one read that crosses
+    /// it, however much keeps arriving, and parses what it took.
+    #[test]
+    fn the_drain_stops_at_its_budget_however_much_keeps_arriving() {
+        let mut flood = Flood {
+            frame: encode_frame(r#"{"type":"ping","nonce":"AAAAAAAAAAAAAAAAAAAAAA"}"#)
+                .expect("a frame"),
+            at: 0,
+            served: 0,
+        };
+        let (mut buf, mut drained, mut frames) = (Vec::new(), 0, 0_usize);
+        while let Some(frame) = drain_next(&mut buf, &mut drained, &mut flood).expect("frames") {
+            assert!(matches!(frame, Frame::Ping(_)));
+            frames += 1;
+        }
+        assert!(frames > 0, "what arrived is read");
+        assert!(
+            (DRAIN_BUDGET..DRAIN_BUDGET + 8192).contains(&flood.served),
+            "stopped at the budget: {}",
+            flood.served
         );
     }
 

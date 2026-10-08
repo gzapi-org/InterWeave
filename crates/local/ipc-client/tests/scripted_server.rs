@@ -403,7 +403,10 @@ async fn a_failed_write_with_a_full_buffer_answers_without_waiting_for_room() {
 /// A daemon that shuts its read half and keeps writing -- pings here,
 /// as fast as it can -- feeds the reader after a failed write for as long
 /// as it likes: the reader is cut off at its drain budget, ends
-/// `BackendUnavailable`, and the waiting call comes back.
+/// `BackendUnavailable`, and the waiting call comes back. Whether the
+/// budget or a stall in the flood ends the reading here is the
+/// scheduler's; the budget itself is pinned by the unit test
+/// `the_drain_stops_at_its_budget_however_much_keeps_arriving`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_server_that_keeps_writing_after_a_failed_write_is_cut_off() {
     use interweave_transport_api::TransportError;
