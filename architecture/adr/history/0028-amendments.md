@@ -113,8 +113,8 @@ still root's or ours, is accepted whatever its write bits. A symbolic
 link the configured path traverses is judged too: the link is owned by
 root or ours and the directory holding it meets the same rule, its ancestors with it, since
 whoever owns the link, or can write its directory, can repoint it as
-surely as renaming the private directory; and the open then uses the
-path that was resolved, not the configured text. The directory itself
+surely as renaming the private directory; and the opens this note
+lists below use the path that was resolved, not the configured text. The directory itself
 keeps its stricter rule (not a link, no group or other bit, the
 effective uid's). The configuration file's directory is judged the same
 way — its ownership and write bits and its ancestors', not an owner-only
@@ -122,8 +122,18 @@ mode, since `config.yaml` is not secret — because `config.yaml` names
 `identity.key_file` and `trust.allowed_peers`: an account that could
 replace it would choose the key's directory (any accepted directory of
 ours, another profile's among them) and admit its own peer, and
-`ProfileConfig::load` opens it today with no judgement at all (the
-re-review's finding). The walk runs once, in `require_private_dir` — the
+`ProfileConfig::load` opened it, at 67099004, with no judgement at all
+(the re-review's finding). The file itself is opened without following a
+final link and refused unless it is owned by root or ours with no
+group- or other-write bit — readable by others is allowed, it is not
+secret — since a group-writable file, a link of ours to a file another
+account writes, or a file another account placed in a sticky
+configuration directory meets the same reason (#224's review). The
+resolved-path open holds for the key, read and write, the two private
+writers (the overlay's write among them), the overlay's read, both
+locks and `config.yaml`; the human store opens its file by its
+configured path under the directory `HumanClientLock` judged, which
+the carried item below covers. The walk runs once, in `require_private_dir` — the
 `profile-config` helper the two private writers
 (`write_private_atomic`, `create_private_exclusive`) call directly and
 the identity loader and both locks reach through
@@ -172,15 +182,17 @@ plain per-user layout (`/home` root's at `0755`, the home and
 `~/.local/state` the user's), a container's root-owned tree, a sticky
 `/tmp`. The rule speaks to local accounts: another host presenting the
 daemon's uid over a network filesystem, or that filesystem's server,
-is outside it, as disk theft is. Unix only, as the helpers are today;
-other platforms keep `UnsupportedPlatform`. A layout refused in the
+is outside it, as disk theft is. Linux only — the effective uid is read
+from `/proc`, so on every other target the writers now refuse as the
+loader and locks did; they keep `UnsupportedPlatform`. A layout refused in the
 field is reported to architect-cto as an observation and decides the
 revisit; nothing is loosened ahead of one. Carried: the human store's
 own directory helpers (`crates/human/store/src/store.rs`,
 `create_private_dir` and `require_owner_only`) judge the directory
 alone and reach no `profile-config` check; its directory is judged
 when `HumanClientLock` is taken, before the store opens — routing those
-helpers through the same funnel is rust-ui-dev's, named here.
+helpers through the same funnel, and opening the store under the
+directory as resolved, is rust-ui-dev's, named here.
 
 **Propagation.** Security implications in the body; this note; the
 log row; the digest entry. IDENTITY.md's at-rest sentence names the
@@ -194,6 +206,7 @@ root-owned `0755` one accepted, a link owned by us in a passing
 directory with a passing target accepted, a link owned by a foreign uid
 or held in a failing directory refused, an ancestor that cannot be
 inspected refused as unresolved, a configuration file under a
-foreign-writable or foreign-owned ancestor refused at load, the plain
-XDG layout as the control)
+foreign-writable or foreign-owned ancestor refused at load, a
+group-writable `config.yaml` refused, a `config.yaml` that is a link
+refused, the plain XDG layout as the control)
 are p2p-network-dev's, on the same PR as this note.
