@@ -392,8 +392,8 @@ mod tests {
 
     #[test]
     fn control_characters_escape_as_the_goldens_do() {
-        let v = Value::String("a\u{1}\n\"\\é".to_owned());
-        assert_eq!(v.to_compact(), "\"a\\u0001\\n\\\"\\\\é\"");
+        let v = Value::String("a\u{1}\u{1f}\n\"\\é".to_owned());
+        assert_eq!(v.to_compact(), "\"a\\u0001\\u001f\\n\\\"\\\\é\"");
         assert_eq!(parse(&v.to_compact()).unwrap(), v);
     }
 
