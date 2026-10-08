@@ -240,7 +240,7 @@ indicator stays stale until it is taken (A 2026-10-04, correcting A
 2026-10-03's "dropped before any message", which the server never
 implemented); it is never in the reserved lane of item 3. A route ends only at a revocation that changed the policy: `admin.trust.set` to `false` ends every connection's route to the peer and withdraws its pending notice, counted as a replacement (the composition's `Diagnostics::peer_notices.paths_replaced_total`, not on the IPC wire); a message from the peer taken afterwards, or a send whose acceptance is recorded afterwards, makes a new route; a disconnect ends none, but withdraws the peer's pending notice, counted as a replacement, so a `peer.path_changed` read after a `peer.disconnected` never names the connection that is gone (A 2026-10-05, #190; the withdrawal A 2026-10-05 (ii), #192; LOCAL-CLIENT.md §2). A connection is held to have a route to at most `MAX_ROUTED_PEERS` peers (the trust allowlist's own ceiling, `PeerTrustPolicy::MAX_ALLOWED_PEERS`): a route past it is counted (the composition's `Diagnostics::peer_notices.routes_refused_total`, not on the IPC wire) and not kept, so no notice is owed for that peer; the pending notices are held one per routed peer, apart from the ordinary queue and its bound — that, not a drop, bounds their memory (A 2026-10-04).
 
-Over IPC the server pumps the session queue into its event lane and the socket, and the client into its own bounded buffer, so what a sender can get accepted while the reader does not drain is the whole pipeline's capacity: the session queue, the event lane, the client's buffer, and the socket — whose share is the kernel's send buffer, bounded in bytes, not events, and therefore hundreds of small frames or a handful of large ones. Bounded, larger than one `event_queue`, and no number this contract states. Acceptance still follows admission at the session queue and every accepted message is held and delivered to a client that keeps draining; a client the server closes as wedged loses what the pipeline held for it, bounded as above and never silently — the session ends and `CHANNEL-EVENT.md` §Delivery says what a bridge tells its host (A 2026-10-08, from ADR-0002 A 2026-10-07); nothing is buffered anywhere a bound does not name (A 2026-09-30).
+Over IPC the server pumps the session queue into its event lane and the socket, and the client into its own bounded buffer, so what a sender can get accepted while the reader does not drain is the whole pipeline's capacity: the session queue, the event lane, the client's buffer, and the socket — whose share is the kernel's send buffer, bounded in bytes, not events, and therefore hundreds of small frames or a handful of large ones. Bounded, larger than one `event_queue`, and no number this contract states. Acceptance still follows admission at the session queue and every accepted message is held and delivered to a client that keeps draining; a client the server closes as wedged loses what the pipeline held for it, bounded as above and never silently to that client — its session ends, and `CHANNEL-EVENT.md` §Delivery says what a bridge tells its host; the sender, already answered Accepted, is not told (A 2026-10-08, from ADR-0002 A 2026-10-07); nothing is buffered anywhere a bound does not name (A 2026-09-30).
 
 Event order over IPC: within one server pump the grouped order of `events()` holds (session notices, then direct, then broadcast, each oldest first, then the pending path notices under what room is left — A 2026-10-04); across pumps the client reads batches as they arrive, so a notice pumped after a direct message follows it. A consumer that needs one order across a session uses the receipt times a direct message and a broadcast carry; a notice carries none and is read as of its arrival (A 2026-09-30).
 
@@ -507,16 +507,26 @@ that has a request id is a `response{ok: false}`, never a `close`.
 
 A call that is still waiting when the connection ends answers the code
 the session ends with (A 2026-10-08): the `close` frame's code when one
-was read — a client whose write failed keeps reading what the server
-sent before it closed, which a Unix socket preserves, and answers its
-waiting calls once the reader stops — and `BackendUnavailable` when the
-connection ended with no `close` frame read. The call and the session's
-end carry one code, read once: a client branches on a call's code
-(`ProtocolViolation` is not retried, `BackendUnavailable` is), and a
-`BackendUnavailable` answered to a call whose connection is about to
-read `ProtocolViolation` would tell it to retry a session the daemon
-refused. No timer of its own: §Liveness bounds a server that keeps its
-write half open and sends nothing.
+was read, and `BackendUnavailable` when the connection ended with no
+`close` frame read. Every binding keeps the server's last frame readable
+after the server's close — a client whose write failed keeps reading
+what already arrived and answers its waiting calls once the reader
+stops, a reset after the `close` frame counting as the end — a
+requirement on the binding, not a property of one transport (a Unix
+socket gives it; the Windows named pipe must flush before it
+disconnects). The call and the session's end carry one code, read once:
+a client branches on a call's code (`ProtocolViolation` is not retried,
+`BackendUnavailable` is), and a `BackendUnavailable` answered to a call
+whose connection is about to read `ProtocolViolation` would tell it to
+retry a session the daemon refused. No timer of its own: on a connection
+that negotiated keepalive, §Disconnect/reconnect and optional keepalive
+bounds a server that keeps its write half open and sends nothing;
+without keepalive only OS connection liveness does. Gap at writing: the
+ipc-client as shipped (6eb4bb58) answers every waiting call
+`BackendUnavailable` at once on a write failure and lets a later `close`
+frame change only the session's code — two codes; the binding moves to
+this rule on p2p-network-dev-02's carry from #224, its two
+`scripted_server` tests turning into this sentence.
 
 ## Cancellation mapping and request concurrency
 
