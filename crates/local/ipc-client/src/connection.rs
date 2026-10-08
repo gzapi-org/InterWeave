@@ -858,6 +858,17 @@ mod tests {
         );
     }
 
+    /// Any end the reader reads makes the provisional code final, not only
+    /// a `close`: a frame the client refuses after a failed write ends
+    /// `ProtocolViolation`, as it would with no write failing first.
+    #[test]
+    fn a_reader_end_replaces_a_provisional_code() {
+        let shared = Shared::default();
+        shared.end(TransportError::BackendUnavailable, false, EndedBy::Writer);
+        shared.end(TransportError::ProtocolViolation, false, EndedBy::Reader);
+        assert_eq!(shared.ended(), Some(TransportError::ProtocolViolation));
+    }
+
     /// A source that never runs dry: ping frames end to end, as a daemon
     /// that keeps writing would supply them, which refuses to be read far
     /// past the budget -- so a drain without one fails here rather than
