@@ -171,6 +171,56 @@ fn a_document_under_a_writable_ancestor_is_refused() {
     }
 }
 
+/// `config.yaml` itself is judged too (ADR-0028 A 2026-10-08): made
+/// group-writable it is refused at load, naming its mode, and readable by
+/// all (0644, the control loading first) it is not.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_group_writable_document_is_refused() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = paths(dir.path(), "work");
+    write(&p, &document("profile:\n  name: work", ""));
+    let mode = |m: u32| {
+        std::fs::set_permissions(p.config_file(), std::fs::Permissions::from_mode(m))
+            .expect("chmod");
+    };
+    mode(0o644);
+    ProfileConfig::load(&p).expect("the control: readable by all");
+    mode(0o664);
+    match ProfileConfig::load(&p) {
+        Err(LoadError::ConfigFileUnguarded { path, detail }) => {
+            assert_eq!(path, p.config_file());
+            assert!(
+                detail.contains("0664") && detail.contains("writable"),
+                "{detail}"
+            );
+        }
+        other => panic!("refused: {other:?}"),
+    }
+}
+
+/// A `config.yaml` that is a symbolic link is refused, not followed --
+/// even to a sound file of ours in a sound directory, which loaded
+/// directly is the control.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_document_that_is_a_link_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = paths(dir.path(), "work");
+    write(&p, &document("profile:\n  name: work", ""));
+    ProfileConfig::load(&p).expect("the control: the file itself");
+    let real = p.config_dir().join("real.yaml");
+    std::fs::rename(p.config_file(), &real).expect("moved aside");
+    std::os::unix::fs::symlink(&real, p.config_file()).expect("link");
+    match ProfileConfig::load(&p) {
+        Err(LoadError::ConfigFileUnguarded { detail, .. }) => {
+            assert!(detail.contains("symbolic link"), "{detail}");
+        }
+        other => panic!("refused: {other:?}"),
+    }
+}
+
 /// R4: the transport key is never kept in the human client's directory.
 /// A key file configured there -- by absolute path, or by a relative one
 /// climbing out of the configuration with `..` -- is refused at load; the

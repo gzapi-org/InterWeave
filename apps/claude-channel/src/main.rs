@@ -150,6 +150,7 @@ mod unix {
             LoadError::KeyFileInHumanDir { .. } => "KeyFileInHumanDir",
             LoadError::KeyFileUnresolved { .. } => "KeyFileUnresolved",
             LoadError::ConfigDirUnguarded(_) => "ConfigDirUnguarded",
+            LoadError::ConfigFileUnguarded { .. } => "ConfigFileUnguarded",
         }
     }
 
