@@ -1368,28 +1368,69 @@ impl HumanStore {
 /// the same walk; this judgement is the store's own, so a caller that
 /// opens it without that lock gets the rule too.
 fn private_dir(dir: &Path) -> Result<std::path::PathBuf, StoreError> {
-    if absent(dir)? {
-        let existing = dir
-            .ancestors()
-            .skip(1)
-            .map(|a| {
-                if a.as_os_str().is_empty() {
-                    Path::new(".")
-                } else {
-                    a
-                }
-            })
-            .find_map(|a| match absent(a) {
-                Ok(false) => Some(Ok(a)),
-                Ok(true) => None,
-                Err(e) => Some(Err(e)),
-            })
-            .unwrap_or(Ok(Path::new(".")))?;
+    // The missing components, innermost first, and the nearest that is
+    // there; an empty ancestor is the working directory.
+    let mut missing = Vec::new();
+    let mut existing = Path::new(".");
+    for ancestor in dir.ancestors() {
+        let ancestor = if ancestor.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            ancestor
+        };
+        if absent(ancestor)? {
+            missing.push(ancestor);
+        } else {
+            existing = ancestor;
+            break;
+        }
+    }
+    if !missing.is_empty() {
         profile_config::resolve_guarded_dir(existing)
             .map_err(|e| StoreError::from_persist(existing, e))?;
-        profile_config::create_private_dir(dir).map_err(|e| StoreError::from_persist(dir, e))?;
+        missing.reverse();
+        create_each(&missing)?;
     }
     profile_config::resolve_owned_private_dir(dir).map_err(|e| StoreError::from_persist(dir, e))
+}
+
+/// Create `components`, outermost first, each owner-only and each by
+/// itself rather than in one recursive call.
+///
+/// ONE AT A TIME because the ancestor judged before them may be a sticky
+/// directory others can create in: a component that appears between that
+/// judgement and its creation is ADOPTED only if it is a private directory
+/// of this uid's -- another of our processes making it -- and otherwise
+/// refused before anything is made inside it. A recursive create adopted
+/// any directory it found and made ours inside it; the refusal came only
+/// after, leaving our directory in another account's
+/// (`a_component_that_appears_unprivate_is_refused_before_anything_is_made_in_it`).
+fn create_each(components: &[&Path]) -> Result<(), StoreError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        for component in components {
+            match std::fs::DirBuilder::new()
+                .mode(profile_config::OWNER_ONLY_DIR)
+                .create(component)
+            {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    profile_config::resolve_owned_private_dir(component)
+                        .map_err(|e| StoreError::from_persist(component, e))?;
+                }
+                Err(e) => return Err(StoreError::Io(e)),
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        // Refusing beats creating a directory of message content this
+        // build cannot protect.
+        let _ = components;
+        Err(StoreError::UnsupportedPlatform)
+    }
 }
 
 /// Whether nothing at all is at `path` -- not even a dangling link,
@@ -1710,7 +1751,31 @@ fn private_parent_of(path: &std::path::Path) -> &std::path::Path {
 
 #[cfg(all(test, target_os = "linux"))]
 mod private_dir_tests {
-    use super::private_dir;
+    use super::{create_each, private_dir};
+    use crate::StoreError;
+
+    #[test]
+    fn a_component_that_appears_unprivate_is_refused_before_anything_is_made_in_it() {
+        // The race made deterministic: `a` appears between the judgement
+        // of its parent and its own creation, readable by others.
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir_in("/tmp").expect("tempdir under /tmp");
+        let a = dir.path().join("a");
+        let b = a.join("b");
+        std::fs::create_dir(&a).expect("mkdir");
+        std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        match create_each(&[&a, &b]) {
+            Err(StoreError::DirectoryNotPrivate { path, .. }) => assert_eq!(path, a),
+            other => panic!("expected the appeared component refused, got {other:?}"),
+        }
+        assert!(!b.exists(), "nothing was made inside it");
+
+        // Our own, private, is adopted: another of our processes made it.
+        std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        create_each(&[&a, &b]).expect("a private directory of ours is adopted");
+        assert!(b.is_dir());
+    }
 
     #[test]
     fn the_store_opens_under_the_directory_as_resolved_not_the_configured_text() {
