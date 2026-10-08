@@ -47,7 +47,10 @@ pub const OWNER_ONLY_DIR: u32 = 0o700;
 /// made the whole tree first and left it under the ancestor the caller's
 /// check then refused (`a_refused_ancestor_gets_nothing_created_under_it`).
 /// A `dir` that already exists creates nothing and is judged by nothing
-/// here: whether it is private is the caller's question.
+/// here: whether it is private is the caller's question. It must be a
+/// directory, or one through a link, as the recursive create required:
+/// anything else is [`std::io::ErrorKind::AlreadyExists`]
+/// (`an_existing_path_that_is_not_a_directory_is_refused`).
 ///
 /// # Errors
 /// [`PersistError::DirectoryNotPrivate`] naming the existing ancestor,
@@ -87,7 +90,12 @@ pub fn create_private_dir(dir: &Path) -> Result<(), PersistError> {
             ))
         })?;
         if missing.as_os_str().is_empty() {
-            return Ok(());
+            // Followed, as `create_dir_all`'s `is_dir` follows: a link is
+            // the caller's to judge, and every caller judges links.
+            return match fs::metadata(probe) {
+                Ok(meta) if meta.is_dir() => Ok(()),
+                _ => Err(PersistError::Io(std::io::ErrorKind::AlreadyExists.into())),
+            };
         }
         let base = resolve_guarded_dir_as(probe, uid)?;
         create_each_as(&base, missing, uid)
@@ -1201,6 +1209,41 @@ mod tests {
         chmod(&appeared, 0o700);
         create_each_as(root.path(), Path::new("a/b"), uid).expect("adopted: ours, owner-only");
         assert!(appeared.join("b").is_dir());
+    }
+
+    /// An existing `dir` that is a file, a FIFO or a dangling link is
+    /// `AlreadyExists`, as the recursive create answered; a link to a
+    /// directory is accepted, as it was (the control).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_existing_path_that_is_not_a_directory_is_refused() {
+        let root = tempfile::tempdir().expect("tempdir");
+        chmod(root.path(), 0o700);
+        let file = root.path().join("file");
+        fs::write(&file, b"").expect("write");
+        let fifo = root.path().join("fifo");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo");
+        assert!(made.success(), "mkfifo");
+        let dangling = root.path().join("dangling");
+        std::os::unix::fs::symlink(root.path().join("nowhere"), &dangling).expect("link");
+        for path in [&file, &fifo, &dangling] {
+            assert!(
+                matches!(
+                    create_private_dir(path),
+                    Err(PersistError::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists
+                ),
+                "{} is not a directory",
+                path.display()
+            );
+        }
+        let real = root.path().join("real");
+        create_private_dir(&real).expect("made");
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("link");
+        create_private_dir(&link).expect("the control: a link to a directory");
     }
 
     /// A missing part that climbs with `..` is refused rather than
