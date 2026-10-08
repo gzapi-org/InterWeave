@@ -434,8 +434,10 @@ fn temp_beside(path: &Path) -> std::path::PathBuf {
 /// Refuse a directory that is not owner-only, or whose place on disk
 /// another account could change; answer where it is on disk.
 ///
-/// THE DIRECTORY ITSELF: not a symbolic link, mode within
-/// [`OWNER_ONLY_DIR`]. Ownership of the directory itself is a separate
+/// THE DIRECTORY ITSELF: a directory, not a symbolic link, mode within
+/// [`OWNER_ONLY_DIR`] -- an owner-only file passed as one, and the open
+/// under it failed later as `ENOTDIR`
+/// (`a_file_is_not_a_private_directory`). Ownership of the directory itself is a separate
 /// question, answered by [`require_same_owner`] for a writer (which
 /// compares against a file it just made) and by
 /// [`resolve_owned_private_dir_as`] for a caller holding none.
@@ -482,6 +484,12 @@ pub fn resolve_private_dir_as(dir: &Path, uid: u32) -> Result<PathBuf, PersistEr
             return Err(PersistError::DirectoryNotPrivate {
                 path: dir.to_path_buf(),
                 detail: "it is a symbolic link".to_owned(),
+            });
+        }
+        if !meta.is_dir() {
+            return Err(PersistError::DirectoryNotPrivate {
+                path: dir.to_path_buf(),
+                detail: "it is not a directory".to_owned(),
             });
         }
         let mode = meta.permissions().mode() & 0o777;
@@ -939,6 +947,24 @@ mod tests {
             require_owned_private_dir(&dir),
             Err(PersistError::DirectoryNotPrivate { .. })
         ));
+    }
+
+    /// An owner-only file of ours is not a private directory, refused
+    /// naming it as one; the owner-only directory beside it is the
+    /// control.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_file_is_not_a_private_directory() {
+        let root = tempfile::tempdir().expect("tempdir");
+        chmod(root.path(), 0o700);
+        let file = root.path().join("file");
+        fs::write(&file, b"").expect("write");
+        chmod(&file, 0o600);
+        let detail = refused_at(resolve_owned_private_dir(&file), &file);
+        assert_eq!(detail, "it is not a directory");
+        let dir = root.path().join("dir");
+        create_private_dir(&dir).expect("made");
+        resolve_owned_private_dir(&dir).expect("the control");
     }
 
     /// An owner-only directory of ours directly under `/tmp`, whose every
