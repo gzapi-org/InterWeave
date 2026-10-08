@@ -236,6 +236,36 @@ out="$(run "$R")"
 help_out="$(bash "$CHECK" --help 2>/dev/null)"
 [[ "$help_out" == *"passes silently-green"* ]] && ok "--help prints the help block" || bad "--help should print help"
 
+# The hand-over to agent-fabric's check-guards-are-wired.sh: every case above ran the
+# real one (CI points AGENT_FABRIC_ROOT at its pinned checkout); these pin
+# what the hand-over itself promises, against a recording stub.
+hcheck() { if eval "$2"; then ok "$1"; else bad "$1" "$hout"; fi; }
+hstub="$(mktemp -d)"
+mkdir -p "$hstub/fabric/runtime/github" "$hstub/fabric/projects/interweave/integration/gh"
+printf '{}' > "$hstub/fabric/projects/interweave/integration/gh/guards.json"
+cat > "$hstub/fabric/runtime/github/check-guards-are-wired.sh" <<'STUB'
+#!/usr/bin/env bash
+printf 'config=%s cache=%s' "${AGENT_FABRIC_GUARDS_CONFIG-<unset>}" "${AGENT_FABRIC_TOOL_CACHE-<unset>}"; printf ' [%s]' "$@"; echo
+exit 3
+STUB
+# shellcheck disable=SC2034 # read in hcheck's eval'd conditions
+hrun() { hout="$(env -u AGENT_FABRIC_GUARDS_CONFIG -u AGENT_FABRIC_TOOL_CACHE -u INTERWEAVE_TOOL_CACHE AGENT_FABRIC_ROOT="$hstub/fabric" "$@" 2>&1)"; hrc=$?; }
+# shellcheck disable=SC2034 # read in hcheck's eval'd conditions
+hrepo="$( cd -- "$SCRIPT_DIR/../.." && pwd )"
+hrun bash "$CHECK" --root /elsewhere
+hcheck "the fabric's check-guards-are-wired gets this working copy as --root, the caller's arguments after it" '[[ $hrc -eq 3 && "$hout" == *" [--root] [$hrepo] [--root] [/elsewhere]" ]]'
+hrun bash "$CHECK" --help
+hcheck "--help is this file's own block, not the fabric's" '[[ $hrc -eq 0 && "$hout" != *"[--help]"* && "$hout" == *"agent-fabric"* ]]'
+hrun bash "$CHECK"
+hcheck "InterWeave's guards.json is named" '[[ "$hout" == "config=$hstub/fabric/projects/interweave/integration/gh/guards.json "* ]]'
+hrun env AGENT_FABRIC_GUARDS_CONFIG=/x.json bash "$CHECK"
+hcheck "an explicit AGENT_FABRIC_GUARDS_CONFIG wins" '[[ "$hout" == "config=/x.json "* ]]'
+hout="$(AGENT_FABRIC_ROOT="$hstub/none" bash "$CHECK" x 2>&1)"
+# shellcheck disable=SC2034 # read in hcheck's eval'd conditions
+hrc=$?
+hcheck "no agent-fabric: exit 2, naming where it looked" '[[ $hrc -eq 2 && "$hout" == *"agent-fabric not found at $hstub/none"* ]]'
+rm -rf "$hstub"
+
 printf '\n'
 if [ "$fail" -gt 0 ]; then
     printf 'test_check_guards_are_wired: %d passed, %d FAILED.\n' "$pass" "$fail" >&2
