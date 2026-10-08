@@ -259,6 +259,8 @@ nonce = 128-bit CSPRNG value, encoded canonically (for example base64url without
 
 When enabled by profile policy and negotiated in `hello`, defaults are `interval=30s`, `response_timeout=10s`, `max_missed=3`. The server has at most one outstanding keepalive nonce per connection; only an exact pong for the current 128-bit nonce satisfies the probe. Stale/duplicate/wrong nonces do not reset liveness state. After the configured miss threshold the daemon closes that IPC connection and releases its endpoint lease exactly as for an ordinary disconnect. Keepalive is local liveness detection only: it is not authentication, replay protection for application messages, a network heartbeat, or a lease-renewal credential.
 
+The bound runs both ways on a connection that negotiated keepalive (A 2026-10-08): the client, which knows the negotiated `interval` and `response_timeout`, ends the connection `Timeout` when no frame of any kind has arrived within `interval + response_timeout` × `max_missed`, answering its waiting calls `Timeout` — the server's pings are the heartbeat it listens for, and a server that keeps its write half open and sends nothing is detected by their absence; a client that did not negotiate keepalive has only the caller's own timeout and OS connection liveness. Gap at writing: ipc-client echoes pings and keeps no timer for a missing one (connection.rs); the timer lands with p2p-network-dev-02's carry from #224.
+
 The profile policy `ipc.keepalive.require_for_endpoint_lease` defaults to `true`. When true, any client that claims a data-plane EndpointId lease must negotiate keepalive during `hello`; otherwise endpoint claim fails with `CapabilityDenied`. Connections that do not claim an endpoint (for example a separate admin or diagnostics session) do not need keepalive solely because of this rule. Operators may set the policy false for compatibility with third-party clients, accepting that a half-open client may retain its lease until OS-level failure detection or explicit `admin.endpoints` revocation.
 
 An IPC client's receive buffer is bounded at its granted `event_queue` plus the one event its reader holds while it pauses; a client whose buffer is full stops reading its socket, so responses wait behind undrained events and, past the keepalive miss threshold, the server closes it as wedged. Draining events is part of holding a lease (A 2026-09-30).
@@ -519,9 +521,10 @@ a client branches on a call's code (`ProtocolViolation` is not retried,
 `BackendUnavailable` is), and a `BackendUnavailable` answered to a call
 whose connection is about to read `ProtocolViolation` would tell it to
 retry a session the daemon refused. No timer of its own: on a connection
-that negotiated keepalive, §Disconnect/reconnect and optional keepalive
-bounds a server that keeps its write half open and sends nothing;
-without keepalive only OS connection liveness does. Gap at writing: the
+that negotiated keepalive, the client's keepalive bound (§Disconnect/
+reconnect and optional keepalive, A 2026-10-08) ends a server that
+keeps its write half open and sends nothing with `Timeout`; without
+keepalive only the caller's own timeout and OS connection liveness do. Gap at writing: the
 ipc-client as shipped (6eb4bb58) answers every waiting call
 `BackendUnavailable` at once on a write failure and lets a later `close`
 frame change only the session's code — two codes; the binding moves to
