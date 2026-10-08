@@ -16,8 +16,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use interweave_ipc_protocol::{
-    Cancel, DecodedFrame, Frame, FrameError, HELLO_TIMEOUT, Hello, HelloResponse, IPC_MAX_MINOR,
-    IpcVersion, Request, RequestFrame, RequestId, ResponseFrame, decode_frame,
+    CLIENT_SILENCE_TIMEOUT, Cancel, DecodedFrame, Frame, FrameError, HELLO_TIMEOUT, Hello,
+    HelloResponse, IPC_MAX_MINOR, IpcVersion, Request, RequestFrame, RequestId, ResponseFrame,
+    decode_frame,
 };
 use interweave_local_client_api::{LocalSessionEvent, SessionEvent};
 use interweave_transport_api::TransportError;
@@ -513,6 +514,16 @@ async fn write_loop(
 /// waits on afterwards can hold a call: a server that stopped reading and
 /// kept its write half open sends nothing more to wait for
 /// (`a_failed_write_ends_the_session_before_the_reader_sees_it`).
+///
+/// And it bounds a silent server, once it has evidence the server runs
+/// keepalive: [`CLIENT_SILENCE_TIMEOUT`] arms at the first `ping` read --
+/// the wire says nothing else about keepalive, and a daemon with it off
+/// never pings (`no_ping_read_never_times_out`) -- and then, with no
+/// frame of any kind read for that long, the connection ends `Timeout`
+/// and so does every waiting call (`a_ping_then_silence_ends_timeout`).
+/// A reader paused on a full buffer is not reading, so the bound is
+/// suspended there and starts afresh when it reads again
+/// (`a_paused_reader_does_not_time_out`).
 async fn read_loop(
     mut reader: Reader,
     version: IpcVersion,
@@ -522,6 +533,9 @@ async fn read_loop(
     (ended, mut write_failed): (watch::Sender<bool>, watch::Receiver<bool>),
 ) {
     let mut draining = false;
+    // When the silence bound ends the connection: `None` until a ping is
+    // read.
+    let mut silence: Option<tokio::time::Instant> = None;
     let (code, clean, by) = loop {
         let next = if draining {
             match reader.next_now() {
@@ -540,8 +554,16 @@ async fn read_loop(
                     continue;
                 }
                 next = reader.next() => next,
+                () = tokio::time::sleep_until(silence.unwrap_or_else(tokio::time::Instant::now)),
+                    if silence.is_some() =>
+                {
+                    break (TransportError::Timeout, false, EndedBy::Reader);
+                }
             }
         };
+        if let (Ok(Some(_)), Some(deadline)) = (&next, silence.as_mut()) {
+            *deadline = tokio::time::Instant::now() + CLIENT_SILENCE_TIMEOUT;
+        }
         match next {
             Ok(Some(Frame::Response(response))) => {
                 // An id no call waits for was cancelled: discarded.
@@ -584,6 +606,10 @@ async fn read_loop(
                         }
                     }
                 };
+                // Reading again: the suspended bound starts afresh.
+                if let Some(deadline) = silence.as_mut() {
+                    *deadline = tokio::time::Instant::now() + CLIENT_SILENCE_TIMEOUT;
+                }
                 match room {
                     Ok(permit) => {
                         permit.send(event);
@@ -596,6 +622,8 @@ async fn read_loop(
                 }
             }
             Ok(Some(Frame::Ping(ping))) => {
+                // The server runs keepalive: the silence bound is armed.
+                silence.get_or_insert_with(|| tokio::time::Instant::now() + CLIENT_SILENCE_TIMEOUT);
                 // A nonce is 64 characters at most, far inside the
                 // ceiling; were its echo refused, the ping would go
                 // unanswered and the server's keepalive would decide.

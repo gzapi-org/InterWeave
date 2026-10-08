@@ -31,3 +31,5 @@ tokio = { workspace = true }
 [dev-dependencies]
 serde_json = { workspace = true }
 tempfile = { workspace = true }
+# The paused clock: the keepalive silence bound is minutes long.
+tokio = { workspace = true, features = ["test-util"] }

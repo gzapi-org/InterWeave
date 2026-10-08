@@ -479,6 +479,111 @@ async fn a_ping_is_echoed_with_its_nonce() {
     }
 }
 
+/// Write a ping and read its echo: the server runs keepalive.
+async fn ping(server: &mut Server) {
+    server
+        .write(&json!({"type": "ping", "nonce": "AAAAAAAAAAAAAAAAAAAAAA"}))
+        .await;
+    assert!(matches!(server.read().await, Some(Frame::Pong(_))));
+}
+
+/// No ping read, no silence bound: a daemon with keepalive off never
+/// pings, and its idle client is bounded only by OS liveness and the
+/// caller's own timeouts (`LOCAL-IPC.md`, A 2026-10-08).
+#[tokio::test(start_paused = true)]
+async fn no_ping_read_never_times_out() {
+    let script = Script::new();
+    let (session, _server) = opened(&script, 8, &["events", "commands"]).await;
+    tokio::time::sleep(Duration::from_secs(600)).await;
+    assert_eq!(
+        session.events(0).await.map(|e| e.len()),
+        Ok(0),
+        "live after ten silent minutes"
+    );
+}
+
+/// A ping read arms the bound: 120 s with no frame read then ends the
+/// connection `Timeout`, and the call waiting on the silent server
+/// answers the same code -- at the bound, not before.
+#[tokio::test(start_paused = true)]
+async fn a_ping_then_silence_ends_timeout() {
+    use interweave_ipc_protocol::CLIENT_SILENCE_TIMEOUT;
+    use interweave_transport_api::TransportError;
+    let script = Script::new();
+    let (session, mut server) = opened(&script, 8, &["events", "commands"]).await;
+    // Taken before the ping is written, so the bound is armed after it;
+    // the paused clock may move while the echo is read, within PATIENCE.
+    let armed = tokio::time::Instant::now();
+    ping(&mut server).await;
+    let answer = tokio::time::timeout(Duration::from_secs(600), session.join(general()))
+        .await
+        .expect("the call comes back");
+    let waited = armed.elapsed();
+    assert_eq!(answer, Err(TransportError::Timeout));
+    assert!(
+        waited >= CLIENT_SILENCE_TIMEOUT && waited < CLIENT_SILENCE_TIMEOUT + PATIENCE,
+        "at the bound: {waited:?}"
+    );
+    assert_eq!(
+        session.events(0).await.map(|e| e.len()),
+        Err(TransportError::Timeout),
+        "the session ends with the same code"
+    );
+    drop(server);
+}
+
+/// A reader paused on a full buffer is not reading: the bound is
+/// suspended, and the fate of a client that never drains is the server's
+/// wedge close. Drained, the reader reads again and the bound starts
+/// afresh -- the control, ending `Timeout` once it has.
+#[tokio::test(start_paused = true)]
+async fn a_paused_reader_does_not_time_out() {
+    use interweave_ipc_protocol::CLIENT_SILENCE_TIMEOUT;
+    use interweave_transport_api::TransportError;
+    let script = Script::new();
+    let (session, mut server) = opened(&script, 1, &["events", "commands"]).await;
+    ping(&mut server).await;
+    server.event(0).await;
+    server.event(1).await;
+    tokio::time::sleep(Duration::from_secs(600)).await;
+    assert_eq!(
+        session.events(0).await.map(|e| e.len()),
+        Ok(0),
+        "paused for ten minutes, still live"
+    );
+    assert!(
+        !session
+            .events(usize::MAX)
+            .await
+            .expect("drained")
+            .is_empty()
+    );
+    tokio::time::sleep(CLIENT_SILENCE_TIMEOUT + Duration::from_secs(1)).await;
+    assert_eq!(
+        session.events(0).await.map(|e| e.len()),
+        Err(TransportError::Timeout),
+        "reading again, the bound ran"
+    );
+    drop(server);
+}
+
+/// A healthy server pinging at the default interval never lets the bound
+/// fire.
+#[tokio::test(start_paused = true)]
+async fn a_server_pinging_at_the_default_interval_never_times_out() {
+    let script = Script::new();
+    let (session, mut server) = opened(&script, 8, &["events", "commands"]).await;
+    for _ in 0..20 {
+        ping(&mut server).await;
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    }
+    assert_eq!(
+        session.events(0).await.map(|e| e.len()),
+        Ok(0),
+        "live after ten minutes of pings"
+    );
+}
+
 /// A server that ends the connection itself with a `close` frame -- here
 /// answering the client's Finish, after `close` asked -- is reported by
 /// `close`, however the timing falls.
