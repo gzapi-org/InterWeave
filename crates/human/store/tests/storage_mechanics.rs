@@ -1382,11 +1382,12 @@ fn a_link_above_the_state_directory_is_judged_by_where_it_sits() {
 #[cfg(unix)]
 #[test]
 fn a_companion_that_is_a_link_is_refused_not_followed() {
-    // A `-wal` or `-shm` left as a link to an owner-only file elsewhere is
+    // A companion left as a link to an owner-only file elsewhere is
     // judged as what is at the path, never as its target, and the target
-    // is not touched. Without the store's judgement SQLite refuses it too,
-    // but as `CannotOpen`, which reads as a failure worth retrying; the
-    // refusal must say what is wrong.
+    // is not touched. Without the store's judgement SQLite refuses a
+    // linked `-wal` or `-shm` as `CannotOpen`, which reads as a failure
+    // worth retrying, and opens over a linked `-journal`; the refusal must
+    // say what is wrong.
     use std::os::unix::fs::PermissionsExt as _;
     for suffix in ["-wal", "-shm", "-journal"] {
         let dir = tempfile::tempdir().expect("tempdir");
