@@ -3538,6 +3538,7 @@ dependencies = [
 name = "interweave-interoperability-tests"
 version = "0.0.0"
 dependencies = [
+ "interweave-independent-codecs",
  "interweave-local-client-api",
  "interweave-local-client-conformance-tests",
  "interweave-profile-config",
@@ -3545,6 +3546,7 @@ dependencies = [
  "interweave-test-support",
  "interweave-transport-api",
  "interweave-transport-composition",
+ "interweave-transport-runtime",
  "serde_norway",
  "tempfile",
  "tokio",
