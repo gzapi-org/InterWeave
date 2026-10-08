@@ -827,14 +827,18 @@ mod tests {
             Err(PersistError::DirectoryNotPrivate { .. })
         ));
 
+        // The DIRECTORY'S OWN owner, asked of a directory straight under
+        // `/tmp`: every ancestor there is root's, so another uid is
+        // refused at the directory itself and not at an ancestor of ours
+        // (#224 review A F1: under our own tempdir the ancestor walk
+        // answered first and the owner check went untested).
+        let alone = owned_private_dir_under_tmp();
         let uid = effective_uid().expect("readable");
-        require_owned_private_dir_as(&dir, uid).expect("the control: ours");
-        match require_owned_private_dir_as(&dir, uid.wrapping_add(1)) {
-            Err(PersistError::DirectoryNotPrivate { detail, .. }) => {
-                assert!(
-                    detail.contains("owned by uid"),
-                    "the detail names the owner"
-                );
+        require_owned_private_dir_as(alone.path(), uid).expect("the control: ours");
+        match require_owned_private_dir_as(alone.path(), uid.wrapping_add(1)) {
+            Err(PersistError::DirectoryNotPrivate { path, detail }) => {
+                assert_eq!(path, alone.path(), "refused at the directory itself");
+                assert!(detail.starts_with("owned by uid"), "{detail}");
             }
             other => panic!("refused as another's: {other:?}"),
         }
@@ -844,6 +848,25 @@ mod tests {
             require_owned_private_dir(&dir),
             Err(PersistError::DirectoryNotPrivate { .. })
         ));
+    }
+
+    /// An owner-only directory of ours directly under `/tmp`, whose every
+    /// ancestor is root's: `/tmp` is asserted root's and sticky, the
+    /// precondition that lets another uid be refused at the directory
+    /// alone.
+    #[cfg(target_os = "linux")]
+    fn owned_private_dir_under_tmp() -> tempfile::TempDir {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let tmp = fs::symlink_metadata("/tmp").expect("/tmp");
+        assert!(
+            tmp.uid() == 0 && tmp.permissions().mode() & 0o1000 != 0,
+            "the precondition: /tmp is root's and sticky"
+        );
+        let dir = tempfile::Builder::new()
+            .tempdir_in("/tmp")
+            .expect("a directory under /tmp");
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).expect("chmod");
+        dir
     }
 
     /// `mode` on `dir`, whatever the umask gave it.
