@@ -332,6 +332,41 @@ async fn a_failed_write_ends_the_session_before_the_reader_sees_it() {
     drop(held);
 }
 
+/// The server's own `close` decides the code the session ends with, even
+/// when a write of the client's fails against the socket the server is
+/// closing first (#224 review B F1): the writer's end is provisional and
+/// the `close` read after it replaces it. The call that met the failed
+/// write is answered at once, as the session ends; it is the session's
+/// end that names the server's reason. Current-thread, so the writer
+/// runs before the reader is polled -- the order that loses the code.
+#[tokio::test(flavor = "current_thread")]
+async fn a_failed_write_keeps_the_servers_close_code() {
+    use interweave_transport_api::TransportError;
+    let script = Script::new();
+    let (session, mut server) = opened(&script, 8, &["events", "commands"]).await;
+    server
+        .write(&json!({"type": "close", "code": "ShuttingDown"}))
+        .await;
+    drop(server);
+    let answer = tokio::time::timeout(PATIENCE, session.join(general()))
+        .await
+        .expect("the call comes back");
+    assert!(answer.is_err(), "no server, no join: {answer:?}");
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let end = session.events(0).await.map(|e| e.len());
+        if end == Err(TransportError::ShuttingDown) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the server's code never replaced the writer's: {end:?}"
+        );
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 /// A server granting more than a session may hold is capped, not trusted.
 #[tokio::test]
 async fn a_grant_past_the_session_ceiling_is_capped() {
