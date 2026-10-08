@@ -487,12 +487,13 @@ fn finish(shared: &Shared, inbox: Option<&Inbox>, code: TransportError, clean: b
     }
 }
 
-/// The writer. One whose write fails ends the connection BEFORE it drops
-/// its queue, so a call that fails on the dropped queue finds the end
-/// already recorded and `events` already refusing, and then tells the
-/// reader, which may be waiting on a server that stopped reading and
-/// kept writing, to read what has arrived and stop
-/// (`a_failed_write_ends_the_session_before_the_reader_sees_it`).
+/// The writer. One whose write fails records a provisional end, which no
+/// caller sees ([`Shared::ended`]), and then tells the reader -- which may
+/// be waiting on a server that stopped reading and kept its write half
+/// open -- to read what has arrived and stop. The reader's end answers
+/// every call, a send refused by the stopped writer's queue included, and
+/// makes the code final
+/// (`a_failed_write_ends_the_session_though_the_server_keeps_writing_open`).
 async fn write_loop(
     mut write: OwnedWriteHalf,
     mut out: mpsc::Receiver<Outgoing>,
@@ -540,7 +541,7 @@ async fn write_loop(
 /// ends with (`a_failed_write_keeps_the_servers_close_code`). Nothing it
 /// waits on afterwards can hold a call: a server that stopped reading and
 /// kept its write half open sends nothing more to wait for
-/// (`a_failed_write_ends_the_session_before_the_reader_sees_it`).
+/// (`a_failed_write_ends_the_session_though_the_server_keeps_writing_open`).
 ///
 /// And it bounds a silent server, once it has evidence the server runs
 /// keepalive: [`CLIENT_SILENCE_TIMEOUT`] arms at the first `ping` read --
@@ -566,7 +567,8 @@ async fn read_loop(
     let (code, clean, by) = loop {
         let next = if draining {
             match reader.next_now() {
-                // Nothing more has arrived: the provisional end stands.
+                // Nothing more has arrived, or the drain budget is spent:
+                // the provisional end stands.
                 Ok(None) => break (TransportError::BackendUnavailable, false, EndedBy::Reader),
                 next => next,
             }
@@ -745,7 +747,7 @@ impl Reader {
     /// in the socket went unread when the writer failed first (measured,
     /// current-thread). The duplicate shares the descriptor's non-blocking
     /// mode, so its read never waits either
-    /// (`a_failed_write_ends_the_session_before_the_reader_sees_it`, whose
+    /// (`a_failed_write_ends_the_session_though_the_server_keeps_writing_open`, whose
     /// server keeps its write half open, would hang if it did).
     fn next_now(&mut self) -> Result<Option<Frame>, TransportError> {
         loop {

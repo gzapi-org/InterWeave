@@ -299,15 +299,15 @@ async fn a_call_on_an_ended_connection_is_refused_not_left_waiting() {
     );
 }
 
-/// A write that fails ends the connection then and there, before the
-/// reader sees anything: the server here stops reading and keeps its
-/// write half open, so the client's next write fails and its reader goes
-/// on waiting. The call's error and the session's end are one fact
-/// (#199's carried risk: in between, `events(0)` read live, so a caller
-/// asking whether the session ended took the failure for a refusal).
-/// The control is the session reading live before the write.
+/// A write that fails ends the connection though the server stops
+/// reading and keeps its write half open, so nothing it sends will end the
+/// reader: the reader reads what has arrived and ends, and the call comes
+/// back. The call's error and the session's end are one fact (#199's
+/// carried risk: a call failed while `events(0)` read live, so a caller
+/// asking whether the session ended took the failure for a refusal). The
+/// control is the session reading live before the write.
 #[tokio::test]
-async fn a_failed_write_ends_the_session_before_the_reader_sees_it() {
+async fn a_failed_write_ends_the_session_though_the_server_keeps_writing_open() {
     let script = Script::new();
     let (session, server) = opened(&script, 8, &["events", "commands"]).await;
     assert!(session.events(0).await.is_ok(), "the control: live");

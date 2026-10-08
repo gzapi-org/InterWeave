@@ -13,8 +13,10 @@
 //! `events`, which takes from what the server already pushed.
 //!
 //! Five things differ from the in-process binding, all of the wire and
-//! all named in `LOCAL-IPC.md` (the first three A 2026-09-30, the last
-//! two A 2026-10-08):
+//! all named in the contracts: the first three in `LOCAL-IPC.md` (A
+//! 2026-09-30), the fourth in `LOCAL-CLIENT.md` §Taking events and the
+//! fifth in `LOCAL-IPC.md` §Disconnect/reconnect and optional keepalive
+//! (both A 2026-10-08):
 //!
 //! - Events are pushed, so `events` returns what has ARRIVED; one the
 //!   binding admitted may still be on its way.
