@@ -40,7 +40,12 @@ mod tests {
 
     #[test]
     fn held_absent_and_cannot_tell_are_three_answers() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        // Owner-only at creation: under umask 002 a bare `tempdir()` is
+        // group-writable and the lock refuses it as an ancestor.
+        let dir = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .expect("tempdir");
         let paths = paths(dir.path());
         assert_eq!(present(&paths), Ok(false), "no lock file: no daemon");
         let held = ProfileLock::acquire(&paths, Duration::ZERO).expect("the daemon's lock");
