@@ -1377,7 +1377,7 @@ impl HumanStore {
 /// the same walk; this judgement is the store's own, so a caller that
 /// opens it without that lock gets the rule too.
 fn private_dir(dir: &Path) -> Result<std::path::PathBuf, StoreError> {
-    use std::path::Component;
+    let dir = &beyond_missing(dir)?;
     // The missing components, innermost first, and the nearest that is
     // there; an empty ancestor is the working directory.
     let mut missing = Vec::new();
@@ -1389,16 +1389,7 @@ fn private_dir(dir: &Path) -> Result<std::path::PathBuf, StoreError> {
             ancestor
         };
         if absent(ancestor)? {
-            // Only a NAME is a directory this process makes: `a/new/..`
-            // is `a` itself, which `mkdir` answers "exists", and judging
-            // it as one of ours refused a path that opened before
-            // (`a_path_through_a_missing_directory_and_back_opens_as_before`).
-            if matches!(
-                ancestor.components().next_back(),
-                Some(Component::Normal(_))
-            ) {
-                missing.push(ancestor);
-            }
+            missing.push(ancestor);
         } else {
             existing = ancestor;
             break;
@@ -1411,6 +1402,42 @@ fn private_dir(dir: &Path) -> Result<std::path::PathBuf, StoreError> {
         create_each(&missing)?;
     }
     profile_config::resolve_owned_private_dir(dir).map_err(|e| StoreError::from_persist(dir, e))
+}
+
+/// `dir` with every `.` and every `..` that follows a MISSING component
+/// taken out by text, so each missing component is a name this process
+/// will make.
+///
+/// Exact, not an approximation: a component that is not there cannot be
+/// a link, so `new/..` is its parent and nothing else. Left in, `mkdir`
+/// answered "exists" for `x/new/..` or `x/new/../wide` -- an existing
+/// directory -- and it was judged as one of ours and refused, where the
+/// same path opened before
+/// (`a_path_through_a_missing_directory_and_back_opens_as_before`). A
+/// `..` after a component that IS there is kept, for the walk to resolve
+/// as the kernel does.
+fn beyond_missing(dir: &Path) -> Result<std::path::PathBuf, StoreError> {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for component in dir.components() {
+        let here = if out.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            out.as_path()
+        };
+        let missing = absent(here)?;
+        match component {
+            Component::CurDir if missing => {}
+            Component::ParentDir if missing => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        out.push(".");
+    }
+    Ok(out)
 }
 
 /// Create `components`, outermost first, each owner-only and each by

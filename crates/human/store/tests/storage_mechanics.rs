@@ -1292,6 +1292,28 @@ fn a_path_through_a_missing_directory_and_back_opens_as_before() {
         .permissions()
         .mode();
     assert_eq!(mode & 0o777, 0o700, "made owner-only");
+
+    // And back down into a directory that IS there, sound but not
+    // owner-only: `x/other/../wide` is `x/wide`, an ancestor, not ours to
+    // judge as private.
+    let wide = x.join("wide");
+    std::fs::create_dir(&wide).expect("mkdir");
+    std::fs::set_permissions(&wide, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let path = x
+        .join("other")
+        .join("..")
+        .join("wide")
+        .join("b")
+        .join("human.sqlite3");
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
+    assert!(
+        wide.join("b").join("human.sqlite3").is_file(),
+        "the store is at x/wide/b"
+    );
+    assert!(
+        !x.join("other").exists(),
+        "nothing made for a name the path backs out of"
+    );
 }
 
 #[cfg(target_os = "linux")]
