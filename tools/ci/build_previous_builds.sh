@@ -108,15 +108,13 @@ src=""
 partial=""
 cleanup() {
     [ -z "$partial" ] || rm -rf -- "$partial"
-    if [ -n "$src" ]; then
-        git -C "$ROOT" worktree remove --force "$src" >/dev/null 2>&1 || true
-        git -C "$ROOT" worktree prune >/dev/null 2>&1 || true
-    fi
+    [ -z "$src" ] || git -C "$ROOT" worktree remove --force "$src" >/dev/null 2>&1 || true
     [ -z "$scratch" ] || rm -rf -- "$scratch"
+    # After the rm: prune drops only a registration whose directory is
+    # gone, so it is the backstop for a remove that failed.
+    [ -z "$src" ] || git -C "$ROOT" worktree prune >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
 
 for i in "${!labels[@]}"; do
     label="${labels[$i]}"; sha="${shas[$i]}"

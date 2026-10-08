@@ -88,7 +88,10 @@ jobs:
     runs-on: ubuntu-latest
     # Measured 8.5 min over 12 runs, 2026-09-29 (clippy 74 s, test build
     # 177 s, 104 test binaries ~215 s); the cap is for a hang, which
-    # otherwise runs to GitHub's six-hour default.
+    # otherwise runs to GitHub's six-hour default. A miss on the
+    # previous-builds cache (below) adds a cold release build of every
+    # entry: 7m38s for the first on a 6-core host, 2026-10-08, not yet
+    # timed on a runner.
     timeout-minutes: 25
     steps:
       # Pinned to a commit, not a tag. A tag is mutable by whoever owns

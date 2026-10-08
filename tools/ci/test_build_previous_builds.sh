@@ -5,8 +5,8 @@
 #
 # Self-test for build_previous_builds.sh.
 #
-# git and cargo are stubs on PATH (rustup is absent, so the toolchain
-# step is skipped), each logging its arguments and told by a file in the
+# git and cargo are stubs on PATH (rustup is absent unless a case puts its
+# stub first), each logging its arguments and told by a file in the
 # sandbox how to misbehave: git's worktree add makes a tree with the two
 # apps, cargo leaves target/release/<bin> where CARGO_TARGET_DIR says.
 # Every case runs the script against a list of its own. The real build
@@ -52,8 +52,10 @@ case "\$1" in
       add) [[ -e "$SANDBOX/worktree-fails" ]] && exit 128
            path="\${@: -2:1}"; mkdir -p "\$path/apps/transport-daemon" "\$path/apps/transportctl"
            echo "\${@: -1}" > "\$path/HEAD-SHA" ;;
-      remove) rm -rf "\${@: -1}" ;;
-      prune) ;;
+      remove) [[ -e "$SANDBOX/remove-fails" ]] && exit 128
+              rm -rf "\${@: -1}" ;;
+      prune) if compgen -G "$SANDBOX/tmp/previous-build.*" >/dev/null; then echo "prune: scratch still there" >> "$SANDBOX/log"
+             else echo "prune: scratch gone" >> "$SANDBOX/log"; fi ;;
     esac ;;
 esac
 EOF
@@ -67,11 +69,25 @@ for a in "\$@"; do [[ "\$prev" == "--bin" ]] && bin="\$a"; prev="\$a"; done
 echo "cargo \$* sha=\$(cat HEAD-SHA 2>/dev/null) target=\${CARGO_TARGET_DIR-unset}" >> "$SANDBOX/log"
 [[ -e "$SANDBOX/cargo-fails-\$bin" ]] && exit 101
 [[ -e "$SANDBOX/cargo-no-output-\$bin" ]] && exit 0
+[[ -e "$SANDBOX/cargo-hangs" ]] && { touch "$SANDBOX/cargo-started"; sleep 30; exit 0; }
 mkdir -p "\$CARGO_TARGET_DIR/release"
 printf '#!/bin/sh\necho %s %s\n' "\$bin" "\$(cat HEAD-SHA)" > "\$CARGO_TARGET_DIR/release/\$bin"
 chmod +x "\$CARGO_TARGET_DIR/release/\$bin"
 EOF
-chmod +x "$BIN/git" "$BIN/cargo"
+RUSTUP_BIN="$SANDBOX/rustup-bin"
+mkdir -p "$RUSTUP_BIN"
+# rustup: records the tree it ran in; rustup-inactive makes `show
+# active-toolchain` fail (the pinned one is not installed), and
+# rustup-install-fails the install.
+cat > "$RUSTUP_BIN/rustup" <<EOF
+#!/usr/bin/env bash
+echo "rustup \$* sha=\$(cat HEAD-SHA 2>/dev/null)" >> "$SANDBOX/log"
+case "\$1" in
+  show) [[ -e "$SANDBOX/rustup-inactive" ]] && exit 1; exit 0 ;;
+  toolchain) [[ -e "$SANDBOX/rustup-install-fails" ]] && exit 1; exit 0 ;;
+esac
+EOF
+chmod +x "$BIN/git" "$BIN/cargo" "$RUSTUP_BIN/rustup"
 # PATH without rustup: the stubs, then the system's own tools, minus any
 # directory that holds a real rustup.
 SYS_PATH=""
@@ -83,7 +99,8 @@ done
 
 reset() {
     rm -rf "$SANDBOX/out" "$SANDBOX/tmp" "$SANDBOX"/log "$SANDBOX"/known-commits \
-           "$SANDBOX"/*-fails* "$SANDBOX"/cargo-no-output-*
+           "$SANDBOX"/*-fails* "$SANDBOX"/cargo-no-output-* \
+           "$SANDBOX"/rustup-inactive "$SANDBOX"/cargo-hangs "$SANDBOX"/cargo-started
     mkdir -p "$SANDBOX/tmp"
 }
 # run <list text> [args…]: the script against that list, into out/.
@@ -190,7 +207,8 @@ failed() {  # failed <name> <sandbox flag file> <expected message part>
     reset
     touch "$SANDBOX/$2"
     run "stage13-45ba3928 $SHA_A" "$SANDBOX/out"
-    if [[ $rc -eq 1 && "$out" == *"$3"* && -z "$(ls -A "$SANDBOX/out")" ]] && scratch_empty; then
+    if [[ $rc -eq 1 && "$out" == *"$3"* && -z "$(ls -A "$SANDBOX/out")" ]] && scratch_empty \
+       && { ! grep -q 'worktree add' "$SANDBOX/log" || grep -q '^git .* worktree remove --force ' "$SANDBOX/log"; }; then
         pass "fails, leaving no entry and no scratch: $1"
     else fail "fails, leaving no entry and no scratch: $1" "rc=$rc $out $(ls -A "$SANDBOX/out" "$SANDBOX/tmp")"; fi
 }
@@ -198,6 +216,62 @@ failed "the fetch" fetch-fails "could not fetch"
 failed "the worktree" worktree-fails "could not check"
 failed "the second app's build" cargo-fails-transportctl "could not build transportctl"
 failed "a build that leaves no binary" cargo-no-output-transport-daemon "left no executable"
+
+if grep -q 'worktree add' "$SANDBOX/log" && grep -q '^git .* worktree remove --force ' "$SANDBOX/log"; then
+    pass "(the failure cases above that added a worktree removed it)"
+else fail "(the failure cases above that added a worktree removed it)" "$(cat "$SANDBOX/log")"; fi
+
+# --- a remove that fails: prune, run once the scratch is gone ----------
+reset
+touch "$SANDBOX/remove-fails"
+run "stage13-45ba3928 $SHA_A" "$SANDBOX/out"
+if [[ $rc -eq 0 ]] && scratch_empty && grep -qx 'prune: scratch gone' "$SANDBOX/log" \
+   && ! grep -q 'prune: scratch still there' "$SANDBOX/log"; then
+    pass "a failed worktree remove is pruned, after the scratch is gone"
+else fail "a failed worktree remove is pruned, after the scratch is gone" "rc=$rc $(cat "$SANDBOX/log")"; fi
+
+# --- rustup, when present, installs the commit's toolchain -------------
+run_rustup() {
+    printf '%s\n' "$1" > "$SANDBOX/list"; shift
+    out="$(PATH="$RUSTUP_BIN:$BIN:$SYS_PATH" TMPDIR="$SANDBOX/tmp" RUNNER_TEMP="" \
+          bash "$UNDER_TEST" --list "$SANDBOX/list" "$@" 2>&1)"
+    rc=$?
+}
+reset
+touch "$SANDBOX/rustup-inactive"
+run_rustup "stage13-45ba3928 $SHA_A" "$SANDBOX/out"
+if [[ $rc -eq 0 ]] && grep -qx "rustup toolchain install sha=$SHA_A" "$SANDBOX/log" \
+   && [[ "$(grep -n "rustup toolchain install" "$SANDBOX/log" | cut -d: -f1)" -lt "$(grep -n '^cargo ' "$SANDBOX/log" | head -1 | cut -d: -f1)" ]]; then
+    pass "rustup installs the toolchain in the commit's own tree, before cargo"
+else fail "rustup installs the toolchain in the commit's own tree, before cargo" "rc=$rc $(cat "$SANDBOX/log")"; fi
+reset
+run_rustup "stage13-45ba3928 $SHA_A" "$SANDBOX/out"
+if [[ $rc -eq 0 ]] && grep -qx "rustup show active-toolchain sha=$SHA_A" "$SANDBOX/log" && ! grep -q 'rustup toolchain install' "$SANDBOX/log"; then
+    pass "an installed toolchain is not installed again"
+else fail "an installed toolchain is not installed again" "rc=$rc $(cat "$SANDBOX/log")"; fi
+reset
+touch "$SANDBOX/rustup-inactive" "$SANDBOX/rustup-install-fails"
+run_rustup "stage13-45ba3928 $SHA_A" "$SANDBOX/out"
+if [[ $rc -eq 1 && "$out" == *"could not install the toolchain"* && -z "$(ls -A "$SANDBOX/out")" ]] && scratch_empty \
+   && ! grep -q '^cargo ' "$SANDBOX/log"; then
+    pass "a toolchain that will not install fails before cargo, leaving nothing"
+else fail "a toolchain that will not install fails before cargo, leaving nothing" "rc=$rc $out"; fi
+
+# --- TERM mid-build: the run ends, leaving no entry and no scratch -----
+# To the process group, as a cancelled CI step's is, so cargo ends too.
+reset
+touch "$SANDBOX/cargo-hangs"
+printf '%s\n' "stage13-45ba3928 $SHA_A" > "$SANDBOX/list"
+PATH="$BIN:$SYS_PATH" TMPDIR="$SANDBOX/tmp" RUNNER_TEMP="" \
+    setsid bash "$UNDER_TEST" --list "$SANDBOX/list" "$SANDBOX/out" >"$SANDBOX/term-out" 2>&1 &
+pid=$!
+for _ in $(seq 100); do [[ -e "$SANDBOX/cargo-started" ]] && break; sleep 0.1; done
+kill -TERM -- "-$pid" 2>/dev/null
+wait "$pid"; rc=$?
+if [[ -e "$SANDBOX/cargo-started" && $rc -eq 143 && -z "$(ls -A "$SANDBOX/out")" ]] && scratch_empty \
+   && grep -q '^git .* worktree remove --force ' "$SANDBOX/log"; then
+    pass "TERM mid-build exits 143, leaving no entry, worktree or scratch"
+else fail "TERM mid-build exits 143, leaving no entry, worktree or scratch" "rc=$rc $(cat "$SANDBOX/term-out") $(ls -A "$SANDBOX/out" "$SANDBOX/tmp")"; fi
 
 # --- usage --------------------------------------------------------------
 reset
