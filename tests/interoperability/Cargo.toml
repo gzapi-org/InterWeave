@@ -4,9 +4,10 @@
 # Stage 12's part of the interoperability suite (plan §15 (2)): two
 # runtimes composed from two different shipped example profiles exchange
 # direct and broadcast, and the frozen fixture vectors travel through the
-# composed runtime unchanged. The desktop <-> Android, upgrade and
-# independent-codec matrices are Stage 17's. TEST-ONLY; nothing depends on
-# this package.
+# composed runtime unchanged. Stage 17 (plan §20 (c)) adds production
+# against the independent codecs and the upgrade matrix's rows that need
+# no older build; the previous-build axis and the desktop <-> Android
+# matrix are still to come. TEST-ONLY; nothing depends on this package.
 [package]
 name = "interweave-interoperability-tests"
 version = "0.0.0"
