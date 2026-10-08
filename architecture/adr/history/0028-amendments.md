@@ -210,3 +210,77 @@ foreign-writable or foreign-owned ancestor refused at load, a
 group-writable `config.yaml` refused, a `config.yaml` that is a link
 refused, the plain XDG layout as the control)
 are p2p-network-dev's, on the same PR as this note.
+
+**Closed 2026-10-08 (InterWeave #226, 36e6adc6, rust-ui-dev).** The carried item above is done: `HumanStore::open` checks the nearest existing ancestor with `profile-config`'s walk before creating anything, creates missing components one at a time, resolves a `..` after a missing component by text first, then judges the directory with `resolve_owned_private_dir` and opens the database and every companion (`-wal`, `-shm`, `-journal`, each checked as what is at its path, never followed) under the path that returns; a directory, ancestor or link that breaks the rule is refused as `StoreError::DirectoryNotPrivate`, naming it and the rule it broke, and a companion that is a link or not owner-only as `NotAFile` or `PermissionsTooOpen`. The body, the log row, the digest, the threat row and configuration.md read so.
+
+### Amendment 2026-10-08 — The ancestor walk stops at the trust boundary the binding supplies
+
+**Trigger.** rust-ui-dev's observation (GZCoord 01a11b1f-2246), while
+routing the human store through the ancestor funnel on the desktop: the
+2026-10-08 rule accepts a private directory only when every ancestor up
+to `/` is owned by root or the effective uid with no group- or
+other-write bit, and it binds every production binding, the Android
+embedded runtime and its store included. On Android an app's private
+directory sits under `/data` and `/data/data`, both `0771 system:system`
+(AOSP `system/core/rootdir/init.rc`), reached through the `/data/user/0`
+link — owned by uid 1000, not root and not the app's uid, group-
+writable. The rule as written refuses every app-private directory
+there: the human store, the trust overlay the embedded runtime keeps,
+the profile lock. Not measured on a device (none attached; OEM layouts
+may differ); the host-side store tests show the funnel refusing a
+`0777` non-sticky ancestor, so `0771 system` is refused the same way.
+
+**Decision.** The walk runs from the private directory's parent up to a
+trust boundary the composition supplies to `profile-config`: the
+directory above which the platform, not the account, owns the layout.
+The boundary itself and everything below it are judged by the rule as
+written (owner, write bits, sticky, links); nothing above it is. The
+daemon and `transportctl` supply `/`, so on a Linux host nothing
+changes. The Android embedded runtime supplies the app's own data
+directory as the platform reports it (the parent of the files
+directory the runtime is handed), never a hard-coded `/data/data/<pkg>`:
+OEM layouts vary and are not ours to judge. Above that boundary the
+platform owns and SELinux-confines the tree per app, and an app can
+neither observe it reliably nor change it — the precondition the walk
+verifies on a Linux host is the platform's guarantee there. The boundary is canonicalised once when it is
+supplied and the walk stops at the canonical component equal to it —
+the platform reports `/data/user/0/<pkg>` while the canonical path is
+`/data/data/<pkg>` — and links traversed above it are not judged; links
+on the path below the boundary are judged as before. A private
+directory whose canonical path is not under the boundary at all — a
+configured path elsewhere, or a link below the boundary resolving
+outside it — is refused, naming the boundary: fail closed, never a walk
+past it to `/`. The platform
+creates the app's `files/`, `cache/` and `code_cache/` directories
+group-writable (`0771`, the app's own gid; `ContextImpl` chmods them),
+so a private directory under `files/` would still be refused for the
+group-write bit: the embedded runtime therefore keeps its private
+directories directly under the boundary, created by the runtime at
+`0700`, never under those platform directories. Chmodding `files/` was
+rejected (the platform may restore it); accepting group-write for the
+effective gid was rejected (shared-uid packages hold the same gid, and
+it would need its own justification). The `config.yaml` directory walk
+takes the same boundary.
+
+**Alternatives rejected.** Accepting uid 1000 (`system`) as a trusted
+owner beside root: it would also need the group-write bit accepted for
+gid 1000 and a table of modes OEMs may vary — the boundary says the same
+without enumerating the platform. Leaving the rule and refusing on
+Android until a measured exception exists: a rule the platform cannot
+meet is a rule nobody runs, and the first Android package (plan §20) would be
+built against it.
+
+**Consequences.** No code change on a Linux host; the parameter in
+`profile-config`'s resolve functions and the daemon's `/` are
+p2p-network-dev's, landing with the Android binding's first package
+(plan §20, Stage 17), not before — nothing ships refused today. The store side is
+rust-ui-dev's. The refusal text names the boundary when the component
+that broke the rule is the boundary itself. The threat model's residual
+for the ancestor-swap row names the Android trust: what sits above the
+boundary is the platform's to protect.
+
+**Propagation.** Security implications in the body; this note; the log
+row; the digest entry; configuration.md's private-directory paragraph
+(the Android sentence); threat-model.md's ancestor-swap row (the
+boundary in the control column, Android in the residual); IDENTITY.md's
+at-rest sentence names the boundary.
