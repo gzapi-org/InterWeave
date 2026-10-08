@@ -558,7 +558,13 @@ async fn a_paused_reader_does_not_time_out() {
             .expect("drained")
             .is_empty()
     );
-    tokio::time::sleep(CLIENT_SILENCE_TIMEOUT + Duration::from_secs(1)).await;
+    tokio::time::sleep(CLIENT_SILENCE_TIMEOUT / 2).await;
+    assert_eq!(
+        session.events(0).await.map(|e| e.len()),
+        Ok(0),
+        "the bound starts afresh as the reader resumes, not from before the pause"
+    );
+    tokio::time::sleep(CLIENT_SILENCE_TIMEOUT / 2 + Duration::from_secs(1)).await;
     assert_eq!(
         session.events(0).await.map(|e| e.len()),
         Err(TransportError::Timeout),
