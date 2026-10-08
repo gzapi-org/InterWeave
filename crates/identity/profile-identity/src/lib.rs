@@ -911,7 +911,12 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn a_key_directory_owned_by_another_uid_is_refused() {
         use super::{IdentityError, PersistError, ProfileIdentity, effective_uid};
+        use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::tempdir().expect("tempdir");
+        // Owner-only whatever the umask gave it: the directory's owner is
+        // what is under test, not its mode.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("owner-only");
         let path = dir.path().join("identity.key");
         let identity = ProfileIdentity::generate();
         identity.save(&path).expect("saved");
