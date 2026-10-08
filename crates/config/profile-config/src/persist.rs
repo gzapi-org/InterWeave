@@ -739,27 +739,29 @@ fn judge_ancestors(dir: &Path, uid: u32) -> Result<(), PersistError> {
 /// The rule for a directory above a private one, or on the path to one
 /// (ADR-0028 A 2026-10-08): owned by root or `uid` -- any other owner can
 /// rename its entries whatever the mode says -- and carrying no
-/// other-write bit, and no group-write bit unless its group is the
-/// owner's private group ([`owners_private_group`]), unless the sticky
-/// bit is set: in a sticky directory an entry is renamed only by its
-/// owner, the directory's owner or root, and the owner rule above already
-/// makes the directory root's or ours. One that cannot be inspected is
-/// refused, not judged on its name. `seen` is `(owner, gid, mode)`.
+/// other-write bit, and no group-write bit unless it passes
+/// [`owners_private_group`], unless the sticky bit is set: in a sticky
+/// directory an entry is renamed only by its owner, the directory's owner
+/// or root, and the owner rule above already makes the directory root's
+/// or ours. One that cannot be inspected is refused, not judged on its
+/// name. `seen` is `(owner, gid, mode)`.
 fn judge_ancestor(
     path: &Path,
     seen: std::io::Result<(u32, u32, u32)>,
     uid: u32,
 ) -> Result<(), PersistError> {
-    judge_ancestor_with(path, seen, uid, &HostNames)
+    judge_ancestor_with(path, seen, uid, &HostNames, || access_acl_at(path))
 }
 
-/// [`judge_ancestor`] reading `names`, apart so a test can stand in for
-/// the name service.
+/// [`judge_ancestor`] reading `names`, and `acl` for whether the
+/// directory carries an access ACL -- asked only of a group-writable one
+/// -- apart so a test can stand in for both.
 fn judge_ancestor_with(
     path: &Path,
     seen: std::io::Result<(u32, u32, u32)>,
     uid: u32,
     names: &impl NameService,
+    acl: impl FnOnce() -> std::io::Result<bool>,
 ) -> Result<(), PersistError> {
     let refuse = |detail: String| {
         Err(PersistError::DirectoryNotPrivate {
@@ -788,7 +790,7 @@ fn judge_ancestor_with(
             ));
         }
         if mode & 0o020 != 0
-            && let Err(detail) = owners_private_group(names, owner, gid)
+            && let Err(detail) = owners_private_group(names, uid, gid, acl())
         {
             return refuse(format!(
                 "an ancestor owned by uid {owner}, mode {mode:04o}: {detail}"
@@ -843,31 +845,54 @@ impl NameService for HostNames {
     }
 }
 
-/// ADR-0028 A 2026-10-08, "a group of one is the owner's own": a
-/// group-write bit grants nobody but the owner when the group is the
-/// owner's PRIVATE group -- its name is the owner's user name and it
-/// lists no member, as the name service answers both. The user-private
-/// group scheme gives such accounts umask `002`, so their own directories
-/// and files are `0775` and `0664`. A shared primary group is not one:
-/// the name, not the gid, is what is compared, since a scheme where every
+/// ADR-0028 A 2026-10-08, "a group of one is the owner's own" (#231): a
+/// group-write bit is accepted when the group is the PRIVATE group of
+/// `euid`, the account this process runs as -- never the directory's
+/// owner, or a root-owned directory in group `root` would pass while
+/// accounts with primary gid 0 exist -- that is, its name is that
+/// account's user name and it lists no member, as the name service
+/// answers both; and when the directory or file carries no POSIX access
+/// ACL (`acl`), since with one its group bits are the ACL's mask, not
+/// the group's grant. The user-private group scheme gives such accounts
+/// umask `002`, so their own directories and files are `0775` and
+/// `0664`. The name, not the gid, is compared: a scheme where every
 /// account's primary group is `users` would pass a gid comparison. A read
-/// that fails or finds no entry refuses. Applied by the directory walk
-/// and by `config.yaml`'s own clause (`load.rs`), so the two cannot
-/// diverge.
+/// that fails or finds no entry refuses.
+///
+/// What it does NOT see, named in the amendment as root's acts the rule
+/// accepts: another account given this group as its PRIMARY group (never
+/// listed in the member list, and no name service enumerates passwd
+/// reliably), and a name service that answers falsely.
+///
+/// Applied by the directory walk and by `config.yaml`'s own clause
+/// (`load.rs`), so the two cannot diverge.
 ///
 /// # Errors
-/// The refusal's detail, naming the group when it was read.
+/// The refusal's detail, naming the group, its gid or the ACL.
 pub(crate) fn owners_private_group(
     names: &impl NameService,
-    owner: u32,
+    euid: u32,
     gid: u32,
+    acl: std::io::Result<bool>,
 ) -> Result<(), String> {
-    let (Ok(Some(user)), Ok(Some((group, members)))) = (names.user_name(owner), names.group(gid))
+    match acl {
+        Ok(false) => {}
+        Ok(true) => {
+            return Err(format!(
+                "group-writable, and it carries an access ACL ({ACCESS_ACL}): its group bits are the ACL's mask"
+            ));
+        }
+        Err(e) => {
+            return Err(format!(
+                "group-writable; whether it carries an access ACL could not be read ({e})"
+            ));
+        }
+    }
+    let (Ok(Some(user)), Ok(Some((group, members)))) = (names.user_name(euid), names.group(gid))
     else {
-        return Err(
-            "group-writable, and whether the group is the owner's private group could not be read"
-                .to_owned(),
-        );
+        return Err(format!(
+            "group-writable; whether group {gid} is the owner's private group could not be read"
+        ));
     };
     if group == user && members.is_empty() {
         return Ok(());
@@ -875,6 +900,50 @@ pub(crate) fn owners_private_group(
     Err(format!(
         "group-writable by group {group} (gid {gid}), not the owner's private group"
     ))
+}
+
+/// The extended attribute holding a POSIX access ACL. A default ACL
+/// (`system.posix_acl_default`) is not one: a child it gives an access
+/// ACL is refused at its own turn.
+const ACCESS_ACL: &str = "system.posix_acl_access";
+
+/// Whether `path` itself -- not a link's target -- carries an access ACL.
+/// A filesystem without extended attributes carries none.
+pub(crate) fn access_acl_at(path: &Path) -> std::io::Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        acl_answer(rustix::fs::lgetxattr(path, ACCESS_ACL, &mut [0u8; 0][..]))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+}
+
+/// Whether the opened `file` carries an access ACL, asked of the handle
+/// so the file judged is the file read.
+pub(crate) fn access_acl_of(file: &fs::File) -> std::io::Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        acl_answer(rustix::fs::fgetxattr(file, ACCESS_ACL, &mut [0u8; 0][..]))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = file;
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+}
+
+/// A size query's answer read as presence: a size is an ACL, no such
+/// attribute or no attribute support is none, anything else is an error.
+#[cfg(target_os = "linux")]
+fn acl_answer(answer: rustix::io::Result<usize>) -> std::io::Result<bool> {
+    match answer {
+        Ok(_) => Ok(true),
+        Err(e) if e == rustix::io::Errno::NODATA || e == rustix::io::Errno::NOTSUP => Ok(false),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// The rule for a symbolic link on the path to a private directory: owned
@@ -1186,19 +1255,23 @@ mod tests {
         }
     }
 
-    /// ADR-0028 A 2026-10-08, "a group of one is the owner's own", on
-    /// staged entries: a group-writable ancestor passes when its group's
-    /// name is the owner's and it lists no member. A shared group, a gid
-    /// equal to the uid under another name, a group with a member, a
-    /// missing entry and a failed read are each refused; other-write is
-    /// refused whatever the group; sticky is unchanged.
+    /// ADR-0028 A 2026-10-08, "a group of one is the owner's own" (#231),
+    /// on staged entries: a group-writable ancestor passes when its
+    /// group's name is that of the account this process runs as, it lists
+    /// no member, and the directory carries no access ACL. A shared group,
+    /// a gid equal to the uid under another name, a group with a member, a
+    /// root-owned directory in group `root` (named after its OWNER, not
+    /// ours), an access ACL, a missing entry and a failed read -- of the
+    /// names or of the ACL -- are each refused; other-write is refused
+    /// whatever the group; sticky is unchanged.
     #[cfg(unix)]
     #[test]
     fn a_group_writable_ancestor_needs_the_owners_private_group() {
         let path = Path::new("/home/alice");
         let names = FakeNames {
-            users: vec![(1000, "alice")],
+            users: vec![(1000, "alice"), (0, "root")],
             groups: vec![
+                (0, "root", vec![]),
                 (1001, "alice", vec![]),
                 (100, "users", vec![]),
                 (1000, "staff", vec![]),
@@ -1207,7 +1280,7 @@ mod tests {
             fails: false,
         };
         let judge = |gid: u32, mode: u32, names: &FakeNames| {
-            judge_ancestor_with(path, Ok((1000, gid, mode)), 1000, names)
+            judge_ancestor_with(path, Ok((1000, gid, mode)), 1000, names, || Ok(false))
         };
         judge(1001, 0o40775, &names).expect("the owner's private group, gid apart from the uid");
         let refused = |result: Result<(), PersistError>| match result {
@@ -1223,6 +1296,35 @@ mod tests {
         assert!(same_id.contains("group staff (gid 1000)"), "{same_id}");
         let member = refused(judge(1002, 0o40775, &names));
         assert!(member.contains("group alice (gid 1002)"), "{member}");
+        let roots = refused(judge_ancestor_with(
+            path,
+            Ok((0, 0, 0o40775)),
+            1000,
+            &names,
+            || Ok(false),
+        ));
+        assert!(roots.contains("group root (gid 0)"), "{roots}");
+        let acl = refused(judge_ancestor_with(
+            path,
+            Ok((1000, 1001, 0o40775)),
+            1000,
+            &names,
+            || Ok(true),
+        ));
+        assert!(acl.contains("access ACL"), "{acl}");
+        let acl_unread = refused(judge_ancestor_with(
+            path,
+            Ok((1000, 1001, 0o40775)),
+            1000,
+            &names,
+            || Err(std::io::ErrorKind::PermissionDenied.into()),
+        ));
+        assert!(
+            acl_unread.contains("access ACL could not be read"),
+            "{acl_unread}"
+        );
+        let unknown = refused(judge(4242, 0o40775, &names));
+        assert!(unknown.contains("whether group 4242 is"), "{unknown}");
         for detail in [
             refused(judge(4242, 0o40775, &names)),
             refused(judge(
@@ -1247,6 +1349,47 @@ mod tests {
         let other = refused(judge(1001, 0o40757, &names));
         assert!(other.contains("other-writable"), "{other}");
         judge(100, 0o41775, &names).expect("sticky, as before");
+    }
+
+    /// The access-ACL readers on a real directory and file: none until
+    /// `setfacl` grants another account write, then one -- by path, not
+    /// following a link, and by handle. A default ACL alone, on a
+    /// directory, is not an access ACL.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_access_acl_readers_see_an_acl_setfacl_adds() {
+        let root = private_tempdir().expect("tempdir");
+        let dir = root.path().join("d");
+        fs::create_dir(&dir).expect("mkdir");
+        let file = root.path().join("f");
+        fs::write(&file, b"").expect("write");
+        let setfacl = |args: &[&str], at: &Path| {
+            let ran = std::process::Command::new("setfacl")
+                .args(args)
+                .arg(at)
+                .status()
+                .expect("setfacl runs");
+            assert!(ran.success(), "setfacl {args:?}");
+        };
+        assert!(!access_acl_at(&dir).expect("read"), "the control: no ACL");
+        setfacl(&["-d", "-m", "u:nobody:rwx"], &dir);
+        assert!(!access_acl_at(&dir).expect("read"), "a default ACL only");
+        setfacl(&["-m", "u:nobody:rwx"], &dir);
+        assert!(access_acl_at(&dir).expect("read"), "an access ACL");
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&dir, &link).expect("link");
+        assert!(
+            !access_acl_at(&link).expect("read"),
+            "the link, not its target"
+        );
+
+        let opened = || fs::File::open(&file).expect("open");
+        assert!(
+            !access_acl_of(&opened()).expect("read"),
+            "the control: no ACL"
+        );
+        setfacl(&["-m", "u:nobody:rw"], &file);
+        assert!(access_acl_of(&opened()).expect("read"), "an access ACL");
     }
 
     #[cfg(unix)]

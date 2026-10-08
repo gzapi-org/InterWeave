@@ -159,7 +159,12 @@ fn open_guarded_as(
         }
         // The directory walk's predicate, not a copy of it.
         if mode & 0o020 != 0
-            && let Err(detail) = crate::persist::owners_private_group(names, owner, gid)
+            && let Err(detail) = crate::persist::owners_private_group(
+                names,
+                uid,
+                gid,
+                crate::persist::access_acl_of(&file),
+            )
         {
             return Err(refuse(format!(
                 "owned by uid {owner}, mode {mode:04o}: {detail}"
@@ -409,7 +414,8 @@ mod tests {
     /// bit, with the name service staged: a `0664` document passes when
     /// its group is the owner's private group, and is refused naming the
     /// group when that group is shared, or as unreadable when the entry
-    /// is missing. Other-write is refused whatever the group.
+    /// is missing, or when it carries an access ACL. Other-write is
+    /// refused whatever the group.
     #[cfg(target_os = "linux")]
     #[test]
     #[allow(clippy::expect_used, clippy::panic)]
@@ -445,6 +451,17 @@ mod tests {
         );
         let missing = refused(Names(None));
         assert!(missing.contains("could not be read"), "{missing}");
+        // An access ACL granting another account write makes the group
+        // bits its mask: refused, the private group notwithstanding.
+        let ran = std::process::Command::new("setfacl")
+            .args(["-m", "u:nobody:rw"])
+            .arg(&path)
+            .status()
+            .expect("setfacl runs");
+        assert!(ran.success(), "setfacl");
+        chmod(0o664);
+        let acl = refused(Names(Some("alice")));
+        assert!(acl.contains("access ACL"), "{acl}");
         chmod(0o666);
         let other = refused(Names(Some("alice")));
         assert!(other.contains("other-writable"), "{other}");
