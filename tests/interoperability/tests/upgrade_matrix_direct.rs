@@ -46,9 +46,16 @@ use libp2p::swarm::SwarmEvent;
 use libp2p::{Multiaddr, PeerId, StreamProtocol, SwarmBuilder};
 use tokio::sync::{mpsc, oneshot};
 
+/// The ids a RAW peer lists. What HEAD itself speaks is read from
+/// production, [`head_id`], wherever a row asserts it.
 const V2_0: &str = "/interweave/direct/2.0.0";
 const V2_1: &str = "/interweave/direct/2.1.0";
 const V3_0: &str = "/interweave/direct/3.0.0";
+
+/// HEAD's own direct protocol id, from production rather than restated.
+fn head_id() -> String {
+    interweave_transport_libp2p::direct_codec::DIRECT_PROTOCOL.to_string()
+}
 
 /// What the raw peer read: the protocol id the stream negotiated, and the
 /// bytes.
@@ -426,7 +433,7 @@ async fn direct_unsupported_major_is_refused_both_ways_beside_a_2_0_control() {
         .request(head.address.clone(), head.peer_id(), frame_to_human(1))
         .await
         .expect("the control exchanges");
-    assert_eq!(answered.protocol, V2_0);
+    assert_eq!(answered.protocol, head_id());
     let decoded = DirectResponseV2::decode(&answered.bytes);
     assert!(
         matches!(decoded, Ok(DirectResponseV2::Accepted { .. })),
@@ -440,7 +447,10 @@ async fn direct_unsupported_major_is_refused_both_ways_beside_a_2_0_control() {
             .as_str(),
         "human"
     );
-    assert_eq!(control.inbound.recv().await.expect("read").protocol, V2_0);
+    assert_eq!(
+        control.inbound.recv().await.expect("read").protocol,
+        head_id()
+    );
     head.stop().await;
 
     let mut newer = RawPeer::start(ip, &[V3_0]).await;
@@ -480,7 +490,11 @@ async fn direct_minor_bump_negotiates_2_0_both_ways() {
         .request(head.address.clone(), head.peer_id(), frame_to_human(5))
         .await
         .expect("exchanges");
-    assert_eq!(answered.protocol, V2_0, "the stream negotiated 2.0.0");
+    assert_eq!(
+        answered.protocol,
+        head_id(),
+        "the stream negotiated HEAD's id, not 2.1.0"
+    );
     assert_eq!(
         DirectResponseV2::decode(&answered.bytes).expect("HEAD's response, independently decoded"),
         DirectResponseV2::Accepted {
@@ -508,7 +522,7 @@ async fn direct_minor_bump_negotiates_2_0_both_ways() {
         .recv()
         .await
         .expect("the peer read HEAD's request");
-    assert_eq!(read.protocol, V2_0);
+    assert_eq!(read.protocol, head_id());
     let frame = IndependentFrame::decode(&read.bytes).expect("HEAD's frame, independently decoded");
     assert_eq!(frame.message_id, [6; 16]);
     assert_eq!(frame.payload, b"from HEAD");
