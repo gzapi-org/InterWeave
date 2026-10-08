@@ -136,10 +136,14 @@ impl HumanStore {
         // unchangeable by anyone but root and this uid, so nothing can
         // be swapped in between the judgement and the open (ADR-0028 A
         // 2026-10-08).
-        let dir = private_dir(private_parent_of(path))?;
-        let resolved = dir.join(path.file_name().ok_or(StoreError::NotAFile {
+        // The file's name FIRST: a path ending in `..` names no file, and
+        // asking after the directory was made left that directory behind
+        // a refusal (`a_path_naming_no_file_is_refused_before_any_directory_is_made`).
+        let name = path.file_name().ok_or(StoreError::NotAFile {
             what: "the database path names no file",
-        })?);
+        })?;
+        let dir = private_dir(private_parent_of(path))?;
+        let resolved = dir.join(name);
         let path = resolved.as_path();
         // CREATE IT OWNER-ONLY OURSELVES. SQLite creates the database with
         // the process umask, which is 0644 on a default system — message

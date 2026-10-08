@@ -1251,6 +1251,23 @@ fn a_private_state_directory_under_an_ancestor_others_can_write_is_refused_namin
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_path_naming_no_file_is_refused_before_any_directory_is_made() {
+    // `state/new/..` names no file; its parent `state/new` must not be
+    // created on the way to that refusal.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let new = dir.path().join("new");
+    match HumanStore::open(&new.join(".."), StoreOptions::default()) {
+        Err(StoreError::NotAFile { .. }) => {}
+        other => panic!("expected the path refused as naming no file, got {other:?}"),
+    }
+    assert!(
+        !new.exists(),
+        "nothing was created for a path naming no file"
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn a_refused_state_directory_creates_nothing() {
