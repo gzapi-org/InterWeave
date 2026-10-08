@@ -47,11 +47,15 @@ enum Outgoing {
     Finish,
 }
 
+/// What a waiting call is handed: its response, or the connection's end.
+type Answer = Result<ResponseFrame, TransportError>;
+
 /// What the reader and the callers share.
 #[derive(Default)]
 struct Shared {
-    /// Calls waiting for their response, by id.
-    pending: Mutex<HashMap<String, oneshot::Sender<ResponseFrame>>>,
+    /// Calls waiting for their response, by id: answered with it, or with
+    /// the code the connection ended with, handed over as it ends.
+    pending: Mutex<HashMap<String, oneshot::Sender<Answer>>>,
     /// Why the connection ended, once it has.
     ended: Mutex<Option<TransportError>>,
     /// The recorded end is the writer's own failure, which a server's
@@ -86,7 +90,7 @@ impl Shared {
     fn register(
         &self,
         id: &RequestId,
-        answer: oneshot::Sender<ResponseFrame>,
+        answer: oneshot::Sender<Answer>,
     ) -> Result<(), TransportError> {
         let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(code) = self.ended() {
@@ -96,7 +100,7 @@ impl Shared {
         Ok(())
     }
 
-    fn take(&self, id: &str) -> Option<oneshot::Sender<ResponseFrame>> {
+    fn take(&self, id: &str) -> Option<oneshot::Sender<Answer>> {
         self.pending
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -104,7 +108,7 @@ impl Shared {
     }
 
     /// The connection is over: the code is recorded, and every waiting
-    /// call is dropped and reads it. The first end recorded stands, except
+    /// call is answered with it then, not when it is next polled. The first end recorded stands, except
     /// that a writer's failure is provisional: the server's own `close`
     /// frame, read after it, replaces its code, so a caller is told why the
     /// SERVER ended the connection rather than that a write failed against
@@ -127,7 +131,10 @@ impl Shared {
             *ended = Some(code);
         }
         if by != EndedBy::Writer {
-            pending.clear();
+            let code = ended.unwrap_or(code);
+            for (_, answer) in pending.drain() {
+                let _ = answer.send(Err(code));
+            }
         }
     }
 }
@@ -361,7 +368,7 @@ impl Connection {
             .send(Outgoing::Bytes(bytes))
             .await
             .map_err(|_| self.gone())?;
-        let response = response.await.map_err(|_| self.gone())?;
+        let response = response.await.map_err(|_| self.gone())??;
         guard.id = None;
         response.outcome()
     }
@@ -539,7 +546,7 @@ async fn read_loop(
             Ok(Some(Frame::Response(response))) => {
                 // An id no call waits for was cancelled: discarded.
                 if let Some(answer) = shared.take(response.id.as_str()) {
-                    let _ = answer.send(response);
+                    let _ = answer.send(Ok(response));
                 }
             }
             Ok(Some(Frame::Event(frame))) => {
