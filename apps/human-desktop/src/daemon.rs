@@ -46,6 +46,15 @@ mod tests {
             .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir()
             .expect("tempdir");
+        assert_eq!(
+            std::fs::metadata(dir.path())
+                .expect("stat")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+            "owner-only whatever the umask"
+        );
         let paths = paths(dir.path());
         assert_eq!(present(&paths), Ok(false), "no lock file: no daemon");
         let held = ProfileLock::acquire(&paths, Duration::ZERO).expect("the daemon's lock");
