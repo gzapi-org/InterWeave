@@ -135,12 +135,16 @@ which this repository prints in refusals on purpose (ADR-0028).
   `.github/codeql/extensions/interweave-rust-models/models/uid.model.yml`,
   under the rule its header states, in your PR.
 - Source is a **variable or field** named like a uid (`writes uid`,
-  `writes self.owner_uid`): no row can reach it. Dismiss the alert as
-  "false positive" with a comment citing that file, and resolve its
+  `writes self.owner_uid`): no row can reach it, so the NAME settles
+  nothing — trace the VALUE. Dismiss as "false positive" only when it
+  is a POSIX account uid (`effective_uid`/`geteuid`, a file owner's from
+  `stat`, a peer's from `SO_PEERCRED`, or a parameter carrying one),
+  with a comment saying which and citing that file; then resolve the
   thread.
 
-Any other source of that rule — a key, a token, a passphrase — is a
-real finding until shown otherwise.
+Any other source of that rule — a key, a token, a passphrase, an
+application's user identifier — is a real finding until shown
+otherwise.
 
 ## When to open a NEW PR
 

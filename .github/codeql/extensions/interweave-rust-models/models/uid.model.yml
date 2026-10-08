@@ -25,8 +25,10 @@
 # by its name, and models name functions only. The 24 left are all of
 # that shape — a `uid` parameter or local in load.rs/persist.rs reaching
 # a test's panic. The crates' owners keep those names where the value
-# is "a uid" (2026-10-08), so such an alert is dismissed as "false
-# positive" by the PR's author, citing this file.
+# is a uid (p2p-network-dev-01's GZCoord reply of 2026-10-08,
+# 01a11c68-d4ef-7e60-a9ac-effb421521b5), so such an alert is dismissed as
+# "false positive" by the PR's author once the value is traced to a
+# POSIX account uid — the pr-lifecycle skill says how.
 #
 # THE RULE FOR A ROW: it names one function, says what the function
 # returns, why that value is not the secret its name suggests, and that
@@ -43,8 +45,8 @@ extensions:
       extensible: barrierModel
     data:
       # This process's effective uid, a u32 read from /proc/self/status.
-      # A uid names an account the world-readable passwd database already
-      # maps, and ADR-0028's refusals print this one on purpose.
+      # A uid is an account number, not a credential, and ADR-0028's
+      # refusals print this one on purpose.
       - ["interweave_profile_config::persist::effective_uid", "ReturnValue", "log-injection", "manual"]
       # A file's owner uid, a u32 from stat(2). Not a secret for the same
       # reason; the refusals name the owner of the component they judged.
