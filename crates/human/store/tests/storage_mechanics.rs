@@ -1270,6 +1270,32 @@ fn a_path_naming_no_file_is_refused_before_any_directory_is_made() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn a_path_through_a_missing_directory_and_back_opens_as_before() {
+    // `x/new/../state` under an ancestor of ours that is sound but not
+    // owner-only: `x/new/..` is `x`, which this process does not make and
+    // must not judge as its private directory.
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir_in("/tmp").expect("tempdir under /tmp");
+    let x = dir.path().join("x");
+    std::fs::create_dir(&x).expect("mkdir");
+    std::fs::set_permissions(&x, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let path = x.join("new").join("..").join("state").join("human.sqlite3");
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
+    let state = x.join("state");
+    assert!(
+        state.join("human.sqlite3").is_file(),
+        "the store is at x/state"
+    );
+    let mode = std::fs::metadata(&state)
+        .expect("stat")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o700, "made owner-only");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn a_refused_state_directory_creates_nothing() {
     // Judged before anything is created: a missing state directory under
     // an ancestor that breaks the rule is not made, so the refusal leaves

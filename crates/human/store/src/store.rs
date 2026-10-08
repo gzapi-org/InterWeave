@@ -1368,6 +1368,7 @@ impl HumanStore {
 /// the same walk; this judgement is the store's own, so a caller that
 /// opens it without that lock gets the rule too.
 fn private_dir(dir: &Path) -> Result<std::path::PathBuf, StoreError> {
+    use std::path::Component;
     // The missing components, innermost first, and the nearest that is
     // there; an empty ancestor is the working directory.
     let mut missing = Vec::new();
@@ -1379,7 +1380,16 @@ fn private_dir(dir: &Path) -> Result<std::path::PathBuf, StoreError> {
             ancestor
         };
         if absent(ancestor)? {
-            missing.push(ancestor);
+            // Only a NAME is a directory this process makes: `a/new/..`
+            // is `a` itself, which `mkdir` answers "exists", and judging
+            // it as one of ours refused a path that opened before
+            // (`a_path_through_a_missing_directory_and_back_opens_as_before`).
+            if matches!(
+                ancestor.components().next_back(),
+                Some(Component::Normal(_))
+            ) {
+                missing.push(ancestor);
+            }
         } else {
             existing = ancestor;
             break;
