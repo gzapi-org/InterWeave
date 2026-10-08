@@ -1382,7 +1382,22 @@ impl HumanStore {
 /// opens it without that lock gets the rule too.
 fn private_dir(dir: &Path) -> Result<std::path::PathBuf, StoreError> {
     let dir = &beyond_missing(dir)?;
-    profile_config::create_private_dir(dir).map_err(|e| StoreError::from_persist(dir, e))?;
+    match profile_config::create_private_dir(dir) {
+        Ok(()) => {}
+        // Something that is not a directory is already there -- a file, a
+        // dangling link. `create_private_dir` answers that as a bare
+        // "exists", which reads as a failure worth retrying; the walk
+        // names what it is and the rule it breaks
+        // (`a_state_directory_that_is_not_a_directory_is_refused_by_name`).
+        Err(profile_config::PersistError::Io(e))
+            if e.kind() == std::io::ErrorKind::AlreadyExists =>
+        {
+            profile_config::resolve_owned_private_dir(dir)
+                .map_err(|e| StoreError::from_persist(dir, e))?;
+            return Err(StoreError::Io(e));
+        }
+        Err(e) => return Err(StoreError::from_persist(dir, e)),
+    }
     profile_config::resolve_owned_private_dir(dir).map_err(|e| StoreError::from_persist(dir, e))
 }
 

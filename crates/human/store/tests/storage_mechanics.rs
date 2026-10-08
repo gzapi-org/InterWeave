@@ -1318,6 +1318,29 @@ fn a_path_through_a_missing_directory_and_back_opens_as_before() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_state_directory_that_is_not_a_directory_is_refused_by_name() {
+    // A file, or a dangling link, where the state directory belongs is
+    // refused naming it and what it is -- a permanent problem a person
+    // fixes, not an I/O failure worth retrying.
+    let dir = common::private_tempdir();
+    let file = dir.path().join("file");
+    std::fs::write(&file, b"").expect("a file");
+    let dangling = dir.path().join("dangling");
+    std::os::unix::fs::symlink(dir.path().join("nowhere"), &dangling).expect("link");
+
+    for state in [&file, &dangling] {
+        match HumanStore::open(&state.join("human.sqlite3"), StoreOptions::default()) {
+            Err(StoreError::DirectoryNotPrivate { path, .. }) => assert_eq!(&path, state),
+            other => panic!(
+                "{}: expected a named refusal, got {other:?}",
+                state.display()
+            ),
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn a_refused_state_directory_creates_nothing() {
