@@ -46,7 +46,7 @@ The canonical printable form at every **JSON boundary** — local IPC, Channel e
 ### Payload
 
 - bytes are opaque to the transport;
-- `media_type` is advisory; when present it is **1..128 ASCII bytes**; an empty string is non-canonical and rejected as `InvalidArgument` (use absence instead);
+- `media_type` is advisory; when present it is **1..128 printable ASCII bytes (0x20..0x7E — the bound the schemas pin and the decoders enforce, A 2026-10-08)**; an empty string is non-canonical and rejected as `InvalidArgument` (use absence instead);
 - hard ceiling for application payload bytes: **49,152 bytes (48 KiB)** for broadcast and direct operations;
 - each active profile may configure a lower effective `max_payload_bytes`, never a higher one;
 - the payload contract does not require UTF-8.
