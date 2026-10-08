@@ -9,6 +9,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use interweave_independent_codecs::broadcast_v1::BroadcastMessageV1;
+use interweave_independent_codecs::direct_response_v2::DirectResponseV2;
 use interweave_independent_codecs::direct_v2::DirectMessageV2;
 use interweave_independent_codecs::ipc_v2;
 use interweave_independent_codecs::{MAX_PAYLOAD_BYTES, fingerprint};
@@ -233,4 +234,58 @@ fn ipc_envelope_rules_hold_beside_their_controls() {
     }
     assert!(ipc("[]").is_err());
     assert!(ipc_v2::decode_frame(&[0, 0, 0, 2, b'{', b'}', 0]).is_err());
+}
+
+/// `DIRECT.md` §Response byte layout, each refusal beside its control.
+#[test]
+fn response_rules_hold_beside_their_controls() {
+    let accepted = |label: &str| {
+        let mut f = vec![1u8];
+        f.extend_from_slice(&[5; 16]);
+        f.push(u8::try_from(label.len()).unwrap());
+        f.extend_from_slice(label.as_bytes());
+        f
+    };
+    let rejected = |code: u8| {
+        let mut f = vec![2u8];
+        f.extend_from_slice(&[5; 16]);
+        f.push(code);
+        f
+    };
+    assert!(DirectResponseV2::decode(&accepted("human")).is_ok());
+    assert!(DirectResponseV2::decode(&accepted(&"a".repeat(64))).is_ok());
+    assert_eq!(accepted(&"a".repeat(64)).len(), 82);
+    assert!(
+        DirectResponseV2::decode(&accepted("")).is_err(),
+        "a zero label"
+    );
+    assert!(DirectResponseV2::decode(&accepted(&"a".repeat(65))).is_err());
+    assert!(DirectResponseV2::decode(&accepted("Human")).is_err());
+    for code in 1..=7 {
+        assert!(DirectResponseV2::decode(&rejected(code)).is_ok(), "{code}");
+    }
+    for code in [0u8, 8, 255] {
+        assert!(DirectResponseV2::decode(&rejected(code)).is_err(), "{code}");
+    }
+    let mut tag3 = rejected(1);
+    tag3[0] = 3;
+    assert!(DirectResponseV2::decode(&tag3).is_err());
+    let mut long = rejected(1);
+    long.push(0);
+    assert!(DirectResponseV2::decode(&long).is_err());
+    let mut long = accepted("human");
+    long.push(b'x');
+    assert!(DirectResponseV2::decode(&long).is_err());
+    assert!(
+        DirectResponseV2::decode(&rejected(1)[..17]).is_err(),
+        "no reason byte"
+    );
+    assert!(
+        DirectResponseV2::Rejected {
+            message_id: [0; 16],
+            reason: "gone"
+        }
+        .encode()
+        .is_err()
+    );
 }

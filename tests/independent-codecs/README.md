@@ -8,7 +8,7 @@ Stage 17's independent codecs (plan §20 (c); `architecture/docs/architecture/te
 | `BroadcastMessageV1` envelope | `broadcast_v1` | `transport/libp2p/PUBSUB.md` |
 | `DirectContentFingerprintV1` | `fingerprint` | `contracts/ENDPOINTS.md` |
 | IPC v2 frame and envelope | `ipc_v2` (body JSON: `json`) | `contracts/LOCAL-IPC.md` §Framing, §Message classes; schemas `ipc/frame`, `ipc/hello`, `ipc/hello-response`, `ipc/close` |
-| `AcceptedV2` / `RejectedV2` | — | **blocked**: `DIRECT.md` §Response states no byte layout. The draft text and frozen vector are on this branch for architect-cto's spec review. The codec will be written from that text once it lands. |
+| `AcceptedV2` / `RejectedV2` | `direct_response_v2` | `transport/libp2p/DIRECT.md` §Response byte layout. That section was written when this item found the layout stated only in production's codec. |
 
 **Independent means no path package in the graph.** `tools/checks/check_independent_codecs.sh` refuses any path package in this crate's dependency graph, at any depth, with dev-dependencies included at the first hop. That covers a workspace member, `tests/support` and a vendored `third_party/` tree. The layering checks follow no dev-dependency, so they could not hold this.
 

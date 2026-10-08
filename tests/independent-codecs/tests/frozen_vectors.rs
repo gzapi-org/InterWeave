@@ -11,6 +11,7 @@
 use std::path::PathBuf;
 
 use interweave_independent_codecs::broadcast_v1::BroadcastMessageV1;
+use interweave_independent_codecs::direct_response_v2::{DirectResponseV2, REASONS};
 use interweave_independent_codecs::direct_v2::DirectMessageV2;
 use interweave_independent_codecs::fingerprint;
 use interweave_independent_codecs::ipc_v2::{self, Class};
@@ -65,6 +66,56 @@ fn direct_v2_frames_decode_to_their_fields_and_reencode_byte_equal() {
         assert_eq!(got, want, "{name}");
         assert_eq!(got.encode().unwrap(), frame, "{name}");
     }
+}
+
+#[test]
+fn direct_response_frames_decode_to_their_fields_and_reencode_byte_equal() {
+    for v in vectors("direct-v2/direct-response-v2-frame.json") {
+        let name = v["name"].as_str().unwrap();
+        let frame = hex(v["frame_hex"].as_str().unwrap());
+        assert_eq!(
+            frame.len() as u64,
+            v["frame_len"].as_u64().unwrap(),
+            "{name}"
+        );
+        let message_id = id16(v["message_id"].as_str().unwrap());
+        let want = match v["kind"].as_str().unwrap() {
+            "accepted" => DirectResponseV2::Accepted {
+                message_id,
+                resolved_destination_endpoint: v["resolved_destination_endpoint"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            },
+            "rejected" => DirectResponseV2::Rejected {
+                message_id,
+                reason: REASONS
+                    .iter()
+                    .find(|r| **r == v["reason"].as_str().unwrap())
+                    .unwrap(),
+            },
+            other => panic!("{name}: {other}"),
+        };
+        let got = DirectResponseV2::decode(&frame).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(got, want, "{name}");
+        assert_eq!(got.encode().unwrap(), frame, "{name}");
+    }
+}
+
+/// The numbering is the schema's enum order from 1: the list the codec
+/// carries is the schema's list, read here from the schema itself.
+#[test]
+fn the_reason_order_is_the_schemas() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../architecture/contracts/schemas/direct/reject-reason.schema.json");
+    let doc: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let schema: Vec<&str> = doc["enum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_str().unwrap())
+        .collect();
+    assert_eq!(schema, REASONS);
 }
 
 #[test]

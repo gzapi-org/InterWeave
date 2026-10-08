@@ -19,15 +19,17 @@
 //! The shapes, one module each:
 //!
 //! - [`direct_v2`] — the `DirectMessageV2` request frame;
+//! - [`direct_response_v2`] — its `AcceptedV2`/`RejectedV2` response;
 //! - [`broadcast_v1`] — the GossipSub `BroadcastMessageV1` envelope;
 //! - [`fingerprint`] — `DirectContentFingerprintV1`;
 //! - [`ipc_v2`] — the IPC v2 length-prefixed frame and its envelope classes.
 //!
-//! `AcceptedV2`/`RejectedV2` have no codec here yet: their byte layout is
-//! stated in no contract, so a codec for them could only transcribe
-//! production. The question is with architect-cto.
+//! The response codec is written from `DIRECT.md` §Response byte layout,
+//! which this codec's writing caused to be stated (architect-cto,
+//! 2026-10-08): until then the layout lived only in production's codec.
 
 pub mod broadcast_v1;
+pub mod direct_response_v2;
 pub mod direct_v2;
 pub mod fingerprint;
 pub mod ipc_v2;
