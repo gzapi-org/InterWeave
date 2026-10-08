@@ -289,6 +289,22 @@ async fn item_9_an_ended_session_answers_events_with_its_end() {
     pair.stop().await;
 }
 
+/// The case with something waiting at the end: IPC keeps what the
+/// daemon pushed before it stopped, at the client.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn item_9_an_ended_session_delivers_what_waited_then_its_end() {
+    let pair = IpcPair::start().await;
+    let (a, b) = pair.bindings();
+    let (session, _sender) =
+        suite::a_session_to_end_with_a_message_waiting(&b, &a, &pair.a_peer, &agent(), &human())
+            .await;
+    let IpcPair { pair, a, b, .. } = pair;
+    a.stop().await;
+    suite::an_ended_session_delivers_what_waited_then_its_end(&session).await;
+    b.stop().await;
+    pair.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn item_10_the_runtimes_state_is_owed_once_at_open() {
     let pair = IpcPair::start().await;

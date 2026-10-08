@@ -849,3 +849,19 @@ async fn item_9_an_ended_session_answers_events_with_its_end() {
     suite::an_ended_session_answers_events_with_its_end(&session).await;
     b.shutdown().await.expect("b stops");
 }
+
+/// The case with something waiting at the end, degenerate in process:
+/// the queues are the runtime's, and go with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn item_9_a_message_waiting_at_the_end_goes_with_the_runtime_in_process() {
+    use interweave_transport_api::TransportRuntime as _;
+    let pair = Pair::start().await;
+    let (a, b) = pair.bindings();
+    let (session, _sender) =
+        suite::a_session_to_end_with_a_message_waiting(&b, &a, &pair.a_peer, &agent(), &human())
+            .await;
+    let common::Pair { a, b, .. } = pair;
+    a.shutdown().await.expect("a stops");
+    suite::an_ended_session_answers_events_with_its_end(&session).await;
+    b.shutdown().await.expect("b stops");
+}

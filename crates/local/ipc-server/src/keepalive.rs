@@ -169,6 +169,31 @@ mod tests {
         assert_eq!(keepalive.missed, 0, "a duplicate is ignored");
     }
 
+    /// The server's wedge threshold at the defaults -- `max_missed` probes
+    /// an `interval` apart, a miss counted `response_timeout` after each:
+    /// 100 s -- sits below the client's silence bound, never equal, so the
+    /// server judges a wedged connection first (`LOCAL-IPC.md`
+    /// §Disconnect/reconnect and optional keepalive, A 2026-10-08).
+    #[test]
+    fn the_default_threshold_closes_before_the_clients_silence_bound() {
+        use interweave_ipc_protocol::CLIENT_SILENCE_TIMEOUT;
+        let t0 = Instant::now();
+        let mut keepalive = Keepalive::new(KeepalivePolicy::default(), t0);
+        let mut now = t0;
+        for _ in 0..16 {
+            now = keepalive.next_wake();
+            if keepalive.wake(now) == Action::Close {
+                break;
+            }
+        }
+        assert_eq!(
+            now - t0,
+            Duration::from_secs(100),
+            "closed at the threshold"
+        );
+        assert!(now - t0 < CLIENT_SILENCE_TIMEOUT, "the server judges first");
+    }
+
     #[test]
     fn max_missed_unanswered_probes_close_the_connection() {
         let t0 = Instant::now();

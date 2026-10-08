@@ -211,8 +211,11 @@ pub trait DataSessionPort {
     /// caller with room for `max` never holds more than it can pass on,
     /// so none is taken and then lost (architect-cto's ruling, relay seq
     /// 9709). `max == 0` takes nothing: on a live session it returns an
-    /// empty list, and once the session has ended it answers the end as
-    /// any other `max` does.
+    /// empty list, and it answers the end as soon as the session has
+    /// ended, whatever remains buffered; a positive `max` delivers the
+    /// buffered events first, then the end (architect-cto's ruling
+    /// 01a11be2; the conformance suite's
+    /// `an_ended_session_delivers_what_waited_then_its_end`).
     ///
     /// # Errors
     /// `CapabilityDenied` without `events`, or `BackendUnavailable`.
