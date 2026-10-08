@@ -115,7 +115,8 @@ pub fn create_private_dir(dir: &Path) -> Result<(), PersistError> {
 /// and its own creation is ADOPTED only if it is an owner-only directory
 /// of `uid`'s -- another of our processes making it -- and refused before
 /// anything is made inside it otherwise
-/// (`a_component_that_appears_unprivate_is_refused_before_anything_is_made_in_it`).
+/// (`a_component_that_appears_unprivate_is_refused_before_anything_is_made_in_it`,
+/// `a_component_another_uid_owns_is_refused_before_anything_is_made_in_it`).
 #[cfg(unix)]
 fn create_each_as(base: &Path, missing: &Path, uid: u32) -> Result<(), PersistError> {
     use std::os::unix::fs::DirBuilderExt as _;
@@ -1209,6 +1210,33 @@ mod tests {
         chmod(&appeared, 0o700);
         create_each_as(root.path(), Path::new("a/b"), uid).expect("adopted: ours, owner-only");
         assert!(appeared.join("b").is_dir());
+    }
+
+    /// The ownership half of adoption: an owner-only directory that is
+    /// not `uid`'s is refused naming it, with nothing made inside --
+    /// staged as ours directly under root's sticky `/tmp` and asked for
+    /// another uid, since under a tempdir of ours that uid is refused at
+    /// an ancestor first. The same call for our own uid is the control.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_component_another_uid_owns_is_refused_before_anything_is_made_in_it() {
+        let appeared = owned_private_dir_under_tmp();
+        let name = appeared.path().file_name().expect("a name");
+        let missing = Path::new(name).join("b");
+        let uid = effective_uid().expect("readable");
+        let detail = refused_at(
+            create_each_as(Path::new("/tmp"), &missing, uid.wrapping_add(1))
+                .map(|()| appeared.path().to_path_buf()),
+            appeared.path(),
+        );
+        assert!(detail.starts_with("owned by uid"), "{detail}");
+        assert!(
+            entries(appeared.path()).is_empty(),
+            "nothing made inside it"
+        );
+
+        create_each_as(Path::new("/tmp"), &missing, uid).expect("the control: ours");
+        assert!(appeared.path().join("b").is_dir());
     }
 
     /// An existing `dir` that is a file, a FIFO or a dangling link is
