@@ -412,9 +412,10 @@ pub enum TrustProblem {
     /// The daemon refused the change: this profile's own identity, or a
     /// new peer past the allowlist's ceiling.
     Refused,
-    /// The daemon does not speak the version of the protocol this client
-    /// needs: a mixed install, where the daemon is not the app's own
-    /// release. Updating the daemon is what helps.
+    /// The daemon and this client do not speak a common version of what
+    /// trust needs: a mixed install, where the daemon is not the app's own
+    /// release (older, below IPC 2.3, or of another major), or an exchange
+    /// that broke the protocol. Bringing both to one release is what helps.
     Incompatible,
     /// Anything else.
     Internal,

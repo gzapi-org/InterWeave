@@ -272,9 +272,9 @@ ui_texts! {
     /// The daemon refused the change: its own identity, or the list is
     /// full.
     TrustRefused => "The transport daemon refused this change. Nothing was changed.",
-    /// The daemon is not the app's own release and does not speak the
-    /// version trust needs: what helps is updating the daemon, not trying
-    /// again.
+    /// The daemon and the app are not the same release, so they share no
+    /// version trust needs: what helps is bringing both to one release,
+    /// not trying again.
     TrustIncompatible => "The transport daemon is a different version from this app, so trust cannot be read or changed here. Nothing was changed.",
     /// Anything else went wrong, before anything was changed. No raw code
     /// is kept, so the text points nowhere for details.
@@ -756,7 +756,8 @@ mod tests {
     #[test]
     fn every_trust_problem_reads_apart() {
         // An exhaustive match: a variant added to `TrustProblem` fails to
-        // compile here until it is listed below.
+        // compile here until `listed` names it. The compiler does not see the
+        // array below; add the variant there too, and raise the count.
         const fn listed(problem: TrustProblem) -> TrustProblem {
             match problem {
                 TrustProblem::Unavailable
