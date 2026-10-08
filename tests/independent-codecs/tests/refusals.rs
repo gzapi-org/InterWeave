@@ -248,7 +248,11 @@ fn ipc_envelope_rules_hold_beside_their_controls() {
     let owned: Vec<(String, String)> = vec![
         // common/peer-id: 12D3KooW or Qm, then exactly 44 base58btc.
         (lease(""), lease("").replace(GOLDEN_PEER, "12D3KooW")),
-        (lease(""), lease("").replace(GOLDEN_PEER, &GOLDEN_PEER.replace('D', "0"))),
+        // One non-base58btc character (0, O, I, l) in the tail alone, the
+        // prefix and the length kept, so only the alphabet can refuse it.
+        (lease(""), lease("").replace(GOLDEN_PEER, &format!("{}0{}", &GOLDEN_PEER[..8], &GOLDEN_PEER[9..]))),
+        (lease(""), lease("").replace(GOLDEN_PEER, &format!("{}O{}", &GOLDEN_PEER[..8], &GOLDEN_PEER[9..]))),
+        (lease(""), lease("").replace(GOLDEN_PEER, &format!("{}l{}", &GOLDEN_PEER[..8], &GOLDEN_PEER[9..]))),
         (lease(""), lease("").replace(GOLDEN_PEER, &format!("{GOLDEN_PEER}x"))),
         (
             lease("").replace(GOLDEN_PEER, &format!("Qm{}", &GOLDEN_PEER[8..])),
