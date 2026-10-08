@@ -97,6 +97,11 @@ fn direct_media_type_is_one_to_128_ascii() {
     );
     assert!(direct("human", None, Some(""), 1).encode().is_err());
     assert!(direct("human", None, Some("tëxt"), 1).encode().is_err());
+    // Printable only (the schemas' pattern; see `is_media_type`): the
+    // first and last printable bytes pass, a tab and DEL do not.
+    assert!(direct("human", None, Some(" ~"), 1).encode().is_ok());
+    assert!(direct("human", None, Some("a\tb"), 1).encode().is_err());
+    assert!(direct("human", None, Some("a\u{7f}"), 1).encode().is_err());
 }
 
 #[test]

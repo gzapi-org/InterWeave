@@ -18,4 +18,6 @@ Stage 17's independent codecs (plan §20 (c); `architecture/docs/architecture/te
 
 The IPC codec holds the envelope: the class, its allowed and required top-level members, and the frame schema's own rules. A request's params and an event's data pass through as JSON. They are the method and event catalogue's, owned by `ipc/request` and `ipc/event`.
 
+**One reading is pending a ruling.** A present media type is "1..128 ASCII bytes" in the wire and fingerprint prose, but printable ASCII (`^[\x20-\x7E]+$`) in the two schemas that carry it, and production follows each in a different place. Until architect-cto rules (01a11c8b), these codecs follow the schemas. The differential tests stay inside the domain both readings share.
+
 The JSON reader and writer are hand-written. The goldens freeze bodies in key order, and `preserve_order` is enabled nowhere in the workspace.

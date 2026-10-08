@@ -51,7 +51,7 @@ impl std::error::Error for DecodeError {}
 /// decode, the profile's `max_payload_bytes` never above it.
 pub const MAX_PAYLOAD_BYTES: usize = 49_152;
 
-/// `TRANSPORT.md` §Direct send: a present media type is 1..128 ASCII bytes.
+/// `TRANSPORT.md` §Direct send: a present media type is 1..128 bytes.
 pub const MAX_MEDIA_TYPE_BYTES: usize = 128;
 
 /// `ENDPOINTS.md`: `^[a-z][a-z0-9._-]{0,63}$`.
@@ -70,8 +70,15 @@ pub fn is_endpoint_id(s: &str) -> bool {
     }
 }
 
-/// A present media type: 1..128 bytes, every one ASCII.
+/// A present media type: 1..128 bytes, each in 0x20..=0x7E.
+///
+/// PRINTABLE, from the two schemas that carry the field
+/// (`ipc/payload`, `endpoints/message-received`: `^[\x20-\x7E]+$`).
+/// The wire and fingerprint prose says only "ASCII". That gap is raised
+/// with architect-cto (01a11c8b), and until it is ruled this follows the
+/// schemas, the one reading under which a wire frame round-trips through
+/// IPC.
 #[must_use]
 pub fn is_media_type(s: &str) -> bool {
-    (1..=MAX_MEDIA_TYPE_BYTES).contains(&s.len()) && s.is_ascii()
+    (1..=MAX_MEDIA_TYPE_BYTES).contains(&s.len()) && s.bytes().all(|b| (0x20..=0x7e).contains(&b))
 }
