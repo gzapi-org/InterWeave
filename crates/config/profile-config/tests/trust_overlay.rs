@@ -32,7 +32,7 @@ fn set(peers: impl IntoIterator<Item = TransportIdentity>) -> BTreeSet<Transport
 
 /// A private state directory and the overlay's path in it.
 fn state() -> (tempfile::TempDir, PathBuf) {
-    let dir = tempfile::tempdir().expect("a temporary directory");
+    let dir = private_tempdir().expect("a temporary directory");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -188,7 +188,7 @@ fn an_absent_overlay_is_empty_and_is_not_created() {
 #[cfg(target_os = "linux")]
 #[test]
 fn an_overlay_under_a_writable_ancestor_is_refused() {
-    let root = tempfile::tempdir().expect("a temporary directory");
+    let root = private_tempdir().expect("a temporary directory");
     chmod(root.path(), 0o700);
     let above = root.path().join("above");
     let state = above.join("state");
@@ -430,4 +430,14 @@ fn an_overlay_that_is_a_fifo_is_refused_without_waiting() {
         }
         other => panic!("refused: {other:?}"),
     }
+}
+
+/// A temporary directory made `0700` at creation, whatever the umask: the
+/// ancestor rule judges it, and `tempfile::tempdir()` under umask `002`
+/// with a shared primary group is `0775`, refused (j37).
+fn private_tempdir() -> std::io::Result<tempfile::TempDir> {
+    use std::os::unix::fs::PermissionsExt as _;
+    tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
 }

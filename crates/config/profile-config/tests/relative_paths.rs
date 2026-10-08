@@ -40,7 +40,7 @@ fn a_bare_relative_filename_writes_into_the_current_directory() {
         "the premise: a bare filename has an EMPTY parent, not None"
     );
 
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let private = dir.path().join("private");
     std::fs::create_dir(&private).expect("mkdir");
     std::fs::set_permissions(&private, std::fs::Permissions::from_mode(OWNER_ONLY_DIR))
@@ -72,4 +72,14 @@ fn a_bare_relative_filename_writes_into_the_current_directory() {
     // Leave the process somewhere that still exists, so the tempdir can
     // be removed on drop.
     std::env::set_current_dir(dir.path()).expect("cd");
+}
+
+/// A temporary directory made `0700` at creation, whatever the umask: the
+/// ancestor rule judges it, and `tempfile::tempdir()` under umask `002`
+/// with a shared primary group is `0775`, refused (j37).
+fn private_tempdir() -> std::io::Result<tempfile::TempDir> {
+    use std::os::unix::fs::PermissionsExt as _;
+    tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
 }

@@ -40,14 +40,19 @@ endpoints:
     )
 }
 
+/// The document at `0644` whatever the umask: under `002` it would be
+/// `0664`, and in a shared group refused for that (j37).
 fn write(paths: &ProfilePaths, text: &str) {
+    use std::os::unix::fs::PermissionsExt as _;
     create_private_dir(paths.config_dir()).expect("config dir");
     std::fs::write(paths.config_file(), text).expect("write");
+    std::fs::set_permissions(paths.config_file(), std::fs::Permissions::from_mode(0o644))
+        .expect("chmod");
 }
 
 #[test]
 fn a_valid_document_loads_as_its_own_profile() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path(), "work");
     write(&p, &document("profile:\n  name: work", ""));
     let loaded = ProfileConfig::load(&p).expect("loads");
@@ -58,7 +63,7 @@ fn a_valid_document_loads_as_its_own_profile() {
 /// another, or claiming none, it is refused rather than trusted.
 #[test]
 fn a_document_naming_another_profile_or_none_is_refused() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path(), "work");
     write(&p, &document("profile:\n  name: home", ""));
     match ProfileConfig::load(&p) {
@@ -79,7 +84,7 @@ fn a_document_naming_another_profile_or_none_is_refused() {
 
 #[test]
 fn a_document_that_breaks_a_rule_is_refused_with_every_rule_it_breaks() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path(), "work");
     write(
         &p,
@@ -106,7 +111,7 @@ fn a_document_that_breaks_a_rule_is_refused_with_every_rule_it_breaks() {
 
 #[test]
 fn an_unknown_key_is_a_parse_refusal() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path(), "work");
     write(
         &p,
@@ -122,7 +127,7 @@ fn an_unknown_key_is_a_parse_refusal() {
 /// ceiling itself is not.
 #[test]
 fn a_document_past_the_ceiling_is_refused_unparsed() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path(), "work");
     let base = document("profile:\n  name: work", "");
     let pad = |total: u64| {
@@ -140,7 +145,7 @@ fn a_document_past_the_ceiling_is_refused_unparsed() {
 
 #[test]
 fn a_missing_document_is_a_read_refusal() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path(), "work");
     assert!(matches!(ProfileConfig::load(&p), Err(LoadError::Read(_))));
 }
@@ -154,7 +159,7 @@ fn a_missing_document_is_a_read_refusal() {
 #[test]
 fn a_document_under_a_writable_ancestor_is_refused() {
     use std::os::unix::fs::PermissionsExt as _;
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path(), "work");
     write(&p, &document("profile:\n  name: work", ""));
     ProfileConfig::load(&p).expect("the control");
@@ -180,7 +185,7 @@ fn a_document_under_a_writable_ancestor_is_refused() {
 #[test]
 fn a_document_others_can_write_is_refused() {
     use std::os::unix::fs::PermissionsExt as _;
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path(), "work");
     write(&p, &document("profile:\n  name: work", ""));
     let mode = |m: u32| {
@@ -208,7 +213,7 @@ fn a_document_others_can_write_is_refused() {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_document_that_is_a_link_is_refused() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path(), "work");
     write(&p, &document("profile:\n  name: work", ""));
     ProfileConfig::load(&p).expect("the control: the file itself");
@@ -231,7 +236,7 @@ fn a_document_that_is_a_link_is_refused() {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_document_that_is_a_fifo_is_refused_without_waiting() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path(), "work");
     write(&p, &document("profile:\n  name: work", ""));
     ProfileConfig::load(&p).expect("the control: a regular file");
@@ -266,7 +271,7 @@ fn a_document_that_is_a_fifo_is_refused_without_waiting() {
 /// control, an absolute key file elsewhere, loads.
 #[test]
 fn a_key_file_inside_the_human_dir_or_climbing_is_refused() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path(), "work");
 
     write(
@@ -348,7 +353,7 @@ fn a_key_file_reached_through_a_link_into_the_human_dir_is_refused() {
         ProfileConfig::load(p)
     }
 
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path(), "work");
     let vault = p.human_dir().join("vault");
     std::fs::create_dir_all(&vault).expect("vault");
@@ -382,7 +387,7 @@ fn a_key_file_reached_through_a_link_into_the_human_dir_is_refused() {
     }
 
     // The human directory itself a link to where the key is.
-    let other = tempfile::tempdir().expect("tempdir");
+    let other = private_tempdir().expect("tempdir");
     let q = paths(other.path(), "work");
     let elsewhere = other.path().join("elsewhere");
     std::fs::create_dir_all(&elsewhere).expect("elsewhere");
@@ -397,7 +402,7 @@ fn a_key_file_reached_through_a_link_into_the_human_dir_is_refused() {
 
     // The human directory a dangling link: its place is unknown, so the
     // load is refused naming it, the key ordinary.
-    let third = tempfile::tempdir().expect("tempdir");
+    let third = private_tempdir().expect("tempdir");
     let r = paths(third.path(), "work");
     let ordinary = third.path().join("keys").join("work.key");
     std::fs::create_dir_all(r.human_dir().parent().expect("state dir")).expect("state dir");
@@ -432,7 +437,7 @@ fn a_key_file_reached_through_a_link_into_the_human_dir_is_refused() {
 #[test]
 fn a_key_file_under_an_uninspectable_directory_is_refused() {
     use std::os::unix::fs::PermissionsExt as _;
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path(), "work");
     let closed = dir.path().join("closed");
     std::fs::create_dir_all(closed.join("keys")).expect("closed");
@@ -458,4 +463,14 @@ fn a_key_file_under_an_uninspectable_directory_is_refused() {
         Err(LoadError::KeyFileUnresolved { path, .. }) => assert_eq!(path, key),
         other => panic!("refused as unresolved: {other:?}"),
     }
+}
+
+/// A temporary directory made `0700` at creation, whatever the umask: the
+/// ancestor rule judges it, and `tempfile::tempdir()` under umask `002`
+/// with a shared primary group is `0775`, refused (j37).
+fn private_tempdir() -> std::io::Result<tempfile::TempDir> {
+    use std::os::unix::fs::PermissionsExt as _;
+    tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
 }

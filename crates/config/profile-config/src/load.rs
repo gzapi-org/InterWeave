@@ -367,6 +367,16 @@ fn resolve_existing_prefix(path: &std::path::Path) -> std::io::Result<std::path:
 
 #[cfg(test)]
 mod tests {
+    /// A temporary directory made `0700` at creation, whatever the umask: the
+    /// ancestor rule judges it, and `tempfile::tempdir()` under umask `002`
+    /// with a shared primary group is `0775`, refused (j37).
+    fn private_tempdir() -> std::io::Result<tempfile::TempDir> {
+        use std::os::unix::fs::PermissionsExt as _;
+        tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+    }
+
     use super::{LoadError, open_guarded_as};
 
     /// `config.yaml`'s owner clause (ADR-0028 A 2026-10-08): a file of
@@ -379,7 +389,7 @@ mod tests {
     #[allow(clippy::expect_used, clippy::panic)]
     fn a_document_another_uid_owns_is_refused() {
         use std::os::unix::fs::PermissionsExt as _;
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = private_tempdir().expect("tempdir");
         let path = dir.path().join("config.yaml");
         std::fs::write(&path, b"schema_version: 2\n").expect("write");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
@@ -414,7 +424,7 @@ mod tests {
                 Ok(self.0.map(|name| (name.to_owned(), Vec::new())))
             }
         }
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = private_tempdir().expect("tempdir");
         let path = dir.path().join("config.yaml");
         std::fs::write(&path, b"schema_version: 2\n").expect("write");
         let gid = std::fs::metadata(&path).expect("meta").gid();

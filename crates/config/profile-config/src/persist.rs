@@ -1004,6 +1004,16 @@ pub fn is_owner_only(path: &Path) -> Result<bool, PersistError> {
 
 #[cfg(test)]
 mod tests {
+    /// A temporary directory made `0700` at creation, whatever the umask: the
+    /// ancestor rule judges it, and `tempfile::tempdir()` under umask `002`
+    /// with a shared primary group is `0775`, refused (j37).
+    fn private_tempdir() -> std::io::Result<tempfile::TempDir> {
+        use std::os::unix::fs::PermissionsExt as _;
+        tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+    }
+
     use super::*;
 
     /// The uid read from /proc is the one this process creates files as.
@@ -1011,7 +1021,7 @@ mod tests {
     #[test]
     fn the_effective_uid_is_the_owner_of_what_this_process_creates() {
         use std::os::unix::fs::MetadataExt as _;
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = private_tempdir().expect("tempdir");
         let file = dir.path().join("mine");
         std::fs::write(&file, b"").expect("write");
         assert_eq!(
@@ -1028,7 +1038,7 @@ mod tests {
     #[test]
     fn an_owned_private_dir_passes_and_a_wide_or_linked_one_does_not() {
         use std::os::unix::fs::PermissionsExt as _;
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = private_tempdir().expect("tempdir");
         let dir = root.path().join("keys");
         create_private_dir(&dir).expect("create");
         require_owned_private_dir(&dir).expect("our own 0700 directory passes");
@@ -1069,7 +1079,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_file_is_not_a_private_directory() {
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = private_tempdir().expect("tempdir");
         chmod(root.path(), 0o700);
         let file = root.path().join("file");
         fs::write(&file, b"").expect("write");
@@ -1274,7 +1284,7 @@ mod tests {
             Some(id("-un")),
             "the user"
         );
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = private_tempdir().expect("tempdir");
         chmod(root.path(), 0o700);
         let dir = root.path().join("shared");
         fs::create_dir(&dir).expect("mkdir");
@@ -1315,7 +1325,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn an_other_writable_ancestor_needs_the_sticky_bit() {
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = private_tempdir().expect("tempdir");
         chmod(root.path(), 0o700);
         let private = private_under(root.path(), &["a"], 0o757);
         let a = root.path().join("a");
@@ -1331,7 +1341,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn an_ancestor_another_uid_owns_is_refused_sticky_or_not() {
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = private_tempdir().expect("tempdir");
         chmod(root.path(), 0o700);
         let private = private_under(root.path(), &["a"], 0o755);
         let a = root.path().join("a");
@@ -1351,7 +1361,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_link_on_the_path_is_judged_and_followed() {
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = private_tempdir().expect("tempdir");
         chmod(root.path(), 0o700);
         let target = private_under(root.path(), &["a"], 0o755);
         std::os::unix::fs::symlink(root.path().join("a"), root.path().join("via")).expect("link");
@@ -1403,7 +1413,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn the_plain_xdg_layout_passes() {
-        let home = tempfile::tempdir().expect("tempdir");
+        let home = private_tempdir().expect("tempdir");
         chmod(home.path(), 0o700);
         let private = private_under(
             home.path(),
@@ -1420,7 +1430,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_guarded_directory_is_judged_for_writers_not_readers() {
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = private_tempdir().expect("tempdir");
         chmod(root.path(), 0o700);
         let config = root.path().join("a").join("config");
         fs::create_dir_all(&config).expect("mkdir");
@@ -1440,10 +1450,13 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_guarded_directory_that_is_a_file_is_refused() {
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = private_tempdir().expect("tempdir");
         chmod(root.path(), 0o700);
         let file = root.path().join("file");
         fs::write(&file, b"").expect("write");
+        // Its mode set, so it is refused for its type and not for a
+        // group-write bit the umask gave it.
+        chmod(&file, 0o600);
         let detail = refused_at(resolve_guarded_dir(&file), &file);
         assert_eq!(detail, "it is not a directory");
         resolve_guarded_dir(root.path()).expect("the control");
@@ -1466,7 +1479,7 @@ mod tests {
     #[test]
     fn a_refused_ancestor_gets_nothing_created_under_it() {
         use std::os::unix::fs::PermissionsExt as _;
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = private_tempdir().expect("tempdir");
         chmod(root.path(), 0o700);
         let wide = root.path().join("wide");
         fs::create_dir(&wide).expect("mkdir");
@@ -1501,7 +1514,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_component_that_appears_unprivate_is_refused_before_anything_is_made_in_it() {
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = private_tempdir().expect("tempdir");
         chmod(root.path(), 0o700);
         let uid = effective_uid().expect("readable");
         let appeared = root.path().join("a");
@@ -1551,7 +1564,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn an_existing_path_that_is_not_a_directory_is_refused() {
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = private_tempdir().expect("tempdir");
         chmod(root.path(), 0o700);
         let file = root.path().join("file");
         fs::write(&file, b"").expect("write");
@@ -1586,7 +1599,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_missing_path_that_climbs_is_refused() {
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = private_tempdir().expect("tempdir");
         chmod(root.path(), 0o700);
         let climbs = root.path().join("a").join("..").join("b");
         assert!(matches!(
@@ -1621,7 +1634,7 @@ mod tests {
         // identity key, so the name failing to survive a reboot is the
         // loss of the identity itself.
         use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = private_tempdir().expect("tempdir");
         let path = dir.path().join("profile.json");
 
         // POSITIVE CONTROL FIRST: the same write succeeds while the
@@ -1656,7 +1669,7 @@ mod tests {
         // `require_private_dir` — it checks that group and other have no
         // bits, not that the owner can read.
         use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = private_tempdir().expect("tempdir");
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).expect("chmod");
 
         // POSITIVE CONTROL: a readable directory takes the key.

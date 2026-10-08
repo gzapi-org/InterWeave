@@ -336,6 +336,16 @@ fn write_diagnostics(mut file: &File) -> std::io::Result<()> {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     #![allow(clippy::expect_used)]
+    /// A temporary directory made `0700` at creation, whatever the umask: the
+    /// ancestor rule judges it, and `tempfile::tempdir()` under umask `002`
+    /// with a shared primary group is `0775`, refused (j37).
+    fn private_tempdir() -> std::io::Result<tempfile::TempDir> {
+        use std::os::unix::fs::PermissionsExt as _;
+        tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+    }
+
     use super::O_NOFOLLOW;
 
     /// The flag the lock opens with refuses a link: opening one with it
@@ -344,7 +354,7 @@ mod tests {
     #[test]
     fn the_no_follow_flag_refuses_a_link() {
         use std::os::unix::fs::OpenOptionsExt as _;
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = private_tempdir().expect("tempdir");
         let target = dir.path().join("target");
         std::fs::write(&target, b"x").expect("write");
         let link = dir.path().join("link");

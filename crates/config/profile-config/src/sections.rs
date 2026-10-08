@@ -130,6 +130,16 @@ pub(crate) fn validate_into(
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
+    /// A temporary directory made `0700` at creation, whatever the umask: the
+    /// ancestor rule judges it, and `tempfile::tempdir()` under umask `002`
+    /// with a shared primary group is `0775`, refused (j37).
+    fn private_tempdir() -> std::io::Result<tempfile::TempDir> {
+        use std::os::unix::fs::PermissionsExt as _;
+        tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+    }
+
     use super::*;
     use crate::{ProfileConfig, XdgRoots};
 
@@ -214,7 +224,7 @@ mod tests {
     /// directory.
     #[test]
     fn the_key_file_resolves_against_the_profiles_configuration() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = private_tempdir().expect("tempdir");
         let paths = ProfilePaths::resolve_offline("work", &roots(dir.path())).expect("paths");
         let absent = IdentityConfig::default();
         assert_eq!(absent.key_file_in(&paths), paths.identity_file());
