@@ -198,6 +198,18 @@ impl Side {
                 .tempdir()
                 .expect("a store directory")
         };
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(store_dir.path())
+                    .expect("stat")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700,
+                "owner-only whatever the umask"
+            );
+        }
         let store = HumanStore::open(
             // A directory the store makes owner-only itself.
             &store_dir.path().join("state/human.sqlite"),
