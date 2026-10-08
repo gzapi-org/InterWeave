@@ -258,7 +258,9 @@ fn open_lock_file(dirs: &[&Path], path: &Path, create: bool) -> Result<File, Per
         // creating `human_dir()` under a state directory then refused
         // left a new directory under the one it judged unsafe
         // (`a_refused_acquire_creates_nothing`). A missing directory ends
-        // the walk: nothing beneath it exists to judge.
+        // the walk: nothing beneath it exists to judge, and what is above
+        // it is judged by `create_private_dir` before it creates
+        // (`a_refused_ancestor_of_a_missing_state_dir_creates_nothing`).
         for dir in dirs {
             match std::fs::symlink_metadata(dir) {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,

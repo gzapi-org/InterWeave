@@ -256,3 +256,32 @@ fn a_hard_linked_or_wide_lock_file_is_refused() {
         Err(PersistError::FileNotPrivate { .. })
     ));
 }
+
+/// The state root under a directory others can write, with nothing of
+/// the profile's tree there yet: both locks are refused naming that
+/// directory, and neither creates anything under it -- the case
+/// `a_refused_acquire_creates_nothing` does not reach, since there the
+/// refused directory exists and here it is an ANCESTOR of the missing
+/// state directory. The same layout at `0755` is the control.
+#[test]
+fn a_refused_ancestor_of_a_missing_state_dir_creates_nothing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = paths(dir.path());
+    let wide = dir.path().join("state");
+    std::fs::create_dir(&wide).expect("mkdir");
+    std::fs::set_permissions(&wide, std::fs::Permissions::from_mode(0o777)).expect("chmod");
+    let refused = |r: Result<(), PersistError>| match r {
+        Err(PersistError::DirectoryNotPrivate { path, .. }) => assert_eq!(path, wide),
+        other => panic!("refused naming {}: {other:?}", wide.display()),
+    };
+    refused(HumanClientLock::acquire(&p, Duration::ZERO).map(drop));
+    refused(ProfileLock::acquire(&p, Duration::ZERO).map(drop));
+    let left: Vec<_> = std::fs::read_dir(&wide).expect("read").collect();
+    assert!(left.is_empty(), "nothing created: {left:?}");
+
+    std::fs::set_permissions(&wide, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    drop(HumanClientLock::acquire(&p, Duration::ZERO).expect("the control"));
+    drop(ProfileLock::acquire(&p, Duration::ZERO).expect("the control"));
+    assert_eq!(mode(p.state_dir()), OWNER_ONLY_DIR);
+    assert_eq!(mode(&p.human_dir()), OWNER_ONLY_DIR);
+}

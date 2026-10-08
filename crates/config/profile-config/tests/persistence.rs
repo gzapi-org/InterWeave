@@ -469,6 +469,38 @@ fn key_material_refuses_a_parent_directory_that_is_not_private() {
     write_atomic(&plain.join("config.toml"), b"schema_version = 2").expect("config is not secret");
 }
 
+/// Key material whose parent is MISSING, under an ancestor others can
+/// write: both private writers are refused naming that ancestor, and
+/// neither leaves the directories it would have made -- the refusal
+/// above judges a parent that exists. The ancestor at `0755` is the
+/// control.
+#[test]
+#[cfg(target_os = "linux")]
+fn key_material_under_a_refused_ancestor_creates_no_directory() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wide = dir.path().join("wide");
+    std::fs::create_dir(&wide).expect("mkdir");
+    std::fs::set_permissions(&wide, std::fs::Permissions::from_mode(0o777)).expect("chmod");
+    let path = wide.join("keys").join("identity.key");
+    for result in [
+        write_private_atomic(&path, b"not a real key"),
+        create_private_exclusive(&path, b"not a real key"),
+    ] {
+        match result {
+            Err(PersistError::DirectoryNotPrivate { path, .. }) => assert_eq!(path, wide),
+            other => panic!("refused naming {}: {other:?}", wide.display()),
+        }
+        let left: Vec<_> = std::fs::read_dir(&wide).expect("read").collect();
+        assert!(left.is_empty(), "nothing created: {left:?}");
+    }
+
+    std::fs::set_permissions(&wide, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    write_private_atomic(&path, b"not a real key").expect("the control");
+    assert_eq!(mode_of(&wide.join("keys")), OWNER_ONLY_DIR);
+}
+
 #[test]
 #[cfg(unix)]
 fn a_symlinked_parent_is_refused_however_private_its_target() {

@@ -40,25 +40,106 @@ pub const OWNER_ONLY_DIR: u32 = 0o700;
 
 /// Create `dir` and every missing parent, owner-only.
 ///
+/// JUDGED BEFORE ANYTHING IS CREATED: the nearest directory on `dir`'s
+/// path that exists is held to [`resolve_guarded_dir`]'s rule first, and
+/// the missing components are made beneath it as that judgement resolved
+/// it, so a refusal leaves the tree as it found it. A recursive create
+/// made the whole tree first and left it under the ancestor the caller's
+/// check then refused (`a_refused_ancestor_gets_nothing_created_under_it`).
+/// A `dir` that already exists creates nothing and is judged by nothing
+/// here: whether it is private is the caller's question.
+///
 /// # Errors
-/// Returns [`PersistError::Io`] if creation fails, or
+/// [`PersistError::DirectoryNotPrivate`] naming the existing ancestor,
+/// link or appeared component that breaks the rule; [`PersistError::Io`]
+/// if creation fails, or a missing part of the path is `..`;
 /// [`PersistError::UnsupportedPlatform`] where owner-only permissions
-/// cannot be enforced.
+/// cannot be enforced -- every target but Linux, the uid being read from
+/// `/proc`.
 pub fn create_private_dir(dir: &Path) -> Result<(), PersistError> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::DirBuilderExt as _;
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(OWNER_ONLY_DIR)
-            .create(dir)
-            .map_err(PersistError::Io)
+        let uid = effective_uid()?;
+        // The nearest component there is -- `/`, or for a relative `dir`
+        // the working directory, at worst -- and what is missing below it.
+        let mut existing = None;
+        for ancestor in dir.ancestors() {
+            let probe = if ancestor.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                ancestor
+            };
+            match fs::symlink_metadata(probe) {
+                Ok(_) => {
+                    existing = Some((ancestor, probe));
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(PersistError::Io(e)),
+            }
+        }
+        let Some((ancestor, probe)) = existing else {
+            return Err(PersistError::Io(std::io::ErrorKind::NotFound.into()));
+        };
+        let missing = dir.strip_prefix(ancestor).map_err(|_| {
+            PersistError::Io(std::io::Error::other(
+                "a path that is not under its ancestor",
+            ))
+        })?;
+        if missing.as_os_str().is_empty() {
+            return Ok(());
+        }
+        let base = resolve_guarded_dir_as(probe, uid)?;
+        create_each_as(&base, missing, uid)
     }
     #[cfg(not(unix))]
     {
         let _ = dir;
         Err(PersistError::UnsupportedPlatform)
     }
+}
+
+/// Create `missing`'s components under `base`, outermost first, each
+/// owner-only and each by itself rather than in one recursive call.
+///
+/// ONE AT A TIME because `base` may be a sticky directory others can
+/// create in: a component that appears between the judgement of `base`
+/// and its own creation is ADOPTED only if it is an owner-only directory
+/// of `uid`'s -- another of our processes making it -- and refused before
+/// anything is made inside it otherwise
+/// (`a_component_that_appears_unprivate_is_refused_before_anything_is_made_in_it`).
+#[cfg(unix)]
+fn create_each_as(base: &Path, missing: &Path, uid: u32) -> Result<(), PersistError> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    use std::path::Component;
+    // Every name checked before the first is made: `..` under a
+    // directory that does not exist yet names nothing the kernel could
+    // resolve, and following it by text would leave the judged base.
+    let mut names = Vec::new();
+    for component in missing.components() {
+        match component {
+            Component::Normal(name) => names.push(name),
+            Component::CurDir => {}
+            _ => {
+                return Err(PersistError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "a missing directory's path climbs with `..`",
+                )));
+            }
+        }
+    }
+    let mut at = base.to_path_buf();
+    for name in names {
+        at.push(name);
+        match fs::DirBuilder::new().mode(OWNER_ONLY_DIR).create(&at) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                at = resolve_owned_private_dir_as(&at, uid)?;
+            }
+            Err(e) => return Err(PersistError::Io(e)),
+        }
+    }
+    Ok(())
 }
 
 /// Write `contents` to `path` atomically, readable only by the owner.
@@ -1051,6 +1132,92 @@ mod tests {
         chmod(&config, 0o755);
         chmod(&root.path().join("a"), 0o775);
         refused_at(resolve_guarded_dir(&config), &root.path().join("a"));
+    }
+
+    /// The entries of `dir`, by name.
+    #[cfg(unix)]
+    fn entries(dir: &Path) -> Vec<std::ffi::OsString> {
+        fs::read_dir(dir)
+            .expect("read_dir")
+            .map(|e| e.expect("entry").file_name())
+            .collect()
+    }
+
+    /// A missing directory under an ancestor others can write is refused
+    /// naming that ancestor, and nothing is created under it; the same
+    /// tree with the ancestor `0755`, and `1777` (sticky), are the
+    /// controls, each made owner-only all the way down.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_refused_ancestor_gets_nothing_created_under_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().expect("tempdir");
+        chmod(root.path(), 0o700);
+        let wide = root.path().join("wide");
+        fs::create_dir(&wide).expect("mkdir");
+        chmod(&wide, 0o777);
+        let dir = wide.join("a").join("b").join("c");
+        let detail = refused_at(create_private_dir(&dir).map(|()| dir.clone()), &wide);
+        assert!(detail.contains("0777"), "{detail}");
+        assert!(
+            entries(&wide).is_empty(),
+            "nothing created: {:?}",
+            entries(&wide)
+        );
+
+        for mode in [0o755, 0o1777] {
+            chmod(&wide, mode);
+            create_private_dir(&dir).expect("the control");
+            for made in [wide.join("a"), wide.join("a").join("b"), dir.clone()] {
+                let mode = fs::symlink_metadata(&made)
+                    .expect("made")
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o777, OWNER_ONLY_DIR, "{}", made.display());
+            }
+            fs::remove_dir_all(wide.join("a")).expect("clean");
+        }
+    }
+
+    /// A component already there when its turn comes -- made in the
+    /// window after the base was judged -- is adopted when it is our
+    /// owner-only directory, and refused naming it, with nothing made
+    /// inside, when it is wider.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_component_that_appears_unprivate_is_refused_before_anything_is_made_in_it() {
+        let root = tempfile::tempdir().expect("tempdir");
+        chmod(root.path(), 0o700);
+        let uid = effective_uid().expect("readable");
+        let appeared = root.path().join("a");
+        fs::create_dir(&appeared).expect("mkdir");
+        chmod(&appeared, 0o755);
+        refused_at(
+            create_each_as(root.path(), Path::new("a/b"), uid).map(|()| appeared.clone()),
+            &appeared,
+        );
+        assert!(entries(&appeared).is_empty(), "nothing made inside it");
+
+        chmod(&appeared, 0o700);
+        create_each_as(root.path(), Path::new("a/b"), uid).expect("adopted: ours, owner-only");
+        assert!(appeared.join("b").is_dir());
+    }
+
+    /// A missing part that climbs with `..` is refused rather than
+    /// followed out of the judged base; the same path without it is the
+    /// control.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_missing_path_that_climbs_is_refused() {
+        let root = tempfile::tempdir().expect("tempdir");
+        chmod(root.path(), 0o700);
+        let climbs = root.path().join("a").join("..").join("b");
+        assert!(matches!(
+            create_private_dir(&climbs),
+            Err(PersistError::Io(e)) if e.kind() == std::io::ErrorKind::InvalidInput
+        ));
+        assert!(entries(root.path()).is_empty(), "nothing created");
+        create_private_dir(&root.path().join("b")).expect("the control");
     }
 
     /// A directory whose fsync cannot succeed, without a race.
