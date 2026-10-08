@@ -15,8 +15,10 @@ The byte-exact encoding of those vectors is pinned beside the codecs, in `tests/
 
 **Stage 17** — §20's platform tests:
 
-- the desktop ↔ Android matrix on real devices;
-- the upgrade matrices;
-- independent codecs.
+- the desktop ↔ Android matrix on real devices (waits for the Android app);
+- the upgrade matrices — the "previous build" axis empty until the first production build exists, the rows that need no older build filled now (testing.md §Compatibility fixtures, A 2026-10-08);
+- independent codecs — test-only, written from the contract text, no production codec crate, decoding every frozen vector and captured frame and re-encoding byte-equal (same section).
+
+The two Android-free items start before SPIKE-008 and SPIKE-009 close: §20's precondition binds the §20 packages, not this member.
 
 See [`architecture/docs/architecture/testing.md`](../../architecture/docs/architecture/testing.md) for the normative scenarios and exit criteria.

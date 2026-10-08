@@ -177,6 +177,11 @@ Required endpoint-v2 fixtures:
 
 Because no production v1 exists, Phase 1 does not require a v1 fan-out compatibility fixture. Unsupported major versions fail clearly.
 
+**Stage 17's two Android-free items** (plan §20 (c); A 2026-10-08, architect-cto's rulings to p2p-network-dev-02):
+
+- **The upgrade matrix** has a "previous build" axis that is empty until a production build exists: ADR-0017 (A 2026-10-07, second) makes the first production build the pre-release bound for every schema, so it is the first "previous" worth a second binary; a pinned `main` commit is a version nobody ran and is not used. Until then the matrix holds the rows that need no older build — an unsupported major on each wire and on IPC is refused clearly with the error the contract names and no half-handshake; a minor bump is accepted on each; a frame of a lower minor decodes from its frozen vector — and the closing record says the axis is empty and why.
+- **The independent codecs** are test-only encoders/decoders, one per frozen wire shape — the direct-v2 frame, AcceptedV2 and RejectedV2, the GossipSub broadcast frame, DirectContentFingerprintV1, the IPC v2 envelope — written from the contract text (TRANSPORT.md, LOCAL-IPC.md, the schemas) with no dependency on a production codec crate (a dependency the layering check holds), required to decode every frozen vector and every production-encoded frame the tests capture and to re-encode byte-equal. Rust is sufficient: the independence is from the production crates and the contract text is the oracle — a disagreement between an independent codec and production is a contract finding, never a test to bend. They stand in for the "future independent clients" above until one exists.
+
 ## Kademlia standard-v1 provider test suite
 
 These tests are a standard-v1 release gate before shipping configured Kademlia entries default-enabled. Tests also verify explicit `enabled: false` produces zero Kademlia activity.
