@@ -10,6 +10,8 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
+mod common;
+
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -228,7 +230,7 @@ async fn a_second_send_while_one_is_in_flight_is_not_sent_twice() {
 #[tokio::test]
 async fn read_then_keep_then_unkeep_then_keep_again_reaches_the_store() {
     let (a, b) = FakeNetwork::pair(node(), node());
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     let (mut alice, _) = Root::new(facade(
         &a,
@@ -307,7 +309,7 @@ async fn read_then_keep_then_unkeep_then_keep_again_reaches_the_store() {
 #[tokio::test]
 async fn a_keep_with_no_copy_held_fails_and_changes_nothing() {
     let (a, b) = FakeNetwork::pair(node(), node());
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     let (mut alice, _) = Root::new(facade(
         &a,
@@ -411,7 +413,7 @@ async fn a_draft_edit_reaches_the_model_before_a_send_in_the_same_take() {
 
 #[tokio::test]
 async fn the_store_is_listed_at_start() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     let (a, b) = FakeNetwork::pair(node(), node());
     // A message that stays pending: the remote is busy.
@@ -453,7 +455,7 @@ async fn the_store_is_listed_at_start() {
 #[tokio::test]
 async fn a_store_failure_changes_nothing_in_the_model_and_says_why() {
     let (a, b) = FakeNetwork::pair(node(), node());
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     let (mut alice, _) = Root::new(facade(
         &a,

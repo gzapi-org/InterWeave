@@ -13,6 +13,8 @@
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::panic)]
 
+mod common;
+
 use std::path::{Path, PathBuf};
 
 use interweave_human_store::{AppMessageId, HumanStore, InboundOrigin, NewInbound, StoreOptions};
@@ -79,7 +81,7 @@ fn state(dir: &tempfile::TempDir) -> PathBuf {
 
 #[test]
 fn released_content_is_absent_from_both_files_after_a_clean_close() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = state(&dir);
     let row = store_with_both(&path);
     let mut store = HumanStore::open(&path, StoreOptions::default()).expect("reopens");
@@ -98,7 +100,7 @@ fn released_content_is_absent_from_both_files_after_a_clean_close() {
 
 #[test]
 fn released_content_leaves_both_files_before_the_release_returns() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = state(&dir);
     let row = store_with_both(&path);
     let mut store = HumanStore::open(&path, StoreOptions::default()).expect("reopens");
@@ -119,7 +121,7 @@ fn released_content_leaves_both_files_before_the_release_returns() {
 
 #[test]
 fn an_unclean_close_by_a_build_without_secure_delete_is_scrubbed_at_the_next_open() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = state(&dir);
     store_with_both(&path);
     // A build before `secure_delete`, ending uncleanly: it deletes the
@@ -157,7 +159,7 @@ fn an_unclean_close_by_a_build_without_secure_delete_is_scrubbed_at_the_next_ope
 
 #[test]
 fn unkept_content_leaves_both_files_before_the_unkeep_returns() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = state(&dir);
     let mut store = HumanStore::open(&path, StoreOptions::default()).expect("opens");
     let kept = store
@@ -195,7 +197,7 @@ fn terminal_outbound_content_leaves_both_files_before_the_call_returns() {
     use interweave_human_core::retention::TerminalCause;
     use interweave_human_store::{NewOutbound, OutboundDestination};
     use interweave_transport_api::{DirectDestination, MessageId};
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = state(&dir);
     let mut store = HumanStore::open(&path, StoreOptions::default()).expect("opens");
     let kept = store
@@ -244,7 +246,7 @@ fn terminal_outbound_content_leaves_both_files_before_the_call_returns() {
 /// next open must not take that store for a fresh one (#214's review, F1).
 #[test]
 fn a_never_checkpointed_store_released_and_killed_is_scrubbed_at_the_next_open() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("fresh").join("human.sqlite3");
     let mut store = HumanStore::open(&path, StoreOptions::default()).expect("opens");
     store
@@ -296,7 +298,7 @@ fn a_never_checkpointed_store_released_and_killed_is_scrubbed_at_the_next_open()
 /// timeout once.
 #[test]
 fn a_held_log_is_not_mistaken_for_a_truncated_one() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = state(&dir);
     let row = store_with_both(&path);
     let mut store = HumanStore::open(&path, StoreOptions::default()).expect("reopens");

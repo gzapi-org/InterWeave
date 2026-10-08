@@ -8,6 +8,8 @@
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::panic)]
 
+mod common;
+
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -28,7 +30,7 @@ struct Home {
 
 impl Home {
     fn new() -> Self {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = common::private_tempdir();
         for sub in ["config", "data", "state", "cache", "run"] {
             std::fs::DirBuilder::new()
                 .mode(0o700)
@@ -83,8 +85,18 @@ channels: {{ desired: [] }}
             peer = peer.as_str()
         );
         let file = self.paths().config_file();
-        std::fs::create_dir_all(file.parent().expect("parent")).expect("config dir");
+        // Modes set, not left to the umask: the configuration's directory
+        // and `config.yaml` are refused when others can change them
+        // (ADR-0028 A 2026-10-08), so under umask 002 the run would stop
+        // at the configuration rather than at what the test asks.
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(file.parent().expect("parent"))
+            .expect("config dir");
         std::fs::write(&file, text).expect("config");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644))
+            .expect("config mode");
     }
 
     fn run(&self, args: &[&str]) -> Output {

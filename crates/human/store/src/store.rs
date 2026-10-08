@@ -1805,7 +1805,21 @@ mod private_dir_tests {
         // The race made deterministic: `a` appears between the judgement
         // of its parent and its own creation, readable by others.
         use std::os::unix::fs::PermissionsExt as _;
-        let dir = tempfile::tempdir_in("/tmp").expect("tempdir under /tmp");
+        // Owner-only at creation, whatever the umask: a group-writable
+        // tempdir is refused as an ancestor before the case is reached.
+        let dir = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in("/tmp")
+            .expect("tempdir under /tmp");
+        assert_eq!(
+            std::fs::metadata(dir.path())
+                .expect("stat")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+            "owner-only whatever the umask"
+        );
         let a = dir.path().join("a");
         let b = a.join("b");
         std::fs::create_dir(&a).expect("mkdir");
@@ -1829,7 +1843,21 @@ mod private_dir_tests {
         // a configured path through a link must come back without it, or
         // a link repointed after the judgement would redirect the open.
         use std::os::unix::fs::PermissionsExt as _;
-        let dir = tempfile::tempdir_in("/tmp").expect("tempdir under /tmp");
+        // Owner-only at creation, whatever the umask: a group-writable
+        // tempdir is refused as an ancestor before the case is reached.
+        let dir = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in("/tmp")
+            .expect("tempdir under /tmp");
+        assert_eq!(
+            std::fs::metadata(dir.path())
+                .expect("stat")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+            "owner-only whatever the umask"
+        );
         let real = dir.path().join("real");
         std::fs::create_dir_all(real.join("state")).expect("mkdir");
         for d in [&real, &real.join("state")] {
