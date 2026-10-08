@@ -39,7 +39,7 @@ pub mod recovery;
 use std::path::Path;
 
 use interweave_profile_config::{
-    PersistError, create_private_exclusive, effective_uid, require_owned_private_dir_as,
+    PersistError, create_private_exclusive, effective_uid, resolve_owned_private_dir_as,
     write_private_atomic,
 };
 use interweave_transport_api::{IdError, TransportIdentity};
@@ -698,7 +698,7 @@ impl ProfileIdentity {
         // `require_same_owner(parent, &file)` against a file they just
         // made, and a parent whose uid differs is a directory somebody
         // else can rewrite whatever its mode says; a reader has no file of
-        // its own, so it asks `require_owned_private_dir_as` with the
+        // its own, so it asks `resolve_owned_private_dir_as` with the
         // effective uid `load` read, as the profile lock does. Until then
         // this check took the mode and the link and not the owner (review
         // finding on PR #86; the external review of 2026-10-04, P3-3).
@@ -716,15 +716,25 @@ impl ProfileIdentity {
         // `parent_or_dot` supplies `.` for the one shape that has no
         // directory component. The braces scope the `match` and are not a
         // condition that went missing.
-        {
-            match uid.and_then(|uid| require_owned_private_dir_as(parent_or_dot(path), uid)) {
-                Ok(()) => {}
+        //
+        // AND READ UNDER THE DIRECTORY AS JUDGED: the check resolves the
+        // directory on disk, its ancestors and the links on its path
+        // judged with it (ADR-0028 A 2026-10-08), and the key is opened
+        // under that resolved directory, never the configured text, so
+        // what was judged is what is read.
+        let resolved =
+            match uid.and_then(|uid| resolve_owned_private_dir_as(parent_or_dot(path), uid)) {
+                Ok(dir) => dir,
                 Err(PersistError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
                     return Err(IdentityError::NotFound);
                 }
                 Err(e) => return Err(IdentityError::Storage(e)),
-            }
-        }
+            };
+        let Some(name) = path.file_name() else {
+            return Err(IdentityError::NotAFile);
+        };
+        let resolved = resolved.join(name);
+        let path = resolved.as_path();
 
         // What is AT the path, before opening: a symlink is refused
         // rather than followed, because an identity that has been
