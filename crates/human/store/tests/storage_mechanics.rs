@@ -1331,6 +1331,44 @@ fn a_link_above_the_state_directory_is_judged_by_where_it_sits() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn a_companion_that_is_a_link_is_refused_not_followed() {
+    // A `-wal` or `-shm` left as a link to an owner-only file elsewhere is
+    // judged as what is at the path, never as its target, and the target
+    // is not touched. Without the store's judgement SQLite refuses it too,
+    // but as `CannotOpen`, which reads as a failure worth retrying; the
+    // refusal must say what is wrong.
+    use std::os::unix::fs::PermissionsExt as _;
+    for suffix in ["-wal", "-shm"] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state").join("human.sqlite3");
+        drop(HumanStore::open(&path, StoreOptions::default()).expect("a fresh store"));
+
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::write(&elsewhere, b"").expect("target");
+        std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o600))
+            .expect("owner-only, so only the link itself is wrong");
+        let mut companion = path.as_os_str().to_owned();
+        companion.push(suffix);
+        let companion = std::path::PathBuf::from(companion);
+        let _ = std::fs::remove_file(&companion);
+        std::os::unix::fs::symlink(&elsewhere, &companion).expect("link");
+
+        match HumanStore::open(&path, StoreOptions::default()) {
+            Err(StoreError::NotAFile { what }) => {
+                assert!(what.contains("not a regular file"), "{suffix}: {what}");
+            }
+            other => panic!("{suffix}: expected the link refused, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(&elsewhere).expect("target"),
+            b"",
+            "{suffix}: the link's target is untouched"
+        );
+    }
+}
+
 #[test]
 fn a_too_open_write_ahead_log_is_refused_and_left_as_it_was() {
     // The same rule for a companion: a WAL that was broadly readable

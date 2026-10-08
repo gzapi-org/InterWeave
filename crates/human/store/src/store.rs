@@ -219,16 +219,41 @@ impl HumanStore {
         // content as the directory, and SQLite creates the companions
         // itself with the process umask. Checked after the connection so
         // they exist to be checked.
-        for (suffix, what) in [
-            ("", "the database"),
-            ("-wal", "the write-ahead log"),
-            ("-shm", "the shared-memory index"),
+        //
+        // WHAT IS THERE, as for the database above: `exists` and `metadata`
+        // follow a link, so a `-wal` or `-shm` left as a link to an
+        // owner-only file passed this check. SQLite then refused it on its
+        // own, as `CannotOpen` -- an unclassified open failure a client
+        // shows as "try again", which no wait fixes. Judged here, it is
+        // refused as what it is
+        // (`a_companion_that_is_a_link_is_refused_not_followed`).
+        for (suffix, what, not_a_file) in [
+            (
+                "",
+                "the database",
+                "the database path is not a regular file",
+            ),
+            (
+                "-wal",
+                "the write-ahead log",
+                "the write-ahead log is not a regular file",
+            ),
+            (
+                "-shm",
+                "the shared-memory index",
+                "the shared-memory index is not a regular file",
+            ),
         ] {
             let mut companion = path.as_os_str().to_owned();
             companion.push(suffix);
             let companion = std::path::PathBuf::from(companion);
-            if companion.exists() {
-                require_owner_only(&companion, what)?;
+            match std::fs::symlink_metadata(&companion) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(StoreError::Io(e)),
+                Ok(meta) if !meta.file_type().is_file() => {
+                    return Err(StoreError::NotAFile { what: not_a_file });
+                }
+                Ok(_) => require_owner_only(&companion, what)?,
             }
         }
         // EXISTING AS THE CONNECTION SEES IT, not as the file's header
