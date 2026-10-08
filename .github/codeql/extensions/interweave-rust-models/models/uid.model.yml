@@ -11,24 +11,28 @@
 #
 # A barrierModel row on a function's ReturnValue (the call node, which
 # is the source node) stops that function's result being a source for
-# the query's taint kind, `log-injection`, and nothing else: every other
-# name the heuristic matches, a `password` included, still alerts.
+# taint kind `log-injection`. That kind is SHARED: rust-all reads it as
+# the barrier of rust/cleartext-logging and of rust/log-injection alike,
+# so a row silences both for that value. Every other name the heuristic
+# matches, a `password` included, still alerts.
 #
 # Measured with CodeQL 2.27.1 (the version default setup ran on #228) on
 # #228's profile-config and profile-identity: 31 results without this
 # pack, 24 with it — every `effective_uid(...)` and `meta.uid()` source
 # gone; a canary `eprintln!("{password}")` still reported with it.
 #
-# WHAT NO ROW CAN DO: a VARIABLE named `uid` is a source by its name, and
-# models name functions only. The 24 left are all of that shape — a
-# `uid` parameter or local in load.rs/persist.rs reaching a test's panic.
-# Renaming those identifiers is the crates' owners' call; until then
-# such an alert is dismissed as "false positive" by the PR's author,
-# citing this file.
+# WHAT NO ROW CAN DO: a VARIABLE or FIELD named like a uid is a source
+# by its name, and models name functions only. The 24 left are all of
+# that shape — a `uid` parameter or local in load.rs/persist.rs reaching
+# a test's panic. The crates' owners keep those names where the value
+# is "a uid" (2026-10-08), so such an alert is dismissed as "false
+# positive" by the PR's author, citing this file.
 #
 # THE RULE FOR A ROW: it names one function, says what the function
-# returns, and why that value is not the secret its name suggests. A
-# row that cannot say that is not reviewable. The path is the canonical
+# returns, why that value is not the secret its name suggests, and that
+# it is not text an attacker can shape — in practice a number, since the
+# row is a log-injection barrier too. A row that cannot say all three is
+# not reviewable. The path is the canonical
 # one — the crate's `lib` name (hyphens as underscores) and the module
 # that defines the function, not a re-export; a trait method as
 # `<Type as path::Trait>::method`. A row whose path matches nothing is
@@ -38,9 +42,10 @@ extensions:
       pack: codeql/rust-all
       extensible: barrierModel
     data:
-      # This process's effective uid, a u32 read from /proc/self/status:
-      # every account on the host can read every process's.
+      # This process's effective uid, a u32 read from /proc/self/status.
+      # A uid names an account the world-readable passwd database already
+      # maps, and ADR-0028's refusals print this one on purpose.
       - ["interweave_profile_config::persist::effective_uid", "ReturnValue", "log-injection", "manual"]
-      # A file's owner uid, a u32 from stat(2): any account that can see
-      # the file's name can read it.
+      # A file's owner uid, a u32 from stat(2). Not a secret for the same
+      # reason; the refusals name the owner of the component they judged.
       - ["<std::fs::Metadata as std::os::unix::fs::MetadataExt>::uid", "ReturnValue", "log-injection", "manual"]

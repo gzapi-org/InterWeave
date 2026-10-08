@@ -134,9 +134,10 @@ which this repository prints in refusals on purpose (ADR-0028).
   `barrierModel` row to
   `.github/codeql/extensions/interweave-rust-models/models/uid.model.yml`,
   under the rule its header states, in your PR.
-- Source is a **variable** named `uid` (`writes uid`): no row can reach
-  it. Dismiss the alert as "false positive" with a comment citing that
-  file, and resolve its thread.
+- Source is a **variable or field** named like a uid (`writes uid`,
+  `writes self.owner_uid`): no row can reach it. Dismiss the alert as
+  "false positive" with a comment citing that file, and resolve its
+  thread.
 
 Any other source of that rule — a key, a token, a passphrase — is a
 real finding until shown otherwise.
