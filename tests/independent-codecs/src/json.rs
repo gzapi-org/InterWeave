@@ -392,9 +392,9 @@ mod tests {
             s
         };
         for (units, want) in [
-            (&["d83d", "de00"][..], 0x1f600),
-            (&["d800", "dc00"][..], 0x10000),
-            (&["dbff", "dfff"][..], 0x10ffff),
+            (&["d83d", "de00"][..], 0x0001_f600),
+            (&["d800", "dc00"][..], 0x0001_0000),
+            (&["dbff", "dfff"][..], 0x0010_ffff),
         ] {
             let text = esc(units);
             assert!(text.is_ascii(), "the escape stayed an escape: {text}");

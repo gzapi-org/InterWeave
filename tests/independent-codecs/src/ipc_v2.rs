@@ -264,7 +264,15 @@ fn check_class(class: Class, v: &Value) -> Result<(), DecodeError> {
                     "transport_contract_version is not N.N".to_owned(),
                 ));
             }
-            bounded_str(v.get("peer"), 1, usize::MAX, "peer")?;
+            if !v
+                .get("peer")
+                .and_then(Value::as_str)
+                .is_some_and(is_peer_id)
+            {
+                return Err(DecodeError(
+                    "peer outside the common/peer-id grammar".to_owned(),
+                ));
+            }
             unique_strings(
                 v.get("granted_capabilities").unwrap_or(&Value::Null),
                 0,
@@ -386,6 +394,18 @@ fn check_class(class: Class, v: &Value) -> Result<(), DecodeError> {
         }
     }
     Ok(())
+}
+
+/// `common/peer-id`: `12D3KooW` or `Qm` followed by exactly 44 base58btc
+/// characters (`[1-9A-HJ-NP-Za-km-z]`).
+fn is_peer_id(s: &str) -> bool {
+    let tail = s.strip_prefix("12D3KooW").or_else(|| s.strip_prefix("Qm"));
+    tail.is_some_and(|t| {
+        t.len() == 44
+            && t.bytes().all(|b| {
+                matches!(b, b'1'..=b'9' | b'A'..=b'H' | b'J'..=b'N' | b'P'..=b'Z' | b'a'..=b'k' | b'm'..=b'z')
+            })
+    })
 }
 
 /// `^[A-Za-z0-9_-]+$` of `min..=max` characters: the keepalive nonce and

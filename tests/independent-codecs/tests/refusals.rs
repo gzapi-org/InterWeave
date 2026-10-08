@@ -14,6 +14,10 @@ use interweave_independent_codecs::direct_v2::DirectMessageV2;
 use interweave_independent_codecs::ipc_v2;
 use interweave_independent_codecs::{MAX_PAYLOAD_BYTES, fingerprint};
 
+/// The `PeerId` the IPC goldens carry: a real one, in the common/peer-id
+/// grammar, so a control is a frame the contract accepts.
+const GOLDEN_PEER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+
 fn direct(
     source: &str,
     dest: Option<&str>,
@@ -236,11 +240,20 @@ fn ipc_envelope_rules_hold_beside_their_controls() {
     let nonce = |n: &str| format!(r#"{{"type":"ping","nonce":"{n}"}}"#);
     let lease = |members: &str| {
         format!(
-            r#"{{"type":"hello_response","ipc_version":{{"major":2,"minor":3}},"transport_contract_version":"2.0","peer":"12D3KooW","granted_capabilities":["events"]{members}}}"#
+            r#"{{"type":"hello_response","ipc_version":{{"major":2,"minor":3}},"transport_contract_version":"2.0","peer":"PEER","granted_capabilities":["events"]{members}}}"#
         )
+        .replace("PEER", GOLDEN_PEER)
     };
     let full = r#","endpoint":"human","endpoint_lease_epoch":"AAAAAAAAAAAAAAAA","event_queue":256"#;
     let owned: Vec<(String, String)> = vec![
+        // common/peer-id: 12D3KooW or Qm, then exactly 44 base58btc.
+        (lease(""), lease("").replace(GOLDEN_PEER, "12D3KooW")),
+        (lease(""), lease("").replace(GOLDEN_PEER, &GOLDEN_PEER.replace('D', "0"))),
+        (lease(""), lease("").replace(GOLDEN_PEER, &format!("{GOLDEN_PEER}x"))),
+        (
+            lease("").replace(GOLDEN_PEER, &format!("Qm{}", &GOLDEN_PEER[8..])),
+            lease("").replace(GOLDEN_PEER, &format!("Qn{}", &GOLDEN_PEER[8..])),
+        ),
         // frame $defs/keepalive_nonce: 16..64 of [A-Za-z0-9_-].
         (nonce(&"A".repeat(16)), nonce(&"A".repeat(15))),
         (nonce(&"_-".repeat(32)), nonce(&"A".repeat(65))),
@@ -289,6 +302,18 @@ fn ipc_envelope_rules_hold_beside_their_controls() {
         assert!(ipc(bad).is_err(), "accepted: {bad}");
     }
     assert!(ipc("[]").is_err());
+
+    // A complete prefix with its body still arriving is Incomplete, beside
+    // the same bytes complete, which split; a missing prefix is too.
+    assert_eq!(
+        ipc_v2::split_frame(&[0, 0, 0, 2, b'{']),
+        Ok(ipc_v2::Split::Incomplete)
+    );
+    assert_eq!(ipc_v2::split_frame(&[0, 0]), Ok(ipc_v2::Split::Incomplete));
+    assert_eq!(
+        ipc_v2::split_frame(&[0, 0, 0, 2, b'{', b'}', 9]),
+        Ok(ipc_v2::Split::Frame(&b"{}"[..], &[9][..]))
+    );
     assert!(ipc_v2::decode_frame(&[0, 0, 0, 2, b'{', b'}', 0]).is_err());
 }
 
