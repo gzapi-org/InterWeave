@@ -8,6 +8,8 @@
 //! carries requests, cancels and pongs.
 
 use std::collections::HashMap;
+use std::io::Read as _;
+use std::os::fd::AsFd as _;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -101,12 +103,16 @@ impl Shared {
             .remove(id)
     }
 
-    /// The connection is over: every waiting call is dropped, and reads
-    /// the code. The first end recorded stands, except that a writer's
-    /// failure is provisional: the server's own `close` frame, read after
-    /// it, replaces its code, so a caller is told why the SERVER ended the
-    /// connection rather than that a write failed against the socket it
-    /// was closing (`a_failed_write_keeps_the_servers_close_code`).
+    /// The connection is over: the code is recorded, and every waiting
+    /// call is dropped and reads it. The first end recorded stands, except
+    /// that a writer's failure is provisional: the server's own `close`
+    /// frame, read after it, replaces its code, so a caller is told why the
+    /// SERVER ended the connection rather than that a write failed against
+    /// the socket it was closing. The writer's end drops no call: the
+    /// reader, which then reads only what has already arrived, answers them
+    /// when it stops, so a call answers the code the session ends with
+    /// (`a_failed_write_keeps_the_servers_close_code`; architect-cto's
+    /// ruling, 01a11be2).
     fn end(&self, code: TransportError, clean: bool, by: EndedBy) {
         let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
         let mut ended = self.ended.lock().unwrap_or_else(PoisonError::into_inner);
@@ -120,7 +126,9 @@ impl Shared {
         } else if by == EndedBy::ServerClose && self.provisional.swap(false, Ordering::SeqCst) {
             *ended = Some(code);
         }
-        pending.clear();
+        if by != EndedBy::Writer {
+            pending.clear();
+        }
     }
 }
 
@@ -252,12 +260,15 @@ pub(crate) async fn open(
     // reading -- the server closed it, or broke the protocol -- is shut on
     // this side too, so the server sees it end and releases the session.
     let (ended, ended_rx) = watch::channel(false);
+    // And the writer's failure is the reader's cue to stop waiting: it
+    // reads what has already arrived, then ends.
+    let (write_failed, write_failed_rx) = watch::channel(false);
     let inbox = events_tx.as_ref().map(|(_, inbox)| Arc::clone(inbox));
     let writer = tokio::spawn(write_loop(
         write,
         out_rx,
         pong_rx,
-        ended_rx,
+        (ended_rx, write_failed),
         (Arc::clone(&shared), inbox),
     ));
     let reader = tokio::spawn(read_loop(
@@ -266,7 +277,7 @@ pub(crate) async fn open(
         Arc::clone(&shared),
         pong,
         events_tx,
-        ended,
+        (ended, write_failed_rx),
     ));
     Ok(Opened {
         connection: Connection {
@@ -422,7 +433,8 @@ impl Drop for CancelOnDrop {
 /// replace the recorded code ([`Shared::end`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EndedBy {
-    /// The writer failed on its own.
+    /// The writer failed on its own. Provisional, and it answers no call:
+    /// the reader's end that follows does both.
     Writer,
     /// The reader read the server's `close` frame.
     ServerClose,
@@ -441,15 +453,16 @@ fn finish(shared: &Shared, inbox: Option<&Inbox>, code: TransportError, clean: b
 }
 
 /// The writer. One whose write fails ends the connection BEFORE it drops
-/// its queue, so a call that fails on the dropped queue finds the end already
-/// recorded and `events` already refusing: the reader may never see the
-/// end, a server that stopped reading and kept writing being one way
+/// its queue, so a call that fails on the dropped queue finds the end
+/// already recorded and `events` already refusing, and then tells the
+/// reader, which may be waiting on a server that stopped reading and
+/// kept writing, to read what has arrived and stop
 /// (`a_failed_write_ends_the_session_before_the_reader_sees_it`).
 async fn write_loop(
     mut write: OwnedWriteHalf,
     mut out: mpsc::Receiver<Outgoing>,
     mut pong: watch::Receiver<Option<Vec<u8>>>,
-    mut ended: watch::Receiver<bool>,
+    (mut ended, write_failed): (watch::Receiver<bool>, watch::Sender<bool>),
     (shared, inbox): (Arc<Shared>, Option<Arc<Inbox>>),
 ) {
     loop {
@@ -478,22 +491,51 @@ async fn write_loop(
                 false,
                 EndedBy::Writer,
             );
+            write_failed.send_replace(true);
             break;
         }
     }
     let _ = write.shutdown().await;
 }
 
+/// The reader. Until the writer fails it waits on the socket; after, it
+/// reads only what has already arrived -- a Unix socket keeps what the
+/// server sent before it closed, so a `close` already sent is read -- and
+/// then ends, answering every waiting call with the code the session
+/// ends with (`a_failed_write_keeps_the_servers_close_code`). Nothing it
+/// waits on afterwards can hold a call: a server that stopped reading and
+/// kept its write half open sends nothing more to wait for
+/// (`a_failed_write_ends_the_session_before_the_reader_sees_it`).
 async fn read_loop(
     mut reader: Reader,
     version: IpcVersion,
     shared: Arc<Shared>,
     echoes: watch::Sender<Option<Vec<u8>>>,
     events: Option<(mpsc::Sender<SessionEvent>, Arc<Inbox>)>,
-    ended: watch::Sender<bool>,
+    (ended, mut write_failed): (watch::Sender<bool>, watch::Receiver<bool>),
 ) {
+    let mut draining = false;
     let (code, clean, by) = loop {
-        match reader.next().await {
+        let next = if draining {
+            match reader.next_now() {
+                // Nothing more has arrived: the provisional end stands.
+                Ok(None) => break (TransportError::BackendUnavailable, false, EndedBy::Reader),
+                next => next,
+            }
+        } else {
+            tokio::select! {
+                biased;
+                // Cancel-safe: `next` keeps what it read in its buffer. A
+                // writer that ended without failing drops its sender, which
+                // disables this arm rather than firing it.
+                Ok(_) = write_failed.wait_for(|failed| *failed) => {
+                    draining = true;
+                    continue;
+                }
+                next = reader.next() => next,
+            }
+        };
+        match next {
             Ok(Some(Frame::Response(response))) => {
                 // An id no call waits for was cancelled: discarded.
                 if let Some(answer) = shared.take(response.id.as_str()) {
@@ -518,9 +560,32 @@ async fn read_loop(
                 // session drains it (LOCAL-IPC.md, A 2026-09-30) -- the
                 // client holds the granted bound plus that one. A session
                 // already closed takes nothing, and reading goes on to the
-                // end.
-                if events.send(event).await.is_ok() {
-                    inbox.wake_all();
+                // end. Once the writer has failed the reader no longer
+                // waits for room: an event that does not fit ends the
+                // reading there, as nothing more having arrived does.
+                let room = if draining {
+                    events.try_reserve()
+                } else {
+                    tokio::select! {
+                        biased;
+                        room = events.reserve() => room.map_err(|_| {
+                            mpsc::error::TrySendError::Closed(())
+                        }),
+                        Ok(_) = write_failed.wait_for(|failed| *failed) => {
+                            draining = true;
+                            events.try_reserve()
+                        }
+                    }
+                };
+                match room {
+                    Ok(permit) => {
+                        permit.send(event);
+                        inbox.wake_all();
+                    }
+                    Err(mpsc::error::TrySendError::Closed(())) => {}
+                    Err(mpsc::error::TrySendError::Full(())) => {
+                        break (TransportError::BackendUnavailable, false, EndedBy::Reader);
+                    }
                 }
             }
             Ok(Some(Frame::Ping(ping))) => {
@@ -562,6 +627,8 @@ async fn read_loop(
 struct Reader {
     inner: OwnedReadHalf,
     buf: Vec<u8>,
+    /// The duplicate [`Reader::next_now`] reads through, once it has.
+    now: Option<std::os::unix::net::UnixStream>,
 }
 
 impl Reader {
@@ -569,6 +636,7 @@ impl Reader {
         Self {
             inner,
             buf: Vec::new(),
+            now: None,
         }
     }
 
@@ -599,6 +667,49 @@ impl Reader {
                 };
             }
             self.buf.extend_from_slice(&chunk[..read]);
+        }
+    }
+
+    /// The next frame among what has already arrived, without waiting:
+    /// `None` once nothing complete is left to read, the stream's end
+    /// included.
+    ///
+    /// Read through a duplicate of the socket, not `try_read`: tokio's
+    /// `try_read` answers `WouldBlock` without asking the kernel until its
+    /// reactor has seen the socket readable, so a `close` already sitting
+    /// in the socket went unread when the writer failed first (measured,
+    /// current-thread). The duplicate shares the descriptor's non-blocking
+    /// mode, so its read never waits either
+    /// (`a_failed_write_ends_the_session_before_the_reader_sees_it`, whose
+    /// server keeps its write half open, would hang if it did).
+    fn next_now(&mut self) -> Result<Option<Frame>, TransportError> {
+        loop {
+            match decode_frame(&self.buf) {
+                Ok(DecodedFrame { body, consumed }) => {
+                    self.buf.drain(..consumed);
+                    return Frame::parse(&body).map(Some);
+                }
+                Err(FrameError::Incomplete { .. }) => {}
+                Err(_) => return Err(TransportError::ProtocolViolation),
+            }
+            let socket = match &mut self.now {
+                Some(socket) => socket,
+                None => self.now.insert(
+                    self.inner
+                        .as_ref()
+                        .as_fd()
+                        .try_clone_to_owned()
+                        .map(std::os::unix::net::UnixStream::from)
+                        .map_err(|_| TransportError::BackendUnavailable)?,
+                ),
+            };
+            let mut chunk = [0_u8; 8192];
+            match socket.read(&mut chunk) {
+                Ok(0) => return Ok(None),
+                Ok(read) => self.buf.extend_from_slice(&chunk[..read]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
+                Err(_) => return Err(TransportError::BackendUnavailable),
+            }
         }
     }
 }

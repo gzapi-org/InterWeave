@@ -336,35 +336,68 @@ async fn a_failed_write_ends_the_session_before_the_reader_sees_it() {
 /// when a write of the client's fails against the socket the server is
 /// closing first (#224 review B F1): the writer's end is provisional and
 /// the `close` read after it replaces it. The call that met the failed
-/// write is answered at once, as the session ends; it is the session's
-/// end that names the server's reason. Current-thread, so the writer
-/// runs before the reader is polled -- the order that loses the code.
+/// write answers that same code, not the writer's (architect-cto,
+/// 01a11be2): it is answered when the reader has read what arrived.
+/// Current-thread, so the writer runs before the reader is polled -- the
+/// order that loses the code. The control is the same script with no
+/// `close` written: the call and the end are `BackendUnavailable`.
 #[tokio::test(flavor = "current_thread")]
 async fn a_failed_write_keeps_the_servers_close_code() {
     use interweave_transport_api::TransportError;
+    for (close, expected) in [
+        (true, TransportError::ShuttingDown),
+        (false, TransportError::BackendUnavailable),
+    ] {
+        let script = Script::new();
+        let (session, mut server) = opened(&script, 8, &["events", "commands"]).await;
+        if close {
+            server
+                .write(&json!({"type": "close", "code": "ShuttingDown"}))
+                .await;
+        }
+        drop(server);
+        let answer = tokio::time::timeout(PATIENCE, session.join(general()))
+            .await
+            .expect("the call comes back");
+        assert_eq!(answer, Err(expected), "the call answers the session's end");
+        assert_eq!(
+            session.events(0).await.map(|e| e.len()),
+            Err(expected),
+            "the session ends with the same code"
+        );
+    }
+}
+
+/// After a failed write the reader does not wait for room: with the
+/// buffer full and an event in hand, the reading ends there and the call
+/// is answered, though the server's `close` sits unread behind that event
+/// -- a session that never drains would otherwise hold the call for good.
+/// What fitted before the end is still delivered, then the end.
+#[tokio::test]
+async fn a_failed_write_with_a_full_buffer_answers_without_waiting_for_room() {
+    use interweave_transport_api::TransportError;
     let script = Script::new();
-    let (session, mut server) = opened(&script, 8, &["events", "commands"]).await;
+    let (session, mut server) = opened(&script, 1, &["events", "commands"]).await;
+    server.event(0).await;
+    server.event(1).await;
     server
         .write(&json!({"type": "close", "code": "ShuttingDown"}))
         .await;
     drop(server);
     let answer = tokio::time::timeout(PATIENCE, session.join(general()))
         .await
-        .expect("the call comes back");
-    assert!(answer.is_err(), "no server, no join: {answer:?}");
-    let deadline = tokio::time::Instant::now() + PATIENCE;
-    loop {
-        let end = session.events(0).await.map(|e| e.len());
-        if end == Err(TransportError::ShuttingDown) {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the server's code never replaced the writer's: {end:?}"
-        );
-        tokio::task::yield_now().await;
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+        .expect("the call comes back without the buffer drained");
+    assert_eq!(answer, Err(TransportError::BackendUnavailable));
+    assert_eq!(
+        session.events(usize::MAX).await.map(|e| e.len()),
+        Ok(1),
+        "what fitted is delivered"
+    );
+    assert_eq!(
+        session.events(usize::MAX).await.map(|e| e.len()),
+        Err(TransportError::BackendUnavailable),
+        "then the end"
+    );
 }
 
 /// A server granting more than a session may hold is capped, not trusted.
