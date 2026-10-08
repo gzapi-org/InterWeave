@@ -64,9 +64,36 @@ fn reason(name: &str) -> DirectRejectReason {
 #[test]
 fn every_response_vector_encodes_to_its_frozen_bytes_and_decodes_back() {
     let all = vectors();
-    // Two acceptances and one rejection per assigned code: a reason added
-    // to the vocabulary without a vector, or a vector dropped, fails here.
+    // A vector dropped fails the count. A reason with no vector fails the
+    // coverage loop: `covered` matches every variant exhaustively, so a
+    // variant added to the type does not compile until it is listed, and
+    // once listed it needs a vector. The schema's enum is held to the same
+    // list by the independent codecs' `the_reason_order_is_the_schemas`.
     assert_eq!(all.len(), 9, "nine vectors, per the fixture README");
+    let covered = |r: DirectRejectReason| {
+        match r {
+        DirectRejectReason::NoRoute
+        | DirectRejectReason::UnauthorizedPeer
+        | DirectRejectReason::Overloaded
+        | DirectRejectReason::Malformed
+        | DirectRejectReason::TooLarge
+        | DirectRejectReason::ShuttingDown
+        | DirectRejectReason::Unsupported => all.iter().any(|(_, response, _)| {
+            matches!(response, DirectResponse::Rejected { reason, .. } if *reason == r)
+        }),
+    }
+    };
+    for r in [
+        DirectRejectReason::NoRoute,
+        DirectRejectReason::UnauthorizedPeer,
+        DirectRejectReason::Overloaded,
+        DirectRejectReason::Malformed,
+        DirectRejectReason::TooLarge,
+        DirectRejectReason::ShuttingDown,
+        DirectRejectReason::Unsupported,
+    ] {
+        assert!(covered(r), "{r:?} has no frozen vector");
+    }
     for (name, response, frame) in all {
         assert_eq!(
             hex::encode(&encode_response(&response)),
