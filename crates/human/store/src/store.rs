@@ -16,6 +16,7 @@ use std::path::Path;
 use interweave_human_core::retention::{
     Durability, InboundMessage, OutboundMessage, StorageHealth, TerminalCause,
 };
+use interweave_profile_config as profile_config;
 use interweave_transport_api::payload::MAX_PAYLOAD_BYTES;
 use interweave_transport_api::{
     ChannelId, DirectDestination, EndpointId, MediaType, MessageId, TransportIdentity,
@@ -124,31 +125,22 @@ impl HumanStore {
         // create their own parents, and a store that alone did not would
         // be the one that failed on a fresh profile.
         //
-        // Owner-only because this directory holds message content. The
-        // mode is applied at creation rather than after, so there is no
-        // window in which it is world-traversable. This duplicates three
-        // lines of `interweave-profile-config` on purpose: the store must
-        // not depend on configuration to protect its own files.
         // AN EMPTY PARENT IS THE WORKING DIRECTORY, not "no parent".
         // `Path::new("messages.db").parent()` is `Some("")`, so filtering
         // the empty string out skipped every check below for a bare
         // relative path — in a shared or attacker-writable working
         // directory, exactly the case that most needed them.
-        let parent = private_parent_of(path);
-        {
-            create_private_dir(parent)?;
-            // CREATED owner-only says nothing about one that was already
-            // there. A pre-existing state directory — restored, copied,
-            // made by an older build, or simply made by hand — carries
-            // whatever mode it has, and the store's documentation
-            // promised a protection it had not checked.
-            //
-            // Refused rather than tightened, for the reason the identity
-            // key is: content that has been broadly readable should be
-            // treated as exposed, and quietly narrowing the mode would
-            // hide that it ever was.
-            require_owner_only(parent, "the state directory")?;
-        }
+        //
+        // Every open below is made under the directory AS RESOLVED, not
+        // the configured text: the rule makes that path's components
+        // unchangeable by anyone but root and this uid, so nothing can
+        // be swapped in between the judgement and the open (ADR-0028 A
+        // 2026-10-08).
+        let dir = private_dir(private_parent_of(path))?;
+        let resolved = dir.join(path.file_name().ok_or(StoreError::NotAFile {
+            what: "the database path names no file",
+        })?);
+        let path = resolved.as_path();
         // CREATE IT OWNER-ONLY OURSELVES. SQLite creates the database with
         // the process umask, which is 0644 on a default system — message
         // content readable by every local account. Creating the file
@@ -1324,27 +1316,63 @@ impl HumanStore {
     }
 }
 
-/// Create `dir` and its parents, readable only by the owner.
-fn create_private_dir(dir: &std::path::Path) -> Result<(), StoreError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt as _;
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)
-            .map_err(StoreError::Io)
+/// The store's directory, judged by profile-config's one walk (ADR-0028 A
+/// 2026-10-08) and created owner-only if missing; answers where it is on
+/// disk, to open under.
+///
+/// Owner-only because this directory holds message content, owned by
+/// this uid, and under ancestors and links only root or this uid can
+/// change -- a sound mode under an ancestor another account can write is
+/// a directory that account can rename away and replace.
+///
+/// JUDGED BEFORE ANYTHING IS CREATED, as the profile lock's directories
+/// are: a missing directory is created only beneath an existing ancestor
+/// that meets the rule, so a refusal leaves the tree as it found it
+/// (`a_refused_state_directory_creates_nothing`).
+///
+/// REFUSED RATHER THAN TIGHTENED. A pre-existing directory — restored,
+/// copied, made by an older build, or by hand — carries whatever mode it
+/// has; content that has been broadly readable should be treated as
+/// exposed, and quietly narrowing the mode would hide that it ever was.
+///
+/// The desktop's `HumanClientLock` judges the same directory first, by
+/// the same walk; this judgement is the store's own, so a caller that
+/// opens it without that lock gets the rule too.
+fn private_dir(dir: &Path) -> Result<std::path::PathBuf, StoreError> {
+    if absent(dir)? {
+        let existing = dir
+            .ancestors()
+            .skip(1)
+            .map(|a| {
+                if a.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    a
+                }
+            })
+            .find_map(|a| match absent(a) {
+                Ok(false) => Some(Ok(a)),
+                Ok(true) => None,
+                Err(e) => Some(Err(e)),
+            })
+            .unwrap_or(Ok(Path::new(".")))?;
+        profile_config::resolve_guarded_dir(existing).map_err(StoreError::from_persist)?;
+        profile_config::create_private_dir(dir).map_err(StoreError::from_persist)?;
     }
-    #[cfg(not(unix))]
-    {
-        // Refusing beats creating a directory of message content this
-        // build cannot protect.
-        let _ = dir;
-        Err(StoreError::UnsupportedPlatform)
+    profile_config::resolve_owned_private_dir(dir).map_err(StoreError::from_persist)
+}
+
+/// Whether nothing at all is at `path` -- not even a dangling link,
+/// which is something there to be judged and refused.
+fn absent(path: &Path) -> Result<bool, StoreError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(e) => Err(StoreError::Io(e)),
     }
 }
 
-/// Refuse anything holding message content that others can reach.
+/// Refuse a file holding message content that others can reach.
 fn require_owner_only(path: &std::path::Path, what: &str) -> Result<(), StoreError> {
     #[cfg(unix)]
     {
