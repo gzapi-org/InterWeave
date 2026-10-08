@@ -27,7 +27,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use interweave_independent_codecs::ipc_v2::{self, Class, Envelope};
+use interweave_independent_codecs::ipc_v2::{self, Class, Envelope, Split};
 use interweave_independent_codecs::json::Value;
 use interweave_ipc_protocol::IPC_MAX_MINOR;
 use interweave_ipc_server::{KeepalivePolicy, Limits, ServerConfig, SocketPaths, bind, serve};
@@ -194,22 +194,20 @@ impl Client {
     async fn next(&mut self) -> Option<Envelope> {
         tokio::time::timeout(PATIENCE, async {
             loop {
-                if self.buf.len() >= 4 {
-                    match ipc_v2::split_frame(&self.buf) {
-                        Ok((body, _)) => {
-                            let n = 4 + body.len();
-                            let env = Envelope::decode_body(body).unwrap_or_else(|e| {
-                                panic!(
-                                    "HEAD wrote a frame the contract refuses: {e}: {}",
-                                    String::from_utf8_lossy(body)
-                                )
-                            });
-                            self.buf.drain(..n);
-                            return Some(env);
-                        }
-                        Err(e) if e.0.contains("declared") => {}
-                        Err(e) => panic!("HEAD wrote a bad prefix: {e}"),
+                match ipc_v2::split_frame(&self.buf) {
+                    Ok(Split::Frame(body, _)) => {
+                        let n = 4 + body.len();
+                        let env = Envelope::decode_body(body).unwrap_or_else(|e| {
+                            panic!(
+                                "HEAD wrote a frame the contract refuses: {e}: {}",
+                                String::from_utf8_lossy(body)
+                            )
+                        });
+                        self.buf.drain(..n);
+                        return Some(env);
                     }
+                    Ok(Split::Incomplete) => {}
+                    Err(e) => panic!("HEAD wrote a bad prefix: {e}"),
                 }
                 let mut chunk = [0_u8; 8192];
                 let read = self.stream.read(&mut chunk).await.ok()?;
