@@ -1679,6 +1679,32 @@ fn private_parent_of(path: &std::path::Path) -> &std::path::Path {
     }
 }
 
+#[cfg(all(test, target_os = "linux"))]
+mod private_dir_tests {
+    use super::private_dir;
+
+    #[test]
+    fn the_store_opens_under_the_directory_as_resolved_not_the_configured_text() {
+        // Every open after the judgement is made under what this returns;
+        // a configured path through a link must come back without it, or
+        // a link repointed after the judgement would redirect the open.
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir_in("/tmp").expect("tempdir under /tmp");
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(real.join("state")).expect("mkdir");
+        for d in [&real, &real.join("state")] {
+            std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        }
+        std::os::unix::fs::symlink(&real, dir.path().join("link")).expect("link");
+
+        let resolved = private_dir(&dir.path().join("link").join("state")).expect("judged sound");
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(real.join("state")).expect("canonical")
+        );
+    }
+}
+
 #[cfg(test)]
 mod parent_tests {
     use super::private_parent_of;
