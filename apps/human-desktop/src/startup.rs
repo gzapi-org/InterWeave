@@ -261,9 +261,9 @@ fn classify(path: &Path, error: &StoreError) -> Blocked {
         return Blocked::Recovery { path };
     }
     match error {
-        StoreError::NotAFile { .. } | StoreError::PermissionsTooOpen { .. } => {
-            Blocked::NotPrivate { path }
-        }
+        StoreError::NotAFile { .. }
+        | StoreError::PermissionsTooOpen { .. }
+        | StoreError::DirectoryNotPrivate { .. } => Blocked::NotPrivate { path },
         _ => Blocked::Unavailable { path },
     }
 }
@@ -341,6 +341,16 @@ mod tests {
         assert!(matches!(
             classify(path, &StoreError::Io(std::io::Error::other("busy"))),
             Blocked::Unavailable { .. }
+        ));
+        assert!(matches!(
+            classify(
+                path,
+                &StoreError::DirectoryNotPrivate {
+                    path: "/x".into(),
+                    detail: "mode is 0755".to_owned(),
+                }
+            ),
+            Blocked::NotPrivate { .. }
         ));
     }
 }
