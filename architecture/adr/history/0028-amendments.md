@@ -307,8 +307,13 @@ EFFECTIVE USER — never of the directory's owner, since a root-owned
 with primary gid 0 exist: the group's name equals that user's name, both
 read through the name service (the `getpwuid_r` / `getgrgid_r` family, NSS-
 backed, through nix's `user` feature in safe Rust — never `/etc/group`
-read by hand, which misses NSS sources), and the group's member list is
-empty. A read that cannot be completed, or that answers no such user or
+read by hand, which misses NSS sources), the group's member list is
+empty, and the directory or file carries no extended access ACL: with a
+POSIX ACL present the group bits are the ACL mask, not the owning
+group's grant, and a named entry granting another account write hides
+behind a group-write bit, so the presence of the `system.posix_acl_access`
+attribute refuses the bit (the retired reviewer's thread on #231, judged
+real). A read that cannot be completed, or that answers no such user or
 group, REFUSES, with the detail "group-writable; whether group <gid> is
 the daemon user's private group could not be read". Other-write stays
 refused unless sticky; the private directory itself stays owner-only
@@ -338,7 +343,8 @@ directory in our private group accepted; a shared group refused naming
 it; gid = uid with differing names refused; a name-service miss refused
 as unreadable; a root-owned `0775` ancestor in group `root` refused,
 naming the group — the test that pins the daemon's-user scoping against
-a directory-owner reading), the real lookups tested against `id -un` /
+a directory-owner reading; a `0775` directory in our private group with
+an access ACL granting another account write refused, naming the ACL), the real lookups tested against `id -un` /
 `id -gn` and a gid with no entry. The test suites set their tempdir modes explicitly
 (a test that depends on the host's umask is fragile under either
 ruling). Until the code lands, a user-private-group account under umask
