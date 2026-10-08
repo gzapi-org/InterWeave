@@ -259,7 +259,7 @@ nonce = 128-bit CSPRNG value, encoded canonically (for example base64url without
 
 When enabled by profile policy and negotiated in `hello`, defaults are `interval=30s`, `response_timeout=10s`, `max_missed=3`. The server has at most one outstanding keepalive nonce per connection; only an exact pong for the current 128-bit nonce satisfies the probe. Stale/duplicate/wrong nonces do not reset liveness state. After the configured miss threshold the daemon closes that IPC connection and releases its endpoint lease exactly as for an ordinary disconnect. Keepalive is local liveness detection only: it is not authentication, replay protection for application messages, a network heartbeat, or a lease-renewal credential.
 
-The bound runs both ways (A 2026-10-08). The wire tells the client neither the three values nor whether keepalive was granted (`hello_response` has no keepalive members, and a client offers the feature in every hello), so the client's bound is a protocol constant that ARMS AT THE FIRST PING THE CLIENT READS: `CLIENT_SILENCE_TIMEOUT = 120 s`. A server that has pinged has negotiated keepalive and pings every `interval` while healthy, so 120 s without a frame read after that is a real silence; before the first ping only the caller's own timeout and OS connection liveness bound the wait, as on a connection without keepalive — a daemon whose profile turns keepalive off never pings, and never arms the timer. Armed, a client that has read no frame of any kind for 120 s ends the connection `Timeout`, answering its waiting calls `Timeout`. The constant sits above the server's own threshold for a wedged client — `max_missed × interval + response_timeout`, 100 s at the defaults (probes every `interval`, a miss counted at `response_timeout` after each) — so at the defaults the server judges first; a profile raising `max_missed` can place its own threshold above the constant, which the client's armed timer, suspended while the client is not reading, does not contradict. The timer counts frames the client reads, so a client that has stopped reading its socket (its buffer full, below) suspends it: that client's fate is the server's wedge close, not a timeout it blames on the server. A profile keeps `interval + response_timeout` at or below the constant, so a healthy server's next ping always lands inside the armed bound (a validation rule in `profile-config`; `resource-limits.md`'s keepalive rows carry it). The validation landed with #228 (241b7598, 2026-10-08): `profile-config` refuses a profile whose `interval + response_timeout` exceeds `CLIENT_SILENCE_TIMEOUT_MS` (120 000) while keepalive is enabled, naming both values. Gap at writing: ipc-client echoes pings and keeps no timer for a missing one (connection.rs) — p2p-network-dev-02's carry from #224, on #230.
+The bound runs both ways (A 2026-10-08). The wire tells the client neither the three values nor whether keepalive was granted (`hello_response` has no keepalive members, and a client offers the feature in every hello), so the client's bound is a protocol constant that ARMS AT THE FIRST PING THE CLIENT READS: `CLIENT_SILENCE_TIMEOUT = 120 s`. A server that has pinged has negotiated keepalive and pings every `interval` while healthy, so 120 s without a frame read after that is a real silence; before the first ping only the caller's own timeout and OS connection liveness bound the wait, as on a connection without keepalive — a daemon whose profile turns keepalive off never pings, and never arms the timer. Armed, a client that has read no frame of any kind for 120 s ends the connection `Timeout`, answering its waiting calls `Timeout`. The constant sits above the server's own threshold for a wedged client — `max_missed × interval + response_timeout`, 100 s at the defaults (probes every `interval`, a miss counted at `response_timeout` after each) — so at the defaults the server judges first; a profile raising `max_missed` can place its own threshold above the constant, which the client's armed timer, suspended while the client is not reading, does not contradict. The timer counts frames the client reads, so a client that has stopped reading its socket (its buffer full, below) suspends it: that client's fate is the server's wedge close, not a timeout it blames on the server. A profile keeps `interval + response_timeout` at or below the constant, so a healthy server's next ping always lands inside the armed bound (a validation rule in `profile-config`; `resource-limits.md`'s keepalive rows carry it). The validation landed with #228 (241b7598, 2026-10-08): `profile-config` refuses a profile whose `interval + response_timeout` exceeds `CLIENT_SILENCE_TIMEOUT_MS` (120 000) while keepalive is enabled, naming both values. The client's timer landed with #230 (2373d967): `ipc-protocol`'s `CLIENT_SILENCE_TIMEOUT`, armed at the first ping read, as above.
 
 The profile policy `ipc.keepalive.require_for_endpoint_lease` defaults to `true`. When true, any client that claims a data-plane EndpointId lease must negotiate keepalive during `hello`; otherwise endpoint claim fails with `CapabilityDenied`. Connections that do not claim an endpoint (for example a separate admin or diagnostics session) do not need keepalive solely because of this rule. Operators may set the policy false for compatibility with third-party clients, accepting that a half-open client may retain its lease until OS-level failure detection or explicit `admin.endpoints` revocation.
 
@@ -526,12 +526,21 @@ that negotiated keepalive, the client's keepalive bound (§Disconnect/
 reconnect and optional keepalive, A 2026-10-08: `CLIENT_SILENCE_TIMEOUT`,
 120 s with no frame read, armed at the first ping) ends a server that
 keeps its write half open and sends nothing with `Timeout`; without
-keepalive only the caller's own timeout and OS connection liveness do. Gap at writing: the
-ipc-client as shipped (6eb4bb58) answers every waiting call
-`BackendUnavailable` at once on a write failure and lets a later `close`
-frame change only the session's code — two codes; the binding moves to
-this rule on p2p-network-dev-02's carry from #224, its two
-`scripted_server` tests turning into this sentence.
+keepalive only the caller's own timeout and OS connection liveness do. Landed with #230 (2373d967, 2026-10-08): ipc-client answers a waiting
+call with the session's end code, pinned by
+`a_failed_write_keeps_the_servers_close_code` and
+`a_failed_write_ends_the_session_though_the_server_keeps_writing_open`.
+Four behaviours of that binding are part of the rule: a writer's
+provisional end is shown to no caller, so a call, `events` and `ready`
+read one code; the drain after a failed write is bounded at 1 MiB, so a
+daemon that keeps writing cannot hold the calls — past it the
+connection ends `BackendUnavailable` with no `close` frame read; a frame
+the client refuses, read during that drain, ends the connection
+`ProtocolViolation` as it would without the failed write — the drain
+changes no code; and a request frame that cannot be encoded fails its
+call alone, `PayloadTooLarge`, the connection staying up (the arm is
+unreachable through the typed API, which bounds the request at the
+protocol's maximum).
 
 ## Cancellation mapping and request concurrency
 
