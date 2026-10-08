@@ -369,6 +369,13 @@ jobs:
       - name: The Claude bridge stays off the transport and discovery internals
         run: bash tools/checks/check_claude_layering.sh
 
+      # Plan §20 (c): the independent codecs reach no path package
+      # (workspace member, tests/support, third_party/) through any
+      # dependency kind, dev included at the first hop (cargo metadata,
+      # as above).
+      - name: The independent codecs stay independent of first-party code
+        run: bash tools/checks/check_independent_codecs.sh
+
       # ADR-0050 A 2026-10-01 / plan §17 (3): no bridge package's own
       # default-feature graph names a CommonMark parser (cargo tree per
       # package; a workspace build unifies features, so this is the graph,
