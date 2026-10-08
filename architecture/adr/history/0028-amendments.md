@@ -284,3 +284,57 @@ row; the digest entry; configuration.md's private-directory paragraph
 (the Android sentence); threat-model.md's ancestor-swap row (the
 boundary in the control column, Android in the residual); IDENTITY.md's
 at-rest sentence names the boundary.
+
+### Amendment 2026-10-08 — A group of one is the owner's own
+
+**Trigger.** p2p-network-dev-01's observation (GZCoord 01a11c0b): the
+ancestor rule of the same morning refuses any group-writable ancestor
+whoever is in the group. Under umask 002 — the scheme Fedora-family
+logins apply to a user-private-group account by design — directories a
+user creates are `0775` in their own private group, of which they are
+the only member, `~/.config` and `~/.local/state` among them; the
+daemon, `transportctl` and the human client would refuse such a
+profile, naming `~/.local/state` as "group- or other-writable and not
+sticky", where no other account can write it. Measured: under umask
+002, 56 tests at 36e6adc6 fail on tempfile's `0775` directories, 50
+naming the rule; under 022 they pass. This host's shells run 022.
+
+**Decision.** A group-write bit — on an ancestor, on a traversed link's
+directory, or on `config.yaml` itself (one predicate for both clauses,
+so they cannot diverge) — is accepted when the group is the OWNER'S
+PRIVATE GROUP: the group's name equals the owner's user name, both read
+through the name service (the `getpwuid_r` / `getgrgid_r` family, NSS-
+backed, through nix's `user` feature in safe Rust — never `/etc/group`
+read by hand, which misses NSS sources), and the group's member list is
+empty. A read that cannot be completed, or that answers no such user or
+group, REFUSES, with the detail "group-writable, and whether the group
+is the owner's private group could not be read". Other-write stays
+refused unless sticky; the private directory itself stays owner-only
+(`0700`, no bit for anyone): the predicate is about what others may
+write above and around it. The rule's premise — no account but root and
+ours can rename the directory — holds for a group of one.
+
+**Alternatives rejected.** Leaving the rule and making the tests
+independent of the umask: a supported setup could not start InterWeave,
+and the refusal read as an attack where there was none. The primary-gid
+test alone ("gid equals the owner's primary gid"): Debian's traditional
+scheme gives every account primary gid 100 `users`, so a directory
+every user can write would pass. Numeric gid = uid: `useradd` falls
+back to the next free gid when the uid is taken, so the name equality
+is the user-private-group convention and the thing to test.
+
+**Consequences.** Code: p2p-network-dev's, on #228 or the next batch —
+the predicate in `judge_ancestor`, `judge_link`'s directory and
+`open_guarded_as`, a fake name service for the unit tests (a `0775`
+directory in our private group accepted; a shared group refused naming
+it; gid = uid with differing names refused; a name-service miss refused
+as unreadable), the real lookups tested against `id -un` / `id -gn` and
+a gid with no entry. The test suites set their tempdir modes explicitly
+(a test that depends on the host's umask is fragile under either
+ruling). Until the code lands, a user-private-group account under umask
+002 is refused on main: a defect at writing, affecting no host here.
+
+**Propagation.** The rule clause at every site (body, log row, digest,
+IDENTITY.md, the threat row, configuration.md) and the `config.yaml`
+file clause carry the predicate by reference; the predicate is stated
+once, in Security implications.
