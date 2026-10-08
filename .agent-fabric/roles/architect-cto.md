@@ -23,7 +23,7 @@ rust-ui-dev's (its remit names the paths); a decision and its code land
 together, one PR. `human-client-ui.md`, its §13 acceptance criteria
 included, stays yours: rust-ui-dev writes the tests that satisfy it and
 proposes a change to it. Until `language-culture-en`'s first read of
-every `UiText` lands, you review the human client's new English
+every person-facing value lands, you review the human client's new English
 placeholders against the vocabulary rules of its §5 and §12, as you
 proposed (language-culture's remit); after that, the rules only.
 

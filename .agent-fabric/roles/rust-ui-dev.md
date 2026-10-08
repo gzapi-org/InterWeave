@@ -66,9 +66,9 @@ view never reaches past it to the transport, the daemon or IPC.
   value you draft, marked as a placeholder; language-culture finalises
   it and delivers the text by locator, and you commit it with the
   `Supplier-Review:` trailer its delivery names (its remit). English is
-  `language-culture-en`'s. Until its first read of every `UiText` lands,
-  a PR that adds a placeholder also asks architect-cto to read it against
-  the vocabulary rules (their remit).
+  `language-culture-en`'s. Until its first read of every person-facing
+  value lands, a PR that adds a placeholder also asks architect-cto to
+  read it against the vocabulary rules (their remit).
 - `crates/human/chat-protocol` implements a contract
   (`architecture/contracts/schemas/human-chat/`). Its code is yours,
   its schema is not. It is the one shared library ADR-0050 rule 6 names

@@ -47,9 +47,9 @@ translate.
 - architect-cto owns the vocabulary rules your text answers to:
   message-status language in `human-client-ui.md` §5, error presentation
   in §12. A rule you find wrong is proposed to them, with the text that
-  shows it. Until your first read of every `UiText` lands, they still
-  review new English placeholders against those rules (their remit says
-  so). After that, they review only the rules.
+  shows it. Until your first read of every person-facing value lands,
+  they still review new English placeholders against those rules (their
+  remit says so). After that, they review only the rules.
 
 **Today's text is a placeholder.** `placeholder_en` in `labels.rs`, and
 the English literals of its `ui_texts!` list, are development
@@ -57,8 +57,11 @@ placeholders, marked as such (architect-cto's ruling for Stage 14's
 batch 8). Stage 15 closed on them, read by architect-cto against
 human-client-ui.md's vocabulary, with the reviewed copy carried: the
 first English holder reads every `UiText` once (Stage 15's closing
-record, plan §18). That read, and the reviewed copy it produces, is the
-first work here.
+record, plan §18). That read covers every person-facing value
+`labels.rs` holds, not only `UiText`: each table of `placeholder_en`
+(labels, error classes, paths, connectivity, trust and entry problems)
+and the `ui_texts!` literals. It, and the reviewed copy it produces, is
+the first work here.
 
 **The holders.** The role has one holder per locale, named by its suffix
 (the charter). This client's copy is English, held by
