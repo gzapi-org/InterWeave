@@ -26,7 +26,7 @@ Default values are conservative architecture targets, not performance promises. 
 | IPC connections (data + admin combined) | 16 | 64 |
 | IPC admin-socket connections | 4 | 16 |
 | IPC JSON body | 128 KiB | 128 KiB IPC v2 |
-| IPC keepalive interval | 30 s | 5 min, and interval + response timeout ≤ 120 s, the client's `CLIENT_SILENCE_TIMEOUT` (LOCAL-IPC.md A 2026-10-08; the validation of the sum landing with the carry) |
+| IPC keepalive interval | 30 s | 5 min, and while keepalive is enabled interval + response timeout ≤ 120 s, the client's `CLIENT_SILENCE_TIMEOUT` (LOCAL-IPC.md A 2026-10-08; validated at profile load since #228) — so the interval's effective ceiling is 118 s against the response timeout's 2 s floor |
 | IPC keepalive response timeout | 10 s | < interval, max 1 min, within the same sum |
 | IPC keepalive missed probes | 3 | 10 |
 | require keepalive for EndpointId lease | true | boolean policy |
