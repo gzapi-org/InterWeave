@@ -51,6 +51,18 @@ pub(crate) fn workspace_binary(name: &str, package: &str) -> PathBuf {
     bin
 }
 
+/// A temporary directory made `0700` at creation, whatever the umask:
+/// the daemon judges it as an ancestor of the profile, and
+/// `tempfile::tempdir()` under umask `002` with a shared primary group is
+/// `0775`, refused (j37).
+pub(crate) fn private_tempdir() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt as _;
+    tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .expect("tempdir")
+}
+
 pub(crate) fn private_dir(path: &Path) {
     DirBuilder::new()
         .recursive(true)
@@ -69,7 +81,7 @@ pub(crate) struct Home {
 
 impl Home {
     pub(crate) fn new(profile: &str) -> Self {
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = private_tempdir();
         let mut home = Self::within(root.path(), profile);
         home.root = root;
         home
@@ -94,7 +106,14 @@ impl Home {
     pub(crate) fn write_config(&self, yaml: &str) {
         let file = self.paths.config_file();
         private_dir(file.parent().expect("a config directory"));
-        std::fs::write(file, yaml).expect("the profile written");
+        std::fs::write(&file, yaml).expect("the profile written");
+        // 0644 whatever the umask: under 002 in a shared group a 0664
+        // document is refused (j37).
+        std::fs::set_permissions(
+            &file,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o644),
+        )
+        .expect("chmod");
     }
 
     /// An identity key where the profile's default names it.
