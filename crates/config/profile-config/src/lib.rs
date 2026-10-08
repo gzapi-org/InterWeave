@@ -52,7 +52,9 @@ pub use paths::{HUMAN_DIR, NAMESPACE, PROFILES, ProfilePaths, XdgRoots, absolute
 pub use persist::{
     OWNER_ONLY_DIR, OWNER_ONLY_FILE, create_private_dir, create_private_exclusive, effective_uid,
     is_owner_only, require_owned_private_dir, require_owned_private_dir_as, require_private_dir,
-    write_atomic, write_private_atomic,
+    resolve_guarded_dir, resolve_guarded_dir_as, resolve_owned_private_dir,
+    resolve_owned_private_dir_as, resolve_private_dir, resolve_private_dir_as, write_atomic,
+    write_private_atomic,
 };
 
 /// Which provider a `discovery.providers` entry configures.

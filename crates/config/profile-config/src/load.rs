@@ -14,6 +14,7 @@
 
 use std::io::Read as _;
 
+use crate::paths::CONFIG_FILE;
 use crate::{ConfigError, ProfileConfig, ProfilePaths};
 
 /// The largest profile document read, in bytes.
@@ -72,6 +73,13 @@ pub enum LoadError {
         /// Why.
         source: std::io::Error,
     },
+    /// The configuration directory, an ancestor of it or a link on its
+    /// path can be changed by an account other than root and this one
+    /// (ADR-0028 A 2026-10-08): `config.yaml` names the key path and the
+    /// allowlist, so an account that could replace it would choose the
+    /// key's directory and admit its own peer. Refused before the file is
+    /// read, as a parse failure is fatal.
+    ConfigDirUnguarded(crate::PersistError),
 }
 
 impl core::fmt::Display for LoadError {
@@ -108,6 +116,10 @@ impl core::fmt::Display for LoadError {
                 "{} cannot be resolved to judge identity.key_file's place: {source}",
                 path.display()
             ),
+            Self::ConfigDirUnguarded(e) => write!(
+                f,
+                "the profile's configuration directory can be changed by another account: {e}"
+            ),
             Self::Invalid(errors) => {
                 write!(f, "the profile breaks {} rule(s):", errors.len())?;
                 for e in errors {
@@ -123,6 +135,7 @@ impl core::error::Error for LoadError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Read(e) | Self::KeyFileUnresolved { source: e, .. } => Some(e),
+            Self::ConfigDirUnguarded(e) => Some(e),
             _ => None,
         }
     }
@@ -145,7 +158,15 @@ impl ProfileConfig {
     /// [`LoadError`], naming which step refused: read, size, parse, name,
     /// validation, or a key file inside the human client's directory.
     pub fn load(paths: &ProfilePaths) -> Result<Self, LoadError> {
-        let file = std::fs::File::open(paths.config_file()).map_err(LoadError::Read)?;
+        // The directory judged for who can change it, and the file read
+        // under it as resolved (ADR-0028 A 2026-10-08): an absent one is
+        // still a read failure.
+        let dir = match crate::resolve_guarded_dir(paths.config_dir()) {
+            Ok(dir) => dir,
+            Err(crate::PersistError::Io(e)) => return Err(LoadError::Read(e)),
+            Err(e) => return Err(LoadError::ConfigDirUnguarded(e)),
+        };
+        let file = std::fs::File::open(dir.join(CONFIG_FILE)).map_err(LoadError::Read)?;
         let mut text = String::new();
         file.take(MAX_PROFILE_BYTES + 1)
             .read_to_string(&mut text)

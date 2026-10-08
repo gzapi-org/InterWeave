@@ -319,6 +319,11 @@ fn owner_uid(read: Result<u32, PersistError>) -> Result<u32, OverlayError> {
 /// owned by this process's uid and readable or writable by nobody else
 /// -- the identity key's rule. Judged on the OPENED file, so the file
 /// checked is the file read.
+///
+/// Its DIRECTORY is not walked here: the overlay lives in the state
+/// directory, which `ProfileLock` judges -- the directory, its ancestors
+/// and the links on its path (ADR-0028 A 2026-10-08) -- before any
+/// overlay is loaded, and a second walk would judge the same path again.
 fn open_private(path: &Path) -> Result<std::fs::File, OverlayError> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {

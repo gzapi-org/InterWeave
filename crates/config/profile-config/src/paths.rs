@@ -42,6 +42,9 @@ pub const PROFILES: &str = "profiles";
 /// in it; the profile lock is in the state directory above it.
 pub const HUMAN_DIR: &str = "human";
 
+/// The profile document's file name, inside its configuration directory.
+pub(crate) const CONFIG_FILE: &str = "config.yaml";
+
 /// A resolved set of paths for one profile.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProfilePaths {
@@ -212,7 +215,7 @@ impl ProfilePaths {
     /// The profile configuration file.
     #[must_use]
     pub fn config_file(&self) -> PathBuf {
-        self.config_dir.join("config.yaml")
+        self.config_dir.join(CONFIG_FILE)
     }
 
     /// The private identity key file.
