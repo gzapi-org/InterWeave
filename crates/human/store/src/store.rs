@@ -221,11 +221,12 @@ impl HumanStore {
         // they exist to be checked.
         //
         // WHAT IS THERE, as for the database above: `exists` and `metadata`
-        // follow a link, so a `-wal` or `-shm` left as a link to an
-        // owner-only file passed this check. SQLite then refused it on its
-        // own, as `CannotOpen` -- an unclassified open failure a client
-        // shows as "try again", which no wait fixes. Judged here, it is
-        // refused as what it is
+        // follow a link, so a companion left as a link to an
+        // owner-only file passed this check. For `-wal` and `-shm` SQLite
+        // then refused it on its own, as `CannotOpen` -- an unclassified
+        // open failure a client shows as "try again", which no wait
+        // fixes; a linked `-journal` it opened over without complaint.
+        // Judged here, each is refused as what it is
         // (`a_companion_that_is_a_link_is_refused_not_followed`).
         for (suffix, what, not_a_file) in [
             (
@@ -242,6 +243,14 @@ impl HumanStore {
                 "-shm",
                 "the shared-memory index",
                 "the shared-memory index is not a regular file",
+            ),
+            // A rollback journal left hot by a crash -- a file written
+            // before WAL, or a build that ran without it -- is read by
+            // SQLite on the first query, and holds the same content.
+            (
+                "-journal",
+                "the rollback journal",
+                "the rollback journal is not a regular file",
             ),
         ] {
             let mut companion = path.as_os_str().to_owned();

@@ -1366,7 +1366,7 @@ fn a_companion_that_is_a_link_is_refused_not_followed() {
     // but as `CannotOpen`, which reads as a failure worth retrying; the
     // refusal must say what is wrong.
     use std::os::unix::fs::PermissionsExt as _;
-    for suffix in ["-wal", "-shm"] {
+    for suffix in ["-wal", "-shm", "-journal"] {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("state").join("human.sqlite3");
         drop(HumanStore::open(&path, StoreOptions::default()).expect("a fresh store"));
