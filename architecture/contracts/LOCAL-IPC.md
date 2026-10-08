@@ -530,17 +530,21 @@ keepalive only the caller's own timeout and OS connection liveness do. Landed wi
 call with the session's end code, pinned by
 `a_failed_write_keeps_the_servers_close_code` and
 `a_failed_write_ends_the_session_though_the_server_keeps_writing_open`.
-Four behaviours of that binding are part of the rule: a writer's
-provisional end is shown to no caller, so a call, `events` and `ready`
-read one code; the drain after a failed write is bounded at 1 MiB, so a
-daemon that keeps writing cannot hold the calls — past it the
-connection ends `BackendUnavailable` with no `close` frame read; a frame
-the client refuses, read during that drain, ends the connection
-`ProtocolViolation` as it would without the failed write — the drain
-changes no code; and a request frame that cannot be encoded fails its
-call alone, `PayloadTooLarge`, the connection staying up (the arm is
-unreachable through the typed API, which bounds the request at the
-protocol's maximum).
+Five behaviours of that drain are the rule for every binding, the
+figure the binding's own: a writer's provisional end is shown to no
+caller, so a call, `events` and `ready` read one code; the drain after a
+failed write is BOUNDED in bytes (ipc-client: 1 MiB, `DRAIN_BUDGET`,
+read in frames so the last read may overshoot it), so a daemon that
+keeps writing cannot hold the calls — past the bound the connection ends
+`BackendUnavailable` with no `close` frame read; the drain stops the
+same way, `BackendUnavailable`, when the client's event buffer is full
+and the next frame does not fit — it never waits for room, so a `close`
+behind that event goes unread; a frame the client refuses during the
+drain keeps its code, `ProtocolViolation`, as without the failed write;
+and a request frame that cannot be encoded fails its call alone,
+`PayloadTooLarge`, the connection staying up (the arm is unreachable
+through the typed API, which bounds the request at the protocol's
+maximum).
 
 ## Cancellation mapping and request concurrency
 
