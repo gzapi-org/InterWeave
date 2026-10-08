@@ -10,6 +10,8 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
+mod common;
+
 use std::os::unix::fs::PermissionsExt;
 
 use interweave_human_core::retention::{StorageHealth, TerminalCause};
@@ -199,7 +201,7 @@ fn a_zero_record_ceiling_is_refused_rather_than_ending_the_enumeration() {
 
 #[test]
 fn a_fresh_store_has_exactly_the_allowed_tables() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     let store = HumanStore::open(&path, StoreOptions::default()).expect("opens");
     drop(store);
@@ -238,7 +240,7 @@ fn a_conversation_index_with_a_column_beyond_its_shape_is_refused() {
     // which holds only while it carries exactly its columns: one more --
     // a preview of the last message -- makes it the history ADR-0044
     // forbids, inside a permitted name. Beside the `messages` refusal.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     drop(HumanStore::open(&path, StoreOptions::default()).expect("first open"));
 
@@ -258,7 +260,7 @@ fn a_conversation_index_with_a_column_beyond_its_shape_is_refused() {
 /// A fresh store's database, reopened raw with foreign keys enforced as
 /// the store enforces them.
 fn raw_store() -> (tempfile::TempDir, std::path::PathBuf, rusqlite::Connection) {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     drop(HumanStore::open(&path, StoreOptions::default()).expect("first open"));
     let conn = rusqlite::Connection::open(&path).expect("reopen");
@@ -347,7 +349,7 @@ fn a_route_table_rebuilt_with_other_foreign_key_actions_is_refused() {
 fn a_pending_row_keeps_the_transport_id_it_was_committed_with() {
     // Every retry -- after a restart too -- sends under this id, so the
     // receiver's dedup sees one message (schema v6, HUMAN-CHAT.md).
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     {
         let mut store = HumanStore::open(&path, StoreOptions::default()).expect("open");
@@ -418,7 +420,7 @@ fn a_message_committed_twice_is_refused_as_a_duplicate_and_nothing_else_is() {
     // Not every refusal is a duplicate: a degraded store's is not, and
     // neither is a CHECK violation, a constraint of another kind.
     assert!(!StoreError::Degraded.is_duplicate());
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     drop(HumanStore::open(&path, StoreOptions::default()).expect("open"));
     let conn = rusqlite::Connection::open(&path).expect("raw");
@@ -440,7 +442,7 @@ fn a_v5_database_gains_transport_ids_keeping_its_rows_and_its_id_high_water() {
     // table, so the AUTOINCREMENT high-water mark must be carried: a
     // deleted row's id is never handed to a new row (migration_1's
     // hazard, now through a rebuild).
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     let deleted = {
         let mut store = HumanStore::open(&path, StoreOptions::default()).expect("open");
@@ -503,7 +505,7 @@ fn a_v5_database_gains_transport_ids_keeping_its_rows_and_its_id_high_water() {
 
 #[test]
 fn a_transport_id_of_any_length_but_sixteen_is_refused_by_the_column() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     drop(HumanStore::open(&path, StoreOptions::default()).expect("open"));
     let conn = rusqlite::Connection::open(&path).expect("raw");
@@ -525,7 +527,7 @@ fn a_v4_database_gains_the_three_tables_and_keeps_its_rows() {
     // A v4 database is this build's schema without v5's three tables;
     // opening it migrates in one transaction, adding them and keeping
     // what the retention tables held.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let state = dir.path().join("state");
     let path = state.join("human.sqlite3");
     {
@@ -570,7 +572,7 @@ fn a_v4_database_gains_the_three_tables_and_keeps_its_rows() {
 fn opening_a_database_with_a_history_table_is_refused() {
     // The failure this guards against is a plausible-sounding addition,
     // so it is caught at open rather than left to review.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     drop(HumanStore::open(&path, StoreOptions::default()).expect("first open"));
 
@@ -589,7 +591,7 @@ fn opening_a_database_with_a_history_table_is_refused() {
 
 #[test]
 fn a_newer_schema_is_refused_rather_than_downgraded() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     drop(HumanStore::open(&path, StoreOptions::default()).expect("first open"));
 
@@ -608,7 +610,7 @@ fn a_newer_schema_is_refused_rather_than_downgraded() {
 
 #[test]
 fn reopening_is_idempotent() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     for _ in 0..3 {
         drop(HumanStore::open(&path, StoreOptions::default()).expect("reopen"));
@@ -663,7 +665,7 @@ fn a_payload_transport_could_not_carry_is_not_a_pending_row() {
 /// CONTROL is a ceiling above the database's size, which opens healthy.
 #[test]
 fn a_quota_sqlite_would_not_enforce_is_refused_and_a_tighter_one_opens_degraded() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
 
     let zero = HumanStore::open(&path, StoreOptions { max_pages: Some(0) });
@@ -753,7 +755,7 @@ fn a_quota_sqlite_would_not_enforce_is_refused_and_a_tighter_one_opens_degraded(
 fn a_full_medium_degrades_the_store_and_refuses_new_unread() {
     // A real SQLITE_FULL from a real page quota, not an injected fake:
     // the degradation path must be the one production takes.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     let mut store = HumanStore::open(
         &path,
@@ -858,7 +860,7 @@ fn recheck_health_clears_degradation_when_the_medium_recovers() {
     //
     // So the store is really filled, really degraded, and really drained
     // before the probe is asked anything.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     let mut store = HumanStore::open(
         &path,
@@ -1148,7 +1150,7 @@ fn the_files_holding_message_content_are_owner_only() {
     // readable by every local account.
     use std::os::unix::fs::PermissionsExt as _;
 
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     let mut store = HumanStore::open(&path, StoreOptions::default()).expect("opens");
 
@@ -1193,7 +1195,7 @@ fn an_already_open_state_directory_is_refused_rather_than_tightened() {
     // the mode would hide that it ever was.
     use std::os::unix::fs::PermissionsExt as _;
 
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let state = dir.path().join("state");
     std::fs::create_dir_all(&state).expect("mkdir");
     std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o755)).expect("chmod");
@@ -1218,7 +1220,7 @@ fn an_already_open_state_directory_is_refused_rather_than_tightened() {
 #[cfg(target_os = "linux")]
 fn shared_ancestor() -> (tempfile::TempDir, std::path::PathBuf) {
     use std::os::unix::fs::PermissionsExt as _;
-    let dir = tempfile::tempdir_in("/tmp").expect("tempdir under /tmp");
+    let dir = common::private_tempdir_in("/tmp");
     let shared = dir.path().join("shared");
     std::fs::create_dir(&shared).expect("mkdir");
     std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777))
@@ -1256,7 +1258,7 @@ fn a_private_state_directory_under_an_ancestor_others_can_write_is_refused_namin
 fn a_path_naming_no_file_is_refused_before_any_directory_is_made() {
     // `state/new/..` names no file; its parent `state/new` must not be
     // created on the way to that refusal.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let new = dir.path().join("new");
     match HumanStore::open(&new.join(".."), StoreOptions::default()) {
         Err(StoreError::NotAFile { .. }) => {}
@@ -1275,7 +1277,7 @@ fn a_path_through_a_missing_directory_and_back_opens_as_before() {
     // owner-only: `x/new/..` is `x`, which this process does not make and
     // must not judge as its private directory.
     use std::os::unix::fs::PermissionsExt as _;
-    let dir = tempfile::tempdir_in("/tmp").expect("tempdir under /tmp");
+    let dir = common::private_tempdir_in("/tmp");
     let x = dir.path().join("x");
     std::fs::create_dir(&x).expect("mkdir");
     std::fs::set_permissions(&x, std::fs::Permissions::from_mode(0o755)).expect("chmod");
@@ -1343,7 +1345,7 @@ fn a_link_above_the_state_directory_is_judged_by_where_it_sits() {
     // link's target, which is what was judged. The state directory
     // ITSELF as a link is refused outright (the first case).
     use std::os::unix::fs::PermissionsExt as _;
-    let dir = tempfile::tempdir_in("/tmp").expect("tempdir under /tmp");
+    let dir = common::private_tempdir_in("/tmp");
     let real = dir.path().join("real");
     std::fs::create_dir_all(real.join("state")).expect("mkdir");
     for d in [&real, &real.join("state")] {
@@ -1355,6 +1357,8 @@ fn a_link_above_the_state_directory_is_judged_by_where_it_sits() {
 
     let sound = dir.path().join("sound");
     std::fs::create_dir(&sound).expect("mkdir");
+    std::fs::set_permissions(&sound, std::fs::Permissions::from_mode(0o755))
+        .expect("sound: no group or other write, whatever the umask");
     std::os::unix::fs::symlink(real.join("state"), sound.join("state")).expect("link");
     assert!(
         matches!(open(&sound.join("state")), Err(StoreError::DirectoryNotPrivate { ref detail, .. }) if detail.contains("symbolic link")),
@@ -1390,7 +1394,7 @@ fn a_companion_that_is_a_link_is_refused_not_followed() {
     // say what is wrong.
     use std::os::unix::fs::PermissionsExt as _;
     for suffix in ["-wal", "-shm", "-journal"] {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = common::private_tempdir();
         let path = dir.path().join("state").join("human.sqlite3");
         drop(HumanStore::open(&path, StoreOptions::default()).expect("a fresh store"));
 
@@ -1440,7 +1444,7 @@ fn a_too_open_write_ahead_log_is_refused_and_left_as_it_was() {
         std::process::exit(0);
     }
 
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     let status = std::process::Command::new(std::env::current_exe().expect("this test binary"))
         .args([
@@ -1485,7 +1489,7 @@ fn a_new_column_inside_a_permitted_table_is_a_retention_violation() {
     // contract is that its body disappears when the message is read.
     // Under ADR-0044 an unknown column is not forward compatibility --
     // it is somewhere a body can be kept.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
 
@@ -1519,7 +1523,7 @@ fn the_unique_key_and_the_autoincrement_are_part_of_the_verified_shape() {
     // AUTOINCREMENT is what stops a deleted row's id being handed to
     // the next insert, which in a store that deletes constantly means
     // handing a caller someone else's body.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
 
@@ -1560,7 +1564,7 @@ fn an_unexpected_content_table_is_refused_even_with_an_innocent_name() {
     // module claims REQUIRED_TABLES is every table the store may hold. A table
     // called `chat_archive` passed while being exactly the archive
     // ADR-0044 forbids.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
 
@@ -1713,7 +1717,7 @@ fn a_negative_stored_timestamp_is_corruption_and_not_a_zero() {
     // next page asks for rows after zero, walking straight past every
     // other malformed row. One corrupt value silently truncated the
     // result set, and the caller was handed a short list with no error.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     let mut store = HumanStore::open(&path, StoreOptions::default()).expect("opens");
     store
@@ -1991,7 +1995,7 @@ fn v3_database(path: &std::path::Path, unread_rows: &[(i64, &str)]) {
 
 #[test]
 fn a_v3_database_migrates_to_the_channel_scoped_key_without_losing_rows() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let state = dir.path().join("state");
     std::fs::create_dir_all(&state).expect("state dir");
     std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))
@@ -2034,7 +2038,7 @@ fn a_rebuild_keeps_the_row_id_high_water_mark() {
     // the migration to a message stored after it -- which AUTOINCREMENT
     // exists here to prevent. Rows 1..3 allocated, 2 and 3 deleted
     // before the boundary: the next id after it must be 4.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let state = dir.path().join("state");
     std::fs::create_dir_all(&state).expect("state dir");
     std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))
@@ -2078,7 +2082,7 @@ fn a_rebuild_keeps_the_row_id_high_water_mark() {
 
     // An emptied table keeps its mark too: nothing survives the copy, and
     // the next id is still past everything ever allocated.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let state = dir.path().join("state");
     std::fs::create_dir_all(&state).expect("state dir");
     std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))
@@ -2103,7 +2107,7 @@ fn a_v1_database_keeps_the_row_id_high_water_mark_through_every_rebuild() {
     // runs all three rebuilds. Rows 1..3 allocated, 2 and 3 deleted, and
     // the next id after the upgrade is 4 -- deleting the carry from any
     // of the three migrations makes it 2.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let state = dir.path().join("state");
     std::fs::create_dir_all(&state).expect("state dir");
     std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))
@@ -2179,7 +2183,7 @@ fn a_v2_database_migrates_to_the_endpoint_scoped_key_without_losing_rows() {
     // tables. A migration that widened the key but lost the content would
     // pass every assertion above, because they all start from an empty
     // store.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let state = dir.path().join("state");
     std::fs::create_dir_all(&state).expect("state dir");
     // The store refuses a state directory anyone else can read, so the
@@ -2280,7 +2284,7 @@ fn a_generated_key_with_the_right_name_and_a_different_expression_is_refused() {
     // presents an identical column list AND an identical unique key —
     // while collapsing every endpoint back into one, which is precisely
     // the suppression migration_3 exists to stop.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
 
@@ -2321,7 +2325,7 @@ fn a_stored_generated_column_is_not_the_virtual_one_this_build_wrote() {
     // real value per row, which is a content surface ADR-0044 did not
     // budget for. `table_xinfo` reports 3 for it and 2 for VIRTUAL, and
     // the declaration text differs, so it is caught twice over.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
 
@@ -2368,7 +2372,7 @@ fn an_extra_generated_column_is_a_retention_violation_table_info_cannot_see() {
     //
     // `table_xinfo` is what makes it visible, which is why the hidden set
     // is enumerated rather than assumed empty.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
 
@@ -2400,7 +2404,7 @@ fn a_decoy_comment_carrying_the_expected_declaration_does_not_excuse_a_constant(
     // -- while endpoints collapse back into one.
     //
     // This is why the expression is EVALUATED rather than read.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
 
@@ -2465,7 +2469,7 @@ fn a_channel_key_expression_that_collapses_channels_is_refused() {
         "IFNULL(replace(channel_id, ':', ''), '')",
         "IFNULL(replace(channel_id, '/', ''), '')",
     ] {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = common::private_tempdir();
         let path = dir.path().join("state").join("human.sqlite3");
         drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
         let conn = rusqlite::Connection::open(&path).expect("reopen");
@@ -2511,7 +2515,7 @@ fn a_truncating_generated_key_is_refused_even_though_it_matches_short_probes() {
     //
     // The probe set now reaches 64 characters, the longest legal
     // EndpointId, so no truncation can hide inside it.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
 
@@ -2552,7 +2556,7 @@ fn a_generated_key_that_drops_a_legal_character_class_is_refused() {
     // filters one of them agrees with every alphabetic probe and then
     // collides `a.b` with `ab` — so the probe set carries one id per
     // legal character class rather than a handful of plausible names.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
 
@@ -2600,7 +2604,7 @@ fn a_bare_relative_path_still_checks_its_directory() {
     // as an explicit path into the same directory would be.
     use std::os::unix::fs::PermissionsExt as _;
 
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
         .expect("world-traversable on purpose");
 
@@ -2620,7 +2624,7 @@ fn a_symlinked_database_path_is_refused_not_followed() {
     // its own authority.
     use std::os::unix::fs::PermissionsExt as _;
 
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     // Owner-only, so the parent check passes and the symlink check is
     // what this test actually reaches.
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
@@ -2784,7 +2788,7 @@ fn unkeep_leaves_a_row_it_cannot_decode_in_place() {
     // parses the row; it does so BEFORE the delete, as `mark_read` does,
     // so a row this build cannot decode is reported and kept, never
     // destroyed on the way to the error.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     let mut store = HumanStore::open(&path, StoreOptions::default()).expect("opens");
     let row = store
@@ -2815,7 +2819,7 @@ fn unkeep_leaves_a_row_it_cannot_decode_in_place() {
 
 #[test]
 fn a_file_that_is_not_a_database_needs_recovery_and_is_left_as_it_is() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     // A healthy store first, so the directory and file modes are the
     // store's own; then its content is replaced with something else.
@@ -2834,7 +2838,7 @@ fn a_file_that_is_not_a_database_needs_recovery_and_is_left_as_it_is() {
 
 #[test]
 fn a_v6_database_gains_the_read_pairs_keeping_its_rows() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     {
         let mut store = HumanStore::open(&path, StoreOptions::default()).expect("opens");
@@ -2871,7 +2875,7 @@ fn a_migration_blocked_by_another_writer_is_not_a_file_needing_recovery() {
     // Another local process holding a write transaction blocks the
     // migration's DDL; the file is healthy and the next try works. Read
     // as "needs recovery", a person could move a good file away.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
     let conn = rusqlite::Connection::open(&path).expect("raw");
@@ -2897,7 +2901,7 @@ fn a_migration_blocked_by_another_writer_is_not_a_file_needing_recovery() {
 fn a_migration_of_a_file_this_user_cannot_write_is_not_a_file_needing_recovery() {
     use std::os::unix::fs::PermissionsExt;
     for journal in ["WAL", "DELETE"] {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = common::private_tempdir();
         let path = dir.path().join("state").join("human.sqlite3");
         drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
         let conn = rusqlite::Connection::open(&path).expect("raw");
@@ -2928,7 +2932,7 @@ fn a_file_from_a_newer_build_is_refused_without_a_single_byte_written() {
     // Opening runs journal_mode=WAL, which rewrites a rollback-mode
     // file's header; a file from a newer build is refused by its header
     // before any connection, so it is left exactly as it was.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
     let conn = rusqlite::Connection::open(&path).expect("raw");
