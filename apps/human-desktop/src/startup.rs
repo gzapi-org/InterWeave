@@ -206,11 +206,16 @@ pub enum Blocked {
         /// The file.
         path: PathBuf,
     },
-    /// The file or its directory is not private to this user, or not a
+    /// The file, its directory, or an ancestor or link on the
+    /// directory's path is not private to this user, or the file is not a
     /// regular file: refused, never repaired.
     NotPrivate {
         /// The file.
         path: PathBuf,
+        /// The store's own refusal, which names the file, directory,
+        /// ancestor or link that broke the rule and how -- what a person
+        /// needs to fix the layout.
+        cause: String,
     },
     /// The store could not be opened now; trying again may work.
     Unavailable {
@@ -228,10 +233,10 @@ impl fmt::Display for Blocked {
                  it was not renamed, moved or deleted",
                 path.display()
             ),
-            Self::NotPrivate { path } => write!(
+            Self::NotPrivate { path, cause } => write!(
                 f,
                 "the message store at {} or its directory is not private to this user; \
-                 refusing to use it",
+                 refusing to use it: {cause}",
                 path.display()
             ),
             Self::Unavailable { path } => write!(
@@ -261,9 +266,12 @@ fn classify(path: &Path, error: &StoreError) -> Blocked {
         return Blocked::Recovery { path };
     }
     match error {
-        StoreError::NotAFile { .. } | StoreError::PermissionsTooOpen { .. } => {
-            Blocked::NotPrivate { path }
-        }
+        StoreError::NotAFile { .. }
+        | StoreError::PermissionsTooOpen { .. }
+        | StoreError::DirectoryNotPrivate { .. } => Blocked::NotPrivate {
+            path,
+            cause: error.to_string(),
+        },
         _ => Blocked::Unavailable { path },
     }
 }
@@ -341,6 +349,16 @@ mod tests {
         assert!(matches!(
             classify(path, &StoreError::Io(std::io::Error::other("busy"))),
             Blocked::Unavailable { .. }
+        ));
+        assert!(matches!(
+            classify(
+                path,
+                &StoreError::DirectoryNotPrivate {
+                    path: "/x".into(),
+                    detail: "mode is 0755".to_owned(),
+                }
+            ),
+            Blocked::NotPrivate { ref cause, .. } if cause.contains("/x") && cause.contains("0755")
         ));
     }
 }

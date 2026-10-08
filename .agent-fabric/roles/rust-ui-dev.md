@@ -15,11 +15,9 @@ origin:
 The charter (agent-fabric `identities/roles/rust-ui-dev/charter.md`) is
 the function; this is what it covers in this repository. Written by
 fabric-coordinator from architect-cto's proposal (2026-10-01), which
-the owner confirmed: p2p-network-dev owns Stage 14's code batches, and
-this role is bound before Stage 15 opens. Until Stage 15 opens, Stage
-14's batches in these paths are p2p-network-dev's, and a finding on one
-goes there: this sentence governs where the taxonomy, which cannot say
-"from Stage 15", routes otherwise. A role that wants its remit changed
+the owner confirmed: Stage 14's code batches in the client's paths were
+p2p-network-dev's, and from Stage 15 the client's code is this role's.
+A role that wants its remit changed
 proposes it.
 
 **Yours here.** The human client:
@@ -29,8 +27,7 @@ proposes it.
 - the desktop end-to-end suite by file: `tests/desktop-e2e/tests/
   human_chat.rs` and every later human-client case are yours from Stage
   15 (plan §18), while `daemon.rs` and the harness it shares
-  (`tests/desktop-e2e/tests/common/`, once Stage 14's work moves it
-  there, as the plan prescribes)
+  (`tests/desktop-e2e/tests/common/`)
   stay p2p-network-dev's; `tests/android-e2e/` takes
   the same shape at Stage 17, the embedded runtime being
   p2p-network-dev's;
@@ -51,7 +48,7 @@ performance, licensing or store requirements may trigger. It is never a
 dependency you add.
 
 **The seam.** The client reaches the network through the facade it
-composes (`crates/human/transport-client` when it exists, ADR-0040 for
+composes (`crates/human/transport-client`, ADR-0040 for
 the desktop IPC). p2p-network-dev owns what that facade binds to. A
 view never reaches past it to the transport, the daemon or IPC.
 
@@ -81,16 +78,13 @@ view never reaches past it to the transport, the daemon or IPC.
   change to the decoder's behaviour is a contract change before it is
   code.
 
-**Where the work is.** Read first, before any code: the plan's
-Stage 14 and Stage 15 sections
-(`architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md` §17 and §18)
+**Where the work is.** Read first, before any code: the open stage's
+section of `architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md`
 against the tree; `architecture/docs/architecture/human-client-ui.md`;
 ADR-0039 (the toolkit) and ADR-0040 (the desktop IPC);
 `architecture/clients/human/` (HUMAN-CHAT.md, RETENTION.md, STATE.md);
 and the stage marker in `Cargo.toml`, which says which stage is open
-better than any list. Until Stage 15 opens the client's code is
-p2p-network-dev's (above); what you can do first is read, and agree
-the facade's contract with the p2p-network-dev agent before it is
-built.
+better than any list. A change to the facade's contract is agreed
+with a p2p-network-dev holder before it is built.
 
 The merge queue stays on for this repository.
