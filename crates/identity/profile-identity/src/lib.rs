@@ -921,10 +921,18 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn a_key_directory_owned_by_another_uid_is_refused() {
         use super::{IdentityError, PersistError, ProfileIdentity, effective_uid};
-        use std::os::unix::fs::PermissionsExt as _;
-        let dir = tempfile::tempdir().expect("tempdir");
-        // Owner-only whatever the umask gave it: the directory's owner is
-        // what is under test, not its mode.
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        // Straight under `/tmp`, root's and sticky, so another uid is
+        // refused at the key's directory itself and not at an ancestor of
+        // ours (#224 review A F1); owner-only whatever the umask gave it.
+        let tmp = std::fs::symlink_metadata("/tmp").expect("/tmp");
+        assert!(
+            tmp.uid() == 0 && tmp.permissions().mode() & 0o1000 != 0,
+            "the precondition: /tmp is root's and sticky"
+        );
+        let dir = tempfile::Builder::new()
+            .tempdir_in("/tmp")
+            .expect("a directory under /tmp");
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
             .expect("owner-only");
         let path = dir.path().join("identity.key");
@@ -937,15 +945,12 @@ mod tests {
             identity.transport_identity().expect("a peer")
         );
         let refused = ProfileIdentity::load_as(&path, Ok(uid.wrapping_add(1)));
-        assert!(
-            matches!(
-                refused,
-                Err(IdentityError::Storage(
-                    PersistError::DirectoryNotPrivate { .. }
-                ))
-            ),
-            "{:?}",
-            refused.err()
-        );
+        match refused {
+            Err(IdentityError::Storage(PersistError::DirectoryNotPrivate { path, detail })) => {
+                assert_eq!(path, dir.path(), "refused at the key's directory");
+                assert!(detail.starts_with("owned by uid"), "{detail}");
+            }
+            other => panic!("refused as another's: {:?}", other.err()),
+        }
     }
 }
