@@ -54,6 +54,13 @@ serde_norway = "0.9.42"
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 libc = "0.2.189"
 
+# The name service the private-group rule reads (ADR-0028 A 2026-10-08,
+# "a group of one is the owner's own"): `getpwuid_r` and `getgrgid_r`,
+# NSS-backed, as safe calls -- the crate forbids unsafe code. Already in
+# the graph through rtnetlink at this version; `user` adds no crate.
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.30.1", default-features = false, features = ["user"] }
+
 [dev-dependencies]
 # Synthetic test identities are built from BYTES, since `parse` decodes
 # the base58btc and checks the multihash. Test-only.

@@ -148,7 +148,7 @@ fn a_missing_document_is_a_read_refusal() {
 /// ADR-0028 A 2026-10-08: the document names the key path and the
 /// allowlist, so its directory is judged for who can change it. Under an
 /// ancestor another account could write -- the configuration root made
-/// group-writable here -- it is refused before it is read; the same
+/// other-writable here -- it is refused before it is read; the same
 /// document loading first is the control.
 #[cfg(target_os = "linux")]
 #[test]
@@ -159,7 +159,7 @@ fn a_document_under_a_writable_ancestor_is_refused() {
     write(&p, &document("profile:\n  name: work", ""));
     ProfileConfig::load(&p).expect("the control");
     let config_home = dir.path().join("config");
-    std::fs::set_permissions(&config_home, std::fs::Permissions::from_mode(0o775)).expect("chmod");
+    std::fs::set_permissions(&config_home, std::fs::Permissions::from_mode(0o757)).expect("chmod");
     match ProfileConfig::load(&p) {
         Err(LoadError::ConfigDirUnguarded(e)) => {
             assert!(
@@ -172,11 +172,13 @@ fn a_document_under_a_writable_ancestor_is_refused() {
 }
 
 /// `config.yaml` itself is judged too (ADR-0028 A 2026-10-08): made
-/// group-writable it is refused at load, naming its mode, and readable by
-/// all (0644, the control loading first) it is not.
+/// other-writable it is refused at load, naming its mode, and readable by
+/// all (0644, the control loading first) it is not. (Group-write is the
+/// private-group predicate's: `load.rs`'s
+/// `a_group_writable_document_needs_the_owners_private_group`.)
 #[cfg(target_os = "linux")]
 #[test]
-fn a_group_writable_document_is_refused() {
+fn a_document_others_can_write_is_refused() {
     use std::os::unix::fs::PermissionsExt as _;
     let dir = tempfile::tempdir().expect("tempdir");
     let p = paths(dir.path(), "work");
@@ -187,12 +189,12 @@ fn a_group_writable_document_is_refused() {
     };
     mode(0o644);
     ProfileConfig::load(&p).expect("the control: readable by all");
-    mode(0o664);
+    mode(0o646);
     match ProfileConfig::load(&p) {
         Err(LoadError::ConfigFileUnguarded { path, detail }) => {
             assert_eq!(path, p.config_file());
             assert!(
-                detail.contains("0664") && detail.contains("writable"),
+                detail.contains("0646") && detail.contains("other-writable"),
                 "{detail}"
             );
         }

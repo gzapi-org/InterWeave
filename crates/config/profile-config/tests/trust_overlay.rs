@@ -182,7 +182,7 @@ fn an_absent_overlay_is_empty_and_is_not_created() {
 }
 
 /// The overlay is read under its directory as judged (ADR-0028 A
-/// 2026-10-08): a state directory under a group-writable ancestor stops
+/// 2026-10-08): a state directory under an other-writable ancestor stops
 /// the load, though the overlay itself is owner-only. The same file under
 /// the ancestor at 0755 loading is the control.
 #[cfg(target_os = "linux")]
@@ -199,7 +199,7 @@ fn an_overlay_under_a_writable_ancestor_is_refused() {
     let configured = set([nth(1)]);
     put(&path, &lists(&[&nth(2)], &[]));
     TrustOverlay::load(&path, &configured).expect("the control");
-    chmod(&above, 0o775);
+    chmod(&above, 0o757);
     match TrustOverlay::load(&path, &configured) {
         Err(OverlayError::NotPrivate { detail }) => {
             assert!(detail.contains("not sticky"), "{detail}");

@@ -82,7 +82,8 @@ pub enum LoadError {
     ConfigDirUnguarded(crate::PersistError),
     /// `config.yaml` itself is a symbolic link, not a regular file, or
     /// can be written by an account other than root and this one -- owned
-    /// by another, or group- or other-writable (ADR-0028 A 2026-10-08).
+    /// by another, other-writable, or group-writable by a group that is
+    /// not the owner's private group (ADR-0028 A 2026-10-08).
     /// Readable by others is allowed: it is not secret.
     ConfigFileUnguarded {
         /// The file.
@@ -101,16 +102,20 @@ fn open_guarded(path: &std::path::Path) -> Result<std::fs::File, LoadError> {
     open_guarded_as(
         path,
         crate::effective_uid().map_err(LoadError::ConfigDirUnguarded),
+        &crate::persist::HostNames,
     )
 }
 
 /// [`open_guarded`] with the owner compared against `uid` -- this
 /// process's effective uid, or why it cannot be read -- apart so a test
 /// can name another uid: a file another account owns needs that account
-/// (`a_document_another_uid_owns_is_refused`).
+/// (`a_document_another_uid_owns_is_refused`) -- and with `names` standing
+/// for the name service the group-write clause reads
+/// (`a_group_writable_document_needs_the_owners_private_group`).
 fn open_guarded_as(
     path: &std::path::Path,
     uid: Result<u32, LoadError>,
+    names: &impl crate::persist::NameService,
 ) -> Result<std::fs::File, LoadError> {
     let refuse = |detail: String| LoadError::ConfigFileUnguarded {
         path: path.to_path_buf(),
@@ -136,7 +141,7 @@ fn open_guarded_as(
         };
         let uid = uid?;
         let meta = file.metadata().map_err(LoadError::Read)?;
-        let (owner, mode) = (meta.uid(), meta.mode() & 0o7777);
+        let (owner, gid, mode) = (meta.uid(), meta.gid(), meta.mode() & 0o7777);
         if !meta.is_file() {
             return Err(refuse(format!(
                 "owned by uid {owner}, mode {mode:04o}: not a regular file"
@@ -147,16 +152,24 @@ fn open_guarded_as(
                 "owned by uid {owner}, mode {mode:04o}: owned by neither root nor uid {uid}"
             )));
         }
-        if mode & 0o022 != 0 {
+        if mode & 0o002 != 0 {
             return Err(refuse(format!(
-                "owned by uid {owner}, mode {mode:04o}: group- or other-writable"
+                "owned by uid {owner}, mode {mode:04o}: other-writable"
+            )));
+        }
+        // The directory walk's predicate, not a copy of it.
+        if mode & 0o020 != 0
+            && let Err(detail) = crate::persist::owners_private_group(names, owner, gid)
+        {
+            return Err(refuse(format!(
+                "owned by uid {owner}, mode {mode:04o}: {detail}"
             )));
         }
         Ok(file)
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (refuse, uid);
+        let _ = (refuse, uid, names);
         Err(LoadError::ConfigDirUnguarded(
             crate::PersistError::UnsupportedPlatform,
         ))
@@ -371,13 +384,59 @@ mod tests {
         std::fs::write(&path, b"schema_version: 2\n").expect("write");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
         let uid = crate::effective_uid().expect("the uid");
-        open_guarded_as(&path, Ok(uid)).expect("the control: ours");
-        match open_guarded_as(&path, Ok(uid.wrapping_add(1))) {
+        let names = &crate::persist::HostNames;
+        open_guarded_as(&path, Ok(uid), names).expect("the control: ours");
+        match open_guarded_as(&path, Ok(uid.wrapping_add(1)), names) {
             Err(LoadError::ConfigFileUnguarded { path: at, detail }) => {
                 assert_eq!(at, path);
                 assert!(detail.contains("owned by neither root nor uid"), "{detail}");
             }
             other => panic!("refused as another's: {:?}", other.err()),
         }
+    }
+
+    /// The private-group predicate on `config.yaml`'s own group-write
+    /// bit, with the name service staged: a `0664` document passes when
+    /// its group is the owner's private group, and is refused naming the
+    /// group when that group is shared, or as unreadable when the entry
+    /// is missing. Other-write is refused whatever the group.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[allow(clippy::expect_used, clippy::panic)]
+    fn a_group_writable_document_needs_the_owners_private_group() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        struct Names(Option<&'static str>);
+        impl crate::persist::NameService for Names {
+            fn user_name(&self, _: u32) -> std::io::Result<Option<String>> {
+                Ok(Some("alice".to_owned()))
+            }
+            fn group(&self, _: u32) -> std::io::Result<Option<(String, Vec<String>)>> {
+                Ok(self.0.map(|name| (name.to_owned(), Vec::new())))
+            }
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, b"schema_version: 2\n").expect("write");
+        let gid = std::fs::metadata(&path).expect("meta").gid();
+        let chmod = |m: u32| {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(m)).expect("chmod");
+        };
+        let uid = crate::effective_uid().expect("the uid");
+        chmod(0o664);
+        open_guarded_as(&path, Ok(uid), &Names(Some("alice"))).expect("a group of one");
+        let refused = |names: Names| match open_guarded_as(&path, Ok(uid), &names) {
+            Err(LoadError::ConfigFileUnguarded { detail, .. }) => detail,
+            other => panic!("refused: {:?}", other.err()),
+        };
+        let shared = refused(Names(Some("users")));
+        assert!(
+            shared.contains(&format!("group users (gid {gid})")),
+            "{shared}"
+        );
+        let missing = refused(Names(None));
+        assert!(missing.contains("could not be read"), "{missing}");
+        chmod(0o666);
+        let other = refused(Names(Some("alice")));
+        assert!(other.contains("other-writable"), "{other}");
     }
 }

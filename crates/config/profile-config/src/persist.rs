@@ -729,7 +729,8 @@ fn resolve_judged_as(dir: &Path, uid: u32) -> Result<PathBuf, PersistError> {
 fn judge_ancestors(dir: &Path, uid: u32) -> Result<(), PersistError> {
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
     for ancestor in dir.ancestors() {
-        let seen = fs::symlink_metadata(ancestor).map(|m| (m.uid(), m.permissions().mode()));
+        let seen =
+            fs::symlink_metadata(ancestor).map(|m| (m.uid(), m.gid(), m.permissions().mode()));
         judge_ancestor(ancestor, seen, uid)?;
     }
     Ok(())
@@ -737,15 +738,28 @@ fn judge_ancestors(dir: &Path, uid: u32) -> Result<(), PersistError> {
 
 /// The rule for a directory above a private one, or on the path to one
 /// (ADR-0028 A 2026-10-08): owned by root or `uid` -- any other owner can
-/// rename its entries whatever the mode says -- and carrying no group- or
-/// other-write bit, unless the sticky bit is set: in a sticky directory
-/// an entry is renamed only by its owner, the directory's owner or root,
-/// and the owner rule above already makes the directory root's or ours.
-/// One that cannot be inspected is refused, not judged on its name.
+/// rename its entries whatever the mode says -- and carrying no
+/// other-write bit, and no group-write bit unless its group is the
+/// owner's private group ([`owners_private_group`]), unless the sticky
+/// bit is set: in a sticky directory an entry is renamed only by its
+/// owner, the directory's owner or root, and the owner rule above already
+/// makes the directory root's or ours. One that cannot be inspected is
+/// refused, not judged on its name. `seen` is `(owner, gid, mode)`.
 fn judge_ancestor(
     path: &Path,
-    seen: std::io::Result<(u32, u32)>,
+    seen: std::io::Result<(u32, u32, u32)>,
     uid: u32,
+) -> Result<(), PersistError> {
+    judge_ancestor_with(path, seen, uid, &HostNames)
+}
+
+/// [`judge_ancestor`] reading `names`, apart so a test can stand in for
+/// the name service.
+fn judge_ancestor_with(
+    path: &Path,
+    seen: std::io::Result<(u32, u32, u32)>,
+    uid: u32,
+    names: &impl NameService,
 ) -> Result<(), PersistError> {
     let refuse = |detail: String| {
         Err(PersistError::DirectoryNotPrivate {
@@ -753,7 +767,7 @@ fn judge_ancestor(
             detail,
         })
     };
-    let (owner, mode) = match seen {
+    let (owner, gid, mode) = match seen {
         Ok(seen) => seen,
         Err(e) => {
             return refuse(format!(
@@ -767,12 +781,100 @@ fn judge_ancestor(
             "an ancestor owned by uid {owner}, mode {mode:04o}: owned by neither root nor uid {uid}"
         ));
     }
-    if mode & 0o022 != 0 && mode & 0o1000 == 0 {
-        return refuse(format!(
-            "an ancestor owned by uid {owner}, mode {mode:04o}: group- or other-writable and not sticky"
-        ));
+    if mode & 0o1000 == 0 {
+        if mode & 0o002 != 0 {
+            return refuse(format!(
+                "an ancestor owned by uid {owner}, mode {mode:04o}: other-writable and not sticky"
+            ));
+        }
+        if mode & 0o020 != 0
+            && let Err(detail) = owners_private_group(names, owner, gid)
+        {
+            return refuse(format!(
+                "an ancestor owned by uid {owner}, mode {mode:04o}: {detail}"
+            ));
+        }
     }
     Ok(())
+}
+
+/// What the name service answers, as [`owners_private_group`] reads it:
+/// a user's name, and a group's name with its listed members. `Ok(None)`
+/// is "no such entry".
+pub(crate) trait NameService {
+    /// The name of the account `uid`.
+    fn user_name(&self, uid: u32) -> std::io::Result<Option<String>>;
+    /// The name and listed members of the group `gid`.
+    fn group(&self, gid: u32) -> std::io::Result<Option<(String, Vec<String>)>>;
+}
+
+/// The host's name service: `getpwuid_r` and `getgrgid_r`, so NSS
+/// sources answer as well as `/etc/passwd` and `/etc/group`. Off Linux
+/// nothing is read, and the predicate refuses as unreadable.
+pub(crate) struct HostNames;
+
+impl NameService for HostNames {
+    fn user_name(&self, uid: u32) -> std::io::Result<Option<String>> {
+        #[cfg(target_os = "linux")]
+        {
+            nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))
+                .map(|user| user.map(|user| user.name))
+                .map_err(std::io::Error::from)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = uid;
+            Err(std::io::ErrorKind::Unsupported.into())
+        }
+    }
+
+    fn group(&self, gid: u32) -> std::io::Result<Option<(String, Vec<String>)>> {
+        #[cfg(target_os = "linux")]
+        {
+            nix::unistd::Group::from_gid(nix::unistd::Gid::from_raw(gid))
+                .map(|group| group.map(|group| (group.name, group.mem)))
+                .map_err(std::io::Error::from)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = gid;
+            Err(std::io::ErrorKind::Unsupported.into())
+        }
+    }
+}
+
+/// ADR-0028 A 2026-10-08, "a group of one is the owner's own": a
+/// group-write bit grants nobody but the owner when the group is the
+/// owner's PRIVATE group -- its name is the owner's user name and it
+/// lists no member, as the name service answers both. The user-private
+/// group scheme gives such accounts umask `002`, so their own directories
+/// and files are `0775` and `0664`. A shared primary group is not one:
+/// the name, not the gid, is what is compared, since a scheme where every
+/// account's primary group is `users` would pass a gid comparison. A read
+/// that fails or finds no entry refuses. Applied by the directory walk
+/// and by `config.yaml`'s own clause (`load.rs`), so the two cannot
+/// diverge.
+///
+/// # Errors
+/// The refusal's detail, naming the group when it was read.
+pub(crate) fn owners_private_group(
+    names: &impl NameService,
+    owner: u32,
+    gid: u32,
+) -> Result<(), String> {
+    let (Ok(Some(user)), Ok(Some((group, members)))) = (names.user_name(owner), names.group(gid))
+    else {
+        return Err(
+            "group-writable, and whether the group is the owner's private group could not be read"
+                .to_owned(),
+        );
+    };
+    if group == user && members.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "group-writable by group {group} (gid {gid}), not the owner's private group"
+    ))
 }
 
 /// The rule for a symbolic link on the path to a private directory: owned
@@ -1036,26 +1138,176 @@ mod tests {
         }
     }
 
-    /// ADR-0028 A 2026-10-08, the ancestors: a group-writable ancestor is
-    /// refused and named, and the same tree at `0755` -- ours -- is the
-    /// control, answered at its place on disk.
+    /// A name service a test stages: users and groups by id, or a read
+    /// that fails.
+    #[cfg(unix)]
+    struct FakeNames {
+        users: Vec<(u32, &'static str)>,
+        groups: Vec<(u32, &'static str, Vec<&'static str>)>,
+        fails: bool,
+    }
+
+    #[cfg(unix)]
+    impl NameService for FakeNames {
+        fn user_name(&self, uid: u32) -> std::io::Result<Option<String>> {
+            if self.fails {
+                return Err(std::io::ErrorKind::Other.into());
+            }
+            Ok(self
+                .users
+                .iter()
+                .find(|(id, _)| *id == uid)
+                .map(|(_, name)| (*name).to_owned()))
+        }
+        fn group(&self, gid: u32) -> std::io::Result<Option<(String, Vec<String>)>> {
+            if self.fails {
+                return Err(std::io::ErrorKind::Other.into());
+            }
+            Ok(self
+                .groups
+                .iter()
+                .find(|(id, _, _)| *id == gid)
+                .map(|(_, name, members)| {
+                    (
+                        (*name).to_owned(),
+                        members.iter().map(|m| (*m).to_owned()).collect(),
+                    )
+                }))
+        }
+    }
+
+    /// ADR-0028 A 2026-10-08, "a group of one is the owner's own", on
+    /// staged entries: a group-writable ancestor passes when its group's
+    /// name is the owner's and it lists no member. A shared group, a gid
+    /// equal to the uid under another name, a group with a member, a
+    /// missing entry and a failed read are each refused; other-write is
+    /// refused whatever the group; sticky is unchanged.
+    #[cfg(unix)]
+    #[test]
+    fn a_group_writable_ancestor_needs_the_owners_private_group() {
+        let path = Path::new("/home/alice");
+        let names = FakeNames {
+            users: vec![(1000, "alice")],
+            groups: vec![
+                (1001, "alice", vec![]),
+                (100, "users", vec![]),
+                (1000, "staff", vec![]),
+                (1002, "alice", vec!["bob"]),
+            ],
+            fails: false,
+        };
+        let judge = |gid: u32, mode: u32, names: &FakeNames| {
+            judge_ancestor_with(path, Ok((1000, gid, mode)), 1000, names)
+        };
+        judge(1001, 0o40775, &names).expect("the owner's private group, gid apart from the uid");
+        let refused = |result: Result<(), PersistError>| match result {
+            Err(PersistError::DirectoryNotPrivate { path: at, detail }) => {
+                assert_eq!(at, path);
+                detail
+            }
+            other => panic!("refused: {other:?}"),
+        };
+        let shared = refused(judge(100, 0o40775, &names));
+        assert!(shared.contains("group users (gid 100)"), "{shared}");
+        let same_id = refused(judge(1000, 0o40775, &names));
+        assert!(same_id.contains("group staff (gid 1000)"), "{same_id}");
+        let member = refused(judge(1002, 0o40775, &names));
+        assert!(member.contains("group alice (gid 1002)"), "{member}");
+        for detail in [
+            refused(judge(4242, 0o40775, &names)),
+            refused(judge(
+                1001,
+                0o40775,
+                &FakeNames {
+                    users: vec![],
+                    ..names_clone(&names)
+                },
+            )),
+            refused(judge(
+                1001,
+                0o40775,
+                &FakeNames {
+                    fails: true,
+                    ..names_clone(&names)
+                },
+            )),
+        ] {
+            assert!(detail.contains("could not be read"), "{detail}");
+        }
+        let other = refused(judge(1001, 0o40757, &names));
+        assert!(other.contains("other-writable"), "{other}");
+        judge(100, 0o41775, &names).expect("sticky, as before");
+    }
+
+    #[cfg(unix)]
+    fn names_clone(names: &FakeNames) -> FakeNames {
+        FakeNames {
+            users: names.users.clone(),
+            groups: names.groups.clone(),
+            fails: names.fails,
+        }
+    }
+
+    /// The host's name service reads the entries `id` reports: this
+    /// process's user name and its primary group's name, and no entry
+    /// for a gid nothing allocates. Then a `0775` directory in our
+    /// primary group is judged as `getent` says that group is: accepted
+    /// when its name is ours and it lists no member, refused naming it
+    /// otherwise -- an oracle apart from the code under test.
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_group_writable_ancestor_is_refused() {
+    fn the_host_name_service_answers_as_id_and_getent_do() {
+        use std::os::unix::fs::MetadataExt as _;
+        let id = |flag: &str| {
+            let out = std::process::Command::new("id")
+                .arg(flag)
+                .output()
+                .expect("id");
+            String::from_utf8(out.stdout)
+                .expect("utf-8")
+                .trim()
+                .to_owned()
+        };
+        let uid = effective_uid().expect("readable");
+        assert_eq!(
+            HostNames.user_name(uid).expect("read"),
+            Some(id("-un")),
+            "the user"
+        );
         let root = tempfile::tempdir().expect("tempdir");
         chmod(root.path(), 0o700);
-        let private = private_under(root.path(), &["a"], 0o770);
-        let a = root.path().join("a");
-        let detail = refused_at(resolve_private_dir(&private), &a);
+        let dir = root.path().join("shared");
+        fs::create_dir(&dir).expect("mkdir");
+        let gid = fs::metadata(&dir).expect("meta").gid();
+        let (group, members) = HostNames.group(gid).expect("read").expect("an entry");
+        assert_eq!(group, id("-gn"), "the primary group");
         assert!(
-            detail.contains("0770") && detail.contains("not sticky"),
-            "{detail}"
+            HostNames.group(4_000_000_000).expect("read").is_none(),
+            "no entry"
         );
-        chmod(&a, 0o755);
-        assert_eq!(
-            resolve_private_dir(&private).expect("the control"),
-            fs::canonicalize(&private).expect("canonical")
-        );
+
+        let getent = std::process::Command::new("getent")
+            .args(["group", &gid.to_string()])
+            .output()
+            .expect("getent");
+        let line = String::from_utf8(getent.stdout).expect("utf-8");
+        let listed = line
+            .trim()
+            .rsplit(':')
+            .next()
+            .unwrap_or_default()
+            .to_owned();
+        assert_eq!(listed.is_empty(), members.is_empty(), "members: {line}");
+        let private = group == id("-un") && listed.is_empty();
+        chmod(&dir, 0o775);
+        match resolve_guarded_dir(&dir) {
+            Ok(_) => assert!(private, "accepted, so {group} is our private group"),
+            Err(PersistError::DirectoryNotPrivate { detail, .. }) => {
+                assert!(!private, "refused, so {group} is not: {detail}");
+                assert!(detail.contains(&format!("group {group}")), "{detail}");
+            }
+            Err(other) => panic!("judged: {other:?}"),
+        }
     }
 
     /// An other-writable ancestor without the sticky bit is refused; with
@@ -1129,8 +1381,8 @@ mod tests {
     #[test]
     fn the_ancestor_rule_on_root_and_the_uninspectable() {
         let path = Path::new("/srv");
-        judge_ancestor(path, Ok((0, 0o40755)), 1000).expect("root's, 0755");
-        judge_ancestor(path, Ok((1000, 0o41777)), 1000).expect("ours, sticky");
+        judge_ancestor(path, Ok((0, 0, 0o40755)), 1000).expect("root's, 0755");
+        judge_ancestor(path, Ok((1000, 1000, 0o41777)), 1000).expect("ours, sticky");
         match judge_ancestor(
             path,
             Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
@@ -1162,8 +1414,9 @@ mod tests {
     }
 
     /// The configuration directory is judged for who can change it, not
-    /// who can read it: ours at `0755` passes, group-writable or under a
-    /// group-writable ancestor it is refused.
+    /// who can read it: ours at `0755` passes, other-writable or under an
+    /// other-writable ancestor it is refused. (Group-write is the
+    /// private-group predicate's, tested on staged entries.)
     #[cfg(target_os = "linux")]
     #[test]
     fn a_guarded_directory_is_judged_for_writers_not_readers() {
@@ -1174,10 +1427,10 @@ mod tests {
         chmod(&root.path().join("a"), 0o755);
         chmod(&config, 0o755);
         resolve_guarded_dir(&config).expect("readable by all, written by us");
-        chmod(&config, 0o775);
+        chmod(&config, 0o757);
         refused_at(resolve_guarded_dir(&config), &config);
         chmod(&config, 0o755);
-        chmod(&root.path().join("a"), 0o775);
+        chmod(&root.path().join("a"), 0o757);
         refused_at(resolve_guarded_dir(&config), &root.path().join("a"));
     }
 
