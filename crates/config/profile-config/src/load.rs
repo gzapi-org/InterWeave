@@ -98,6 +98,20 @@ pub enum LoadError {
 /// the file in it is someone else's to rewrite. Judged on the HANDLE, so
 /// the file judged is the file read.
 fn open_guarded(path: &std::path::Path) -> Result<std::fs::File, LoadError> {
+    open_guarded_as(
+        path,
+        crate::effective_uid().map_err(LoadError::ConfigDirUnguarded),
+    )
+}
+
+/// [`open_guarded`] with the owner compared against `uid` -- this
+/// process's effective uid, or why it cannot be read -- apart so a test
+/// can name another uid: a file another account owns needs that account
+/// (`a_document_another_uid_owns_is_refused`).
+fn open_guarded_as(
+    path: &std::path::Path,
+    uid: Result<u32, LoadError>,
+) -> Result<std::fs::File, LoadError> {
     let refuse = |detail: String| LoadError::ConfigFileUnguarded {
         path: path.to_path_buf(),
         detail,
@@ -116,7 +130,7 @@ fn open_guarded(path: &std::path::Path) -> Result<std::fs::File, LoadError> {
             }
             Err(e) => return Err(LoadError::Read(e)),
         };
-        let uid = crate::effective_uid().map_err(LoadError::ConfigDirUnguarded)?;
+        let uid = uid?;
         let meta = file.metadata().map_err(LoadError::Read)?;
         let (owner, mode) = (meta.uid(), meta.mode() & 0o7777);
         if !meta.is_file() {
@@ -138,7 +152,7 @@ fn open_guarded(path: &std::path::Path) -> Result<std::fs::File, LoadError> {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = refuse;
+        let _ = (refuse, uid);
         Err(LoadError::ConfigDirUnguarded(
             crate::PersistError::UnsupportedPlatform,
         ))
@@ -332,4 +346,34 @@ fn resolve_existing_prefix(path: &std::path::Path) -> std::io::Result<std::path:
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LoadError, open_guarded_as};
+
+    /// `config.yaml`'s owner clause (ADR-0028 A 2026-10-08): a file of
+    /// ours at 0644, readable by all and written by no one else, is
+    /// accepted as ours -- the control -- and refused asked as another
+    /// uid, the owner named. In a sticky configuration directory this
+    /// clause is the one that refuses a file another account placed.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[allow(clippy::expect_used, clippy::panic)]
+    fn a_document_another_uid_owns_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, b"schema_version: 2\n").expect("write");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        let uid = crate::effective_uid().expect("the uid");
+        open_guarded_as(&path, Ok(uid)).expect("the control: ours");
+        match open_guarded_as(&path, Ok(uid.wrapping_add(1))) {
+            Err(LoadError::ConfigFileUnguarded { path: at, detail }) => {
+                assert_eq!(at, path);
+                assert!(detail.contains("owned by neither root nor uid"), "{detail}");
+            }
+            other => panic!("refused as another's: {:?}", other.err()),
+        }
+    }
 }
