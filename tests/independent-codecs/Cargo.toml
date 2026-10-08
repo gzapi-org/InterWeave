@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# Stage 17's independent codecs (plan §20 (c); testing.md §Compatibility
+# fixtures): one test-only encoder/decoder per frozen wire shape, written
+# from the contract text and NOTHING of this workspace. The independence
+# is the point -- a codec that shared a crate with production would agree
+# with it for free -- so no dependency below, normal, dev or build, may be
+# a workspace package; tools/checks/check_independent_codecs.sh holds
+# that over the full graph. TEST-ONLY; only tests/interoperability, where
+# the comparison against production lives, depends on this package.
+[package]
+name = "interweave-independent-codecs"
+version = "0.0.0"
+publish = false
+description = "Test-only InterWeave wire codecs written from the contract text alone."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+sha2 = { workspace = true }
+
+[dev-dependencies]
+# Reads the fixture files, never a frame: the IPC body codec is
+# hand-written (src/json.rs), since the canonical form keeps key order and
+# `preserve_order` is enabled nowhere in this workspace.
+serde_json = { workspace = true }

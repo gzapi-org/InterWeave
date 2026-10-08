@@ -134,6 +134,11 @@ fn tree_checks() -> Vec<Task> {
             &["tools/checks/check_human_layering.sh"],
         ),
         Task::new(
+            "the independent codecs reach no path package, dev-dependencies included",
+            "bash",
+            &["tools/checks/check_independent_codecs.sh"],
+        ),
+        Task::new(
             "the Claude bridge stays off the transport and discovery internals",
             "bash",
             &["tools/checks/check_claude_layering.sh"],

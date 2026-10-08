@@ -3527,6 +3527,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "interweave-independent-codecs"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "interweave-interoperability-tests"
 version = "0.0.0"
 dependencies = [
