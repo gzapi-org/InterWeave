@@ -3467,6 +3467,7 @@ name = "interweave-human-store"
 version = "0.0.0"
 dependencies = [
  "interweave-human-core",
+ "interweave-profile-config",
  "interweave-transport-api",
  "rusqlite",
  "tempfile",

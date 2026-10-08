@@ -88,13 +88,18 @@ channels: {{ desired: [] }}
     }
 
     fn run(&self, args: &[&str]) -> Output {
+        self.run_with_state(&self.root("state"), args)
+    }
+
+    /// [`Home::run`] with the state root at `state`.
+    fn run_with_state(&self, state: &Path, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_human-desktop"))
             .args(args)
             .env_clear()
             .env("HOME", self.dir.path())
             .env("XDG_CONFIG_HOME", self.root("config"))
             .env("XDG_DATA_HOME", self.root("data"))
-            .env("XDG_STATE_HOME", self.root("state"))
+            .env("XDG_STATE_HOME", state)
             .env("XDG_CACHE_HOME", self.root("cache"))
             .env("XDG_RUNTIME_DIR", self.root("run"))
             .output()
@@ -216,6 +221,32 @@ fn a_state_directory_open_to_others_is_refused_as_not_private() {
     assert!(
         !home.paths().human_dir().exists(),
         "a refused start leaves the tree as it found it"
+    );
+}
+
+/// A private state root under a directory others can write is refused
+/// as not private, and the person is told WHICH directory and why
+/// (ADR-0028 A 2026-10-08): that ancestor is what they must fix, and the
+/// private directory beneath it looks sound.
+#[test]
+fn a_state_root_under_a_directory_others_can_write_is_refused_naming_that_directory() {
+    let home = Home::new();
+    home.write_config("human-client");
+    let wide = home.root("wide");
+    std::fs::create_dir(&wide).expect("mkdir");
+    std::fs::set_permissions(&wide, std::fs::Permissions::from_mode(0o777))
+        .expect("writable by others on purpose");
+    let state = wide.join("state");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&state)
+        .expect("a private state root");
+
+    let (code, message) = code_and_message(&home.run_with_state(&state, &["--profile", PROFILE]));
+    assert_eq!(code, i32::from(EX_NOPERM), "{message}");
+    assert!(
+        message.contains(&wide.display().to_string()) && message.contains("0777"),
+        "the ancestor and its mode are named: {message}"
     );
 }
 

@@ -16,6 +16,7 @@ use std::path::Path;
 use interweave_human_core::retention::{
     Durability, InboundMessage, OutboundMessage, StorageHealth, TerminalCause,
 };
+use interweave_profile_config as profile_config;
 use interweave_transport_api::payload::MAX_PAYLOAD_BYTES;
 use interweave_transport_api::{
     ChannelId, DirectDestination, EndpointId, MediaType, MessageId, TransportIdentity,
@@ -124,31 +125,26 @@ impl HumanStore {
         // create their own parents, and a store that alone did not would
         // be the one that failed on a fresh profile.
         //
-        // Owner-only because this directory holds message content. The
-        // mode is applied at creation rather than after, so there is no
-        // window in which it is world-traversable. This duplicates three
-        // lines of `interweave-profile-config` on purpose: the store must
-        // not depend on configuration to protect its own files.
         // AN EMPTY PARENT IS THE WORKING DIRECTORY, not "no parent".
         // `Path::new("messages.db").parent()` is `Some("")`, so filtering
         // the empty string out skipped every check below for a bare
         // relative path — in a shared or attacker-writable working
         // directory, exactly the case that most needed them.
-        let parent = private_parent_of(path);
-        {
-            create_private_dir(parent)?;
-            // CREATED owner-only says nothing about one that was already
-            // there. A pre-existing state directory — restored, copied,
-            // made by an older build, or simply made by hand — carries
-            // whatever mode it has, and the store's documentation
-            // promised a protection it had not checked.
-            //
-            // Refused rather than tightened, for the reason the identity
-            // key is: content that has been broadly readable should be
-            // treated as exposed, and quietly narrowing the mode would
-            // hide that it ever was.
-            require_owner_only(parent, "the state directory")?;
-        }
+        //
+        // Every open below is made under the directory AS RESOLVED, not
+        // the configured text: the rule makes that path's components
+        // unchangeable by anyone but root and this uid, so nothing can
+        // be swapped in between the judgement and the open (ADR-0028 A
+        // 2026-10-08).
+        // The file's name FIRST: a path ending in `..` names no file, and
+        // asking after the directory was made left that directory behind
+        // a refusal (`a_path_naming_no_file_is_refused_before_any_directory_is_made`).
+        let name = path.file_name().ok_or(StoreError::NotAFile {
+            what: "the database path names no file",
+        })?;
+        let dir = private_dir(private_parent_of(path))?;
+        let resolved = dir.join(name);
+        let path = resolved.as_path();
         // CREATE IT OWNER-ONLY OURSELVES. SQLite creates the database with
         // the process umask, which is 0644 on a default system — message
         // content readable by every local account. Creating the file
@@ -223,16 +219,50 @@ impl HumanStore {
         // content as the directory, and SQLite creates the companions
         // itself with the process umask. Checked after the connection so
         // they exist to be checked.
-        for (suffix, what) in [
-            ("", "the database"),
-            ("-wal", "the write-ahead log"),
-            ("-shm", "the shared-memory index"),
+        //
+        // WHAT IS THERE, as for the database above: `exists` and `metadata`
+        // follow a link, so a companion left as a link to an
+        // owner-only file passed this check. For `-wal` and `-shm` SQLite
+        // then refused it on its own, as `CannotOpen` -- an unclassified
+        // open failure a client shows as "try again", which no wait
+        // fixes; a linked `-journal` it opened over without complaint.
+        // Judged here, each is refused as what it is
+        // (`a_companion_that_is_a_link_is_refused_not_followed`).
+        for (suffix, what, not_a_file) in [
+            (
+                "",
+                "the database",
+                "the database path is not a regular file",
+            ),
+            (
+                "-wal",
+                "the write-ahead log",
+                "the write-ahead log is not a regular file",
+            ),
+            (
+                "-shm",
+                "the shared-memory index",
+                "the shared-memory index is not a regular file",
+            ),
+            // A rollback journal left hot by a crash -- a file written
+            // before WAL, or a build that ran without it -- is read by
+            // SQLite on the first query, and holds the same content.
+            (
+                "-journal",
+                "the rollback journal",
+                "the rollback journal is not a regular file",
+            ),
         ] {
             let mut companion = path.as_os_str().to_owned();
             companion.push(suffix);
             let companion = std::path::PathBuf::from(companion);
-            if companion.exists() {
-                require_owner_only(&companion, what)?;
+            match std::fs::symlink_metadata(&companion) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(StoreError::Io(e)),
+                Ok(meta) if !meta.file_type().is_file() => {
+                    return Err(StoreError::NotAFile { what: not_a_file });
+                }
+                Ok(_) => require_owner_only(&companion, what)?,
             }
         }
         // EXISTING AS THE CONNECTION SEES IT, not as the file's header
@@ -1324,27 +1354,142 @@ impl HumanStore {
     }
 }
 
-/// Create `dir` and its parents, readable only by the owner.
-fn create_private_dir(dir: &std::path::Path) -> Result<(), StoreError> {
+/// The store's directory, judged by profile-config's one walk (ADR-0028 A
+/// 2026-10-08) and created owner-only if missing; answers where it is on
+/// disk, to open under.
+///
+/// Owner-only because this directory holds message content, owned by
+/// this uid, and under ancestors and links only root or this uid can
+/// change -- a sound mode under an ancestor another account can write is
+/// a directory that account can rename away and replace.
+///
+/// JUDGED BEFORE ANYTHING IS CREATED, as the profile lock's directories
+/// are: a missing directory is created only beneath an existing ancestor
+/// that meets the rule, so a refusal leaves the tree as it found it
+/// (`a_refused_state_directory_creates_nothing`).
+///
+/// REFUSED RATHER THAN TIGHTENED. A pre-existing directory — restored,
+/// copied, made by an older build, or by hand — carries whatever mode it
+/// has; content that has been broadly readable should be treated as
+/// exposed, and quietly narrowing the mode would hide that it ever was.
+///
+/// The desktop's `HumanClientLock` judges the same directory first, by
+/// the same walk; this judgement is the store's own, so a caller that
+/// opens it without that lock gets the rule too.
+fn private_dir(dir: &Path) -> Result<std::path::PathBuf, StoreError> {
+    let dir = &beyond_missing(dir)?;
+    // The missing components, innermost first, and the nearest that is
+    // there; an empty ancestor is the working directory.
+    let mut missing = Vec::new();
+    let mut existing = Path::new(".");
+    for ancestor in dir.ancestors() {
+        let ancestor = if ancestor.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            ancestor
+        };
+        if absent(ancestor)? {
+            missing.push(ancestor);
+        } else {
+            existing = ancestor;
+            break;
+        }
+    }
+    if !missing.is_empty() {
+        profile_config::resolve_guarded_dir(existing)
+            .map_err(|e| StoreError::from_persist(existing, e))?;
+        missing.reverse();
+        create_each(&missing)?;
+    }
+    profile_config::resolve_owned_private_dir(dir).map_err(|e| StoreError::from_persist(dir, e))
+}
+
+/// `dir` with every `.` and every `..` that follows a MISSING component
+/// taken out by text, so each missing component is a name this process
+/// will make.
+///
+/// Exact, not an approximation: a component that is not there cannot be
+/// a link, so `new/..` is its parent and nothing else. Left in, `mkdir`
+/// answered "exists" for `x/new/..` or `x/new/../wide` -- an existing
+/// directory -- and it was judged as one of ours and refused, where the
+/// same path opened before
+/// (`a_path_through_a_missing_directory_and_back_opens_as_before`). A
+/// `..` after a component that IS there is kept, for the walk to resolve
+/// as the kernel does.
+fn beyond_missing(dir: &Path) -> Result<std::path::PathBuf, StoreError> {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for component in dir.components() {
+        let here = if out.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            out.as_path()
+        };
+        let missing = absent(here)?;
+        match component {
+            Component::CurDir if missing => {}
+            Component::ParentDir if missing => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        out.push(".");
+    }
+    Ok(out)
+}
+
+/// Create `components`, outermost first, each owner-only and each by
+/// itself rather than in one recursive call.
+///
+/// ONE AT A TIME because the ancestor judged before them may be a sticky
+/// directory others can create in: a component that appears between that
+/// judgement and its creation is ADOPTED only if it is a private directory
+/// of this uid's -- another of our processes making it -- and otherwise
+/// refused before anything is made inside it. A recursive create adopted
+/// any directory it found and made ours inside it; the refusal came only
+/// after, leaving our directory in another account's
+/// (`a_component_that_appears_unprivate_is_refused_before_anything_is_made_in_it`).
+fn create_each(components: &[&Path]) -> Result<(), StoreError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt as _;
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)
-            .map_err(StoreError::Io)
+        for component in components {
+            match std::fs::DirBuilder::new()
+                .mode(profile_config::OWNER_ONLY_DIR)
+                .create(component)
+            {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    profile_config::resolve_owned_private_dir(component)
+                        .map_err(|e| StoreError::from_persist(component, e))?;
+                }
+                Err(e) => return Err(StoreError::Io(e)),
+            }
+        }
+        Ok(())
     }
     #[cfg(not(unix))]
     {
         // Refusing beats creating a directory of message content this
         // build cannot protect.
-        let _ = dir;
+        let _ = components;
         Err(StoreError::UnsupportedPlatform)
     }
 }
 
-/// Refuse anything holding message content that others can reach.
+/// Whether nothing at all is at `path` -- not even a dangling link,
+/// which is something there to be judged and refused.
+fn absent(path: &Path) -> Result<bool, StoreError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(e) => Err(StoreError::Io(e)),
+    }
+}
+
+/// Refuse a file holding message content that others can reach.
 fn require_owner_only(path: &std::path::Path, what: &str) -> Result<(), StoreError> {
     #[cfg(unix)]
     {
@@ -1647,6 +1792,56 @@ fn private_parent_of(path: &std::path::Path) -> &std::path::Path {
     match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => std::path::Path::new("."),
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod private_dir_tests {
+    use super::{create_each, private_dir};
+    use crate::StoreError;
+
+    #[test]
+    fn a_component_that_appears_unprivate_is_refused_before_anything_is_made_in_it() {
+        // The race made deterministic: `a` appears between the judgement
+        // of its parent and its own creation, readable by others.
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir_in("/tmp").expect("tempdir under /tmp");
+        let a = dir.path().join("a");
+        let b = a.join("b");
+        std::fs::create_dir(&a).expect("mkdir");
+        std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        match create_each(&[&a, &b]) {
+            Err(StoreError::DirectoryNotPrivate { path, .. }) => assert_eq!(path, a),
+            other => panic!("expected the appeared component refused, got {other:?}"),
+        }
+        assert!(!b.exists(), "nothing was made inside it");
+
+        // Our own, private, is adopted: another of our processes made it.
+        std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        create_each(&[&a, &b]).expect("a private directory of ours is adopted");
+        assert!(b.is_dir());
+    }
+
+    #[test]
+    fn the_store_opens_under_the_directory_as_resolved_not_the_configured_text() {
+        // Every open after the judgement is made under what this returns;
+        // a configured path through a link must come back without it, or
+        // a link repointed after the judgement would redirect the open.
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir_in("/tmp").expect("tempdir under /tmp");
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(real.join("state")).expect("mkdir");
+        for d in [&real, &real.join("state")] {
+            std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        }
+        std::os::unix::fs::symlink(&real, dir.path().join("link")).expect("link");
+
+        let resolved = private_dir(&dir.path().join("link").join("state")).expect("judged sound");
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(real.join("state")).expect("canonical")
+        );
     }
 }
 
