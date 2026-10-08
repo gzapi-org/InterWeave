@@ -163,6 +163,45 @@ jobs:
             libx11-6 libx11-xcb1 libxcursor1 libxi6 libxrandr2 \
             libxkbcommon0 libxkbcommon-x11-0 libfontconfig1 fonts-dejavu-core
 
+      # testing.md §Compatibility fixtures: the upgrade matrix's "previous
+      # build" axis is production builds, each built from its own commit
+      # as a second binary. Every entry of tools/ci/previous-builds.txt is
+      # built release, --locked, in a worktree and target directory of its
+      # own, into $INTERWEAVE_PREVIOUS_BUILDS/<label>/ (the script's
+      # --help); the scratch is gone before the workspace tests build. A
+      # commit's build never changes, so the BINARIES are cached, keyed on
+      # the list and the script (each label carries its sha, and the sha
+      # its toolchain file), and a hit builds nothing. Restored
+      # everywhere, saved only from main, as the tree-checks cargo cache
+      # is and for its reason. In this job, not one of its own: a new job
+      # would gate nothing until the ruleset names it (the note above).
+      - name: Restore the previous production builds
+        id: previous-builds-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/previous-builds
+          key: previous-builds-${{ runner.os }}-${{ hashFiles('tools/ci/previous-builds.txt', 'tools/ci/build_previous_builds.sh') }}
+
+      - name: Build the previous production builds the upgrade matrix runs against
+        env:
+          INTERWEAVE_PREVIOUS_BUILDS: ${{ runner.temp }}/previous-builds
+        run: bash tools/ci/build_previous_builds.sh "$INTERWEAVE_PREVIOUS_BUILDS"
+
+      - name: Save the previous production builds (main only)
+        if: success() && github.event_name == 'push' && steps.previous-builds-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/previous-builds
+          key: ${{ steps.previous-builds-cache.outputs.cache-primary-key }}
+
+      # The rows are #[ignore] so a plain local `cargo test` passes without
+      # the builds; here they run, and with the variable unset or an entry
+      # missing they FAIL rather than skip (the test file says how).
+      - name: The upgrade matrix against the previous production builds
+        env:
+          INTERWEAVE_PREVIOUS_BUILDS: ${{ runner.temp }}/previous-builds
+        run: cargo test -p interweave-interoperability-tests --test upgrade_matrix_previous --locked -- --ignored
+
       # Includes tests/support's fixture-loading suite, which is the
       # Stage-0 gate that the frozen vectors load from Rust with no
       # product networking in the graph. Under a private X display and a
