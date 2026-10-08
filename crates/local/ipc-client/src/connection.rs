@@ -34,6 +34,16 @@ use tokio::task::JoinHandle;
 /// to hold what a caller sends before the writer takes it.
 const OUTGOING: usize = 64;
 
+/// The most the reader takes in once the writer has failed, before it
+/// ends: "what has already arrived" read as a bound, since how much the
+/// socket holds is not asked of the kernel (that is an `ioctl`, and this
+/// crate forbids `unsafe`). A conforming daemon has at most a socket
+/// buffer queued when it closes -- 208 KiB at Linux's default -- so its
+/// `close` is inside the bound; a daemon that shut its read half and
+/// keeps writing is cut off here rather than holding every waiting call
+/// (`a_server_that_keeps_writing_after_a_failed_write_is_cut_off`).
+const DRAIN_BUDGET: usize = 1024 * 1024;
+
 /// How long `close` waits for the server to finish the session -- it
 /// releases the lease before it closes the socket -- before giving up.
 const CLOSE_WAIT: Duration = Duration::from_secs(5);
@@ -524,7 +534,7 @@ async fn write_loop(
 }
 
 /// The reader. Until the writer fails it waits on the socket; after, it
-/// reads only what has already arrived -- a Unix socket keeps what the
+/// reads what has already arrived, up to [`DRAIN_BUDGET`] -- a Unix socket keeps what the
 /// server sent before it closed, so a `close` already sent is read -- and
 /// then ends, answering every waiting call with the code the session
 /// ends with (`a_failed_write_keeps_the_servers_close_code`). Nothing it
@@ -681,6 +691,8 @@ struct Reader {
     buf: Vec<u8>,
     /// The duplicate [`Reader::next_now`] reads through, once it has.
     now: Option<std::os::unix::net::UnixStream>,
+    /// What [`Reader::next_now`] has read, against [`DRAIN_BUDGET`].
+    drained: usize,
 }
 
 impl Reader {
@@ -689,6 +701,7 @@ impl Reader {
             inner,
             buf: Vec::new(),
             now: None,
+            drained: 0,
         }
     }
 
@@ -724,7 +737,7 @@ impl Reader {
 
     /// The next frame among what has already arrived, without waiting:
     /// `None` once nothing complete is left to read, the stream's end
-    /// included.
+    /// included, or once [`DRAIN_BUDGET`] bytes have been read.
     ///
     /// Read through a duplicate of the socket, not `try_read`: tokio's
     /// `try_read` answers `WouldBlock` without asking the kernel until its
@@ -755,10 +768,16 @@ impl Reader {
                         .map_err(|_| TransportError::BackendUnavailable)?,
                 ),
             };
+            if self.drained >= DRAIN_BUDGET {
+                return Ok(None);
+            }
             let mut chunk = [0_u8; 8192];
             match socket.read(&mut chunk) {
                 Ok(0) => return Ok(None),
-                Ok(read) => self.buf.extend_from_slice(&chunk[..read]),
+                Ok(read) => {
+                    self.drained += read;
+                    self.buf.extend_from_slice(&chunk[..read]);
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
                 Err(_) => return Err(TransportError::BackendUnavailable),
             }

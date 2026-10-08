@@ -400,6 +400,41 @@ async fn a_failed_write_with_a_full_buffer_answers_without_waiting_for_room() {
     );
 }
 
+/// A daemon that shuts its read half and keeps writing -- pings here,
+/// as fast as it can -- feeds the reader after a failed write for as long
+/// as it likes: the reader is cut off at its drain budget, ends
+/// `BackendUnavailable`, and the waiting call comes back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_server_that_keeps_writing_after_a_failed_write_is_cut_off() {
+    use interweave_transport_api::TransportError;
+    use std::io::Write as _;
+    let script = Script::new();
+    let (session, server) = opened(&script, 8, &["events", "commands"]).await;
+    let held = server.stream.into_std().expect("a std stream");
+    held.set_nonblocking(false).expect("blocking");
+    held.shutdown(std::net::Shutdown::Read)
+        .expect("the server stops reading");
+    let ping =
+        encode_frame(r#"{"type":"ping","nonce":"AAAAAAAAAAAAAAAAAAAAAA"}"#).expect("a frame");
+    let batch: Vec<u8> = ping
+        .iter()
+        .copied()
+        .cycle()
+        .take(ping.len() * 4096)
+        .collect();
+    let flood = std::thread::spawn(move || {
+        let mut held = held;
+        // Until the client goes: then the write fails and the flood ends.
+        while held.write_all(&batch).is_ok() {}
+    });
+    let answer = tokio::time::timeout(PATIENCE, session.join(general()))
+        .await
+        .expect("the call comes back though the server never stops writing");
+    assert_eq!(answer, Err(TransportError::BackendUnavailable));
+    drop(session);
+    flood.join().expect("the flood ends with the client");
+}
+
 /// A server granting more than a session may hold is capped, not trusted.
 #[tokio::test]
 async fn a_grant_past_the_session_ceiling_is_capped() {
