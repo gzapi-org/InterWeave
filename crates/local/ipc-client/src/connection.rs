@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use interweave_ipc_protocol::{
     Cancel, DecodedFrame, Frame, FrameError, HELLO_TIMEOUT, Hello, HelloResponse, IPC_MAX_MINOR,
-    IpcVersion, Request, RequestId, ResponseFrame, decode_frame,
+    IpcVersion, Request, RequestFrame, RequestId, ResponseFrame, decode_frame,
 };
 use interweave_local_client_api::{LocalSessionEvent, SessionEvent};
 use interweave_transport_api::TransportError;
@@ -35,9 +35,11 @@ const OUTGOING: usize = 64;
 /// releases the lease before it closes the socket -- before giving up.
 const CLOSE_WAIT: Duration = Duration::from_secs(5);
 
-/// What the writer is handed.
+/// What the writer is handed: frames already encoded, each by the code
+/// that made it, so a frame that cannot be encoded fails where it was
+/// made and never reaches the connection's own end.
 enum Outgoing {
-    Frame(Frame),
+    Bytes(Vec<u8>),
     /// Shut the write half: the server reads end of stream, closes the
     /// session and then the socket.
     Finish,
@@ -236,7 +238,7 @@ pub(crate) async fn open(
     // Latest wins: the server holds one nonce outstanding at a time, so
     // an echo for an older ping still unwritten is replaced, not queued
     // ahead of the current one.
-    let (pong, pong_rx) = watch::channel::<Option<Frame>>(None);
+    let (pong, pong_rx) = watch::channel::<Option<Vec<u8>>>(None);
     let shared = Arc::new(Shared::default());
     let (events_tx, events) = match event_queue(&response) {
         Some(bound) => {
@@ -317,19 +319,35 @@ impl Connection {
         &self,
         request: Request,
     ) -> Result<T, TransportError> {
+        self.exchange(|id| request.into_frame(id, None)).await
+    }
+
+    /// [`call`](Self::call) for the frame `frame` makes under a fresh id.
+    /// A frame past the 128 KiB ceiling is refused here, as that call's
+    /// `PayloadTooLarge`, and the connection carries on: no request a
+    /// typed [`Request`] can hold is that large -- the largest legal
+    /// `direct.send` fits with its whole envelope (`ipc-protocol`'s
+    /// `the_largest_legal_payload_fits_with_its_whole_envelope`) -- so the
+    /// refusal is reached through this seam alone
+    /// (`an_unencodable_request_fails_its_call_and_not_the_connection`).
+    async fn exchange<T: DeserializeOwned>(
+        &self,
+        frame: impl FnOnce(RequestId) -> RequestFrame,
+    ) -> Result<T, TransportError> {
         let n = self.next_id.fetch_add(1, Ordering::Relaxed);
         let id = RequestId::new(format!("r{n}"))?;
+        let bytes = Frame::Request(frame(id.clone()))
+            .encode()
+            .map_err(|_| TransportError::PayloadTooLarge)?;
         let (answer, response) = oneshot::channel();
         self.shared.register(&id, answer)?;
         let mut guard = CancelOnDrop {
-            id: Some(id.clone()),
+            id: Some(id),
             out: self.out.clone(),
             shared: Arc::clone(&self.shared),
         };
         self.out
-            .send(Outgoing::Frame(Frame::Request(
-                request.into_frame(id, None),
-            )))
+            .send(Outgoing::Bytes(bytes))
             .await
             .map_err(|_| self.gone())?;
         let response = response.await.map_err(|_| self.gone())?;
@@ -389,11 +407,13 @@ impl Drop for CancelOnDrop {
         };
         // Still waiting: tell the server, advisory as LOCAL-IPC's cancel
         // is. A full writer queue skips it; the answer is discarded here
-        // either way, because the id is no longer pending.
-        if self.shared.take(id.as_str()).is_some() {
-            let _ = self
-                .out
-                .try_send(Outgoing::Frame(Frame::Cancel(Cancel::new(id))));
+        // either way, because the id is no longer pending. A cancel carries
+        // an id of 128 characters at most, far inside the ceiling; were it
+        // refused, it would be skipped as a full queue skips it.
+        if self.shared.take(id.as_str()).is_some()
+            && let Ok(bytes) = Frame::Cancel(Cancel::new(id)).encode()
+        {
+            let _ = self.out.try_send(Outgoing::Bytes(bytes));
         }
     }
 }
@@ -420,16 +440,15 @@ fn finish(shared: &Shared, inbox: Option<&Inbox>, code: TransportError, clean: b
     }
 }
 
-/// The writer. One that stops for its own reason -- a failed write, a
-/// frame past the ceiling -- ends the connection BEFORE it drops its
-/// queue, so a call that fails on the dropped queue finds the end already
+/// The writer. One whose write fails ends the connection BEFORE it drops
+/// its queue, so a call that fails on the dropped queue finds the end already
 /// recorded and `events` already refusing: the reader may never see the
 /// end, a server that stopped reading and kept writing being one way
 /// (`a_failed_write_ends_the_session_before_the_reader_sees_it`).
 async fn write_loop(
     mut write: OwnedWriteHalf,
     mut out: mpsc::Receiver<Outgoing>,
-    mut pong: watch::Receiver<Option<Frame>>,
+    mut pong: watch::Receiver<Option<Vec<u8>>>,
     mut ended: watch::Receiver<bool>,
     (shared, inbox): (Arc<Shared>, Option<Arc<Inbox>>),
 ) {
@@ -440,7 +459,7 @@ async fn write_loop(
             biased;
             _ = ended.wait_for(|ended| *ended) => break,
             Ok(()) = pong.changed() => match pong.borrow_and_update().clone() {
-                Some(frame) => Outgoing::Frame(frame),
+                Some(bytes) => Outgoing::Bytes(bytes),
                 None => continue,
             },
             next = out.recv() => match next {
@@ -448,17 +467,7 @@ async fn write_loop(
                 None => break,
             },
         };
-        let Outgoing::Frame(frame) = next else {
-            break;
-        };
-        let Ok(bytes) = frame.encode() else {
-            finish(
-                &shared,
-                inbox.as_deref(),
-                TransportError::PayloadTooLarge,
-                false,
-                EndedBy::Writer,
-            );
+        let Outgoing::Bytes(bytes) = next else {
             break;
         };
         if write.write_all(&bytes).await.is_err() {
@@ -479,7 +488,7 @@ async fn read_loop(
     mut reader: Reader,
     version: IpcVersion,
     shared: Arc<Shared>,
-    echoes: watch::Sender<Option<Frame>>,
+    echoes: watch::Sender<Option<Vec<u8>>>,
     events: Option<(mpsc::Sender<SessionEvent>, Arc<Inbox>)>,
     ended: watch::Sender<bool>,
 ) {
@@ -515,7 +524,12 @@ async fn read_loop(
                 }
             }
             Ok(Some(Frame::Ping(ping))) => {
-                echoes.send_replace(Some(Frame::Pong(ping.echo())));
+                // A nonce is 64 characters at most, far inside the
+                // ceiling; were its echo refused, the ping would go
+                // unanswered and the server's keepalive would decide.
+                if let Ok(bytes) = Frame::Pong(ping.echo()).encode() {
+                    echoes.send_replace(Some(bytes));
+                }
             }
             // Held for a session reading events, the newest only; a
             // connection without them has no use for it.
@@ -586,5 +600,102 @@ impl Reader {
             }
             self.buf.extend_from_slice(&chunk[..read]);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used, clippy::panic)]
+
+    use std::collections::BTreeSet;
+
+    use interweave_ipc_protocol::{
+        ChannelParams, MAX_BODY_BYTES, RequestedCapability, encode_frame,
+    };
+    use interweave_transport_api::ChannelId;
+    use serde::de::IgnoredAny;
+    use tokio::net::UnixListener;
+
+    use super::*;
+
+    const PEER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+    const PATIENCE: Duration = Duration::from_secs(5);
+
+    fn join() -> Request {
+        Request::ChannelJoin(ChannelParams {
+            channel: ChannelId::parse("general").expect("channel"),
+        })
+    }
+
+    async fn next(reader: &mut Reader) -> Frame {
+        tokio::time::timeout(PATIENCE, reader.next())
+            .await
+            .expect("the client writes in time")
+            .expect("a frame")
+            .expect("not the end")
+    }
+
+    /// A request frame past the 128 KiB ceiling -- built through the
+    /// `exchange` seam, since no typed `Request` is that large -- fails
+    /// its own call with `PayloadTooLarge` and puts nothing on the wire:
+    /// the server's next frame is the control's request, answered, on a
+    /// connection that never ended.
+    #[tokio::test]
+    async fn an_unencodable_request_fails_its_call_and_not_the_connection() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("data.sock");
+        let listener = UnixListener::bind(&path).expect("binds");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accepts");
+            let (read, mut write) = stream.into_split();
+            let mut reader = Reader::new(read);
+            assert!(matches!(next(&mut reader).await, Frame::Hello(_)));
+            let answer = |body: String| encode_frame(&body).expect("a frame");
+            write
+                .write_all(&answer(format!(
+                    r#"{{"type":"hello_response","ipc_version":{{"major":2,"minor":0}},"transport_contract_version":"2.0","peer":"{PEER}","granted_capabilities":["commands"]}}"#
+                )))
+                .await
+                .expect("written");
+            let Frame::Request(request) = next(&mut reader).await else {
+                panic!("a request");
+            };
+            write
+                .write_all(&answer(format!(
+                    r#"{{"type":"response","id":"{}","ok":true,"result":{{}}}}"#,
+                    request.id.as_str()
+                )))
+                .await
+                .expect("written");
+            request.method
+        });
+        let hello = crate::session::hello(
+            "k",
+            None,
+            BTreeSet::from([RequestedCapability::Commands]),
+            BTreeSet::new(),
+        );
+        let opened = open(&path, hello, |_| None).await.expect("opens");
+        let connection = opened.connection;
+
+        let refused = connection
+            .exchange::<IgnoredAny>(|id| {
+                let mut frame = join().into_frame(id, None);
+                frame.method = "m".repeat(MAX_BODY_BYTES);
+                frame
+            })
+            .await;
+        assert_eq!(refused.map(|_| ()), Err(TransportError::PayloadTooLarge));
+        assert!(!connection.has_ended(), "the connection carries on");
+
+        let control = tokio::time::timeout(PATIENCE, connection.call::<IgnoredAny>(join()))
+            .await
+            .expect("answered in time");
+        assert!(control.is_ok(), "the control is answered: {control:?}");
+        assert_eq!(
+            server.await.expect("the server"),
+            "channel.join",
+            "the refused frame never reached the wire"
+        );
     }
 }
