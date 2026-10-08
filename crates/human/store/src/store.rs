@@ -1356,10 +1356,11 @@ fn private_dir(dir: &Path) -> Result<std::path::PathBuf, StoreError> {
                 Err(e) => Some(Err(e)),
             })
             .unwrap_or(Ok(Path::new(".")))?;
-        profile_config::resolve_guarded_dir(existing).map_err(StoreError::from_persist)?;
-        profile_config::create_private_dir(dir).map_err(StoreError::from_persist)?;
+        profile_config::resolve_guarded_dir(existing)
+            .map_err(|e| StoreError::from_persist(existing, e))?;
+        profile_config::create_private_dir(dir).map_err(|e| StoreError::from_persist(dir, e))?;
     }
-    profile_config::resolve_owned_private_dir(dir).map_err(StoreError::from_persist)
+    profile_config::resolve_owned_private_dir(dir).map_err(|e| StoreError::from_persist(dir, e))
 }
 
 /// Whether nothing at all is at `path` -- not even a dangling link,

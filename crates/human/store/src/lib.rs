@@ -234,17 +234,26 @@ pub enum StoreError {
 }
 
 impl StoreError {
-    /// profile-config's answer about the store's directory, in the
+    /// profile-config's answer about the store's directory `dir`, in the
     /// store's own terms.
-    pub(crate) fn from_persist(error: interweave_profile_config::PersistError) -> Self {
+    ///
+    /// A cause the directory helpers do not answer today is read as a
+    /// refusal of `dir`, not as an I/O failure: an `Io` is shown as "try
+    /// again", which no wait fixes for a privacy refusal
+    /// (`another_persist_cause_is_a_refusal_not_a_retry`).
+    pub(crate) fn from_persist(
+        dir: &std::path::Path,
+        error: interweave_profile_config::PersistError,
+    ) -> Self {
         use interweave_profile_config::PersistError as P;
         match error {
             P::DirectoryNotPrivate { path, detail } => Self::DirectoryNotPrivate { path, detail },
             P::Io(e) => Self::Io(e),
             P::UnsupportedPlatform => Self::UnsupportedPlatform,
-            // The directory helpers answer only the three above; a new
-            // cause there is still a failure to open, not a success.
-            other => Self::Io(std::io::Error::other(other.to_string())),
+            other => Self::DirectoryNotPrivate {
+                path: dir.to_path_buf(),
+                detail: other.to_string(),
+            },
         }
     }
 
@@ -366,6 +375,28 @@ impl core::error::Error for StoreError {
             Self::Sql(e) => Some(e),
             Self::Io(e) => Some(e),
             _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod persist_tests {
+    use super::StoreError;
+    use interweave_profile_config::PersistError;
+    use std::path::Path;
+
+    #[test]
+    fn another_persist_cause_is_a_refusal_not_a_retry() {
+        let dir = Path::new("/state/human");
+        let mapped = StoreError::from_persist(
+            dir,
+            PersistError::FileNotPrivate {
+                path: dir.join("x"),
+            },
+        );
+        match mapped {
+            StoreError::DirectoryNotPrivate { path, .. } => assert_eq!(path, dir),
+            other => panic!("expected a refusal of the directory, got {other:?}"),
         }
     }
 }
