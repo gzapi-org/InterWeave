@@ -14,8 +14,9 @@
 //! both accept, on every field. A disagreement is a contract finding for
 //! architect-cto, never a test to bend: the contract text is the oracle.
 //!
-//! The domain is the one both media-type readings share (printable ASCII),
-//! until 01a11c8b is ruled; see the codecs' README.
+//! A present media type is printable ASCII on every side (architect-cto,
+//! 01a11c8d); a control byte or DEL in one is refused by all three, the
+//! fingerprint included.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
@@ -220,6 +221,33 @@ fn broadcast_frames_agree_in_both_directions() {
         let again = ind::broadcast_v1::BroadcastMessageV1::decode(&theirs)
             .unwrap_or_else(|e| panic!("case {case}: ours refused production's: {e}"));
         assert_eq!(again, m, "case {case}: independent decode");
+    }
+}
+
+/// One byte outside printable ASCII, in a media type otherwise legal:
+/// both fingerprints refuse it, beside the printable edges both accept.
+#[test]
+fn fingerprints_refuse_the_same_media_types() {
+    for ok in [" ", "~", " ~", "text/plain"] {
+        assert!(
+            ind::fingerprint::fingerprint(Some(ok), b"x").is_ok(),
+            "{ok:?}"
+        );
+        assert!(
+            direct_content_fingerprint_v1(Some(ok), b"x").is_ok(),
+            "{ok:?}"
+        );
+    }
+    for b in (0x00u8..0x20).chain([0x7F]) {
+        let media = format!("text/{}", char::from(b));
+        assert!(
+            ind::fingerprint::fingerprint(Some(&media), b"x").is_err(),
+            "{b:#04x}"
+        );
+        assert!(
+            direct_content_fingerprint_v1(Some(&media), b"x").is_err(),
+            "{b:#04x}"
+        );
     }
 }
 
