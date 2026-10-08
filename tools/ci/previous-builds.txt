@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# The upgrade matrix's "previous build" axis (testing.md §Compatibility
+# fixtures): production builds, each built from its own commit as a
+# second binary. One line per entry, "<label> <full commit sha>"; the
+# label ends in the sha's first eight characters, which
+# build_previous_builds.sh checks. CI builds exactly this list into
+# $INTERWEAVE_PREVIOUS_BUILDS/<label>/, and
+# tests/interoperability/tests/upgrade_matrix_previous.rs fails when the
+# subdirectories there are not exactly these labels. Adding an entry is
+# one line here.
+#
+# Stage 13's build, the first to speak IPC 2.0: #165's merge.
+stage13-45ba3928 45ba39283a89acfabb728ae4533be0589264353b
