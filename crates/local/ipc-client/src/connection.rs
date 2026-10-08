@@ -136,7 +136,10 @@ impl Shared {
     /// client refuses -- so a caller is told why the connection ended
     /// rather than that a write failed against the socket the server was
     /// closing, and one server behaviour gets one code whichever half saw
-    /// it first (`a_refused_frame_read_after_a_failed_write_is_the_violation`). The writer's end answers no call: the reader, which
+    /// it first (`a_reader_end_replaces_a_provisional_code`, which fixes
+    /// the order rather than relying on the scheduler, and end to end
+    /// `a_refused_frame_read_after_a_failed_write_is_the_violation`). The
+    /// writer's end answers no call: the reader, which
     /// then reads what has already arrived, answers them when it stops,
     /// and its end makes the code final, so a call answers the code the
     /// session ends with (`a_failed_write_keeps_the_servers_close_code`;
