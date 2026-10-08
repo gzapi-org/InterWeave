@@ -903,8 +903,16 @@ pub(crate) fn owners_private_group(
     };
     let (group, members) = match names.group(gid) {
         Ok(Some(group)) => group,
-        Ok(None) => return Err(unread(format!("group {gid} has no entry"))),
-        Err(e) => return Err(unread(format!("group {gid}: {e}"))),
+        Ok(None) => {
+            return Err(unread(format!(
+                "group {gid} has no entry (this process's account: {user}, uid {euid})"
+            )));
+        }
+        Err(e) => {
+            return Err(unread(format!(
+                "group {gid}: {e} (this process's account: {user}, uid {euid})"
+            )));
+        }
     };
     if group == user && members.is_empty() {
         return Ok(());
@@ -1342,6 +1350,10 @@ mod tests {
         let unknown = refused(judge(4242, 0o40775, &names));
         assert!(unknown.contains("whether group 4242 is"), "{unknown}");
         assert!(unknown.contains("group 4242 has no entry"), "{unknown}");
+        assert!(
+            unknown.contains("alice, uid 1000"),
+            "names our account: {unknown}"
+        );
         let no_account = refused(judge(
             1001,
             0o40775,
