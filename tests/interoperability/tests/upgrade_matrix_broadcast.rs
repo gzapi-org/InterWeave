@@ -176,20 +176,47 @@ async fn a_foreign_version_byte_is_not_delivered_beside_a_version_1_control() {
             .build();
         swarm.behaviour_mut().subscribe(&topic).expect("subscribes");
         swarm.dial(address).expect("dials HEAD");
-        // Each foreign version repeatedly while the mesh forms, then the
-        // control; a distinct payload each round keeps every message's id
-        // distinct.
-        for round in 0u8..40 {
-            let body = if round < 30 {
-                envelope(FOREIGN[usize::from(round) % FOREIGN.len()], &[b'f', round])
-            } else {
-                envelope(1, &[b'c', round])
-            };
-            let _ = swarm.behaviour_mut().publish(topic.hash(), body);
-            let _ = tokio::time::timeout(Duration::from_millis(50), swarm.select_next_some()).await;
+        // Until each foreign version has LEFT the publisher at least once
+        // (`publish` refuses while no peer is subscribed, so an attempt is
+        // not a send), then the controls. Each round waits its full 50 ms
+        // rather than ending at the first swarm event, and a distinct
+        // payload each round keeps every message's id distinct.
+        let mut sent = [0usize; FOREIGN.len()];
+        let deadline = tokio::time::Instant::now() + PATIENCE;
+        let mut round = 0u8;
+        let pump = async |swarm: &mut libp2p::Swarm<_>| {
+            let until = tokio::time::Instant::now() + Duration::from_millis(50);
+            while tokio::time::timeout_at(until, swarm.select_next_some())
+                .await
+                .is_ok()
+            {}
+        };
+        while sent.contains(&0) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "foreign envelopes never left: {sent:?}"
+            );
+            let which = usize::from(round) % FOREIGN.len();
+            let body = envelope(FOREIGN[which], &[b'f', round]);
+            if swarm.behaviour_mut().publish(topic.hash(), body).is_ok() {
+                sent[which] += 1;
+            }
+            round = round.wrapping_add(1);
+            pump(&mut swarm).await;
         }
+        for control in 0u8..10 {
+            let _ = swarm
+                .behaviour_mut()
+                .publish(topic.hash(), envelope(1, &[b'c', control]));
+            pump(&mut swarm).await;
+        }
+        sent
     });
-    publisher_task.await.expect("the publisher ran");
+    let sent = publisher_task.await.expect("the publisher ran");
+    assert!(
+        sent.iter().all(|n| *n > 0),
+        "each foreign version was published: {sent:?}"
+    );
 
     let got = receive(&session, PATIENCE).await;
     // A session notice (the runtime's state) may ride along; only the
