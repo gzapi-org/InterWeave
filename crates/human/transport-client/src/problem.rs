@@ -137,8 +137,12 @@ pub(crate) const fn classify_open(error: TransportError) -> OpenFailure {
 /// or of a new peer past the allowlist's ceiling (`LOCAL-CLIENT.md` §7
 /// item 11), a refusal the person can act on. A daemon that does not speak
 /// the version trust needs -- one negotiating IPC below 2.3, whose trust
-/// read `ipc-client` refuses `ProtocolUnsupported` -- is `Incompatible`,
-/// as a send's is: the person is told the cause, which no retry mends.
+/// read `ipc-client` refuses `ProtocolUnsupported`, or one with no common
+/// major (`VersionIncompatible`) -- is `Incompatible`: the person is told
+/// the cause, which no retry mends. `ProtocolViolation` is not: a framing
+/// error or a reused request id raises it within one release too
+/// (`LOCAL-IPC.md` §Close), so it would name a version gap that may not be
+/// there.
 pub(crate) const fn classify_trust(error: TransportError) -> TrustProblem {
     match error {
         TransportError::BackendUnavailable
@@ -149,10 +153,11 @@ pub(crate) const fn classify_trust(error: TransportError) -> TrustProblem {
         | TransportError::CancellationRaced => TrustProblem::Unavailable,
         TransportError::CapabilityDenied => TrustProblem::NotPermitted,
         TransportError::InvalidArgument => TrustProblem::Refused,
-        TransportError::ProtocolUnsupported
-        | TransportError::VersionIncompatible
-        | TransportError::ProtocolViolation => TrustProblem::Incompatible,
-        TransportError::PayloadTooLarge
+        TransportError::ProtocolUnsupported | TransportError::VersionIncompatible => {
+            TrustProblem::Incompatible
+        }
+        TransportError::ProtocolViolation
+        | TransportError::PayloadTooLarge
         | TransportError::ChannelNotJoined
         | TransportError::EndpointNotRegistered
         | TransportError::EndpointUnknown
@@ -307,15 +312,24 @@ mod tests {
                 error == TransportError::InvalidArgument,
                 "{error:?}"
             );
-            // A version problem reads as one wherever a send's does.
+            // Only the errors that establish a version gap read as one.
+            let version_gap = matches!(
+                error,
+                TransportError::ProtocolUnsupported | TransportError::VersionIncompatible
+            );
             assert_eq!(
                 classify_trust(error) == TrustProblem::Incompatible,
-                matches!(
-                    classify_send(error),
-                    AttemptFailure::NeedsAttention(SendProblem::Incompatible)
-                ),
+                version_gap,
                 "{error:?}"
             );
+            // Where trust names a version gap, a send names it too.
+            if version_gap {
+                assert_eq!(
+                    classify_send(error),
+                    AttemptFailure::NeedsAttention(SendProblem::Incompatible),
+                    "{error:?}"
+                );
+            }
         }
     }
 
