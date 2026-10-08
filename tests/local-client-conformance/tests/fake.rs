@@ -285,6 +285,18 @@ async fn item_9_an_ended_session_answers_events_with_its_end() {
     suite::an_ended_session_answers_events_with_its_end(&session).await;
 }
 
+/// The case with something waiting at the end, degenerate here: the
+/// fake's queues are its runtime's, and go with it.
+#[tokio::test]
+async fn item_9_a_message_waiting_at_the_end_goes_with_the_fakes_runtime() {
+    let p = pair();
+    let (session, _sender) =
+        suite::a_session_to_end_with_a_message_waiting(&p.b, &p.a, &p.a_peer, &agent(), &human())
+            .await;
+    p.a.stop();
+    suite::an_ended_session_answers_events_with_its_end(&session).await;
+}
+
 #[tokio::test]
 async fn item_10_the_runtimes_state_is_owed_once_at_open() {
     let p = pair();
