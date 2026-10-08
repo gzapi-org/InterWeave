@@ -3551,6 +3551,7 @@ dependencies = [
  "interweave-transport-composition",
  "interweave-transport-libp2p",
  "interweave-transport-runtime",
+ "interweave-trust-api",
  "libp2p",
  "serde_json",
  "serde_norway",
