@@ -240,7 +240,7 @@ indicator stays stale until it is taken (A 2026-10-04, correcting A
 2026-10-03's "dropped before any message", which the server never
 implemented); it is never in the reserved lane of item 3. A route ends only at a revocation that changed the policy: `admin.trust.set` to `false` ends every connection's route to the peer and withdraws its pending notice, counted as a replacement (the composition's `Diagnostics::peer_notices.paths_replaced_total`, not on the IPC wire); a message from the peer taken afterwards, or a send whose acceptance is recorded afterwards, makes a new route; a disconnect ends none, but withdraws the peer's pending notice, counted as a replacement, so a `peer.path_changed` read after a `peer.disconnected` never names the connection that is gone (A 2026-10-05, #190; the withdrawal A 2026-10-05 (ii), #192; LOCAL-CLIENT.md §2). A connection is held to have a route to at most `MAX_ROUTED_PEERS` peers (the trust allowlist's own ceiling, `PeerTrustPolicy::MAX_ALLOWED_PEERS`): a route past it is counted (the composition's `Diagnostics::peer_notices.routes_refused_total`, not on the IPC wire) and not kept, so no notice is owed for that peer; the pending notices are held one per routed peer, apart from the ordinary queue and its bound — that, not a drop, bounds their memory (A 2026-10-04).
 
-Over IPC the server pumps the session queue into its event lane and the socket, and the client into its own bounded buffer, so what a sender can get accepted while the reader does not drain is the whole pipeline's capacity: the session queue, the event lane, the client's buffer, and the socket — whose share is the kernel's send buffer, bounded in bytes, not events, and therefore hundreds of small frames or a handful of large ones. Bounded, larger than one `event_queue`, and no number this contract states. Acceptance still follows admission at the session queue and every accepted message is held and delivered; nothing is buffered anywhere a bound does not name (A 2026-09-30).
+Over IPC the server pumps the session queue into its event lane and the socket, and the client into its own bounded buffer, so what a sender can get accepted while the reader does not drain is the whole pipeline's capacity: the session queue, the event lane, the client's buffer, and the socket — whose share is the kernel's send buffer, bounded in bytes, not events, and therefore hundreds of small frames or a handful of large ones. Bounded, larger than one `event_queue`, and no number this contract states. Acceptance still follows admission at the session queue and every accepted message is held and delivered to a client that keeps draining; a client the server closes as wedged loses what the pipeline held for it, bounded as above and never silently to that client — its session ends, and `CHANNEL-EVENT.md` §Delivery says what a bridge tells its host; the sender, already answered Accepted, is not told (A 2026-10-08, from ADR-0002 A 2026-10-07); nothing is buffered anywhere a bound does not name (A 2026-09-30).
 
 Event order over IPC: within one server pump the grouped order of `events()` holds (session notices, then direct, then broadcast, each oldest first, then the pending path notices under what room is left — A 2026-10-04); across pumps the client reads batches as they arrive, so a notice pumped after a direct message follows it. A consumer that needs one order across a session uses the receipt times a direct message and a broadcast carry; a notice carries none and is read as of its arrival (A 2026-09-30).
 
@@ -258,6 +258,8 @@ nonce = 128-bit CSPRNG value, encoded canonically (for example base64url without
 ```
 
 When enabled by profile policy and negotiated in `hello`, defaults are `interval=30s`, `response_timeout=10s`, `max_missed=3`. The server has at most one outstanding keepalive nonce per connection; only an exact pong for the current 128-bit nonce satisfies the probe. Stale/duplicate/wrong nonces do not reset liveness state. After the configured miss threshold the daemon closes that IPC connection and releases its endpoint lease exactly as for an ordinary disconnect. Keepalive is local liveness detection only: it is not authentication, replay protection for application messages, a network heartbeat, or a lease-renewal credential.
+
+The bound runs both ways (A 2026-10-08). The wire tells the client neither the three values nor whether keepalive was granted (`hello_response` has no keepalive members, and a client offers the feature in every hello), so the client's bound is a protocol constant that ARMS AT THE FIRST PING THE CLIENT READS: `CLIENT_SILENCE_TIMEOUT = 120 s`. A server that has pinged has negotiated keepalive and pings every `interval` while healthy, so 120 s without a frame read after that is a real silence; before the first ping only the caller's own timeout and OS connection liveness bound the wait, as on a connection without keepalive — a daemon whose profile turns keepalive off never pings, and never arms the timer. Armed, a client that has read no frame of any kind for 120 s ends the connection `Timeout`, answering its waiting calls `Timeout`. The constant sits above the server's own threshold for a wedged client — `max_missed × interval + response_timeout`, 100 s at the defaults (probes every `interval`, a miss counted at `response_timeout` after each) — so at the defaults the server judges first; a profile raising `max_missed` can place its own threshold above the constant, which the client's armed timer, suspended while the client is not reading, does not contradict. The timer counts frames the client reads, so a client that has stopped reading its socket (its buffer full, below) suspends it: that client's fate is the server's wedge close, not a timeout it blames on the server. A profile keeps `interval + response_timeout` at or below the constant, so a healthy server's next ping always lands inside the armed bound (a validation rule in `profile-config`; `resource-limits.md`'s keepalive rows carry it). Gap at writing: ipc-client echoes pings and keeps no timer for a missing one (connection.rs) — p2p-network-dev-02's carry from #224 — and the profile validation does not yet hold the sum, while `resource-limits.md` still admits an interval of 5 min on its own: p2p-network-dev-01's, in `profile-config`.
 
 The profile policy `ipc.keepalive.require_for_endpoint_lease` defaults to `true`. When true, any client that claims a data-plane EndpointId lease must negotiate keepalive during `hello`; otherwise endpoint claim fails with `CapabilityDenied`. Connections that do not claim an endpoint (for example a separate admin or diagnostics session) do not need keepalive solely because of this rule. Operators may set the policy false for compatibility with third-party clients, accepting that a half-open client may retain its lease until OS-level failure detection or explicit `admin.endpoints` revocation.
 
@@ -471,7 +473,7 @@ schema takes an additive property into 2.0 itself (`event_queue` on
 emitted, its mirror refusing the old name (`pre_auth.tracked_peers` off
 `admin-status` 1.1.0, A 2026-10-01), and treats a change as that removal
 plus that addition — its own version moving 1.x → 1.(x+1) each time
-(ADR-0017 records the rule and its one bound). A closed RESULT shape may
+(ADR-0017 records the rule and its one bound; the bound holds for a schema flipped `active` before that build as for an `approved` one, and a pure relaxation of a bound is additive before the build, when no consumer built against the old bound exists; after it a result relaxation widens behind a new minor as below and a params relaxation is a major — A 2026-10-07). A closed RESULT shape may
 widen behind a new minor (ADR-0017 A 2026-10-07): a property gains a
 value or a new optional property appears only on a connection that
 negotiated that minor or later, the shape served below it stays
@@ -504,6 +506,32 @@ connection accepted past the connection limits of §Multiple clients
 (`Overloaded`, before any hello is read; A 2026-09-29), and for a
 request id reused while outstanding (`ProtocolViolation`). An error
 that has a request id is a `response{ok: false}`, never a `close`.
+
+A call that is still waiting when the connection ends answers the code
+the session ends with (A 2026-10-08): the `close` frame's code when one
+was read, `Timeout` when the client's own keepalive bound ended it
+(below; armed only after a ping was read), and `BackendUnavailable`
+when the connection ended otherwise with no `close` frame read. Every binding keeps the server's last frame readable
+after the server's close — a client whose write failed keeps reading
+what already arrived and answers its waiting calls once the reader
+stops, a reset after the `close` frame counting as the end — a
+requirement on the binding, not a property of one transport (a Unix
+socket gives it; the Windows named pipe must flush before it
+disconnects). The call and the session's end carry one code, read once:
+a client branches on a call's code (`ProtocolViolation` is not retried,
+`BackendUnavailable` is), and a `BackendUnavailable` answered to a call
+whose connection is about to read `ProtocolViolation` would tell it to
+retry a session the daemon refused. No timer of its own: on a connection
+that negotiated keepalive, the client's keepalive bound (§Disconnect/
+reconnect and optional keepalive, A 2026-10-08: `CLIENT_SILENCE_TIMEOUT`,
+120 s with no frame read, armed at the first ping) ends a server that
+keeps its write half open and sends nothing with `Timeout`; without
+keepalive only the caller's own timeout and OS connection liveness do. Gap at writing: the
+ipc-client as shipped (6eb4bb58) answers every waiting call
+`BackendUnavailable` at once on a write failure and lets a later `close`
+frame change only the session's code — two codes; the binding moves to
+this rule on p2p-network-dev-02's carry from #224, its two
+`scripted_server` tests turning into this sentence.
 
 ## Cancellation mapping and request concurrency
 
