@@ -310,16 +310,17 @@ backed, through nix's `user` feature in safe Rust — never `/etc/group`
 read by hand, which misses NSS sources), and the group's member list is
 empty. A read that cannot be completed, or that answers no such user or
 group, REFUSES, with the detail "group-writable; whether group <gid> is
-the owner's private group could not be read". Other-write stays
+the daemon user's private group could not be read". Other-write stays
 refused unless sticky; the private directory itself stays owner-only
 (`0700`, no bit for anyone): the predicate is about what others may
 write above and around it. The rule's premise — no account but root and
 ours can rename the directory — holds for a group of one with two
 residuals the rule accepts as root's acts (the review of this note):
-an account whose PRIMARY group is the owner's private group
-(`useradd -g`), which `gr_mem` never lists and which no name service
-enumerates reliably (sssd without enumeration), so the predicate does
-not try; and a name service that answers falsely, trusted as root is.
+an account that holds the gid some other way root grants it — a
+PRIMARY group set by `useradd -g`, which `gr_mem` never lists and no
+name service enumerates reliably (sssd without enumeration), a group
+password in `gshadow`, membership a later NSS source grants — so the
+predicate does not try to see it; and a name service that answers falsely, trusted as root is.
 
 **Alternatives rejected.** Leaving the rule and making the tests
 independent of the umask: a supported setup could not start InterWeave,
@@ -335,8 +336,10 @@ the predicate in `judge_ancestor`, `judge_link`'s directory and
 `open_guarded_as`, a fake name service for the unit tests (a `0775`
 directory in our private group accepted; a shared group refused naming
 it; gid = uid with differing names refused; a name-service miss refused
-as unreadable), the real lookups tested against `id -un` / `id -gn` and
-a gid with no entry. The test suites set their tempdir modes explicitly
+as unreadable; a root-owned `0775` ancestor in group `root` refused,
+naming the group — the test that pins the daemon's-user scoping against
+a directory-owner reading), the real lookups tested against `id -un` /
+`id -gn` and a gid with no entry. The test suites set their tempdir modes explicitly
 (a test that depends on the host's umask is fragile under either
 ruling). Until the code lands, a user-private-group account under umask
 002 is refused on main: a defect at writing, affecting no host here.
