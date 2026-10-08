@@ -377,9 +377,45 @@ mod tests {
 
     #[test]
     fn surrogates_pair_or_are_refused() {
-        assert_eq!(parse(r#""😀""#).unwrap(), Value::String("😀".to_owned()));
-        assert!(parse(r#""\ud83d""#).is_err());
-        assert!(parse(r#""\ude00""#).is_err());
+        // Every escape is BUILT here, from a backslash character and the hex
+        // digits, never written as a literal: an editor or tool that
+        // decodes a literal escape pair in source would turn the test into
+        // a raw character and the pairing arithmetic would never run.
+        let esc = |units: &[&str]| {
+            let mut s = String::from('"');
+            for u in units {
+                s.push(char::from(0x5c));
+                s.push('u');
+                s.push_str(u);
+            }
+            s.push('"');
+            s
+        };
+        for (units, want) in [
+            (&["d83d", "de00"][..], 0x1f600),
+            (&["d800", "dc00"][..], 0x10000),
+            (&["dbff", "dfff"][..], 0x10ffff),
+        ] {
+            let text = esc(units);
+            assert!(text.is_ascii(), "the escape stayed an escape: {text}");
+            assert_eq!(
+                parse(&text).unwrap(),
+                Value::String(char::from_u32(want).unwrap().to_string()),
+                "{text}"
+            );
+        }
+        assert!(parse(&esc(&["d83d"])).is_err(), "a lone high surrogate");
+        assert!(parse(&esc(&["de00"])).is_err(), "a lone low surrogate");
+        assert!(
+            parse(&esc(&["d83d", "0041"])).is_err(),
+            "a high surrogate before a non-low"
+        );
+        let mut high_then_text = esc(&["d83d"]);
+        high_then_text.insert(high_then_text.len() - 1, 'A');
+        assert!(
+            parse(&high_then_text).is_err(),
+            "a high surrogate without its low"
+        );
     }
 
     #[test]
