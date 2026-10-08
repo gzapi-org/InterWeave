@@ -43,11 +43,15 @@ pub(crate) const fn classify_send(error: TransportError) -> AttemptFailure {
         | TransportError::ChannelNotJoined
         | TransportError::CancelledBeforeDispatch => Retry(Some(SendProblem::ServiceUnavailable)),
         TransportError::UnauthorizedPeer => NeedsAttention(SendProblem::PeerUntrusted),
-        TransportError::ProtocolUnsupported
-        | TransportError::VersionIncompatible
-        | TransportError::ProtocolViolation => NeedsAttention(SendProblem::Incompatible),
+        // Only these two establish a version gap. `ProtocolViolation` is
+        // raised within one release too (a framing error, a reused request
+        // id: `LOCAL-IPC.md` §Close), so it is a defect, not a version.
+        TransportError::ProtocolUnsupported | TransportError::VersionIncompatible => {
+            NeedsAttention(SendProblem::Incompatible)
+        }
         TransportError::PayloadTooLarge => NeedsAttention(SendProblem::TooLarge),
-        TransportError::InvalidArgument
+        TransportError::ProtocolViolation
+        | TransportError::InvalidArgument
         | TransportError::EndpointUnknown
         | TransportError::EndpointInUse
         | TransportError::EndpointDisabled
@@ -305,6 +309,15 @@ mod tests {
             classify_trust(TransportError::InvalidArgument),
             TrustProblem::Refused
         );
+        // A protocol violation is a defect on both sides, never a version.
+        assert_eq!(
+            classify_send(TransportError::ProtocolViolation),
+            AttemptFailure::NeedsAttention(SendProblem::Internal)
+        );
+        assert_eq!(
+            classify_trust(TransportError::ProtocolViolation),
+            TrustProblem::Internal
+        );
         for error in ALL {
             // Only the port's own refusal reads as one the person caused.
             assert_eq!(
@@ -322,14 +335,12 @@ mod tests {
                 version_gap,
                 "{error:?}"
             );
-            // Where trust names a version gap, a send names it too.
-            if version_gap {
-                assert_eq!(
-                    classify_send(error),
-                    AttemptFailure::NeedsAttention(SendProblem::Incompatible),
-                    "{error:?}"
-                );
-            }
+            // A send names a version gap for exactly the same errors.
+            assert_eq!(
+                classify_send(error) == AttemptFailure::NeedsAttention(SendProblem::Incompatible),
+                version_gap,
+                "{error:?}"
+            );
         }
     }
 
