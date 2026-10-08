@@ -22,13 +22,13 @@ is p2p-network-dev's, and from Stage 15 the native human client's is
 rust-ui-dev's (its remit names the paths); a decision and its code land
 together, one PR. `human-client-ui.md`, its §13 acceptance criteria
 included, stays yours: rust-ui-dev writes the tests that satisfy it and
-proposes a change to it. Until English has a language-culture holder,
-you review the human client's English placeholders against the
-vocabulary rules of its §5 and §12, as you proposed (language-culture's
-remit); after that, the rules only.
+proposes a change to it. Until `language-culture-en`'s first read of
+every person-facing value lands, you review the human client's new English
+placeholders against the vocabulary rules of its §5 and §12, as you
+proposed (language-culture's remit); after that, the rules only.
 
 **Not yours here.** The crates and their tests; the CI wiring and the
 merge queue's rules (devex-tooling's; the queue stays on, the owner,
-2026-09-17); the GZCoord protocol the channel bridge will carry
+2026-09-17); the GZCoord protocol the channel bridge carries
 (fabric-coordinator's — `architecture/plugin/` decisions that touch
 what a message is route there).

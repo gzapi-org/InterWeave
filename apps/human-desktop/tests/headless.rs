@@ -9,6 +9,8 @@
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::panic)]
 
+mod common;
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -165,7 +167,7 @@ fn over_the_real_binding_with_no_daemon_the_window_says_so() {
     use interweave_human_desktop::startup::Profile;
     use interweave_profile_config::{ProfilePaths, XdgRoots};
 
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let roots = XdgRoots {
         config_home: dir.path().join("config"),
         data_home: dir.path().join("data"),
@@ -278,7 +280,7 @@ fn a_link_is_one_argument_to_the_handler_and_never_in_a_report() {
     use interweave_human_desktop::app::DesktopOpener;
 
     static REPORTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let record = dir.path().join("args");
     let marker = dir.path().join("pwned");
     let handler = dir.path().join("handler");
@@ -335,7 +337,7 @@ fn an_opened_links_process_is_reaped() {
     use interweave_human_desktop::app::DesktopOpener;
 
     static PID: AtomicU32 = AtomicU32::new(0);
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let handler = dir.path().join("handler");
     std::fs::write(&handler, "#!/bin/sh\nexit 0\n").expect("handler");
     std::fs::set_permissions(&handler, std::fs::Permissions::from_mode(0o700)).expect("mode");
