@@ -24,6 +24,8 @@ workspace = true
 
 [dev-dependencies]
 interweave-independent-codecs = { path = "../independent-codecs" }
+interweave-ipc-protocol = { path = "../../crates/api/ipc-protocol" }
+interweave-ipc-server = { path = "../../crates/local/ipc-server" }
 interweave-local-client-api = { path = "../../crates/api/local-client-api" }
 interweave-local-client-conformance-tests = { path = "../local-client-conformance" }
 interweave-profile-config = { path = "../../crates/config/profile-config" }
@@ -32,6 +34,7 @@ interweave-test-support = { path = "../support" }
 interweave-transport-api = { path = "../../crates/api/transport-api" }
 interweave-transport-composition = { path = "../../crates/transport/composition" }
 interweave-transport-runtime = { path = "../../crates/transport/runtime" }
+serde_json = { workspace = true }
 serde_norway = "0.9.42"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
