@@ -14,6 +14,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ConfigError, de_duration_ms, ser_duration_ms};
 
+/// The client's silence bound, `CLIENT_SILENCE_TIMEOUT` in
+/// `LOCAL-IPC.md` (A 2026-10-08), in milliseconds: a client armed by a
+/// ping ends the connection after this long without reading a frame, so
+/// a profile's `interval + response_timeout` must not exceed it. Stated
+/// here from the contract rather than imported, since this crate does not
+/// depend on the IPC protocol's.
+pub const CLIENT_SILENCE_TIMEOUT_MS: u32 = 120_000;
+
 /// `ipc.socket_layout`: `literal[split-data-admin]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum SocketLayout {
@@ -143,6 +151,17 @@ impl IpcConfig {
                 strict: true,
             });
         }
+        // A healthy server's next ping lands inside the bound a client
+        // armed at the previous one: with the keepalive off nothing
+        // pings and nothing arms (`a_ping_lands_inside_the_clients_silence_bound`).
+        let sum = u64::from(k.interval_ms) + u64::from(k.response_timeout_ms);
+        if k.enabled && sum > u64::from(CLIENT_SILENCE_TIMEOUT_MS) {
+            errors.push(ConfigError::KeepaliveOutlastsClientSilence {
+                interval_ms: u64::from(k.interval_ms),
+                response_timeout_ms: u64::from(k.response_timeout_ms),
+                limit_ms: u64::from(CLIENT_SILENCE_TIMEOUT_MS),
+            });
+        }
         // A lease cannot require what is switched off.
         if k.require_for_endpoint_lease && !k.enabled {
             errors.push(ConfigError::KeepaliveRequiredButDisabled);
@@ -198,7 +217,16 @@ mod tests {
             "{max_clients: 64, max_admin_clients: 16, client_event_queue: 1024, keepalive: {interval: 5m, response_timeout: 1m, max_missed: 10}}",
         );
         assert!(errors_of(&at_lo).is_empty(), "{:?}", errors_of(&at_lo));
-        assert!(errors_of(&at_hi).is_empty(), "{:?}", errors_of(&at_hi));
+        // Every upper edge is in range on its own; together the keepalive
+        // pair breaks the client's silence bound, and nothing else.
+        assert_eq!(
+            errors_of(&at_hi),
+            vec![ConfigError::KeepaliveOutlastsClientSilence {
+                interval_ms: 300_000,
+                response_timeout_ms: 60_000,
+                limit_ms: 120_000,
+            }]
+        );
         let fields = |ipc: &IpcConfig| -> Vec<&'static str> {
             errors_of(ipc)
                 .into_iter()
@@ -267,6 +295,39 @@ mod tests {
         assert!(
             errors_of(&parse(
                 "{keepalive: {enabled: false, require_for_endpoint_lease: false, interval: 20s, response_timeout: 30s}}"
+            ))
+            .is_empty(),
+            "a keepalive that is off is not judged"
+        );
+    }
+
+    /// `interval + response_timeout` at exactly the client's silence
+    /// bound passes, one millisecond over is refused naming both values,
+    /// and a keepalive that is off is not judged (`LOCAL-IPC.md`, A
+    /// 2026-10-08).
+    #[test]
+    fn a_ping_lands_inside_the_clients_silence_bound() {
+        assert_eq!(CLIENT_SILENCE_TIMEOUT_MS, 120_000);
+        assert!(
+            errors_of(&parse(
+                "{keepalive: {interval: 100000ms, response_timeout: 20000ms}}"
+            ))
+            .is_empty(),
+            "exactly the bound"
+        );
+        assert_eq!(
+            errors_of(&parse(
+                "{keepalive: {interval: 100001ms, response_timeout: 20000ms}}"
+            )),
+            vec![ConfigError::KeepaliveOutlastsClientSilence {
+                interval_ms: 100_001,
+                response_timeout_ms: 20_000,
+                limit_ms: 120_000,
+            }]
+        );
+        assert!(
+            errors_of(&parse(
+                "{keepalive: {enabled: false, require_for_endpoint_lease: false, interval: 300s, response_timeout: 60s}}"
             ))
             .is_empty(),
             "a keepalive that is off is not judged"
