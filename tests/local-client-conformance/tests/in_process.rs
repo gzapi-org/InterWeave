@@ -837,3 +837,15 @@ async fn trust_administration_revokes_as_policy() {
     suite::trust_administration_revokes_as_policy(&a, &pair.a_peer, &pair.b_peer).await;
     pair.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn item_9_an_ended_session_answers_events_with_its_end() {
+    use interweave_transport_api::TransportRuntime as _;
+    let pair = Pair::start().await;
+    let (a, _) = pair.bindings();
+    let session = suite::a_session_to_end(&a, &human()).await;
+    let common::Pair { a, b, .. } = pair;
+    a.shutdown().await.expect("a stops");
+    suite::an_ended_session_answers_events_with_its_end(&session).await;
+    b.shutdown().await.expect("b stops");
+}

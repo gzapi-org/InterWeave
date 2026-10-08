@@ -180,6 +180,47 @@ pub async fn the_runtimes_state_is_owed_once_at_open<B: DataSessionBinding>(rece
     );
 }
 
+/// Item 9's end, first half: a session leased on `endpoint`, live --
+/// `events(0)` takes nothing and answers an empty list, the control for
+/// the second half -- with what was owed at open drained, so nothing
+/// waits when it ends. The runner ends the session's runtime its own way
+/// and calls [`an_ended_session_answers_events_with_its_end`].
+pub async fn a_session_to_end<B: DataSessionBinding>(
+    binding: &B,
+    endpoint: &EndpointId,
+) -> B::Session {
+    let session = binding.open(full(Some(endpoint))).await.expect("leases");
+    assert_eq!(
+        session.events(0).await.map(|taken| taken.len()),
+        Ok(0),
+        "live: max 0 takes nothing"
+    );
+    tokio::time::timeout(PATIENCE, session.ready())
+        .await
+        .expect("the open-time state ends the wait")
+        .expect("ready");
+    session.events(usize::MAX).await.expect("drained");
+    session
+}
+
+/// The second half (`DataSessionPort::events`): once the session has
+/// ended, `ready()` resolves and `events(0)` answers the end -- an error,
+/// never the empty list a live session gives -- as every other `max`
+/// does. A caller asks `events(0)` whether its session ended without
+/// taking anything.
+pub async fn an_ended_session_answers_events_with_its_end<S: DataSessionPort>(session: &S) {
+    let _ = tokio::time::timeout(PATIENCE, session.ready())
+        .await
+        .expect("ready resolves on the end");
+    let zero = session.events(0).await.map(|taken| taken.len());
+    assert!(zero.is_err(), "ended: max 0 answers the end: {zero:?}");
+    assert_eq!(
+        session.events(usize::MAX).await.map(|taken| taken.len()),
+        zero,
+        "every max answers the same end"
+    );
+}
+
 /// Item 9: `ready()` resolves when at least one event is queued and takes
 /// nothing -- `events` after it takes what was there -- and waits while
 /// nothing is. The wait is checked beside its positive control on the
