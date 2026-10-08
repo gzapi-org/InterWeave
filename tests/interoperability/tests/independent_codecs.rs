@@ -21,10 +21,12 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use interweave_independent_codecs as ind;
+use interweave_transport_api::DirectRejectReason;
 use interweave_transport_api::{
     BroadcastMessageV1, DirectMessageV2, EndpointId, MAX_PAYLOAD_BYTES, MediaType, MessageId,
     Payload,
 };
+use interweave_transport_libp2p::direct_codec::{DirectResponse, decode_response, encode_response};
 use interweave_transport_runtime::direct_content_fingerprint_v1;
 
 /// xorshift64*: deterministic, so a disagreement reproduces from its case
@@ -41,7 +43,7 @@ impl Rng {
     fn below(&mut self, n: usize) -> usize {
         usize::try_from(self.next() % u64::try_from(n).unwrap()).unwrap()
     }
-    fn pick<'a>(&mut self, from: &'a [u8]) -> u8 {
+    fn pick(&mut self, from: &[u8]) -> u8 {
         from[self.below(from.len())]
     }
 }
@@ -259,7 +261,7 @@ fn fingerprints_agree() {
         let bytes = payload(&mut r);
         let ours = ind::fingerprint::fingerprint(media.as_deref(), &bytes).expect("legal");
         let theirs = direct_content_fingerprint_v1(media.as_deref(), &bytes).expect("legal");
-        let ours: String = ours.iter().map(|b| format!("{b:02x}")).collect();
+        let ours = interweave_test_support::hex::encode(&ours);
         assert_eq!(ours, format!("{theirs:x}"), "case {case}");
     }
 }
@@ -274,27 +276,31 @@ fn mutated_frames_get_the_same_verdict_from_both_decoders() {
         0x00, 0x01, 0x02, 0x08, 0x09, 0x1F, 0x20, 0x2D, 0x2E, 0x30, 0x40, 0x41, 0x5F, 0x61, 0x7A,
         0x7E, 0x7F, 0x80, 0xC3, 0xFF,
     ];
-    let mut r = Rng(0xA076_1D64_78BD_642F);
+    let mut rng = Rng(0xA076_1D64_78BD_642F);
     let mut checked = 0usize;
     for _ in 0..40 {
-        let mut m = ind_direct(&mut r);
-        m.payload.truncate(4);
-        if m.media_type.as_ref().is_some_and(|t| t.len() > 8) {
-            m.media_type = Some("text/x".to_owned());
+        let mut msg = ind_direct(&mut rng);
+        msg.payload.truncate(4);
+        if msg.media_type.as_ref().is_some_and(|t| t.len() > 8) {
+            msg.media_type = Some("text/x".to_owned());
         }
-        m.source_endpoint.truncate(6);
-        if let Some(d) = &mut m.destination_endpoint {
-            d.truncate(6);
+        msg.source_endpoint.truncate(6);
+        if let Some(dest) = &mut msg.destination_endpoint {
+            dest.truncate(6);
         }
-        let frame = m.encode().expect("legal");
+        let frame = msg.encode().expect("legal");
         for at in 0..frame.len() {
             for &v in VALUES {
-                let mut f = frame.clone();
-                f[at] = v;
-                let ours = ind::direct_v2::DirectMessageV2::decode(&f);
-                let theirs = DirectMessageV2::decode(&f, MAX_PAYLOAD_BYTES);
+                let mut mutated = frame.clone();
+                mutated[at] = v;
+                let ours = ind::direct_v2::DirectMessageV2::decode(&mutated);
+                let theirs = DirectMessageV2::decode(&mutated, MAX_PAYLOAD_BYTES);
                 match (&ours, &theirs) {
-                    (Ok(a), Ok(b)) => assert_eq!(*a, from_prod_direct(b), "byte {at} = {v:#04x}"),
+                    (Ok(ours_ok), Ok(theirs_ok)) => assert_eq!(
+                        *ours_ok,
+                        from_prod_direct(theirs_ok),
+                        "byte {at} = {v:#04x}"
+                    ),
                     (Err(_), Err(_)) => {}
                     _ => panic!(
                         "byte {at} = {v:#04x} of {}: independent {ours:?}, production {theirs:?}",
@@ -304,22 +310,26 @@ fn mutated_frames_get_the_same_verdict_from_both_decoders() {
                 checked += 1;
             }
         }
-        let b = ind::broadcast_v1::BroadcastMessageV1 {
-            message_id: m.message_id,
-            sent_at_ms: m.sent_at_ms,
-            media_type: m.media_type.clone(),
-            payload: m.payload.clone(),
+        let bcast = ind::broadcast_v1::BroadcastMessageV1 {
+            message_id: msg.message_id,
+            sent_at_ms: msg.sent_at_ms,
+            media_type: msg.media_type.clone(),
+            payload: msg.payload.clone(),
         };
-        let frame = b.encode().expect("legal");
+        let frame = bcast.encode().expect("legal");
         for at in 0..frame.len() {
             for &v in VALUES {
-                let mut f = frame.clone();
-                f[at] = v;
-                let ours = ind::broadcast_v1::BroadcastMessageV1::decode(&f);
-                let theirs = BroadcastMessageV1::decode(&f, MAX_PAYLOAD_BYTES);
+                let mut mutated = frame.clone();
+                mutated[at] = v;
+                let ours = ind::broadcast_v1::BroadcastMessageV1::decode(&mutated);
+                let theirs = BroadcastMessageV1::decode(&mutated, MAX_PAYLOAD_BYTES);
                 match (&ours, &theirs) {
-                    (Ok(a), Ok(b)) => {
-                        assert_eq!(*a, from_prod_broadcast(b), "byte {at} = {v:#04x}");
+                    (Ok(ours_ok), Ok(theirs_ok)) => {
+                        assert_eq!(
+                            *ours_ok,
+                            from_prod_broadcast(theirs_ok),
+                            "byte {at} = {v:#04x}"
+                        );
                     }
                     (Err(_), Err(_)) => {}
                     _ => panic!(
@@ -346,6 +356,90 @@ fn mutated_frames_get_the_same_verdict_from_both_decoders() {
     assert!(checked > 40_000, "only {checked} mutations were tried");
 }
 
+fn prod_reason(name: &str) -> DirectRejectReason {
+    match name {
+        "no_route" => DirectRejectReason::NoRoute,
+        "unauthorized_peer" => DirectRejectReason::UnauthorizedPeer,
+        "overloaded" => DirectRejectReason::Overloaded,
+        "malformed" => DirectRejectReason::Malformed,
+        "too_large" => DirectRejectReason::TooLarge,
+        "shutting_down" => DirectRejectReason::ShuttingDown,
+        "unsupported" => DirectRejectReason::Unsupported,
+        other => panic!("{other}"),
+    }
+}
+
+/// Every reason and a spread of labels, encoded on each side, decoded on
+/// the other; then every one-byte change of each, with the same verdict
+/// and the same fields from both decoders.
+#[test]
+fn direct_responses_agree_in_both_directions_and_under_mutation() {
+    use ind::direct_response_v2::{DirectResponseV2, REASONS};
+    let mut r = Rng(0x5851_F42D_4C95_7F2D);
+    let mut cases = Vec::new();
+    for reason in REASONS {
+        cases.push(DirectResponseV2::Rejected {
+            message_id: id(&mut r),
+            reason,
+        });
+    }
+    for _ in 0..200 {
+        cases.push(DirectResponseV2::Accepted {
+            message_id: id(&mut r),
+            resolved_destination_endpoint: endpoint(&mut r),
+        });
+    }
+    let to_prod = |c: &DirectResponseV2| match c {
+        DirectResponseV2::Accepted {
+            message_id,
+            resolved_destination_endpoint,
+        } => DirectResponse::Accepted {
+            message_id: MessageId::from_bytes(*message_id),
+            resolved_endpoint: EndpointId::parse(resolved_destination_endpoint.clone())
+                .expect("label"),
+        },
+        DirectResponseV2::Rejected { message_id, reason } => DirectResponse::Rejected {
+            message_id: MessageId::from_bytes(*message_id),
+            reason: prod_reason(reason),
+        },
+    };
+    for (n, case) in cases.iter().enumerate() {
+        let ours = case.encode().expect("legal");
+        assert_eq!(ours, encode_response(&to_prod(case)), "case {n}");
+        assert_eq!(
+            decode_response(&ours).expect("production decodes"),
+            to_prod(case),
+            "case {n}"
+        );
+        if ours.len() > 24 {
+            continue;
+        }
+        for at in 0..ours.len() {
+            for v in [
+                0x00u8, 0x01, 0x02, 0x03, 0x07, 0x08, 0x40, 0x41, 0x5A, 0x61, 0x7F, 0xFF,
+            ] {
+                let mut f = ours.clone();
+                f[at] = v;
+                match (DirectResponseV2::decode(&f), decode_response(&f)) {
+                    (Ok(a), Ok(b)) => assert_eq!(to_prod(&a), b, "byte {at} = {v:#04x}"),
+                    (Err(_), Err(_)) => {}
+                    (a, b) => panic!(
+                        "byte {at} = {v:#04x} of {}: independent {a:?}, production {b:?}",
+                        hex(&ours)
+                    ),
+                }
+            }
+        }
+        let mut long = ours.clone();
+        long.push(0);
+        assert!(DirectResponseV2::decode(&long).is_err() && decode_response(&long).is_err());
+        for cut in 0..ours.len() {
+            assert!(DirectResponseV2::decode(&ours[..cut]).is_err(), "cut {cut}");
+            assert!(decode_response(&ours[..cut]).is_err(), "cut {cut}");
+        }
+    }
+}
+
 fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
+    interweave_test_support::hex::encode(b)
 }

@@ -23,6 +23,7 @@ workspace = true
 [dependencies]
 
 [dev-dependencies]
+futures = { workspace = true }
 interweave-independent-codecs = { path = "../independent-codecs" }
 interweave-ipc-protocol = { path = "../../crates/api/ipc-protocol" }
 interweave-ipc-server = { path = "../../crates/local/ipc-server" }
@@ -33,7 +34,9 @@ interweave-profile-identity = { path = "../../crates/identity/profile-identity" 
 interweave-test-support = { path = "../support" }
 interweave-transport-api = { path = "../../crates/api/transport-api" }
 interweave-transport-composition = { path = "../../crates/transport/composition" }
+interweave-transport-libp2p = { path = "../../crates/transport/libp2p" }
 interweave-transport-runtime = { path = "../../crates/transport/runtime" }
+libp2p = { workspace = true }
 serde_json = { workspace = true }
 serde_norway = "0.9.42"
 tempfile = { workspace = true }

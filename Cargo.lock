@@ -3538,6 +3538,7 @@ dependencies = [
 name = "interweave-interoperability-tests"
 version = "0.0.0"
 dependencies = [
+ "futures",
  "interweave-independent-codecs",
  "interweave-ipc-protocol",
  "interweave-ipc-server",
@@ -3548,7 +3549,9 @@ dependencies = [
  "interweave-test-support",
  "interweave-transport-api",
  "interweave-transport-composition",
+ "interweave-transport-libp2p",
  "interweave-transport-runtime",
+ "libp2p",
  "serde_json",
  "serde_norway",
  "tempfile",
