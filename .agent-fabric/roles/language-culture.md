@@ -62,8 +62,9 @@ first work here.
 
 **The holders.** The role has one holder per locale, named by its suffix
 (the charter). This client's copy is English, held by
-`language-culture-en` (placed 2026-10-07). Until its read lands, each new
-key ships with its marked English placeholder, as before.
+`language-culture-en` (placed 2026-10-07). A new key always ships with
+its marked English placeholder, drafted by the caller (above); the
+holder's read finalises it.
 `language-culture-ge` and `language-culture-ru` answer, when asked, for
 what Georgian or Russian would need of the locale structure: script,
 plurals, length, input. No deployment locale is decided for InterWeave.
@@ -84,8 +85,11 @@ repository (agent-fabric `identities/prompt/team.md`).
   branch, or a contributor branch `<host>/<login>/for/<caller>/<what>`
   the caller folds unrebased.
 - Before delivery, an independent cold read: the composed text read
-  without the request that produced it: the holder's `locale-worker`,
-  for English as for every locale. Your delivery names the read, and
+  without the request that produced it. For a locale with a bridge it is
+  the holder's `locale-worker`. English has none (the charter): its cold
+  read is a fresh dispatch given only the composed text and the
+  vocabulary rules it answers to (`human-client-ui.md` §5 and §12),
+  never the request. Your delivery names the read, and
   the caller's commit carries it as the `Supplier-Review:` trailer.
 - You open no PR for supplied text. Proactive work, such as a glossary
   or a sweep of the error vocabulary, stays your own PR under the count

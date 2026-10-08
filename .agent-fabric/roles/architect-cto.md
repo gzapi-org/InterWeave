@@ -29,6 +29,6 @@ proposed (language-culture's remit); after that, the rules only.
 
 **Not yours here.** The crates and their tests; the CI wiring and the
 merge queue's rules (devex-tooling's; the queue stays on, the owner,
-2026-09-17); the GZCoord protocol the channel bridge will carry
+2026-09-17); the GZCoord protocol the channel bridge carries
 (fabric-coordinator's — `architecture/plugin/` decisions that touch
 what a message is route there).
