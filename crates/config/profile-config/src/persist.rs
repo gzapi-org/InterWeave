@@ -755,7 +755,8 @@ fn judge_ancestor(
 
 /// [`judge_ancestor`] reading `names`, and `acl` for whether the
 /// directory carries an access ACL -- asked only of a group-writable one
-/// -- apart so a test can stand in for both.
+/// (`a_group_writable_ancestor_needs_the_owners_private_group`) -- apart
+/// so a test can stand in for both.
 fn judge_ancestor_with(
     path: &Path,
     seen: std::io::Result<(u32, u32, u32)>,
@@ -1325,6 +1326,16 @@ mod tests {
         );
         let unknown = refused(judge(4242, 0o40775, &names));
         assert!(unknown.contains("whether group 4242 is"), "{unknown}");
+        // The ACL is asked of a group-writable directory only: a 0755
+        // one passes without the read, whether it would answer or fail.
+        judge_ancestor_with(path, Ok((1000, 100, 0o40755)), 1000, &names, || {
+            panic!("the ACL is not asked of a directory without group write")
+        })
+        .expect("0755, no ACL read");
+        judge_ancestor_with(path, Ok((1000, 100, 0o40755)), 1000, &names, || {
+            Err(std::io::ErrorKind::PermissionDenied.into())
+        })
+        .expect("0755, an unreadable ACL never consulted");
         for detail in [
             refused(judge(4242, 0o40775, &names)),
             refused(judge(
