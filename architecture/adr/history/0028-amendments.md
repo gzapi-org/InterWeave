@@ -244,7 +244,11 @@ verifies on a Linux host is the platform's guarantee there. The boundary is cano
 supplied and the walk stops at the canonical component equal to it —
 the platform reports `/data/user/0/<pkg>` while the canonical path is
 `/data/data/<pkg>` — and links traversed above it are not judged; links
-on the path below the boundary are judged as before. The platform
+on the path below the boundary are judged as before. A private
+directory whose canonical path is not under the boundary at all — a
+configured path elsewhere, or a link below the boundary resolving
+outside it — is refused, naming the boundary: fail closed, never a walk
+past it to `/`. The platform
 creates the app's `files/`, `cache/` and `code_cache/` directories
 group-writable (`0771`, the app's own gid; `ContextImpl` chmods them),
 so a private directory under `files/` would still be refused for the
@@ -261,7 +265,7 @@ owner beside root: it would also need the group-write bit accepted for
 gid 1000 and a table of modes OEMs may vary — the boundary says the same
 without enumerating the platform. Leaving the rule and refusing on
 Android until a measured exception exists: a rule the platform cannot
-meet is a rule nobody runs, and the first Android package (§20) would be
+meet is a rule nobody runs, and the first Android package (plan §20) would be
 built against it.
 
 **Consequences.** No code change on a Linux host; the parameter in
