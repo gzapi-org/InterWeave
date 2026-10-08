@@ -227,7 +227,7 @@ async fn kill_9_leaves_no_lock_and_the_next_daemon_replaces_its_stale_sockets() 
 /// (`LOCAL-IPC.md`, A 2026-10-01).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn profiles_p_and_p_admin_run_side_by_side() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = common::private_tempdir();
     let (p, p_admin) = (
         Home::within(root.path(), "p"),
         Home::within(root.path(), "p-admin"),

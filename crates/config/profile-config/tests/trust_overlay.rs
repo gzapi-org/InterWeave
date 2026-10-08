@@ -32,7 +32,7 @@ fn set(peers: impl IntoIterator<Item = TransportIdentity>) -> BTreeSet<Transport
 
 /// A private state directory and the overlay's path in it.
 fn state() -> (tempfile::TempDir, PathBuf) {
-    let dir = tempfile::tempdir().expect("a temporary directory");
+    let dir = private_tempdir().expect("a temporary directory");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -182,13 +182,13 @@ fn an_absent_overlay_is_empty_and_is_not_created() {
 }
 
 /// The overlay is read under its directory as judged (ADR-0028 A
-/// 2026-10-08): a state directory under a group-writable ancestor stops
+/// 2026-10-08): a state directory under an other-writable ancestor stops
 /// the load, though the overlay itself is owner-only. The same file under
 /// the ancestor at 0755 loading is the control.
 #[cfg(target_os = "linux")]
 #[test]
 fn an_overlay_under_a_writable_ancestor_is_refused() {
-    let root = tempfile::tempdir().expect("a temporary directory");
+    let root = private_tempdir().expect("a temporary directory");
     chmod(root.path(), 0o700);
     let above = root.path().join("above");
     let state = above.join("state");
@@ -199,7 +199,7 @@ fn an_overlay_under_a_writable_ancestor_is_refused() {
     let configured = set([nth(1)]);
     put(&path, &lists(&[&nth(2)], &[]));
     TrustOverlay::load(&path, &configured).expect("the control");
-    chmod(&above, 0o775);
+    chmod(&above, 0o757);
     match TrustOverlay::load(&path, &configured) {
         Err(OverlayError::NotPrivate { detail }) => {
             assert!(detail.contains("not sticky"), "{detail}");
@@ -394,4 +394,50 @@ fn a_failed_normalisation_rewrite_stops_the_load() {
             assert_eq!(on_disk(&path)["added"].as_array().expect("added").len(), 1);
         }
     }
+}
+
+/// An overlay that is a FIFO is refused as not a regular file, at once:
+/// opened without `O_NONBLOCK` it blocked the load until a writer
+/// appeared. The same lists as a file are the control. On a timeout the
+/// FIFO is opened for writing, which releases the blocked load, before
+/// the test fails.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_overlay_that_is_a_fifo_is_refused_without_waiting() {
+    let configured = set([nth(1)]);
+    let (_dir, path) = state();
+    put(&path, &lists(&[&nth(2)], &[]));
+    TrustOverlay::load(&path, &configured).expect("the control: a regular file");
+    std::fs::remove_file(&path).expect("removed");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&path)
+        .status()
+        .expect("mkfifo");
+    assert!(made.success(), "mkfifo");
+    chmod(&path, 0o600);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let loading = path.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(TrustOverlay::load(&loading, &configured).map(drop));
+    });
+    let Ok(result) = rx.recv_timeout(std::time::Duration::from_secs(5)) else {
+        let _ = std::fs::OpenOptions::new().write(true).open(&path);
+        panic!("the load blocked on the FIFO");
+    };
+    match result {
+        Err(OverlayError::NotPrivate { detail }) => {
+            assert_eq!(detail, "it is not a regular file");
+        }
+        other => panic!("refused: {other:?}"),
+    }
+}
+
+/// A temporary directory made `0700` at creation, whatever the umask: the
+/// ancestor rule judges it, and `tempfile::tempdir()` under umask `002`
+/// with a shared primary group is `0775`, refused (j37).
+fn private_tempdir() -> std::io::Result<tempfile::TempDir> {
+    use std::os::unix::fs::PermissionsExt as _;
+    tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
 }

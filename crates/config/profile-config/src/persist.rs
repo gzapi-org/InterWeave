@@ -40,25 +40,115 @@ pub const OWNER_ONLY_DIR: u32 = 0o700;
 
 /// Create `dir` and every missing parent, owner-only.
 ///
+/// JUDGED BEFORE ANYTHING IS CREATED: the nearest directory on `dir`'s
+/// path that exists is held to [`resolve_guarded_dir`]'s rule first, and
+/// the missing components are made beneath it as that judgement resolved
+/// it, so a refusal leaves the tree as it found it. A recursive create
+/// made the whole tree first and left it under the ancestor the caller's
+/// check then refused (`a_refused_ancestor_gets_nothing_created_under_it`).
+/// A `dir` that already exists creates nothing and is judged by nothing
+/// here: whether it is private is the caller's question. It must be a
+/// directory, or one through a link, as the recursive create required:
+/// anything else is [`std::io::ErrorKind::AlreadyExists`]
+/// (`an_existing_path_that_is_not_a_directory_is_refused`).
+///
 /// # Errors
-/// Returns [`PersistError::Io`] if creation fails, or
+/// [`PersistError::DirectoryNotPrivate`] naming the existing ancestor,
+/// link or appeared component that breaks the rule; [`PersistError::Io`]
+/// if creation fails, or a missing part of the path is `..`;
 /// [`PersistError::UnsupportedPlatform`] where owner-only permissions
-/// cannot be enforced.
+/// cannot be enforced -- every target but Linux, the uid being read from
+/// `/proc`.
 pub fn create_private_dir(dir: &Path) -> Result<(), PersistError> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::DirBuilderExt as _;
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(OWNER_ONLY_DIR)
-            .create(dir)
-            .map_err(PersistError::Io)
+        let uid = effective_uid()?;
+        // The nearest component there is -- `/`, or for a relative `dir`
+        // the working directory, at worst -- and what is missing below it.
+        let mut existing = None;
+        for ancestor in dir.ancestors() {
+            let probe = if ancestor.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                ancestor
+            };
+            match fs::symlink_metadata(probe) {
+                Ok(_) => {
+                    existing = Some((ancestor, probe));
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(PersistError::Io(e)),
+            }
+        }
+        let Some((ancestor, probe)) = existing else {
+            return Err(PersistError::Io(std::io::ErrorKind::NotFound.into()));
+        };
+        let missing = dir.strip_prefix(ancestor).map_err(|_| {
+            PersistError::Io(std::io::Error::other(
+                "a path that is not under its ancestor",
+            ))
+        })?;
+        if missing.as_os_str().is_empty() {
+            // Followed, as `create_dir_all`'s `is_dir` follows: a link is
+            // the caller's to judge, and every caller judges links.
+            return match fs::metadata(probe) {
+                Ok(meta) if meta.is_dir() => Ok(()),
+                _ => Err(PersistError::Io(std::io::ErrorKind::AlreadyExists.into())),
+            };
+        }
+        let base = resolve_guarded_dir_as(probe, uid)?;
+        create_each_as(&base, missing, uid)
     }
     #[cfg(not(unix))]
     {
         let _ = dir;
         Err(PersistError::UnsupportedPlatform)
     }
+}
+
+/// Create `missing`'s components under `base`, outermost first, each
+/// owner-only and each by itself rather than in one recursive call.
+///
+/// ONE AT A TIME because `base` may be a sticky directory others can
+/// create in: a component that appears between the judgement of `base`
+/// and its own creation is ADOPTED only if it is an owner-only directory
+/// of `uid`'s -- another of our processes making it -- and refused before
+/// anything is made inside it otherwise
+/// (`a_component_that_appears_unprivate_is_refused_before_anything_is_made_in_it`,
+/// `a_component_another_uid_owns_is_refused_before_anything_is_made_in_it`).
+#[cfg(unix)]
+fn create_each_as(base: &Path, missing: &Path, uid: u32) -> Result<(), PersistError> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    use std::path::Component;
+    // Every name checked before the first is made: `..` under a
+    // directory that does not exist yet names nothing the kernel could
+    // resolve, and following it by text would leave the judged base.
+    let mut names = Vec::new();
+    for component in missing.components() {
+        match component {
+            Component::Normal(name) => names.push(name),
+            Component::CurDir => {}
+            _ => {
+                return Err(PersistError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "a missing directory's path climbs with `..`",
+                )));
+            }
+        }
+    }
+    let mut at = base.to_path_buf();
+    for name in names {
+        at.push(name);
+        match fs::DirBuilder::new().mode(OWNER_ONLY_DIR).create(&at) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                at = resolve_owned_private_dir_as(&at, uid)?;
+            }
+            Err(e) => return Err(PersistError::Io(e)),
+        }
+    }
+    Ok(())
 }
 
 /// Write `contents` to `path` atomically, readable only by the owner.
@@ -344,8 +434,10 @@ fn temp_beside(path: &Path) -> std::path::PathBuf {
 /// Refuse a directory that is not owner-only, or whose place on disk
 /// another account could change; answer where it is on disk.
 ///
-/// THE DIRECTORY ITSELF: not a symbolic link, mode within
-/// [`OWNER_ONLY_DIR`]. Ownership of the directory itself is a separate
+/// THE DIRECTORY ITSELF: a directory, not a symbolic link, mode within
+/// [`OWNER_ONLY_DIR`] -- an owner-only file passed as one, and the open
+/// under it failed later as `ENOTDIR`
+/// (`a_file_is_not_a_private_directory`). Ownership of the directory itself is a separate
 /// question, answered by [`require_same_owner`] for a writer (which
 /// compares against a file it just made) and by
 /// [`resolve_owned_private_dir_as`] for a caller holding none.
@@ -392,6 +484,12 @@ pub fn resolve_private_dir_as(dir: &Path, uid: u32) -> Result<PathBuf, PersistEr
             return Err(PersistError::DirectoryNotPrivate {
                 path: dir.to_path_buf(),
                 detail: "it is a symbolic link".to_owned(),
+            });
+        }
+        if !meta.is_dir() {
+            return Err(PersistError::DirectoryNotPrivate {
+                path: dir.to_path_buf(),
+                detail: "it is not a directory".to_owned(),
             });
         }
         let mode = meta.permissions().mode() & 0o777;
@@ -514,6 +612,18 @@ pub fn resolve_guarded_dir_as(dir: &Path, uid: u32) -> Result<PathBuf, PersistEr
         fs::symlink_metadata(dir).map_err(PersistError::Io)?;
         let resolved = resolve_judged_as(dir, uid)?;
         judge_ancestors(&resolved, uid)?;
+        // Asked of the resolved path, which holds no link: a file passed
+        // as the directory, and the open under it failed later as
+        // `ENOTDIR` (`a_guarded_directory_that_is_a_file_is_refused`).
+        if !fs::symlink_metadata(&resolved)
+            .map_err(PersistError::Io)?
+            .is_dir()
+        {
+            return Err(PersistError::DirectoryNotPrivate {
+                path: dir.to_path_buf(),
+                detail: "it is not a directory".to_owned(),
+            });
+        }
         Ok(resolved)
     }
     #[cfg(not(unix))]
@@ -619,7 +729,8 @@ fn resolve_judged_as(dir: &Path, uid: u32) -> Result<PathBuf, PersistError> {
 fn judge_ancestors(dir: &Path, uid: u32) -> Result<(), PersistError> {
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
     for ancestor in dir.ancestors() {
-        let seen = fs::symlink_metadata(ancestor).map(|m| (m.uid(), m.permissions().mode()));
+        let seen =
+            fs::symlink_metadata(ancestor).map(|m| (m.uid(), m.gid(), m.permissions().mode()));
         judge_ancestor(ancestor, seen, uid)?;
     }
     Ok(())
@@ -627,15 +738,31 @@ fn judge_ancestors(dir: &Path, uid: u32) -> Result<(), PersistError> {
 
 /// The rule for a directory above a private one, or on the path to one
 /// (ADR-0028 A 2026-10-08): owned by root or `uid` -- any other owner can
-/// rename its entries whatever the mode says -- and carrying no group- or
-/// other-write bit, unless the sticky bit is set: in a sticky directory
-/// an entry is renamed only by its owner, the directory's owner or root,
-/// and the owner rule above already makes the directory root's or ours.
-/// One that cannot be inspected is refused, not judged on its name.
+/// rename its entries whatever the mode says -- and carrying no
+/// other-write bit, and no group-write bit unless it passes
+/// [`owners_private_group`], unless the sticky bit is set: in a sticky
+/// directory an entry is renamed only by its owner, the directory's owner
+/// or root, and the owner rule above already makes the directory root's
+/// or ours. One that cannot be inspected is refused, not judged on its
+/// name. `seen` is `(owner, gid, mode)`.
 fn judge_ancestor(
     path: &Path,
-    seen: std::io::Result<(u32, u32)>,
+    seen: std::io::Result<(u32, u32, u32)>,
     uid: u32,
+) -> Result<(), PersistError> {
+    judge_ancestor_with(path, seen, uid, &HostNames, || access_acl_at(path))
+}
+
+/// [`judge_ancestor`] reading `names`, and `acl` for whether the
+/// directory carries an access ACL -- asked only of a group-writable one
+/// (`a_group_writable_ancestor_needs_the_owners_private_group`) -- apart
+/// so a test can stand in for both.
+fn judge_ancestor_with(
+    path: &Path,
+    seen: std::io::Result<(u32, u32, u32)>,
+    uid: u32,
+    names: &impl NameService,
+    acl: impl FnOnce() -> std::io::Result<bool>,
 ) -> Result<(), PersistError> {
     let refuse = |detail: String| {
         Err(PersistError::DirectoryNotPrivate {
@@ -643,7 +770,7 @@ fn judge_ancestor(
             detail,
         })
     };
-    let (owner, mode) = match seen {
+    let (owner, gid, mode) = match seen {
         Ok(seen) => seen,
         Err(e) => {
             return refuse(format!(
@@ -657,12 +784,186 @@ fn judge_ancestor(
             "an ancestor owned by uid {owner}, mode {mode:04o}: owned by neither root nor uid {uid}"
         ));
     }
-    if mode & 0o022 != 0 && mode & 0o1000 == 0 {
-        return refuse(format!(
-            "an ancestor owned by uid {owner}, mode {mode:04o}: group- or other-writable and not sticky"
-        ));
+    if mode & 0o1000 == 0 {
+        if mode & 0o002 != 0 {
+            return refuse(format!(
+                "an ancestor owned by uid {owner}, mode {mode:04o}: other-writable and not sticky"
+            ));
+        }
+        if mode & 0o020 != 0
+            && let Err(detail) = owners_private_group(names, uid, gid, acl())
+        {
+            return refuse(format!(
+                "an ancestor owned by uid {owner}, mode {mode:04o}: {detail}"
+            ));
+        }
     }
     Ok(())
+}
+
+/// What the name service answers, as [`owners_private_group`] reads it:
+/// a user's name, and a group's name with its listed members. `Ok(None)`
+/// is "no such entry".
+pub(crate) trait NameService {
+    /// The name of the account `uid`.
+    fn user_name(&self, uid: u32) -> std::io::Result<Option<String>>;
+    /// The name and listed members of the group `gid`.
+    fn group(&self, gid: u32) -> std::io::Result<Option<(String, Vec<String>)>>;
+}
+
+/// The host's name service: `getpwuid_r` and `getgrgid_r`, so NSS
+/// sources answer as well as `/etc/passwd` and `/etc/group`. Off Linux
+/// nothing is read, and the predicate refuses as unreadable.
+pub(crate) struct HostNames;
+
+impl NameService for HostNames {
+    fn user_name(&self, uid: u32) -> std::io::Result<Option<String>> {
+        #[cfg(target_os = "linux")]
+        {
+            nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))
+                .map(|user| user.map(|user| user.name))
+                .map_err(std::io::Error::from)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = uid;
+            Err(std::io::ErrorKind::Unsupported.into())
+        }
+    }
+
+    fn group(&self, gid: u32) -> std::io::Result<Option<(String, Vec<String>)>> {
+        #[cfg(target_os = "linux")]
+        {
+            nix::unistd::Group::from_gid(nix::unistd::Gid::from_raw(gid))
+                .map(|group| group.map(|group| (group.name, group.mem)))
+                .map_err(std::io::Error::from)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = gid;
+            Err(std::io::ErrorKind::Unsupported.into())
+        }
+    }
+}
+
+/// ADR-0028 A 2026-10-08, "a group of one is the owner's own" (#231): a
+/// group-write bit is accepted when the group is the PRIVATE group of
+/// `euid`, the account this process runs as -- never the directory's
+/// owner, or a root-owned directory in group `root` would pass while
+/// accounts with primary gid 0 exist -- that is, its name is that
+/// account's user name and it lists no member, as the name service
+/// answers both; and when the directory or file carries no POSIX access
+/// ACL (`acl`), since with one its group bits are the ACL's mask, not
+/// the group's grant. The user-private group scheme gives such accounts
+/// umask `002`, so their own directories and files are `0775` and
+/// `0664`. The name, not the gid, is compared: a scheme where every
+/// account's primary group is `users` would pass a gid comparison. A read
+/// that fails or finds no entry refuses.
+///
+/// What it does NOT see, named in the amendment as root's acts the rule
+/// accepts: another account given this group as its PRIMARY group (never
+/// listed in the member list, and no name service enumerates passwd
+/// reliably), and a name service that answers falsely.
+///
+/// Applied by the directory walk and by `config.yaml`'s own clause
+/// (`load.rs`), so the two cannot diverge.
+///
+/// # Errors
+/// The refusal's detail, naming the group, its gid or the ACL.
+pub(crate) fn owners_private_group(
+    names: &impl NameService,
+    euid: u32,
+    gid: u32,
+    acl: std::io::Result<bool>,
+) -> Result<(), String> {
+    match acl {
+        Ok(false) => {}
+        Ok(true) => {
+            return Err(format!(
+                "group-writable, and it carries an access ACL ({ACCESS_ACL}): its group bits are the ACL's mask"
+            ));
+        }
+        Err(e) => {
+            return Err(format!(
+                "group-writable; whether it carries an access ACL could not be read ({e})"
+            ));
+        }
+    }
+    // The amendment's wording, "the owner" meaning this process's
+    // account, with which read failed and why after it.
+    let unread = |why: String| {
+        format!(
+            "group-writable; whether group {gid} is the owner's private group could not be read: {why}"
+        )
+    };
+    let user = match names.user_name(euid) {
+        Ok(Some(user)) => user,
+        Ok(None) => return Err(unread(format!("uid {euid} has no account entry"))),
+        Err(e) => return Err(unread(format!("the account of uid {euid}: {e}"))),
+    };
+    let (group, members) = match names.group(gid) {
+        Ok(Some(group)) => group,
+        Ok(None) => {
+            return Err(unread(format!(
+                "group {gid} has no entry (this process's account: {user}, uid {euid})"
+            )));
+        }
+        Err(e) => {
+            return Err(unread(format!(
+                "group {gid}: {e} (this process's account: {user}, uid {euid})"
+            )));
+        }
+    };
+    if group == user && members.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "group-writable by group {group} (gid {gid}), not the owner's private group (the owner being this process's account, {user}, uid {euid})"
+    ))
+}
+
+/// The extended attribute holding a POSIX access ACL. A default ACL
+/// (`system.posix_acl_default`) is not one: a child it gives an access
+/// ACL is refused at its own turn.
+const ACCESS_ACL: &str = "system.posix_acl_access";
+
+/// Whether `path` itself -- not a link's target -- carries an access ACL.
+/// A filesystem without extended attributes carries none.
+pub(crate) fn access_acl_at(path: &Path) -> std::io::Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        acl_answer(rustix::fs::lgetxattr(path, ACCESS_ACL, &mut [0u8; 0][..]))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+}
+
+/// Whether the opened `file` carries an access ACL, asked of the handle
+/// so the file judged is the file read.
+pub(crate) fn access_acl_of(file: &fs::File) -> std::io::Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        acl_answer(rustix::fs::fgetxattr(file, ACCESS_ACL, &mut [0u8; 0][..]))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = file;
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+}
+
+/// A size query's answer read as presence: a size is an ACL, no such
+/// attribute or no attribute support is none, anything else is an error.
+#[cfg(target_os = "linux")]
+fn acl_answer(answer: rustix::io::Result<usize>) -> std::io::Result<bool> {
+    match answer {
+        Ok(_) => Ok(true),
+        Err(e) if e == rustix::io::Errno::NODATA || e == rustix::io::Errno::NOTSUP => Ok(false),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// The rule for a symbolic link on the path to a private directory: owned
@@ -792,6 +1093,16 @@ pub fn is_owner_only(path: &Path) -> Result<bool, PersistError> {
 
 #[cfg(test)]
 mod tests {
+    /// A temporary directory made `0700` at creation, whatever the umask: the
+    /// ancestor rule judges it, and `tempfile::tempdir()` under umask `002`
+    /// with a shared primary group is `0775`, refused (j37).
+    fn private_tempdir() -> std::io::Result<tempfile::TempDir> {
+        use std::os::unix::fs::PermissionsExt as _;
+        tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+    }
+
     use super::*;
 
     /// The uid read from /proc is the one this process creates files as.
@@ -799,7 +1110,7 @@ mod tests {
     #[test]
     fn the_effective_uid_is_the_owner_of_what_this_process_creates() {
         use std::os::unix::fs::MetadataExt as _;
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = private_tempdir().expect("tempdir");
         let file = dir.path().join("mine");
         std::fs::write(&file, b"").expect("write");
         assert_eq!(
@@ -816,7 +1127,7 @@ mod tests {
     #[test]
     fn an_owned_private_dir_passes_and_a_wide_or_linked_one_does_not() {
         use std::os::unix::fs::PermissionsExt as _;
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = private_tempdir().expect("tempdir");
         let dir = root.path().join("keys");
         create_private_dir(&dir).expect("create");
         require_owned_private_dir(&dir).expect("our own 0700 directory passes");
@@ -849,6 +1160,24 @@ mod tests {
             require_owned_private_dir(&dir),
             Err(PersistError::DirectoryNotPrivate { .. })
         ));
+    }
+
+    /// An owner-only file of ours is not a private directory, refused
+    /// naming it as one; the owner-only directory beside it is the
+    /// control.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_file_is_not_a_private_directory() {
+        let root = private_tempdir().expect("tempdir");
+        chmod(root.path(), 0o700);
+        let file = root.path().join("file");
+        fs::write(&file, b"").expect("write");
+        chmod(&file, 0o600);
+        let detail = refused_at(resolve_owned_private_dir(&file), &file);
+        assert_eq!(detail, "it is not a directory");
+        let dir = root.path().join("dir");
+        create_private_dir(&dir).expect("made");
+        resolve_owned_private_dir(&dir).expect("the control");
     }
 
     /// An owner-only directory of ours directly under `/tmp`, whose every
@@ -908,26 +1237,309 @@ mod tests {
         }
     }
 
-    /// ADR-0028 A 2026-10-08, the ancestors: a group-writable ancestor is
-    /// refused and named, and the same tree at `0755` -- ours -- is the
-    /// control, answered at its place on disk.
+    /// A name service a test stages: users and groups by id, or a read
+    /// that fails -- every read, or the group read alone.
+    #[cfg(unix)]
+    struct FakeNames {
+        users: Vec<(u32, &'static str)>,
+        groups: Vec<(u32, &'static str, Vec<&'static str>)>,
+        fails: bool,
+        group_fails: bool,
+    }
+
+    #[cfg(unix)]
+    impl NameService for FakeNames {
+        fn user_name(&self, uid: u32) -> std::io::Result<Option<String>> {
+            if self.fails {
+                return Err(std::io::ErrorKind::Other.into());
+            }
+            Ok(self
+                .users
+                .iter()
+                .find(|(id, _)| *id == uid)
+                .map(|(_, name)| (*name).to_owned()))
+        }
+        fn group(&self, gid: u32) -> std::io::Result<Option<(String, Vec<String>)>> {
+            if self.fails || self.group_fails {
+                return Err(std::io::ErrorKind::Other.into());
+            }
+            Ok(self
+                .groups
+                .iter()
+                .find(|(id, _, _)| *id == gid)
+                .map(|(_, name, members)| {
+                    (
+                        (*name).to_owned(),
+                        members.iter().map(|m| (*m).to_owned()).collect(),
+                    )
+                }))
+        }
+    }
+
+    /// ADR-0028 A 2026-10-08, "a group of one is the owner's own" (#231),
+    /// on staged entries: a group-writable ancestor passes when its
+    /// group's name is that of the account this process runs as, it lists
+    /// no member, and the directory carries no access ACL. A shared group,
+    /// a gid equal to the uid under another name, a group with a member, a
+    /// root-owned directory in group `root` (named after its OWNER, not
+    /// ours), an access ACL, a missing entry and a failed read -- of the
+    /// names or of the ACL -- are each refused; other-write is refused
+    /// whatever the group; sticky is unchanged.
+    #[cfg(unix)]
+    #[test]
+    fn a_group_writable_ancestor_needs_the_owners_private_group() {
+        let path = Path::new("/home/alice");
+        let names = FakeNames {
+            users: vec![(1000, "alice"), (0, "root")],
+            groups: vec![
+                (0, "root", vec![]),
+                (1001, "alice", vec![]),
+                (100, "users", vec![]),
+                (1000, "staff", vec![]),
+                (1002, "alice", vec!["bob"]),
+            ],
+            fails: false,
+            group_fails: false,
+        };
+        let judge = |gid: u32, mode: u32, names: &FakeNames| {
+            judge_ancestor_with(path, Ok((1000, gid, mode)), 1000, names, || Ok(false))
+        };
+        judge(1001, 0o40775, &names).expect("the owner's private group, gid apart from the uid");
+        let refused = |result: Result<(), PersistError>| match result {
+            Err(PersistError::DirectoryNotPrivate { path: at, detail }) => {
+                assert_eq!(at, path);
+                detail
+            }
+            other => panic!("refused: {other:?}"),
+        };
+        let shared = refused(judge(100, 0o40775, &names));
+        assert!(shared.contains("group users (gid 100)"), "{shared}");
+        let same_id = refused(judge(1000, 0o40775, &names));
+        assert!(same_id.contains("group staff (gid 1000)"), "{same_id}");
+        let member = refused(judge(1002, 0o40775, &names));
+        assert!(member.contains("group alice (gid 1002)"), "{member}");
+        let roots = refused(judge_ancestor_with(
+            path,
+            Ok((0, 0, 0o40775)),
+            1000,
+            &names,
+            || Ok(false),
+        ));
+        assert!(roots.contains("group root (gid 0)"), "{roots}");
+        assert!(
+            roots.contains("alice, uid 1000"),
+            "names our account: {roots}"
+        );
+        let acl = refused(judge_ancestor_with(
+            path,
+            Ok((1000, 1001, 0o40775)),
+            1000,
+            &names,
+            || Ok(true),
+        ));
+        assert!(acl.contains("access ACL"), "{acl}");
+        let acl_unread = refused(judge_ancestor_with(
+            path,
+            Ok((1000, 1001, 0o40775)),
+            1000,
+            &names,
+            || Err(std::io::ErrorKind::PermissionDenied.into()),
+        ));
+        assert!(
+            acl_unread.contains("access ACL could not be read"),
+            "{acl_unread}"
+        );
+        let unknown = refused(judge(4242, 0o40775, &names));
+        assert!(unknown.contains("whether group 4242 is"), "{unknown}");
+        assert!(unknown.contains("group 4242 has no entry"), "{unknown}");
+        assert!(
+            unknown.contains("alice, uid 1000"),
+            "names our account: {unknown}"
+        );
+        let no_account = refused(judge(
+            1001,
+            0o40775,
+            &FakeNames {
+                users: vec![],
+                ..names_clone(&names)
+            },
+        ));
+        assert!(
+            no_account.contains("uid 1000 has no account entry"),
+            "the user read is named, not the group: {no_account}"
+        );
+        let failed = refused(judge(
+            1001,
+            0o40775,
+            &FakeNames {
+                fails: true,
+                ..names_clone(&names)
+            },
+        ));
+        assert!(
+            failed.contains("the account of uid 1000: other error"),
+            "the io error is kept: {failed}"
+        );
+        let group_failed = refused(judge(
+            1001,
+            0o40775,
+            &FakeNames {
+                group_fails: true,
+                ..names_clone(&names)
+            },
+        ));
+        assert!(
+            group_failed.contains("group 1001: other error")
+                && group_failed.contains("alice, uid 1000"),
+            "the group read's error, with our account: {group_failed}"
+        );
+        // The ACL is asked of a group-writable directory only: a 0755
+        // one passes without the read, whether it would answer or fail.
+        judge_ancestor_with(path, Ok((1000, 100, 0o40755)), 1000, &names, || {
+            panic!("the ACL is not asked of a directory without group write")
+        })
+        .expect("0755, no ACL read");
+        judge_ancestor_with(path, Ok((1000, 100, 0o40755)), 1000, &names, || {
+            Err(std::io::ErrorKind::PermissionDenied.into())
+        })
+        .expect("0755, an unreadable ACL never consulted");
+        for detail in [
+            refused(judge(4242, 0o40775, &names)),
+            refused(judge(
+                1001,
+                0o40775,
+                &FakeNames {
+                    users: vec![],
+                    ..names_clone(&names)
+                },
+            )),
+            refused(judge(
+                1001,
+                0o40775,
+                &FakeNames {
+                    fails: true,
+                    ..names_clone(&names)
+                },
+            )),
+        ] {
+            assert!(detail.contains("could not be read"), "{detail}");
+        }
+        let other = refused(judge(1001, 0o40757, &names));
+        assert!(other.contains("other-writable"), "{other}");
+        judge(100, 0o41775, &names).expect("sticky, as before");
+    }
+
+    /// The access-ACL readers on a real directory and file: none until
+    /// `setfacl` grants another account write, then one -- by path, not
+    /// following a link, and by handle. A default ACL alone, on a
+    /// directory, is not an access ACL.
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_group_writable_ancestor_is_refused() {
-        let root = tempfile::tempdir().expect("tempdir");
-        chmod(root.path(), 0o700);
-        let private = private_under(root.path(), &["a"], 0o770);
-        let a = root.path().join("a");
-        let detail = refused_at(resolve_private_dir(&private), &a);
+    fn the_access_acl_readers_see_an_acl_setfacl_adds() {
+        let root = private_tempdir().expect("tempdir");
+        let dir = root.path().join("d");
+        fs::create_dir(&dir).expect("mkdir");
+        let file = root.path().join("f");
+        fs::write(&file, b"").expect("write");
+        let setfacl = |args: &[&str], at: &Path| {
+            let ran = std::process::Command::new("setfacl")
+                .args(args)
+                .arg(at)
+                .status()
+                .expect("setfacl runs");
+            assert!(ran.success(), "setfacl {args:?}");
+        };
+        assert!(!access_acl_at(&dir).expect("read"), "the control: no ACL");
+        setfacl(&["-d", "-m", "u:nobody:rwx"], &dir);
+        assert!(!access_acl_at(&dir).expect("read"), "a default ACL only");
+        setfacl(&["-m", "u:nobody:rwx"], &dir);
+        assert!(access_acl_at(&dir).expect("read"), "an access ACL");
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&dir, &link).expect("link");
         assert!(
-            detail.contains("0770") && detail.contains("not sticky"),
-            "{detail}"
+            !access_acl_at(&link).expect("read"),
+            "the link, not its target"
         );
-        chmod(&a, 0o755);
+
+        let opened = || fs::File::open(&file).expect("open");
+        assert!(
+            !access_acl_of(&opened()).expect("read"),
+            "the control: no ACL"
+        );
+        setfacl(&["-m", "u:nobody:rw"], &file);
+        assert!(access_acl_of(&opened()).expect("read"), "an access ACL");
+    }
+
+    #[cfg(unix)]
+    fn names_clone(names: &FakeNames) -> FakeNames {
+        FakeNames {
+            users: names.users.clone(),
+            groups: names.groups.clone(),
+            fails: names.fails,
+            group_fails: names.group_fails,
+        }
+    }
+
+    /// The host's name service reads the entries `id` reports: this
+    /// process's user name and its primary group's name, and no entry
+    /// for a gid nothing allocates. Then a `0775` directory in our
+    /// primary group is judged as `getent` says that group is: accepted
+    /// when its name is ours and it lists no member, refused naming it
+    /// otherwise -- an oracle apart from the code under test.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_host_name_service_answers_as_id_and_getent_do() {
+        use std::os::unix::fs::MetadataExt as _;
+        let id = |flag: &str| {
+            let out = std::process::Command::new("id")
+                .arg(flag)
+                .output()
+                .expect("id");
+            String::from_utf8(out.stdout)
+                .expect("utf-8")
+                .trim()
+                .to_owned()
+        };
+        let uid = effective_uid().expect("readable");
         assert_eq!(
-            resolve_private_dir(&private).expect("the control"),
-            fs::canonicalize(&private).expect("canonical")
+            HostNames.user_name(uid).expect("read"),
+            Some(id("-un")),
+            "the user"
         );
+        let root = private_tempdir().expect("tempdir");
+        chmod(root.path(), 0o700);
+        let dir = root.path().join("shared");
+        fs::create_dir(&dir).expect("mkdir");
+        let gid = fs::metadata(&dir).expect("meta").gid();
+        let (group, members) = HostNames.group(gid).expect("read").expect("an entry");
+        assert_eq!(group, id("-gn"), "the primary group");
+        assert!(
+            HostNames.group(4_000_000_000).expect("read").is_none(),
+            "no entry"
+        );
+
+        let getent = std::process::Command::new("getent")
+            .args(["group", &gid.to_string()])
+            .output()
+            .expect("getent");
+        let line = String::from_utf8(getent.stdout).expect("utf-8");
+        let listed = line
+            .trim()
+            .rsplit(':')
+            .next()
+            .unwrap_or_default()
+            .to_owned();
+        assert_eq!(listed.is_empty(), members.is_empty(), "members: {line}");
+        let private = group == id("-un") && listed.is_empty();
+        chmod(&dir, 0o775);
+        match resolve_guarded_dir(&dir) {
+            Ok(_) => assert!(private, "accepted, so {group} is our private group"),
+            Err(PersistError::DirectoryNotPrivate { detail, .. }) => {
+                assert!(!private, "refused, so {group} is not: {detail}");
+                assert!(detail.contains(&format!("group {group}")), "{detail}");
+            }
+            Err(other) => panic!("judged: {other:?}"),
+        }
     }
 
     /// An other-writable ancestor without the sticky bit is refused; with
@@ -935,7 +1547,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn an_other_writable_ancestor_needs_the_sticky_bit() {
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = private_tempdir().expect("tempdir");
         chmod(root.path(), 0o700);
         let private = private_under(root.path(), &["a"], 0o757);
         let a = root.path().join("a");
@@ -951,7 +1563,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn an_ancestor_another_uid_owns_is_refused_sticky_or_not() {
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = private_tempdir().expect("tempdir");
         chmod(root.path(), 0o700);
         let private = private_under(root.path(), &["a"], 0o755);
         let a = root.path().join("a");
@@ -971,7 +1583,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_link_on_the_path_is_judged_and_followed() {
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = private_tempdir().expect("tempdir");
         chmod(root.path(), 0o700);
         let target = private_under(root.path(), &["a"], 0o755);
         std::os::unix::fs::symlink(root.path().join("a"), root.path().join("via")).expect("link");
@@ -1001,8 +1613,8 @@ mod tests {
     #[test]
     fn the_ancestor_rule_on_root_and_the_uninspectable() {
         let path = Path::new("/srv");
-        judge_ancestor(path, Ok((0, 0o40755)), 1000).expect("root's, 0755");
-        judge_ancestor(path, Ok((1000, 0o41777)), 1000).expect("ours, sticky");
+        judge_ancestor(path, Ok((0, 0, 0o40755)), 1000).expect("root's, 0755");
+        judge_ancestor(path, Ok((1000, 1000, 0o41777)), 1000).expect("ours, sticky");
         match judge_ancestor(
             path,
             Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
@@ -1023,7 +1635,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn the_plain_xdg_layout_passes() {
-        let home = tempfile::tempdir().expect("tempdir");
+        let home = private_tempdir().expect("tempdir");
         chmod(home.path(), 0o700);
         let private = private_under(
             home.path(),
@@ -1034,23 +1646,190 @@ mod tests {
     }
 
     /// The configuration directory is judged for who can change it, not
-    /// who can read it: ours at `0755` passes, group-writable or under a
-    /// group-writable ancestor it is refused.
+    /// who can read it: ours at `0755` passes, other-writable or under an
+    /// other-writable ancestor it is refused. (Group-write is the
+    /// private-group predicate's, tested on staged entries.)
     #[cfg(target_os = "linux")]
     #[test]
     fn a_guarded_directory_is_judged_for_writers_not_readers() {
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = private_tempdir().expect("tempdir");
         chmod(root.path(), 0o700);
         let config = root.path().join("a").join("config");
         fs::create_dir_all(&config).expect("mkdir");
         chmod(&root.path().join("a"), 0o755);
         chmod(&config, 0o755);
         resolve_guarded_dir(&config).expect("readable by all, written by us");
-        chmod(&config, 0o775);
+        chmod(&config, 0o757);
         refused_at(resolve_guarded_dir(&config), &config);
         chmod(&config, 0o755);
-        chmod(&root.path().join("a"), 0o775);
+        chmod(&root.path().join("a"), 0o757);
         refused_at(resolve_guarded_dir(&config), &root.path().join("a"));
+    }
+
+    /// A file is not a guarded directory, refused naming it; the
+    /// directory beside it is the control. (`create_private_dir` under a
+    /// file never reaches this: its walk meets `ENOTDIR` first.)
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_guarded_directory_that_is_a_file_is_refused() {
+        let root = private_tempdir().expect("tempdir");
+        chmod(root.path(), 0o700);
+        let file = root.path().join("file");
+        fs::write(&file, b"").expect("write");
+        // Its mode set, so it is refused for its type and not for a
+        // group-write bit the umask gave it.
+        chmod(&file, 0o600);
+        let detail = refused_at(resolve_guarded_dir(&file), &file);
+        assert_eq!(detail, "it is not a directory");
+        resolve_guarded_dir(root.path()).expect("the control");
+    }
+
+    /// The entries of `dir`, by name.
+    #[cfg(unix)]
+    fn entries(dir: &Path) -> Vec<std::ffi::OsString> {
+        fs::read_dir(dir)
+            .expect("read_dir")
+            .map(|e| e.expect("entry").file_name())
+            .collect()
+    }
+
+    /// A missing directory under an ancestor others can write is refused
+    /// naming that ancestor, and nothing is created under it; the same
+    /// tree with the ancestor `0755`, and `1777` (sticky), are the
+    /// controls, each made owner-only all the way down.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_refused_ancestor_gets_nothing_created_under_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = private_tempdir().expect("tempdir");
+        chmod(root.path(), 0o700);
+        let wide = root.path().join("wide");
+        fs::create_dir(&wide).expect("mkdir");
+        chmod(&wide, 0o777);
+        let dir = wide.join("a").join("b").join("c");
+        let detail = refused_at(create_private_dir(&dir).map(|()| dir.clone()), &wide);
+        assert!(detail.contains("0777"), "{detail}");
+        assert!(
+            entries(&wide).is_empty(),
+            "nothing created: {:?}",
+            entries(&wide)
+        );
+
+        for mode in [0o755, 0o1777] {
+            chmod(&wide, mode);
+            create_private_dir(&dir).expect("the control");
+            for made in [wide.join("a"), wide.join("a").join("b"), dir.clone()] {
+                let mode = fs::symlink_metadata(&made)
+                    .expect("made")
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o777, OWNER_ONLY_DIR, "{}", made.display());
+            }
+            fs::remove_dir_all(wide.join("a")).expect("clean");
+        }
+    }
+
+    /// A component already there when its turn comes -- made in the
+    /// window after the base was judged -- is adopted when it is our
+    /// owner-only directory, and refused naming it, with nothing made
+    /// inside, when it is wider.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_component_that_appears_unprivate_is_refused_before_anything_is_made_in_it() {
+        let root = private_tempdir().expect("tempdir");
+        chmod(root.path(), 0o700);
+        let uid = effective_uid().expect("readable");
+        let appeared = root.path().join("a");
+        fs::create_dir(&appeared).expect("mkdir");
+        chmod(&appeared, 0o755);
+        refused_at(
+            create_each_as(root.path(), Path::new("a/b"), uid).map(|()| appeared.clone()),
+            &appeared,
+        );
+        assert!(entries(&appeared).is_empty(), "nothing made inside it");
+
+        chmod(&appeared, 0o700);
+        create_each_as(root.path(), Path::new("a/b"), uid).expect("adopted: ours, owner-only");
+        assert!(appeared.join("b").is_dir());
+    }
+
+    /// The ownership half of adoption: an owner-only directory that is
+    /// not `uid`'s is refused naming it, with nothing made inside --
+    /// staged as ours directly under root's sticky `/tmp` and asked for
+    /// another uid, since under a tempdir of ours that uid is refused at
+    /// an ancestor first. The same call for our own uid is the control.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_component_another_uid_owns_is_refused_before_anything_is_made_in_it() {
+        let appeared = owned_private_dir_under_tmp();
+        let name = appeared.path().file_name().expect("a name");
+        let missing = Path::new(name).join("b");
+        let uid = effective_uid().expect("readable");
+        let detail = refused_at(
+            create_each_as(Path::new("/tmp"), &missing, uid.wrapping_add(1))
+                .map(|()| appeared.path().to_path_buf()),
+            appeared.path(),
+        );
+        assert!(detail.starts_with("owned by uid"), "{detail}");
+        assert!(
+            entries(appeared.path()).is_empty(),
+            "nothing made inside it"
+        );
+
+        create_each_as(Path::new("/tmp"), &missing, uid).expect("the control: ours");
+        assert!(appeared.path().join("b").is_dir());
+    }
+
+    /// An existing `dir` that is a file, a FIFO or a dangling link is
+    /// `AlreadyExists`, as the recursive create answered; a link to a
+    /// directory is accepted, as it was (the control).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_existing_path_that_is_not_a_directory_is_refused() {
+        let root = private_tempdir().expect("tempdir");
+        chmod(root.path(), 0o700);
+        let file = root.path().join("file");
+        fs::write(&file, b"").expect("write");
+        let fifo = root.path().join("fifo");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo");
+        assert!(made.success(), "mkfifo");
+        let dangling = root.path().join("dangling");
+        std::os::unix::fs::symlink(root.path().join("nowhere"), &dangling).expect("link");
+        for path in [&file, &fifo, &dangling] {
+            assert!(
+                matches!(
+                    create_private_dir(path),
+                    Err(PersistError::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists
+                ),
+                "{} is not a directory",
+                path.display()
+            );
+        }
+        let real = root.path().join("real");
+        create_private_dir(&real).expect("made");
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("link");
+        create_private_dir(&link).expect("the control: a link to a directory");
+    }
+
+    /// A missing part that climbs with `..` is refused rather than
+    /// followed out of the judged base; the same path without it is the
+    /// control.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_missing_path_that_climbs_is_refused() {
+        let root = private_tempdir().expect("tempdir");
+        chmod(root.path(), 0o700);
+        let climbs = root.path().join("a").join("..").join("b");
+        assert!(matches!(
+            create_private_dir(&climbs),
+            Err(PersistError::Io(e)) if e.kind() == std::io::ErrorKind::InvalidInput
+        ));
+        assert!(entries(root.path()).is_empty(), "nothing created");
+        create_private_dir(&root.path().join("b")).expect("the control");
     }
 
     /// A directory whose fsync cannot succeed, without a race.
@@ -1077,7 +1856,7 @@ mod tests {
         // identity key, so the name failing to survive a reboot is the
         // loss of the identity itself.
         use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = private_tempdir().expect("tempdir");
         let path = dir.path().join("profile.json");
 
         // POSITIVE CONTROL FIRST: the same write succeeds while the
@@ -1112,7 +1891,7 @@ mod tests {
         // `require_private_dir` — it checks that group and other have no
         // bits, not that the owner can read.
         use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = private_tempdir().expect("tempdir");
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).expect("chmod");
 
         // POSITIVE CONTROL: a readable directory takes the key.

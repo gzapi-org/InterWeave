@@ -223,7 +223,7 @@ fn private_dir(path: &Path) {
 
 impl Home {
     fn new() -> Self {
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = private_tempdir().expect("tempdir");
         let at = |name: &str| root.path().join(name);
         let roots = XdgRoots {
             config_home: at("config"),
@@ -249,6 +249,13 @@ transport: { listen: { addresses: [\"/ip4/127.0.0.1/tcp/0\"] } }
 ",
         )
         .expect("the profile written");
+        // 0644 whatever the umask: under 002 in a shared group a 0664
+        // document is refused (j37).
+        std::fs::set_permissions(
+            &config,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o644),
+        )
+        .expect("chmod");
         Self { root, paths }
     }
 
@@ -794,7 +801,7 @@ fn a_phrase_in_argv_is_never_repeated_past_the_parser() {
 /// `/dev/stderr` (a new open file description, offset 0) would do.
 #[test]
 fn the_prompt_appends_to_an_appended_stderr() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let log = dir.path().join("restore.log");
     std::fs::write(&log, "HEAD-OF-THE-LOG\n").expect("the log");
     let shell = format!(
@@ -809,4 +816,14 @@ fn the_prompt_appends_to_an_appended_stderr() {
     let written = std::fs::read_to_string(&log).expect("read");
     assert!(written.starts_with("HEAD-OF-THE-LOG\n"), "{written:?}");
     assert!(written.contains("recovery phrase (hidden)"), "{written:?}");
+}
+
+/// A temporary directory made `0700` at creation, whatever the umask: the
+/// ancestor rule judges it, and `tempfile::tempdir()` under umask `002`
+/// with a shared primary group is `0775`, refused (j37).
+fn private_tempdir() -> std::io::Result<tempfile::TempDir> {
+    use std::os::unix::fs::PermissionsExt as _;
+    tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
 }

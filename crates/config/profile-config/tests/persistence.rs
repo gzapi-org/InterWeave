@@ -45,7 +45,7 @@ fn mode_of(path: &Path) -> u32 {
 fn the_five_roles_land_in_five_distinct_places() {
     // A layout whose roles collapsed runs perfectly right up until a
     // cache clear deletes the identity key.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path());
     assert!(p.roles_are_distinct());
 
@@ -68,7 +68,7 @@ fn the_five_roles_land_in_five_distinct_places() {
 /// one of them, and not a directory above one.
 #[test]
 fn the_human_dir_is_under_state_and_holds_no_daemon_path() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path());
     let human = p.human_dir();
     assert_eq!(human.parent(), Some(p.state_dir()));
@@ -101,7 +101,7 @@ fn the_human_dir_is_under_state_and_holds_no_daemon_path() {
 #[test]
 fn a_role_in_or_above_the_human_dir_is_reported() {
     type Move = fn(&mut XdgRoots, &std::path::Path, &std::path::Path);
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let base = paths(dir.path());
     assert!(base.roles_are_distinct(), "the control layout is accepted");
     let human = base.human_dir();
@@ -138,7 +138,7 @@ fn a_role_in_or_above_the_human_dir_is_reported() {
 #[test]
 fn a_role_path_with_a_parent_component_is_refused() {
     type Move = fn(&mut XdgRoots, &std::path::Path);
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let real_human = paths(dir.path()).human_dir();
     let rows: [(&str, Move); 5] = [
         ("config", |r, b| {
@@ -174,7 +174,7 @@ fn a_role_path_with_a_parent_component_is_refused() {
 fn a_collapsed_layout_is_reported_rather_than_tolerated() {
     // The environment can point two XDG variables at the same directory.
     // Nothing else in the system would notice.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let same = dir.path().join("everything");
     let collapsed = XdgRoots {
         config_home: same.clone(),
@@ -195,7 +195,7 @@ fn the_data_and_admin_sockets_are_different_files() {
     // The two IPC boundaries carry different authority. One socket
     // serving both would make that a runtime check instead of a
     // filesystem fact.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path());
     assert_ne!(
         p.data_socket().expect("socket"),
@@ -209,7 +209,7 @@ fn no_profiles_data_socket_is_anothers_admin_socket() {
     // its data socket was `work`'s admin socket. The `.` of
     // `<profile>.admin.sock` is outside the name alphabet (LOCAL-IPC.md,
     // A 2026-10-01).
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let roots = XdgRoots {
         config_home: dir.path().join("c"),
         data_home: dir.path().join("d"),
@@ -237,7 +237,7 @@ fn no_profiles_data_socket_is_anothers_admin_socket() {
 
 #[test]
 fn a_profile_name_cannot_escape_or_hide_in_a_path() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let r = roots(dir.path());
     for bad in [
         "",
@@ -267,7 +267,7 @@ fn a_profile_name_cannot_escape_or_hide_in_a_path() {
 fn a_missing_runtime_dir_is_fatal_rather_than_defaulted() {
     // Its guarantees — owner-only, per-user, per-boot — are exactly what
     // an IPC socket relies on, so inventing /tmp would drop all three.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let mut r = roots(dir.path());
     r.runtime_dir = None;
     assert!(matches!(
@@ -281,7 +281,7 @@ fn a_missing_runtime_dir_is_fatal_rather_than_defaulted() {
 /// unavailable, and asking for one is `NoRuntimeDir`, never a default.
 #[test]
 fn the_offline_roles_resolve_without_a_runtime_dir() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let online = paths(dir.path());
     let mut r = roots(dir.path());
     r.runtime_dir = None;
@@ -308,7 +308,7 @@ fn the_offline_roles_resolve_without_a_runtime_dir() {
 #[test]
 #[cfg(unix)]
 fn a_private_write_is_owner_only_from_the_moment_it_exists() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     // Under a subdirectory the write creates itself: `tempdir()` is
     // 0755, and a private write now refuses a parent that open.
     let path = dir.path().join("state").join("identity.key");
@@ -323,7 +323,7 @@ fn a_private_write_is_owner_only_from_the_moment_it_exists() {
 fn a_private_directory_is_owner_only() {
     // A 0600 key inside a world-executable directory still leaks its
     // existence, size, and modification time.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let target = dir.path().join("a").join("b").join("c");
     create_private_dir(&target).expect("create");
     assert_eq!(mode_of(&target), OWNER_ONLY_DIR);
@@ -335,7 +335,7 @@ fn is_owner_only_rejects_a_key_file_someone_else_can_read() {
     // A file written correctly by this build may still have been
     // restored from a backup or copied from somewhere less careful.
     use std::os::unix::fs::PermissionsExt as _;
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let path = dir.path().join("state").join("identity.key");
     write_private_atomic(&path, b"not a real key").expect("write");
 
@@ -348,7 +348,7 @@ fn is_owner_only_rejects_a_key_file_someone_else_can_read() {
 
 #[test]
 fn an_atomic_write_replaces_the_previous_contents_completely() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let path = dir.path().join("config.yaml");
     write_atomic(&path, b"schema_version: 2\nlong original content\n").expect("first");
     write_atomic(&path, b"short\n").expect("second");
@@ -361,7 +361,7 @@ fn an_atomic_write_replaces_the_previous_contents_completely() {
 
 #[test]
 fn an_atomic_write_leaves_no_temporary_behind() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let path = dir.path().join("config.yaml");
     write_atomic(&path, b"schema_version: 2\n").expect("write");
 
@@ -375,7 +375,7 @@ fn an_atomic_write_leaves_no_temporary_behind() {
 
 #[test]
 fn an_atomic_write_creates_missing_parents() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let path = dir.path().join("deep").join("nested").join("config.yaml");
     write_atomic(&path, b"schema_version: 2\n").expect("write");
     assert!(path.exists());
@@ -387,7 +387,7 @@ fn the_identity_file_and_the_config_file_get_different_protection() {
     // Configuration is what a user edits and backs up; the identity key
     // is private-key-equivalent. Writing both the same way would mean one
     // policy silently applies to both.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path());
     create_private_dir(p.identity_dir()).expect("identity dir");
     write_private_atomic(&p.identity_file(), b"not a real key").expect("key");
@@ -429,7 +429,7 @@ fn key_material_refuses_a_parent_directory_that_is_not_private() {
     // guarantee, stated as the whole one.
     use std::os::unix::fs::PermissionsExt as _;
 
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let open = dir.path().join("open");
     std::fs::create_dir(&open).expect("mkdir");
     std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).expect("chmod");
@@ -469,6 +469,38 @@ fn key_material_refuses_a_parent_directory_that_is_not_private() {
     write_atomic(&plain.join("config.toml"), b"schema_version = 2").expect("config is not secret");
 }
 
+/// Key material whose parent is MISSING, under an ancestor others can
+/// write: both private writers are refused naming that ancestor, and
+/// neither leaves the directories it would have made -- the refusal
+/// above judges a parent that exists. The ancestor at `0755` is the
+/// control.
+#[test]
+#[cfg(target_os = "linux")]
+fn key_material_under_a_refused_ancestor_creates_no_directory() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = private_tempdir().expect("tempdir");
+    let wide = dir.path().join("wide");
+    std::fs::create_dir(&wide).expect("mkdir");
+    std::fs::set_permissions(&wide, std::fs::Permissions::from_mode(0o777)).expect("chmod");
+    let path = wide.join("keys").join("identity.key");
+    for result in [
+        write_private_atomic(&path, b"not a real key"),
+        create_private_exclusive(&path, b"not a real key"),
+    ] {
+        match result {
+            Err(PersistError::DirectoryNotPrivate { path, .. }) => assert_eq!(path, wide),
+            other => panic!("refused naming {}: {other:?}", wide.display()),
+        }
+        let left: Vec<_> = std::fs::read_dir(&wide).expect("read").collect();
+        assert!(left.is_empty(), "nothing created: {left:?}");
+    }
+
+    std::fs::set_permissions(&wide, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    write_private_atomic(&path, b"not a real key").expect("the control");
+    assert_eq!(mode_of(&wide.join("keys")), OWNER_ONLY_DIR);
+}
+
 #[test]
 #[cfg(unix)]
 fn a_symlinked_parent_is_refused_however_private_its_target() {
@@ -477,7 +509,7 @@ fn a_symlinked_parent_is_refused_however_private_its_target() {
     // directory while the LINK sits somewhere anyone can repoint.
     use std::os::unix::fs::PermissionsExt as _;
 
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let real = dir.path().join("real");
     std::fs::create_dir(&real).expect("mkdir");
     std::fs::set_permissions(&real, std::fs::Permissions::from_mode(OWNER_ONLY_DIR))
@@ -502,7 +534,7 @@ fn a_squatted_temporary_name_is_an_error_and_not_a_write_elsewhere() {
     // both an existing file and a link.
     use std::os::unix::fs::PermissionsExt as _;
 
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let state = dir.path().join("state");
     std::fs::create_dir(&state).expect("mkdir");
     std::fs::set_permissions(&state, std::fs::Permissions::from_mode(OWNER_ONLY_DIR))
@@ -528,4 +560,14 @@ fn a_squatted_temporary_name_is_an_error_and_not_a_write_elsewhere() {
         b"precious",
         "the link target must be untouched"
     );
+}
+
+/// A temporary directory made `0700` at creation, whatever the umask: the
+/// ancestor rule judges it, and `tempfile::tempdir()` under umask `002`
+/// with a shared primary group is `0775`, refused (j37).
+fn private_tempdir() -> std::io::Result<tempfile::TempDir> {
+    use std::os::unix::fs::PermissionsExt as _;
+    tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
 }

@@ -20,7 +20,7 @@ struct Home {
 
 impl Home {
     fn new() -> Self {
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = private_tempdir().expect("tempdir");
         let at = |name: &str| root.path().join(name);
         let roots = XdgRoots {
             config_home: at("config"),
@@ -122,4 +122,14 @@ fn a_held_lock_with_no_socket_is_three_naming_the_socket() {
         "still held by this test"
     );
     drop(lock);
+}
+
+/// A temporary directory made `0700` at creation, whatever the umask: the
+/// ancestor rule judges it, and `tempfile::tempdir()` under umask `002`
+/// with a shared primary group is `0775`, refused (j37).
+fn private_tempdir() -> std::io::Result<tempfile::TempDir> {
+    use std::os::unix::fs::PermissionsExt as _;
+    tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
 }

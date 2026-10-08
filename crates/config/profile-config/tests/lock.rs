@@ -49,7 +49,7 @@ fn child_holds_the_lock_when_asked() {
 
 #[test]
 fn a_second_holder_is_refused_while_the_first_lives() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path());
     let first = ProfileLock::acquire(&p, Duration::ZERO).expect("the first holder");
     assert!(matches!(
@@ -75,7 +75,7 @@ fn a_second_holder_is_refused_while_the_first_lives() {
 #[test]
 fn the_lock_file_stays_owner_only_and_names_its_holder() {
     use std::os::unix::fs::PermissionsExt as _;
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path());
     let lock = ProfileLock::acquire(&p, Duration::ZERO).expect("locks");
     let path = lock.path().to_path_buf();
@@ -93,7 +93,7 @@ fn the_lock_file_stays_owner_only_and_names_its_holder() {
 /// A holder that lets go within the wait is waited for.
 #[test]
 fn an_acquisition_waits_out_a_momentary_holder() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path());
     let brief = ProfileLock::acquire(&p, Duration::ZERO).expect("locks");
     let releaser = std::thread::spawn(move || {
@@ -106,7 +106,7 @@ fn an_acquisition_waits_out_a_momentary_holder() {
 
 #[test]
 fn a_child_holding_the_lock_blocks_the_parent_until_it_is_killed() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path());
     let mut child = Command::new(std::env::current_exe().expect("this test binary"))
         .args([
@@ -152,7 +152,7 @@ fn a_child_holding_the_lock_blocks_the_parent_until_it_is_killed() {
 #[test]
 fn a_state_directory_others_can_write_is_refused() {
     use std::os::unix::fs::PermissionsExt as _;
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path());
     std::fs::create_dir_all(p.state_dir()).expect("mkdir");
     std::fs::set_permissions(p.state_dir(), std::fs::Permissions::from_mode(0o770)).expect("chmod");
@@ -164,7 +164,7 @@ fn a_state_directory_others_can_write_is_refused() {
 
 #[test]
 fn a_missing_lock_file_is_not_held() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     assert!(!ProfileLock::is_held(&paths(dir.path())).expect("probe"));
 }
 
@@ -175,7 +175,7 @@ fn a_missing_lock_file_is_not_held() {
 #[test]
 fn a_wide_state_directory_without_a_lock_file_is_refused_by_the_probe() {
     use std::os::unix::fs::PermissionsExt as _;
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path());
     interweave_profile_config::create_private_dir(p.state_dir()).expect("state dir");
     assert!(!ProfileLock::is_held(&p).expect("the control: not held"));
@@ -198,7 +198,7 @@ fn state_dir(p: &ProfilePaths) -> &Path {
 #[test]
 fn a_planted_symlink_is_refused_and_its_target_untouched() {
     use std::os::unix::fs::PermissionsExt as _;
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path());
     let target = dir.path().join("precious");
     std::fs::write(&target, b"keep me").expect("write");
@@ -222,7 +222,7 @@ fn a_planted_symlink_is_refused_and_its_target_untouched() {
 /// points.
 #[test]
 fn a_dangling_symlink_is_refused_and_creates_nothing() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path());
     let nowhere = dir.path().join("created-through-the-link");
     std::os::unix::fs::symlink(&nowhere, state_dir(&p).join("profile.lock")).expect("link");
@@ -241,7 +241,7 @@ fn a_dangling_symlink_is_refused_and_creates_nothing() {
 /// cannot tell from the file itself -- is refused on the opened handle.
 #[test]
 fn a_hard_linked_lock_file_is_refused() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path());
     drop(ProfileLock::acquire(&p, Duration::ZERO).expect("created"));
     std::fs::hard_link(ProfileLock::path_for(&p), dir.path().join("second-name"))
@@ -257,7 +257,7 @@ fn a_hard_linked_lock_file_is_refused() {
 #[test]
 fn a_lock_file_wider_than_owner_only_is_refused() {
     use std::os::unix::fs::PermissionsExt as _;
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path());
     let lock = state_dir(&p).join("profile.lock");
     std::fs::write(&lock, b"").expect("write");
@@ -270,4 +270,14 @@ fn a_lock_file_wider_than_owner_only_is_refused() {
         ProfileLock::is_held(&p),
         Err(PersistError::FileNotPrivate { .. })
     ));
+}
+
+/// A temporary directory made `0700` at creation, whatever the umask: the
+/// ancestor rule judges it, and `tempfile::tempdir()` under umask `002`
+/// with a shared primary group is `0775`, refused (j37).
+fn private_tempdir() -> std::io::Result<tempfile::TempDir> {
+    use std::os::unix::fs::PermissionsExt as _;
+    tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
 }

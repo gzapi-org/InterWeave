@@ -40,14 +40,19 @@ endpoints:
     )
 }
 
+/// The document at `0644` whatever the umask: under `002` it would be
+/// `0664`, and in a shared group refused for that (j37).
 fn write(paths: &ProfilePaths, text: &str) {
+    use std::os::unix::fs::PermissionsExt as _;
     create_private_dir(paths.config_dir()).expect("config dir");
     std::fs::write(paths.config_file(), text).expect("write");
+    std::fs::set_permissions(paths.config_file(), std::fs::Permissions::from_mode(0o644))
+        .expect("chmod");
 }
 
 #[test]
 fn a_valid_document_loads_as_its_own_profile() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path(), "work");
     write(&p, &document("profile:\n  name: work", ""));
     let loaded = ProfileConfig::load(&p).expect("loads");
@@ -58,7 +63,7 @@ fn a_valid_document_loads_as_its_own_profile() {
 /// another, or claiming none, it is refused rather than trusted.
 #[test]
 fn a_document_naming_another_profile_or_none_is_refused() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path(), "work");
     write(&p, &document("profile:\n  name: home", ""));
     match ProfileConfig::load(&p) {
@@ -79,7 +84,7 @@ fn a_document_naming_another_profile_or_none_is_refused() {
 
 #[test]
 fn a_document_that_breaks_a_rule_is_refused_with_every_rule_it_breaks() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path(), "work");
     write(
         &p,
@@ -106,7 +111,7 @@ fn a_document_that_breaks_a_rule_is_refused_with_every_rule_it_breaks() {
 
 #[test]
 fn an_unknown_key_is_a_parse_refusal() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path(), "work");
     write(
         &p,
@@ -122,7 +127,7 @@ fn an_unknown_key_is_a_parse_refusal() {
 /// ceiling itself is not.
 #[test]
 fn a_document_past_the_ceiling_is_refused_unparsed() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path(), "work");
     let base = document("profile:\n  name: work", "");
     let pad = |total: u64| {
@@ -140,7 +145,7 @@ fn a_document_past_the_ceiling_is_refused_unparsed() {
 
 #[test]
 fn a_missing_document_is_a_read_refusal() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path(), "work");
     assert!(matches!(ProfileConfig::load(&p), Err(LoadError::Read(_))));
 }
@@ -148,18 +153,18 @@ fn a_missing_document_is_a_read_refusal() {
 /// ADR-0028 A 2026-10-08: the document names the key path and the
 /// allowlist, so its directory is judged for who can change it. Under an
 /// ancestor another account could write -- the configuration root made
-/// group-writable here -- it is refused before it is read; the same
+/// other-writable here -- it is refused before it is read; the same
 /// document loading first is the control.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_document_under_a_writable_ancestor_is_refused() {
     use std::os::unix::fs::PermissionsExt as _;
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path(), "work");
     write(&p, &document("profile:\n  name: work", ""));
     ProfileConfig::load(&p).expect("the control");
     let config_home = dir.path().join("config");
-    std::fs::set_permissions(&config_home, std::fs::Permissions::from_mode(0o775)).expect("chmod");
+    std::fs::set_permissions(&config_home, std::fs::Permissions::from_mode(0o757)).expect("chmod");
     match ProfileConfig::load(&p) {
         Err(LoadError::ConfigDirUnguarded(e)) => {
             assert!(
@@ -172,13 +177,15 @@ fn a_document_under_a_writable_ancestor_is_refused() {
 }
 
 /// `config.yaml` itself is judged too (ADR-0028 A 2026-10-08): made
-/// group-writable it is refused at load, naming its mode, and readable by
-/// all (0644, the control loading first) it is not.
+/// other-writable it is refused at load, naming its mode, and readable by
+/// all (0644, the control loading first) it is not. (Group-write is the
+/// private-group predicate's: `load.rs`'s
+/// `a_group_writable_document_needs_the_owners_private_group`.)
 #[cfg(target_os = "linux")]
 #[test]
-fn a_group_writable_document_is_refused() {
+fn a_document_others_can_write_is_refused() {
     use std::os::unix::fs::PermissionsExt as _;
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path(), "work");
     write(&p, &document("profile:\n  name: work", ""));
     let mode = |m: u32| {
@@ -187,12 +194,12 @@ fn a_group_writable_document_is_refused() {
     };
     mode(0o644);
     ProfileConfig::load(&p).expect("the control: readable by all");
-    mode(0o664);
+    mode(0o646);
     match ProfileConfig::load(&p) {
         Err(LoadError::ConfigFileUnguarded { path, detail }) => {
             assert_eq!(path, p.config_file());
             assert!(
-                detail.contains("0664") && detail.contains("writable"),
+                detail.contains("0646") && detail.contains("other-writable"),
                 "{detail}"
             );
         }
@@ -206,7 +213,7 @@ fn a_group_writable_document_is_refused() {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_document_that_is_a_link_is_refused() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path(), "work");
     write(&p, &document("profile:\n  name: work", ""));
     ProfileConfig::load(&p).expect("the control: the file itself");
@@ -221,13 +228,50 @@ fn a_document_that_is_a_link_is_refused() {
     }
 }
 
+/// A `config.yaml` that is a FIFO is refused as not a regular file, at
+/// once: opened without `O_NONBLOCK` it blocked until a writer appeared,
+/// so the process never started and never said why. The same document as
+/// a file is the control. On a timeout the FIFO is opened for writing,
+/// which releases the blocked load, before the test fails.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_document_that_is_a_fifo_is_refused_without_waiting() {
+    let dir = private_tempdir().expect("tempdir");
+    let p = paths(dir.path(), "work");
+    write(&p, &document("profile:\n  name: work", ""));
+    ProfileConfig::load(&p).expect("the control: a regular file");
+    std::fs::remove_file(p.config_file()).expect("removed");
+    let made = std::process::Command::new("mkfifo")
+        .arg(p.config_file())
+        .status()
+        .expect("mkfifo");
+    assert!(made.success(), "mkfifo");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let loading = p.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(ProfileConfig::load(&loading).map(drop));
+    });
+    let Ok(result) = rx.recv_timeout(std::time::Duration::from_secs(5)) else {
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .open(p.config_file());
+        panic!("the load blocked on the FIFO");
+    };
+    match result {
+        Err(LoadError::ConfigFileUnguarded { detail, .. }) => {
+            assert!(detail.contains("not a regular file"), "{detail}");
+        }
+        other => panic!("refused: {other:?}"),
+    }
+}
+
 /// R4: the transport key is never kept in the human client's directory.
 /// A key file configured there -- by absolute path, or by a relative one
 /// climbing out of the configuration with `..` -- is refused at load; the
 /// control, an absolute key file elsewhere, loads.
 #[test]
 fn a_key_file_inside_the_human_dir_or_climbing_is_refused() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path(), "work");
 
     write(
@@ -309,7 +353,7 @@ fn a_key_file_reached_through_a_link_into_the_human_dir_is_refused() {
         ProfileConfig::load(p)
     }
 
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path(), "work");
     let vault = p.human_dir().join("vault");
     std::fs::create_dir_all(&vault).expect("vault");
@@ -343,7 +387,7 @@ fn a_key_file_reached_through_a_link_into_the_human_dir_is_refused() {
     }
 
     // The human directory itself a link to where the key is.
-    let other = tempfile::tempdir().expect("tempdir");
+    let other = private_tempdir().expect("tempdir");
     let q = paths(other.path(), "work");
     let elsewhere = other.path().join("elsewhere");
     std::fs::create_dir_all(&elsewhere).expect("elsewhere");
@@ -358,7 +402,7 @@ fn a_key_file_reached_through_a_link_into_the_human_dir_is_refused() {
 
     // The human directory a dangling link: its place is unknown, so the
     // load is refused naming it, the key ordinary.
-    let third = tempfile::tempdir().expect("tempdir");
+    let third = private_tempdir().expect("tempdir");
     let r = paths(third.path(), "work");
     let ordinary = third.path().join("keys").join("work.key");
     std::fs::create_dir_all(r.human_dir().parent().expect("state dir")).expect("state dir");
@@ -393,7 +437,7 @@ fn a_key_file_reached_through_a_link_into_the_human_dir_is_refused() {
 #[test]
 fn a_key_file_under_an_uninspectable_directory_is_refused() {
     use std::os::unix::fs::PermissionsExt as _;
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path(), "work");
     let closed = dir.path().join("closed");
     std::fs::create_dir_all(closed.join("keys")).expect("closed");
@@ -419,4 +463,14 @@ fn a_key_file_under_an_uninspectable_directory_is_refused() {
         Err(LoadError::KeyFileUnresolved { path, .. }) => assert_eq!(path, key),
         other => panic!("refused as unresolved: {other:?}"),
     }
+}
+
+/// A temporary directory made `0700` at creation, whatever the umask: the
+/// ancestor rule judges it, and `tempfile::tempdir()` under umask `002`
+/// with a shared primary group is `0775`, refused (j37).
+fn private_tempdir() -> std::io::Result<tempfile::TempDir> {
+    use std::os::unix::fs::PermissionsExt as _;
+    tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
 }

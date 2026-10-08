@@ -346,9 +346,13 @@ fn open_private(path: &Path) -> Result<std::fs::File, OverlayError> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+        // O_NONBLOCK so a FIFO in its place opens at once and is refused
+        // below as not a regular file, rather than holding start until a
+        // writer appears; it changes nothing for a regular file
+        // (`an_overlay_that_is_a_fifo_is_refused_without_waiting`).
         let file = std::fs::OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(path)
             .map_err(|e| {
                 // ELOOP is O_NOFOLLOW meeting a link.

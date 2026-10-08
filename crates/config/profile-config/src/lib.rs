@@ -2037,6 +2037,18 @@ pub enum ConfigError {
     /// `ipc.keepalive.require_for_endpoint_lease` with the keepalive off:
     /// a lease would require a feature no client can negotiate.
     KeepaliveRequiredButDisabled,
+    /// `ipc.keepalive.interval + response_timeout` exceeds the client's
+    /// silence bound (`LOCAL-IPC.md`, A 2026-10-08): a healthy server's
+    /// next ping could land after a client armed at the previous one has
+    /// already ended the connection `Timeout`.
+    KeepaliveOutlastsClientSilence {
+        /// `ipc.keepalive.interval`, in milliseconds.
+        interval_ms: u64,
+        /// `ipc.keepalive.response_timeout`, in milliseconds.
+        response_timeout_ms: u64,
+        /// The bound the sum must not exceed, in milliseconds.
+        limit_ms: u64,
+    },
     /// `ipc.enabled` contradicts `runtime.deployment` (the schema's first
     /// two runtime rules): a daemon without its IPC boundary serves no
     /// client, and an embedded Android runtime has none to open.
@@ -2409,6 +2421,14 @@ impl core::fmt::Display for ConfigError {
             Self::KeepaliveRequiredButDisabled => write!(
                 f,
                 "ipc.keepalive.require_for_endpoint_lease is true while ipc.keepalive.enabled is false"
+            ),
+            Self::KeepaliveOutlastsClientSilence {
+                interval_ms,
+                response_timeout_ms,
+                limit_ms,
+            } => write!(
+                f,
+                "ipc.keepalive.interval ({interval_ms}) + ipc.keepalive.response_timeout ({response_timeout_ms}) must not exceed {limit_ms} ms, the client's silence bound"
             ),
             Self::IpcContradictsDeployment {
                 deployment,
