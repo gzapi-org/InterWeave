@@ -139,6 +139,15 @@ impl Drop for RawPeer {
 
 impl RawPeer {
     async fn start(ip: Ipv4Addr, protocols: &[&'static str]) -> Self {
+        Self::answering(ip, protocols, answer_for).await
+    }
+
+    /// A raw peer whose answer to each request is `answer(request)`.
+    async fn answering(
+        ip: Ipv4Addr,
+        protocols: &[&'static str],
+        answer: fn(&[u8]) -> Vec<u8>,
+    ) -> Self {
         let mut swarm = SwarmBuilder::with_new_identity()
             .with_tokio()
             .with_tcp(
@@ -201,7 +210,7 @@ impl RawPeer {
                         }
                         SwarmEvent::Behaviour(request_response::Event::Message { message, .. }) => match message {
                             request_response::Message::Request { request, channel, .. } => {
-                                let answer = answer_for(&request.bytes);
+                                let answer = answer(&request.bytes);
                                 let _ = swarm.behaviour_mut().send_response(channel, Read { protocol: String::new(), bytes: answer });
                                 let _ = inbound_tx.send(request).await;
                             }
@@ -503,4 +512,64 @@ async fn direct_minor_bump_negotiates_2_0_both_ways() {
     assert_eq!(frame.payload, b"from HEAD");
 
     head.stop().await;
+}
+
+/// `DIRECT.md` §Response byte layout: an unassigned reason code, a tag
+/// other than 1 or 2, or a byte after the last field is malformed
+/// response metadata, a local `ProtocolViolation`. Here a raw peer gives
+/// HEAD each of those answers to a real send. The control is the same
+/// peer answering well-formed: HEAD's send is accepted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_malformed_response_is_a_local_protocol_violation_at_head() {
+    fn id_of(request: &[u8]) -> [u8; 16] {
+        request
+            .get(..16)
+            .and_then(|b| b.try_into().ok())
+            .unwrap_or([0; 16])
+    }
+    fn unassigned_code(request: &[u8]) -> Vec<u8> {
+        let mut f = vec![2];
+        f.extend_from_slice(&id_of(request));
+        f.push(9);
+        f
+    }
+    fn third_tag(request: &[u8]) -> Vec<u8> {
+        let mut f = vec![3];
+        f.extend_from_slice(&id_of(request));
+        f.push(1);
+        f
+    }
+    fn trailing_byte(request: &[u8]) -> Vec<u8> {
+        let mut f = answer_for(request);
+        f.push(0);
+        f
+    }
+    let ip = interweave_test_support::net::require_private_interface_v4();
+
+    let control = RawPeer::start(ip, &[V2_0]).await;
+    let head = Head::start(ip, &control).await;
+    assert_eq!(
+        head_sends(&head, &control, 7)
+            .await
+            .expect("the control is accepted")
+            .as_str(),
+        "human"
+    );
+    head.stop().await;
+
+    let cases: [(&str, fn(&[u8]) -> Vec<u8>); 3] = [
+        ("an unassigned reason code", unassigned_code),
+        ("a third tag", third_tag),
+        ("a trailing byte", trailing_byte),
+    ];
+    for (what, answer) in cases {
+        let peer = RawPeer::answering(ip, &[V2_0], answer).await;
+        let head = Head::start(ip, &peer).await;
+        assert_eq!(
+            head_sends(&head, &peer, 8).await,
+            Err(TransportError::ProtocolViolation),
+            "{what}"
+        );
+        head.stop().await;
+    }
 }
