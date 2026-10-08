@@ -72,12 +72,10 @@ pub fn is_endpoint_id(s: &str) -> bool {
 
 /// A present media type: 1..128 bytes, each in 0x20..=0x7E.
 ///
-/// PRINTABLE, from the two schemas that carry the field
-/// (`ipc/payload`, `endpoints/message-received`: `^[\x20-\x7E]+$`).
-/// The wire and fingerprint prose says only "ASCII". That gap is raised
-/// with architect-cto (01a11c8b), and until it is ruled this follows the
-/// schemas, the one reading under which a wire frame round-trips through
-/// IPC.
+/// PRINTABLE: the two schemas that carry the field pin it
+/// (`ipc/payload`, `endpoints/message-received`: `^[\x20-\x7E]+$`), and
+/// since architect-cto's ruling of 2026-10-08 (01a11c8d) the wire and
+/// fingerprint prose says so too. Before that the prose said "ASCII".
 #[must_use]
 pub fn is_media_type(s: &str) -> bool {
     (1..=MAX_MEDIA_TYPE_BYTES).contains(&s.len()) && s.bytes().all(|b| (0x20..=0x7e).contains(&b))

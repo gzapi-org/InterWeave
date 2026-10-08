@@ -65,7 +65,9 @@ impl BroadcastMessageV1 {
         if let Some(m) = &self.media_type
             && !is_media_type(m)
         {
-            return Err(DecodeError("media_type not 1..128 ASCII bytes".to_owned()));
+            return Err(DecodeError(
+                "media_type not 1..128 printable ASCII bytes".to_owned(),
+            ));
         }
         if self.payload.len() > MAX_PAYLOAD_BYTES {
             return Err(DecodeError("payload above the ceiling".to_owned()));

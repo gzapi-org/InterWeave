@@ -31,7 +31,9 @@ pub fn canonical_bytes(media_type: Option<&str>, payload: &[u8]) -> Result<Vec<u
         None => out.push(0),
         Some(m) => {
             if !is_media_type(m) {
-                return Err(DecodeError("media_type not 1..128 ASCII bytes".to_owned()));
+                return Err(DecodeError(
+                    "media_type not 1..128 printable ASCII bytes".to_owned(),
+                ));
             }
             out.push(1);
             out.extend_from_slice(&u16::try_from(m.len()).unwrap_or(u16::MAX).to_be_bytes());
