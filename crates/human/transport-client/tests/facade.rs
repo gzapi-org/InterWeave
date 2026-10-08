@@ -8,6 +8,8 @@
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
+mod common;
+
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
@@ -351,7 +353,7 @@ async fn an_unconfirmed_send_is_retried_under_the_stored_transport_id() {
 
 #[tokio::test]
 async fn after_a_restart_a_pending_row_is_reported_once_and_resent_under_its_id() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     let (a, b) = FakeNetwork::pair(node_config(), node_config());
     let held = raw(&b, Some(human())).await;
@@ -646,7 +648,7 @@ async fn a_stopped_runtime_takes_the_session_and_connectivity_to_reconnecting_an
 #[tokio::test]
 async fn degraded_storage_refuses_a_send_and_releases_the_lease() {
     let (_a, b) = FakeNetwork::pair(node_config(), node_config());
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     drop(HumanStore::open(&path, StoreOptions::default()).expect("create"));
     // A quota below the file's size opens degraded (StoreOptions docs).
@@ -758,7 +760,7 @@ async fn a_send_this_client_cannot_make_is_refused_with_no_row() {
 async fn a_restarted_row_the_config_no_longer_allows_needs_attention_and_keeps_the_session() {
     // P2-1: such a row used to bounce the session forever, dropping inbound
     // that was already accepted with every close.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     let (a, b) = FakeNetwork::pair(node_config(), node_config());
     {
@@ -903,7 +905,7 @@ async fn deliver(from: &impl DataSessionPort, to: &TransportIdentity, id: u8, te
 async fn storage_failing_mid_session_releases_the_held_lease_and_a_recheck_restores_it() {
     // P2-3: a READY session, holding its lease, whose inbound commit meets
     // a full store.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let (a, b) = FakeNetwork::pair(node_config(), node_config());
     let mut receiver = client(&b, human(), store_with_room_for_one(dir.path()));
     ready(&mut receiver, 0).await;
@@ -943,7 +945,7 @@ async fn storage_failing_mid_session_releases_the_held_lease_and_a_recheck_resto
 async fn a_degrade_returns_to_refused_and_never_leaves_closed() {
     let (_a, b) = FakeNetwork::pair(node_config(), node_config());
     let holder = raw(&b, Some(human())).await;
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let mut refused = client(&b, human(), store_with_room_for_one(dir.path()));
     refused.tick(0).await;
     assert!(matches!(
@@ -973,7 +975,7 @@ async fn a_degrade_returns_to_refused_and_never_leaves_closed() {
     drop(refused);
     holder.close().await.expect("released");
 
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let mut closed = client(&b, human(), store_with_room_for_one(dir.path()));
     ready(&mut closed, 0).await;
     closed.close().await;
@@ -1111,7 +1113,7 @@ async fn a_send_after_the_lease_was_revoked_is_retried_once_the_lease_is_reclaim
 
 #[tokio::test]
 async fn a_pending_row_that_no_longer_reads_is_counted_not_silently_stalled() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     let (a, b) = FakeNetwork::pair(node_config(), node_config());
     let _held = raw(&b, Some(human())).await;
@@ -1284,7 +1286,7 @@ async fn a_snapshot_past_the_cap_is_kept_in_the_store_and_announced() {
 
 #[tokio::test]
 async fn a_close_whose_take_meets_a_full_store_degrades_rather_than_reconnects() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let (a, b) = FakeNetwork::pair(node_config(), node_config());
     let mut receiver = client(&b, human(), store_with_room_for_one(dir.path()));
     ready(&mut receiver, 0).await;

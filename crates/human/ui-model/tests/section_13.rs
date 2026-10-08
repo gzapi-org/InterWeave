@@ -10,6 +10,8 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
+mod common;
+
 use interweave_human_chat_protocol::{HumanChatV2, MessageKind};
 use interweave_human_client_api::{
     ClientEvent, Connectivity, Destination, Origin, OutboundStatus, SessionState, TrustList,
@@ -415,7 +417,7 @@ fn model_from(store: &HumanStore) -> UiModel {
 #[tokio::test]
 async fn s13_7_pending_outbound_and_unread_inbound_survive_restart_and_read_unkept_and_terminal_do_not()
  {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     let (a, b) = FakeNetwork::pair(
         node(vec![FakeEndpoint::open(endpoint("human"), false)]),
@@ -487,7 +489,7 @@ async fn s13_7_pending_outbound_and_unread_inbound_survive_restart_and_read_unke
 #[tokio::test]
 async fn a_message_received_while_unfocused_is_still_unread_after_a_restart() {
     // Agreed item 2c: read comes only from a focused view.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     let (a, b) = FakeNetwork::pair(
         node(vec![FakeEndpoint::open(endpoint("human"), false)]),

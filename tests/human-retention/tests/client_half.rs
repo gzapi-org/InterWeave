@@ -16,6 +16,8 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -181,7 +183,7 @@ async fn holder(node: &FakeNode) -> impl DataSessionPort {
 
 #[tokio::test]
 async fn case_1_client_the_transport_is_called_only_while_the_pending_copy_is_on_disk() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let (path, store) = store_at(dir.path());
     let (a, b) = FakeNetwork::pair(node(), node());
     let _held = holder(&b).await;
@@ -222,7 +224,7 @@ async fn case_1_client_the_transport_is_called_only_while_the_pending_copy_is_on
 
 #[tokio::test]
 async fn case_5_client_every_message_drain_hands_over_is_already_an_unread_row() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let (path, store) = store_at(dir.path());
     let (a, b) = FakeNetwork::pair(node(), node());
     let mut receiver = TransportClient::new(
@@ -276,7 +278,7 @@ async fn case_5_client_every_message_drain_hands_over_is_already_an_unread_row()
 
 #[tokio::test]
 async fn case_14_client_a_store_that_cannot_hold_unread_content_takes_no_lease() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     drop(HumanStore::open(&path, StoreOptions::default()).expect("create"));
     // A quota below the file's size opens degraded (StoreOptions docs):

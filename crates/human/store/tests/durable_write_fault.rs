@@ -19,6 +19,8 @@
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::panic)]
 
+mod common;
+
 use std::path::Path;
 use std::process::Command;
 
@@ -88,7 +90,7 @@ fn recheck_health_stays_degraded_while_durable_writes_fail() {
         return;
     }
 
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     // THE CONTROL: with no fault, a maximal message commits, and the
     // store is closed so the child starts with an empty WAL.

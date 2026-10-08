@@ -39,6 +39,8 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
+mod common;
+
 use std::path::Path;
 use std::process::Command;
 
@@ -82,7 +84,7 @@ fn memory() -> HumanStore {
 
 #[test]
 fn case_1_outbound_is_durable_before_the_call_returns() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     let mut store = HumanStore::open(&path, StoreOptions::default()).expect("opens");
     store
@@ -105,7 +107,7 @@ fn case_1_outbound_is_durable_before_the_call_returns() {
 
 #[test]
 fn case_5_inbound_is_durable_before_the_call_returns() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     let mut store = HumanStore::open(&path, StoreOptions::default()).expect("opens");
     store
@@ -330,7 +332,7 @@ fn case_10_beside_an_unkept_message_can_be_kept_again_in_the_session() {
 
 #[test]
 fn case_6_pending_outbound_and_unread_inbound_survive_a_crash() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     crash_after(&path, "durable");
 
@@ -348,7 +350,7 @@ fn case_6_pending_outbound_and_unread_inbound_survive_a_crash() {
 
 #[test]
 fn case_11_terminal_outbound_and_read_unkept_inbound_are_gone_after_a_crash() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     crash_after(&path, "ephemeral");
 
@@ -442,7 +444,7 @@ fn case_12_backup_includes_only_unread_and_kept_inbound() {
 
 #[test]
 fn case_14_a_full_store_degrades_rather_than_claiming_durability() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     let mut store = HumanStore::open(
         &path,
