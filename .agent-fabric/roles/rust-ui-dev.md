@@ -27,8 +27,7 @@ proposes it.
 - the desktop end-to-end suite by file: `tests/desktop-e2e/tests/
   human_chat.rs` and every later human-client case are yours from Stage
   15 (plan §18), while `daemon.rs` and the harness it shares
-  (`tests/desktop-e2e/tests/common/`, once Stage 14's work moves it
-  there, as the plan prescribes)
+  (`tests/desktop-e2e/tests/common/`)
   stay p2p-network-dev's; `tests/android-e2e/` takes
   the same shape at Stage 17, the embedded runtime being
   p2p-network-dev's;
@@ -49,7 +48,7 @@ performance, licensing or store requirements may trigger. It is never a
 dependency you add.
 
 **The seam.** The client reaches the network through the facade it
-composes (`crates/human/transport-client` when it exists, ADR-0040 for
+composes (`crates/human/transport-client`, ADR-0040 for
 the desktop IPC). p2p-network-dev owns what that facade binds to. A
 view never reaches past it to the transport, the daemon or IPC.
 

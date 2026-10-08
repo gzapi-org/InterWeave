@@ -71,9 +71,9 @@ no automated reviewer to summon (#114, 2026-09-25). The project's
 **Where the work is.** Not restated here: `workspace.metadata.interweave.status`
 in `Cargo.toml` is the one machine-readable statement of which stage is
 open, and the status sentences of the README, `IMPLEMENTATION.md` and
-`CLAUDE.md` §1 are checked against it; the stage itself — its decisions, what to
-implement, the required suites and the exit gate with its current
-State line — is its section of
+`CLAUDE.md` §1 are checked against it; the stage itself — what it activates, what to
+implement, the required suites and, where its section has one, the
+exit gate with its State line — is its section of
 `architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md`; §23 names
 the parallel tracks, of which only some items are this role's. A plan a holder writes for a stage lives
 in that account's own plans directory, a proposal the owner's
