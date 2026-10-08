@@ -122,6 +122,25 @@ obvious from a single run:
 - `pr-review-status.sh` reports a review of an earlier head as not on head:
   a fix range is re-reviewed before the arm, however small.
 
+## CodeQL alerts on a PR
+
+Code scanning runs on GitHub's default setup and is not a required
+context, so a red CodeQL does not stop the queue; its alert is still a
+finding, and its thread still counts as unresolved. Judge it like any
+other. One shape is settled: `rust/cleartext-logging` on a **uid**,
+which this repository prints in refusals on purpose (ADR-0028).
+
+- Source is a **function** (`foo(...)` in the alert text): add a
+  `barrierModel` row to
+  `.github/codeql/extensions/interweave-rust-models/models/uid.model.yml`,
+  under the rule its header states, in your PR.
+- Source is a **variable** named `uid` (`writes uid`): no row can reach
+  it. Dismiss the alert as "false positive" with a comment citing that
+  file, and resolve its thread.
+
+Any other source of that rule — a key, a token, a passphrase — is a
+real finding until shown otherwise.
+
 ## When to open a NEW PR
 
 **A PR waiting on review does not block the next task.** Review rounds take
