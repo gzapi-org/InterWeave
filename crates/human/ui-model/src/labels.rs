@@ -272,6 +272,10 @@ ui_texts! {
     /// The daemon refused the change: its own identity, or the list is
     /// full.
     TrustRefused => "The transport daemon refused this change. Nothing was changed.",
+    /// The daemon and the app are not the same release, so they share no
+    /// version trust needs: what helps is bringing both to one release,
+    /// not trying again.
+    TrustIncompatible => "The transport daemon is a different version from this app, so trust cannot be read or changed here. Nothing was changed.",
     /// Anything else went wrong, before anything was changed. No raw code
     /// is kept, so the text points nowhere for details.
     TrustFailed => "Trust could not be read or changed. Nothing was changed.",
@@ -374,6 +378,7 @@ pub mod placeholder_en {
             TrustProblem::Unavailable => UiText::TrustUnavailable,
             TrustProblem::NotPermitted => UiText::TrustNotPermitted,
             TrustProblem::Refused => UiText::TrustRefused,
+            TrustProblem::Incompatible => UiText::TrustIncompatible,
             TrustProblem::Internal => UiText::TrustFailed,
         })
     }
@@ -746,6 +751,34 @@ mod tests {
         let n = texts.len();
         texts.dedup();
         assert_eq!(texts.len(), n, "no two interface texts read the same");
+    }
+
+    #[test]
+    fn every_trust_problem_reads_apart() {
+        // An exhaustive match: a variant added to `TrustProblem` fails to
+        // compile here until `listed` names it. The compiler does not see the
+        // array below; add the variant there too, and raise the count.
+        const fn listed(problem: TrustProblem) -> TrustProblem {
+            match problem {
+                TrustProblem::Unavailable
+                | TrustProblem::NotPermitted
+                | TrustProblem::Refused
+                | TrustProblem::Incompatible
+                | TrustProblem::Internal => problem,
+            }
+        }
+        let mut texts: Vec<&str> = [
+            TrustProblem::Unavailable,
+            TrustProblem::NotPermitted,
+            TrustProblem::Refused,
+            TrustProblem::Incompatible,
+            TrustProblem::Internal,
+        ]
+        .map(|p| placeholder_en::trust_problem(listed(p)))
+        .to_vec();
+        texts.sort_unstable();
+        texts.dedup();
+        assert_eq!(texts.len(), 5, "each problem says its own cause");
     }
 
     #[test]
