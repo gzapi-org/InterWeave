@@ -149,29 +149,10 @@ fn open_guarded_as(
                 "owned by uid {owner}, mode {mode:04o}: not a regular file"
             )));
         }
-        if owner != 0 && owner != uid {
-            return Err(refuse(format!(
-                "owned by uid {owner}, mode {mode:04o}: owned by neither root nor uid {uid}"
-            )));
-        }
-        if mode & 0o002 != 0 {
-            return Err(refuse(format!(
-                "owned by uid {owner}, mode {mode:04o}: other-writable"
-            )));
-        }
-        // The directory walk's predicate, not a copy of it.
-        if mode & 0o020 != 0
-            && let Err(detail) = crate::persist::owners_private_group(
-                names,
-                uid,
-                gid,
-                crate::persist::access_acl_of(&file),
-            )
-        {
-            return Err(refuse(format!(
-                "owned by uid {owner}, mode {mode:04o}: {detail}"
-            )));
-        }
+        judge_document((owner, gid, mode), uid, names, || {
+            crate::persist::access_acl_of(&file)
+        })
+        .map_err(refuse)?;
         Ok(file)
     }
     #[cfg(not(target_os = "linux"))]
@@ -181,6 +162,40 @@ fn open_guarded_as(
             crate::PersistError::UnsupportedPlatform,
         ))
     }
+}
+
+/// The writer rules for `config.yaml`, on what its opened handle said:
+/// `seen` is `(owner, gid, mode)`, `uid` this process's, `acl` whether
+/// the file carries an access ACL (asked only of a group-writable one).
+/// Apart from the open so a test can stage an owner it cannot create a
+/// file as (`a_group_writable_document_is_judged_for_this_process`).
+///
+/// # Errors
+/// The refusal's detail.
+fn judge_document(
+    (owner, gid, mode): (u32, u32, u32),
+    uid: u32,
+    names: &impl crate::persist::NameService,
+    acl: impl FnOnce() -> std::io::Result<bool>,
+) -> Result<(), String> {
+    if owner != 0 && owner != uid {
+        return Err(format!(
+            "owned by uid {owner}, mode {mode:04o}: owned by neither root nor uid {uid}"
+        ));
+    }
+    if mode & 0o002 != 0 {
+        return Err(format!(
+            "owned by uid {owner}, mode {mode:04o}: other-writable"
+        ));
+    }
+    // The directory walk's predicate, not a copy of it, asked for this
+    // process's account and never the file's owner.
+    if mode & 0o020 != 0
+        && let Err(detail) = crate::persist::owners_private_group(names, uid, gid, acl())
+    {
+        return Err(format!("owned by uid {owner}, mode {mode:04o}: {detail}"));
+    }
+    Ok(())
 }
 
 impl core::fmt::Display for LoadError {
@@ -410,6 +425,42 @@ mod tests {
             }
             other => panic!("refused as another's: {:?}", other.err()),
         }
+    }
+
+    /// The predicate on `config.yaml` asks for THIS PROCESS's private
+    /// group, never the file owner's: a root-owned `0664` document in
+    /// group `root` is refused for uid 1000, and the same document in
+    /// alice's private group passes for her. A document without group
+    /// write never asks its ACL.
+    #[test]
+    #[allow(clippy::expect_used, clippy::panic)]
+    fn a_group_writable_document_is_judged_for_this_process() {
+        struct Names;
+        impl crate::persist::NameService for Names {
+            fn user_name(&self, uid: u32) -> std::io::Result<Option<String>> {
+                Ok(match uid {
+                    0 => Some("root".to_owned()),
+                    1000 => Some("alice".to_owned()),
+                    _ => None,
+                })
+            }
+            fn group(&self, gid: u32) -> std::io::Result<Option<(String, Vec<String>)>> {
+                Ok(match gid {
+                    0 => Some(("root".to_owned(), Vec::new())),
+                    1001 => Some(("alice".to_owned(), Vec::new())),
+                    _ => None,
+                })
+            }
+        }
+        let detail = super::judge_document((0, 0, 0o664), 1000, &Names, || Ok(false))
+            .expect_err("root's group is not ours");
+        assert!(detail.contains("group root (gid 0)"), "{detail}");
+        super::judge_document((0, 1001, 0o664), 1000, &Names, || Ok(false))
+            .expect("our private group, root owning the file");
+        super::judge_document((1000, 0, 0o644), 1000, &Names, || {
+            panic!("the ACL is not asked of a document without group write")
+        })
+        .expect("0644");
     }
 
     /// The private-group predicate on `config.yaml`'s own group-write
