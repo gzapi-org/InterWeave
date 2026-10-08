@@ -259,7 +259,7 @@ nonce = 128-bit CSPRNG value, encoded canonically (for example base64url without
 
 When enabled by profile policy and negotiated in `hello`, defaults are `interval=30s`, `response_timeout=10s`, `max_missed=3`. The server has at most one outstanding keepalive nonce per connection; only an exact pong for the current 128-bit nonce satisfies the probe. Stale/duplicate/wrong nonces do not reset liveness state. After the configured miss threshold the daemon closes that IPC connection and releases its endpoint lease exactly as for an ordinary disconnect. Keepalive is local liveness detection only: it is not authentication, replay protection for application messages, a network heartbeat, or a lease-renewal credential.
 
-The bound runs both ways on a connection that negotiated keepalive (A 2026-10-08). The wire carries none of the three values (`hello_response` has no keepalive members), so the client's bound is a protocol constant: `CLIENT_SILENCE_TIMEOUT = 120 s`, equal to the server's threshold at the defaults, `(interval + response_timeout) × max_missed` = (30 + 10) × 3. A client that has read no frame of any kind for that long ends the connection `Timeout`, answering its waiting calls `Timeout` — the server's pings are the heartbeat it listens for, and a server that keeps its write half open and sends nothing is detected by their absence. The timer counts frames the client reads, so a client that has stopped reading its socket (its buffer full, below) suspends it: that client's fate is the server's wedge close, not a timeout it blames on the server. A profile keeps `interval + response_timeout` at or below the constant, so a healthy server's first ping always precedes the client's bound (a validation rule). A client that did not negotiate keepalive has only the caller's own timeout and OS connection liveness. Gap at writing: ipc-client echoes pings and keeps no timer for a missing one (connection.rs), and the profile validation does not yet hold the sum; both land with p2p-network-dev-02's carry from #224.
+The bound runs both ways (A 2026-10-08). The wire tells the client neither the three values nor whether keepalive was granted (`hello_response` has no keepalive members, and a client offers the feature in every hello), so the client's bound is a protocol constant that ARMS AT THE FIRST PING THE CLIENT READS: `CLIENT_SILENCE_TIMEOUT = 120 s`. A server that has pinged has negotiated keepalive and pings every `interval` while healthy, so 120 s without a frame read after that is a real silence; before the first ping only the caller's own timeout and OS connection liveness bound the wait, as on a connection without keepalive — a daemon whose profile turns keepalive off never pings, and never arms the timer. Armed, a client that has read no frame of any kind for 120 s ends the connection `Timeout`, answering its waiting calls `Timeout`. The constant sits above the server's own threshold for a wedged client — `max_missed × interval + response_timeout`, 100 s at the defaults (probes every `interval`, a miss counted at `response_timeout` after each) — never equal to it, so the server always judges first. The timer counts frames the client reads, so a client that has stopped reading its socket (its buffer full, below) suspends it: that client's fate is the server's wedge close, not a timeout it blames on the server. A profile keeps `interval + response_timeout` at or below the constant, so a healthy server's next ping always lands inside the armed bound (a validation rule in `profile-config`; `resource-limits.md`'s keepalive rows carry it). Gap at writing: ipc-client echoes pings and keeps no timer for a missing one (connection.rs) — p2p-network-dev-02's carry from #224 — and the profile validation does not yet hold the sum, while `resource-limits.md` still admits an interval of 5 min on its own: p2p-network-dev-01's, in `profile-config`.
 
 The profile policy `ipc.keepalive.require_for_endpoint_lease` defaults to `true`. When true, any client that claims a data-plane EndpointId lease must negotiate keepalive during `hello`; otherwise endpoint claim fails with `CapabilityDenied`. Connections that do not claim an endpoint (for example a separate admin or diagnostics session) do not need keepalive solely because of this rule. Operators may set the policy false for compatibility with third-party clients, accepting that a half-open client may retain its lease until OS-level failure detection or explicit `admin.endpoints` revocation.
 
@@ -510,8 +510,8 @@ that has a request id is a `response{ok: false}`, never a `close`.
 A call that is still waiting when the connection ends answers the code
 the session ends with (A 2026-10-08): the `close` frame's code when one
 was read, `Timeout` when the client's own keepalive bound ended it
-(below), and `BackendUnavailable` when the connection ended otherwise
-with no `close` frame read. Every binding keeps the server's last frame readable
+(below; armed only after a ping was read), and `BackendUnavailable`
+when the connection ended otherwise with no `close` frame read. Every binding keeps the server's last frame readable
 after the server's close — a client whose write failed keeps reading
 what already arrived and answers its waiting calls once the reader
 stops, a reset after the `close` frame counting as the end — a
@@ -524,8 +524,8 @@ whose connection is about to read `ProtocolViolation` would tell it to
 retry a session the daemon refused. No timer of its own: on a connection
 that negotiated keepalive, the client's keepalive bound (§Disconnect/
 reconnect and optional keepalive, A 2026-10-08: `CLIENT_SILENCE_TIMEOUT`,
-120 s of frames unread) ends a server that keeps its write half open
-and sends nothing with `Timeout`; without
+120 s with no frame read, armed at the first ping) ends a server that
+keeps its write half open and sends nothing with `Timeout`; without
 keepalive only the caller's own timeout and OS connection liveness do. Gap at writing: the
 ipc-client as shipped (6eb4bb58) answers every waiting call
 `BackendUnavailable` at once on a write failure and lets a later `close`
