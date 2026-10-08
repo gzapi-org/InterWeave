@@ -209,17 +209,13 @@ failed() {  # failed <name> <sandbox flag file> <expected message part>
     run "stage13-45ba3928 $SHA_A" "$SANDBOX/out"
     if [[ $rc -eq 1 && "$out" == *"$3"* && -z "$(ls -A "$SANDBOX/out")" ]] && scratch_empty \
        && { ! grep -q 'worktree add' "$SANDBOX/log" || grep -q '^git .* worktree remove --force ' "$SANDBOX/log"; }; then
-        pass "fails, leaving no entry and no scratch: $1"
-    else fail "fails, leaving no entry and no scratch: $1" "rc=$rc $out $(ls -A "$SANDBOX/out" "$SANDBOX/tmp")"; fi
+        pass "fails, leaving no entry, worktree or scratch: $1"
+    else fail "fails, leaving no entry, worktree or scratch: $1" "rc=$rc $out $(ls -A "$SANDBOX/out" "$SANDBOX/tmp")"; fi
 }
 failed "the fetch" fetch-fails "could not fetch"
 failed "the worktree" worktree-fails "could not check"
 failed "the second app's build" cargo-fails-transportctl "could not build transportctl"
 failed "a build that leaves no binary" cargo-no-output-transport-daemon "left no executable"
-
-if grep -q 'worktree add' "$SANDBOX/log" && grep -q '^git .* worktree remove --force ' "$SANDBOX/log"; then
-    pass "(the failure cases above that added a worktree removed it)"
-else fail "(the failure cases above that added a worktree removed it)" "$(cat "$SANDBOX/log")"; fi
 
 # --- a remove that fails: prune, run once the scratch is gone ----------
 reset
@@ -257,21 +253,28 @@ if [[ $rc -eq 1 && "$out" == *"could not install the toolchain"* && -z "$(ls -A 
     pass "a toolchain that will not install fails before cargo, leaving nothing"
 else fail "a toolchain that will not install fails before cargo, leaving nothing" "rc=$rc $out"; fi
 
-# --- TERM mid-build: the run ends, leaving no entry and no scratch -----
+# --- INT or TERM mid-build: no entry, worktree or scratch is left -----
 # To the process group, as a cancelled CI step's is, so cargo ends too.
-reset
-touch "$SANDBOX/cargo-hangs"
-printf '%s\n' "stage13-45ba3928 $SHA_A" > "$SANDBOX/list"
-PATH="$BIN:$SYS_PATH" TMPDIR="$SANDBOX/tmp" RUNNER_TEMP="" \
-    setsid bash "$UNDER_TEST" --list "$SANDBOX/list" "$SANDBOX/out" >"$SANDBOX/term-out" 2>&1 &
-pid=$!
-for _ in $(seq 100); do [[ -e "$SANDBOX/cargo-started" ]] && break; sleep 0.1; done
-kill -TERM -- "-$pid" 2>/dev/null
-wait "$pid"; rc=$?
-if [[ -e "$SANDBOX/cargo-started" && $rc -eq 143 && -z "$(ls -A "$SANDBOX/out")" ]] && scratch_empty \
-   && grep -q '^git .* worktree remove --force ' "$SANDBOX/log"; then
-    pass "TERM mid-build exits 143, leaving no entry, worktree or scratch"
-else fail "TERM mid-build exits 143, leaving no entry, worktree or scratch" "rc=$rc $(cat "$SANDBOX/term-out") $(ls -A "$SANDBOX/out" "$SANDBOX/tmp")"; fi
+# Started with INT's default restored: a `&` job of a non-interactive
+# shell starts with INT ignored, which a CI step's shell does not.
+command -v python3 >/dev/null || { echo "test_build_previous_builds: python3 is needed (the INT case restores INT's default)" >&2; exit 1; }
+for sig in INT:130 TERM:143; do
+    name="${sig%%:*}"; want="${sig##*:}"
+    reset
+    touch "$SANDBOX/cargo-hangs"
+    printf '%s\n' "stage13-45ba3928 $SHA_A" > "$SANDBOX/list"
+    PATH="$BIN:$SYS_PATH" TMPDIR="$SANDBOX/tmp" RUNNER_TEMP="" \
+        python3 -c 'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+        bash "$UNDER_TEST" --list "$SANDBOX/list" "$SANDBOX/out" >"$SANDBOX/sig-out" 2>&1 &
+    pid=$!
+    for _ in $(seq 100); do [[ -e "$SANDBOX/cargo-started" ]] && break; sleep 0.1; done
+    kill "-$name" -- "-$pid" 2>/dev/null
+    wait "$pid"; rc=$?
+    if [[ -e "$SANDBOX/cargo-started" && $rc -eq $want && -z "$(ls -A "$SANDBOX/out")" ]] && scratch_empty \
+       && grep -q '^git .* worktree remove --force ' "$SANDBOX/log"; then
+        pass "$name mid-build exits $want, leaving no entry, worktree or scratch"
+    else fail "$name mid-build exits $want, leaving no entry, worktree or scratch" "rc=$rc $(cat "$SANDBOX/sig-out") $(ls -A "$SANDBOX/out" "$SANDBOX/tmp")"; fi
+done
 
 # --- usage --------------------------------------------------------------
 reset
