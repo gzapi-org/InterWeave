@@ -99,8 +99,8 @@ fn write_atomic_with_mode(
     // path does not exist yet, and does nothing at all when it does --
     // so the module's own statement that "the directory matters as much
     // as the file" was an argument the code did not make. Everything
-    // after happens under the parent AS RESOLVED by that check, never
-    // the configured text (ADR-0028 A 2026-10-08).
+    // after happens under the parent AS RESOLVED by that check
+    // (ADR-0028 A 2026-10-08).
     let (parent, path) = if mode.is_some() {
         create_private_dir(parent_dir(path))?;
         let parent = resolve_private_dir(parent_dir(path))?;
@@ -355,8 +355,9 @@ fn temp_beside(path: &Path) -> std::path::PathBuf {
 /// ancestor another account can write is a directory that account can
 /// rename away and replace, so the mode alone promised nothing.
 ///
-/// Every caller opens under the RETURNED path, never the configured
-/// text: the rule makes that path's components unchangeable by anyone
+/// The callers that open -- the private writers, the identity loader,
+/// both locks, the trust overlay's read -- open under the RETURNED path:
+/// the rule makes that path's components unchangeable by anyone
 /// but root and this uid, which is what a check before an open needs to
 /// mean -- it is the precondition under which the kernel refuses the
 /// swap, so no check-then-open race is left to argue about.

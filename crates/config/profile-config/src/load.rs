@@ -116,6 +116,10 @@ impl core::fmt::Display for LoadError {
                 "{} cannot be resolved to judge identity.key_file's place: {source}",
                 path.display()
             ),
+            Self::ConfigDirUnguarded(crate::PersistError::UnsupportedPlatform) => write!(
+                f,
+                "the profile's configuration directory cannot be judged on this platform"
+            ),
             Self::ConfigDirUnguarded(e) => write!(
                 f,
                 "the profile's configuration directory can be changed by another account: {e}"
