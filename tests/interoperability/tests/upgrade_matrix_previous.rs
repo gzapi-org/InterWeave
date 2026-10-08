@@ -4,51 +4,55 @@
 //! The upgrade matrix's "previous build" axis (testing.md §Compatibility
 //! fixtures, A 2026-10-08): each production build in
 //! `tools/ci/previous-builds.txt`, built from its own commit as a second
-//! binary, against HEAD.
+//! binary, against HEAD's own binaries.
 //!
 //! - **The entry set.** The built entries under `INTERWEAVE_PREVIOUS_BUILDS`
 //!   are exactly the list's labels, each with both binaries. An entry added
 //!   without its build fails here, and so does a stale build.
-//! - **HEAD's client against the old daemon.** HEAD's IPC client opens a
-//!   leased data session and an admin port on the old daemon's sockets,
-//!   negotiating down to the minor the old build speaks.
-//! - **The old client against HEAD's daemon.** The old `transportctl`,
-//!   which was that build's only IPC client, reads `status` and the
-//!   endpoint list from HEAD's IPC server. HEAD's server is bound where
-//!   HEAD's own path rules put it for the profile, so this also holds the
-//!   socket layout across builds.
-//! - **Peer to peer.** The old daemon and HEAD's runtime exchange direct
-//!   messages and broadcasts in both directions. The old side's sessions are
-//!   HEAD's IPC client on the old daemon's socket.
+//! - **HEAD's client against the previous daemon.** HEAD's IPC client
+//!   opens a leased data session and an admin port on that daemon's
+//!   sockets, negotiating down to the minor the old build speaks.
+//! - **The previous client against HEAD's daemon.** The old
+//!   `transportctl`, that build's only IPC client, reads `status` and the
+//!   endpoint list from HEAD's `transport-daemon` binary, run in the same
+//!   XDG tree. Each build resolves the profile's sockets by its own path
+//!   rules, so the row also holds the socket layout across builds.
+//! - **Peer to peer.** The previous daemon and HEAD's daemon exchange
+//!   direct messages and broadcasts in both directions, each side's sessions
+//!   opened by HEAD's IPC client on that daemon's sockets.
+//!
+//! Every IPC await and every child process is bounded by `PATIENCE`. A
+//! daemon that accepts a connection and never answers fails the row with
+//! that daemon's log; it does not run out the CI job's clock.
 //!
 //! Every row is `#[ignore]`: a plain `cargo test` has no second binary.
-//! CI builds the list and runs this file with `--ignored`, and then a missing
-//! variable or entry FAILS, never skips (devex-tooling's interface,
-//! 01a11c9e).
+//! CI builds the list and HEAD's `transport-daemon`, then runs this file
+//! with `--ignored`. Run that way, `builds()` panics when the variable is
+//! unset, and the entry-set row fails when an entry is missing or extra
+//! (devex-tooling's interface, 01a11c9e).
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
+use std::future::Future;
 use std::net::{Ipv4Addr, TcpListener};
 use std::os::unix::fs::DirBuilderExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::pin::Pin;
+use std::process::{Child, Command, Output, Stdio};
 use std::time::Duration;
 
 use interweave_ipc_client::{IpcBinding, SocketPaths as ClientSockets};
-use interweave_ipc_server::{KeepalivePolicy, Limits, ServerConfig, SocketPaths, bind, serve};
 use interweave_local_client_api::{
     AdminBinding as _, AdminCapability, AdminPort as _, DataCapability, DataSessionBinding as _,
     DataSessionPort, SessionEvent, SessionRequest,
 };
 use interweave_local_client_conformance_tests::{PATIENCE, receive};
-use interweave_profile_config::{ProfileConfig, ProfilePaths, XdgRoots};
+use interweave_profile_config::{ProfilePaths, XdgRoots};
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::{
     BroadcastMessageV1, ChannelId, DirectDestination, EndpointId, MessageId, Payload,
-    TransportRuntime as _,
+    TransportIdentity,
 };
-use interweave_transport_composition::{ComposedRuntime, CompositionOptions};
-use tokio::sync::oneshot;
 
 const VARIABLE: &str = "INTERWEAVE_PREVIOUS_BUILDS";
 
@@ -60,15 +64,16 @@ fn root() -> PathBuf {
         .to_path_buf()
 }
 
-/// `tools/ci/previous-builds.txt`: `<label> <sha>` per line; `#` comments
-/// and blank lines skipped.
+/// `tools/ci/previous-builds.txt`: `<label> <sha>` per line. Anything from
+/// a `#` to the line's end is a comment, as `build_previous_builds.sh`
+/// reads it, and blank lines are skipped.
 fn listed() -> Vec<(String, String)> {
     let path = root().join("tools/ci/previous-builds.txt");
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     let entries: Vec<(String, String)> = text
         .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| l.split('#').next().unwrap_or_default().trim())
+        .filter(|l| !l.is_empty())
         .map(|l| {
             let mut words = l.split_whitespace();
             let label = words.next().expect("a label").to_owned();
@@ -84,13 +89,29 @@ fn listed() -> Vec<(String, String)> {
     entries
 }
 
-/// The directory CI built into. Unset is a failure: these rows are only
-/// ever run when CI means them to.
+/// The directory CI built into; panics when the variable is unset.
 fn builds() -> PathBuf {
     PathBuf::from(
         std::env::var_os(VARIABLE)
             .unwrap_or_else(|| panic!("{VARIABLE} is unset: these rows need the previous builds")),
     )
+}
+
+/// HEAD's `transport-daemon`, beside this test's own build:
+/// `target/<profile>/deps/<test>` -> `target/<profile>/transport-daemon`.
+fn head_daemon() -> PathBuf {
+    let exe = std::env::current_exe().expect("this test's path");
+    let bin = exe
+        .parent()
+        .and_then(Path::parent)
+        .expect("a target directory")
+        .join("transport-daemon");
+    assert!(
+        bin.exists(),
+        "{} is missing: build it first (cargo build -p interweave-transport-daemon)",
+        bin.display()
+    );
+    bin
 }
 
 /// One listed build's two binaries.
@@ -154,8 +175,8 @@ fn private_dir(path: &Path) {
         .expect("a private directory");
 }
 
-/// One XDG tree for one profile. The old build resolves its paths in it
-/// by its own rules, and HEAD by HEAD's.
+/// One XDG tree for one profile. Each build resolves its paths in it by
+/// its own rules; HEAD's are what this side writes and connects to.
 struct Home {
     _root: tempfile::TempDir,
     roots: XdgRoots,
@@ -181,7 +202,6 @@ impl Home {
         }
     }
 
-    /// HEAD's paths for this profile.
     fn paths(&self) -> ProfilePaths {
         ProfilePaths::resolve(&self.profile, &self.roots).expect("paths")
     }
@@ -207,6 +227,12 @@ impl Home {
         std::fs::write(file, yaml).expect("the profile written");
     }
 
+    fn write_key(&self, identity: &ProfileIdentity) {
+        let file = self.paths().identity_file();
+        private_dir(file.parent().expect("an identity directory"));
+        identity.save(&file).expect("the key saved");
+    }
+
     fn client(&self) -> IpcBinding {
         let p = self.paths();
         IpcBinding::new(
@@ -219,46 +245,52 @@ impl Home {
     }
 }
 
-/// An old daemon process; killed on drop, its log kept for the failure
-/// message.
-struct OldDaemon {
+/// A daemon process of either build; killed on drop, its log kept for
+/// every failure message.
+struct Daemon {
     child: Child,
     log: PathBuf,
+    which: String,
 }
 
-impl OldDaemon {
-    async fn start(home: &Home, bin: &Path) -> Self {
-        let log = home.roots.state_home.with_file_name("daemon.log");
+impl Daemon {
+    async fn start(home: &Home, bin: &Path, which: &str, extra: &[&str]) -> Self {
+        let log = home.roots.state_home.with_file_name(format!("{which}.log"));
         let child = home
             .command(bin)
-            .arg("--create-identity")
+            .args(extra)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(std::fs::File::create(&log).expect("a log"))
             .spawn()
-            .expect("the old daemon starts");
-        let mut daemon = Self { child, log };
+            .unwrap_or_else(|e| panic!("{which}: {}: {e}", bin.display()));
+        let mut daemon = Self {
+            child,
+            log,
+            which: which.to_owned(),
+        };
         // Serving once its admin socket answers a status: a socket file is
-        // not enough, a killed daemon leaves one behind.
+        // not enough, a killed daemon leaves one behind. Each attempt is
+        // bounded, so a daemon that accepts and never answers fails here.
         let deadline = tokio::time::Instant::now() + PATIENCE;
         loop {
-            let ready = async {
+            let attempt = tokio::time::timeout(Duration::from_secs(2), async {
                 let admin = home
                     .client()
                     .admin([AdminCapability::Status].into())
                     .await
                     .ok()?;
                 admin.status().await.ok()
-            };
-            if ready.await.is_some() {
+            });
+            if let Ok(Some(_)) = attempt.await {
                 return daemon;
             }
             if let Ok(Some(status)) = daemon.child.try_wait() {
-                panic!("the old daemon exited ({status}):\n{}", daemon.log());
+                panic!("{which} exited ({status}):\n{}", daemon.log());
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "the old daemon never served:\n{}",
+                "{which} never served:\n{}",
                 daemon.log()
             );
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -268,16 +300,78 @@ impl OldDaemon {
     fn log(&self) -> String {
         std::fs::read_to_string(&self.log).unwrap_or_default()
     }
+
+    /// `fut`, or a panic naming `what` and carrying this daemon's log.
+    /// Boxed: the IPC client's futures are large, and a caller holding
+    /// several on its stack would be larger still.
+    fn within<'a, T: 'a>(
+        &'a self,
+        what: &'a str,
+        fut: impl Future<Output = T> + 'a,
+    ) -> Pin<Box<dyn Future<Output = T> + 'a>> {
+        Box::pin(async move {
+            tokio::time::timeout(PATIENCE, fut)
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "{}: {what} took more than {PATIENCE:?}:\n{}",
+                        self.which,
+                        self.log()
+                    )
+                })
+        })
+    }
+
+    /// The daemon's own `PeerId`, from its admin status.
+    fn peer<'a>(&'a self, home: &'a Home) -> Pin<Box<dyn Future<Output = TransportIdentity> + 'a>> {
+        self.within("the admin status", async move {
+            home.client()
+                .admin([AdminCapability::Status].into())
+                .await
+                .expect("an admin port")
+                .status()
+                .await
+                .expect("a status")
+                .peer
+        })
+    }
 }
 
-impl Drop for OldDaemon {
+impl Drop for Daemon {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
 }
 
-/// A profile both builds read: only keys the Stage 13 build already had.
+/// Run `command` to completion within `PATIENCE`, killing it if it hangs.
+fn run_bounded(mut command: Command, what: &str) -> Output {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("{what}: {e}"));
+    let deadline = std::time::Instant::now() + PATIENCE;
+    loop {
+        if child.try_wait().expect("a status").is_some() {
+            return child.wait_with_output().expect("its output");
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let out = child.wait_with_output().expect("its output");
+            panic!(
+                "{what} took more than {PATIENCE:?}:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// A profile both builds read: only keys the Stage 13 build already had,
+/// which its `deny_unknown_fields` holds this to. `profile.name` must equal
+/// `--profile`.
 fn profile_yaml(name: &str, trusted: &str, listen: &str, statics: &[String]) -> String {
     let providers = if statics.is_empty() {
         "[]".to_owned()
@@ -330,8 +424,8 @@ fn stranger() -> String {
         .to_owned()
 }
 
-/// Row: HEAD's IPC client on the old daemon's sockets — a leased data
-/// session and the admin status, at the minor the old build speaks.
+/// Row: HEAD's IPC client on each previous daemon's sockets — a leased
+/// data session and the admin status, at the minor the old build speaks.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs INTERWEAVE_PREVIOUS_BUILDS"]
 async fn heads_client_is_served_by_each_previous_daemon() {
@@ -343,142 +437,63 @@ async fn heads_client_is_served_by_each_previous_daemon() {
             "/ip4/127.0.0.1/tcp/0",
             &[],
         ));
-        let daemon = OldDaemon::start(&home, &entry.daemon).await;
+        let old = Daemon::start(&home, &entry.daemon, &entry.label, &["--create-identity"]).await;
 
-        let admin = home
-            .client()
-            .admin([AdminCapability::Status].into())
-            .await
-            .unwrap_or_else(|e| panic!("{}: admin port: {e:?}\n{}", entry.label, daemon.log()));
-        let status = admin.status().await.expect("status");
+        let peer = old.peer(&home).await;
         assert!(
-            status.peer.as_str().starts_with("12D3KooW"),
-            "{}: {status:?}",
+            peer.as_str().starts_with("12D3KooW"),
+            "{}: {peer:?}",
             entry.label
         );
 
-        let session = home
-            .client()
-            .open(human_session())
+        let session = old
+            .within("a leased session", home.client().open(human_session()))
             .await
-            .unwrap_or_else(|e| panic!("{}: lease: {e:?}\n{}", entry.label, daemon.log()));
-        session
-            .join(ChannelId::parse("interop").expect("valid"))
-            .await
-            .unwrap_or_else(|e| panic!("{}: join: {e:?}", entry.label));
-        session.close().await.expect("closes");
-        drop(daemon);
-    }
-}
-
-/// HEAD's daemon, in-process: the composed runtime and HEAD's IPC server,
-/// bound where HEAD's path rules put the profile's sockets.
-struct HeadDaemon {
-    stop: Option<oneshot::Sender<()>>,
-    server: tokio::task::JoinHandle<()>,
-    runtime: Option<ComposedRuntime>,
-}
-
-impl HeadDaemon {
-    async fn start(
-        home: &Home,
-        identity: &ProfileIdentity,
-        profile: &ProfileConfig,
-        listen: &str,
-    ) -> Self {
-        let runtime = ComposedRuntime::start(
-            identity,
-            profile,
-            CompositionOptions {
-                listen: vec![listen.to_owned()],
-                ..CompositionOptions::default()
-            },
+            .unwrap_or_else(|e| panic!("{}: lease: {e:?}\n{}", entry.label, old.log()));
+        old.within(
+            "a join",
+            session.join(ChannelId::parse("interop").expect("valid")),
         )
         .await
-        .expect("HEAD composes");
-        let p = home.paths();
-        let paths = SocketPaths {
-            data: p.data_socket().expect("data"),
-            admin: p.admin_socket().expect("admin"),
-            run_dir: p
-                .data_socket()
-                .expect("data")
-                .parent()
-                .expect("a run dir")
-                .to_path_buf(),
-        };
-        let listeners = bind(&paths).expect("binds");
-        let config = ServerConfig {
-            peer: identity.transport_identity().expect("peer"),
-            limits: Limits::default(),
-            keepalive: KeepalivePolicy::default(),
-            shutdown_grace: Duration::from_secs(1),
-            command_deadline: Duration::from_secs(10),
-            write_stall: interweave_ipc_server::WRITE_STALL,
-        };
-        let (stop, stopped) = oneshot::channel();
-        let binding = runtime.sessions();
-        let server = tokio::spawn(async move {
-            let _ = serve(listeners, binding, config, async {
-                let _ = stopped.await;
-            })
-            .await;
-        });
-        Self {
-            stop: Some(stop),
-            server,
-            runtime: Some(runtime),
-        }
-    }
-
-    fn runtime(&self) -> &ComposedRuntime {
-        self.runtime.as_ref().expect("running")
-    }
-
-    async fn stop(mut self) {
-        let _ = self.stop.take().expect("once").send(());
-        self.server.await.expect("the server stops");
-        self.runtime
-            .take()
-            .expect("once")
-            .shutdown()
+        .unwrap_or_else(|e| panic!("{}: join: {e:?}", entry.label));
+        old.within("a close", session.close())
             .await
-            .expect("HEAD stops");
+            .expect("closes");
     }
 }
 
-/// Row: the old `transportctl` against HEAD's daemon — `status` and
-/// `endpoints list` answered, the profile's own `PeerId` in the status.
+/// Row: each previous `transportctl` against HEAD's daemon binary, in one
+/// XDG tree — `status` names HEAD's `PeerId`, `endpoints list` names the
+/// configured endpoint.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs INTERWEAVE_PREVIOUS_BUILDS"]
 async fn each_previous_transportctl_is_served_by_heads_daemon() {
+    let head_bin = head_daemon();
     for entry in entries() {
         let home = Home::new("head");
         let identity = ProfileIdentity::generate();
         let peer = identity.transport_identity().expect("peer");
-        let profile: ProfileConfig = serde_norway::from_str(&profile_yaml(
+        home.write_key(&identity);
+        home.write_config(&profile_yaml(
             "head",
             &stranger(),
             "/ip4/127.0.0.1/tcp/0",
             &[],
-        ))
-        .expect("parses");
-        let head = HeadDaemon::start(&home, &identity, &profile, "/ip4/127.0.0.1/tcp/0").await;
+        ));
+        let head = Daemon::start(&home, &head_bin, "HEAD's daemon", &[]).await;
 
         for args in [&["status"][..], &["endpoints", "list"][..]] {
-            let out = home
-                .command(&entry.transportctl)
-                .args(args)
-                .stdin(Stdio::null())
-                .output()
-                .expect("the old transportctl runs");
+            let mut command = home.command(&entry.transportctl);
+            command.args(args);
+            let out = run_bounded(command, &format!("{}: transportctl {args:?}", entry.label));
             let stdout = String::from_utf8_lossy(&out.stdout);
             assert!(
                 out.status.success(),
-                "{}: transportctl {args:?}: {}\n{stdout}\n{}",
+                "{}: transportctl {args:?}: {}\n{stdout}\n{}\n{}",
                 entry.label,
                 out.status,
-                String::from_utf8_lossy(&out.stderr)
+                String::from_utf8_lossy(&out.stderr),
+                head.log()
             );
             if args == ["status"] {
                 assert!(
@@ -494,12 +509,13 @@ async fn each_previous_transportctl_is_served_by_heads_daemon() {
                 );
             }
         }
-        head.stop().await;
     }
 }
 
-/// A port free on `ip` now, so HEAD's address can be written into the
-/// old daemon's profile before HEAD starts.
+/// A port free on `ip` now, so an address can be written into the other
+/// side's profile before its daemon starts. Picked, released and bound
+/// later: another process can take it in between, which fails the row
+/// loudly (the daemon refuses to listen), never silently.
 fn free_port(ip: Ipv4Addr) -> u16 {
     TcpListener::bind((ip, 0))
         .expect("binds")
@@ -508,77 +524,82 @@ fn free_port(ip: Ipv4Addr) -> u16 {
         .port()
 }
 
-/// Row: the old daemon and HEAD's runtime, peer to peer — direct both ways
-/// and broadcast both ways.
+/// Row: each previous daemon and HEAD's daemon, peer to peer — direct both
+/// ways and broadcast both ways.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs INTERWEAVE_PREVIOUS_BUILDS"]
 async fn each_previous_daemon_exchanges_with_head_both_ways() {
+    let head_bin = head_daemon();
     let ip = interweave_test_support::net::require_private_interface_v4();
     for entry in entries() {
-        // HEAD's identity and address first, so the old profile can name
-        // them; the old daemon creates its own key, read back from its status.
+        // HEAD's key and address first, so the old profile can name them;
+        // the old daemon creates its own key, read back from its status,
+        // and HEAD's profile names it. Each side holds a static route to
+        // the other, so whichever starts second connects.
         let head_identity = ProfileIdentity::generate();
         let head_peer = head_identity.transport_identity().expect("peer");
-        let head_listen = format!("/ip4/{ip}/tcp/{}", free_port(ip));
-        let head_route = format!("{head_listen}/p2p/{}", head_peer.as_str());
+        let (head_port, old_port) = loop {
+            let (a, b) = (free_port(ip), free_port(ip));
+            if a != b {
+                break (a, b);
+            }
+        };
+        let head_listen = format!("/ip4/{ip}/tcp/{head_port}");
+        let old_listen = format!("/ip4/{ip}/tcp/{old_port}");
 
         let old_home = Home::new("old");
-        // A port picked for the old daemon too: HEAD starts second, so HEAD
-        // holds a static route to the old daemon, which is already up.
-        let old_listen = format!("/ip4/{ip}/tcp/{}", free_port(ip));
         old_home.write_config(&profile_yaml(
             "old",
             head_peer.as_str(),
             &old_listen,
-            &[head_route],
+            &[format!("{head_listen}/p2p/{}", head_peer.as_str())],
         ));
-        let old = OldDaemon::start(&old_home, &entry.daemon).await;
-        let old_peer = old_home
-            .client()
-            .admin([AdminCapability::Status].into())
-            .await
-            .expect("admin")
-            .status()
-            .await
-            .expect("status")
-            .peer;
+        let old = Daemon::start(
+            &old_home,
+            &entry.daemon,
+            &entry.label,
+            &["--create-identity"],
+        )
+        .await;
+        let old_peer = old.peer(&old_home).await;
 
-        let head_profile: ProfileConfig = serde_norway::from_str(&profile_yaml(
+        let head_home = Home::new("head");
+        head_home.write_key(&head_identity);
+        head_home.write_config(&profile_yaml(
             "head",
             old_peer.as_str(),
             &head_listen,
             &[format!("{old_listen}/p2p/{}", old_peer.as_str())],
-        ))
-        .expect("parses");
-        let head_home = Home::new("head");
-        let head = HeadDaemon::start(&head_home, &head_identity, &head_profile, &head_listen).await;
+        ));
+        let head = Daemon::start(&head_home, &head_bin, "HEAD's daemon", &[]).await;
 
         let at_head = head
-            .runtime()
-            .sessions()
-            .open(human_session())
+            .within("a leased session", head_home.client().open(human_session()))
             .await
             .expect("leases");
-        let at_old = old_home
-            .client()
-            .open(human_session())
+        let at_old = old
+            .within("a leased session", old_home.client().open(human_session()))
             .await
             .expect("leases");
         let human = EndpointId::parse("human").expect("valid");
         let payload = |s: &str| Payload::at_ceiling(None, s.as_bytes().to_vec()).expect("fits");
+        let logs = || format!("{}\n--- HEAD ---\n{}", old.log(), head.log());
 
-        // Direct, HEAD to old: retried while the old daemon's static route
-        // to HEAD has not yet connected.
+        // Direct, HEAD to old: retried until the two daemons are connected,
+        // on whichever static route connects first.
         let deadline = tokio::time::Instant::now() + PATIENCE;
         loop {
-            let sent = at_head
-                .send_direct(
-                    DirectDestination {
-                        peer: old_peer.clone(),
-                        endpoint: Some(human.clone()),
-                    },
-                    MessageId::from_bytes([1; 16]),
-                    payload("head to old"),
+            let sent = head
+                .within(
+                    "HEAD's direct send",
+                    at_head.send_direct(
+                        DirectDestination {
+                            peer: old_peer.clone(),
+                            endpoint: Some(human.clone()),
+                        },
+                        MessageId::from_bytes([1; 16]),
+                        payload("head to old"),
+                    ),
                 )
                 .await;
             match sent {
@@ -590,12 +611,12 @@ async fn each_previous_daemon_exchanges_with_head_both_ways() {
                     tokio::time::Instant::now() < deadline,
                     "{}: HEAD's send never accepted: {e:?}\n{}",
                     entry.label,
-                    old.log()
+                    logs()
                 ),
             }
             tokio::time::sleep(Duration::from_millis(300)).await;
         }
-        let got = receive(&at_old, PATIENCE).await;
+        let got = old.within("a receive", receive(&at_old, PATIENCE)).await;
         assert!(
             got.iter().any(
                 |e| matches!(e, SessionEvent::Direct(m) if m.payload.bytes() == b"head to old")
@@ -605,18 +626,20 @@ async fn each_previous_daemon_exchanges_with_head_both_ways() {
         );
 
         // Direct, old to HEAD.
-        at_old
-            .send_direct(
+        old.within(
+            "the old daemon's direct send",
+            at_old.send_direct(
                 DirectDestination {
                     peer: head_peer.clone(),
                     endpoint: Some(human.clone()),
                 },
                 MessageId::from_bytes([2; 16]),
                 payload("old to head"),
-            )
-            .await
-            .unwrap_or_else(|e| panic!("{}: the old daemon's send: {e:?}", entry.label));
-        let got = receive(&at_head, PATIENCE).await;
+            ),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{}: the old daemon's send: {e:?}\n{}", entry.label, logs()));
+        let got = head.within("a receive", receive(&at_head, PATIENCE)).await;
         assert!(
             got.iter().any(
                 |e| matches!(e, SessionEvent::Direct(m) if m.payload.bytes() == b"old to head")
@@ -625,24 +648,28 @@ async fn each_previous_daemon_exchanges_with_head_both_ways() {
             entry.label
         );
 
-        // Broadcast both ways: published until it arrives, the mesh forming
-        // on its own schedule.
+        // Broadcast both ways, published until it arrives.
         let channel = ChannelId::parse("interop").expect("valid");
-        at_head.join(channel.clone()).await.expect("joins");
-        at_old.join(channel.clone()).await.expect("joins");
-        let ctx = format!("{}\n{}", entry.label, old.log());
+        head.within("a join", at_head.join(channel.clone()))
+            .await
+            .expect("joins");
+        old.within("a join", at_old.join(channel.clone()))
+            .await
+            .expect("joins");
+        let ctx = format!("{}\n{}", entry.label, logs());
         broadcast_until_received(&at_head, &at_old, &channel, "head broadcast", &ctx).await;
         broadcast_until_received(&at_old, &at_head, &channel, "old broadcast", &ctx).await;
 
-        at_head.close().await.expect("closes");
-        at_old.close().await.expect("closes");
-        head.stop().await;
-        drop(old);
+        head.within("a close", at_head.close())
+            .await
+            .expect("closes");
+        old.within("a close", at_old.close()).await.expect("closes");
     }
 }
 
 /// Publish on `channel` from `from` until `to` receives it: the mesh forms
-/// on its own schedule, and each republish is a new message.
+/// on its own schedule, and each republish is a new message. Every await
+/// is bounded, and so is the whole.
 async fn broadcast_until_received<F, T>(
     from: &F,
     to: &T,
@@ -657,17 +684,15 @@ async fn broadcast_until_received<F, T>(
     let mut n = 0u8;
     loop {
         n = n.wrapping_add(1);
-        let _ = from
-            .broadcast(
-                channel.clone(),
-                BroadcastMessageV1 {
-                    message_id: MessageId::from_bytes([n; 16]),
-                    sent_at_ms: 0,
-                    payload: Payload::at_ceiling(None, what.as_bytes().to_vec()).expect("fits"),
-                },
-            )
-            .await;
-        let got = receive(to, Duration::from_millis(500)).await;
+        let message = BroadcastMessageV1 {
+            message_id: MessageId::from_bytes([n; 16]),
+            sent_at_ms: 0,
+            payload: Payload::at_ceiling(None, what.as_bytes().to_vec()).expect("fits"),
+        };
+        let _ = tokio::time::timeout(PATIENCE, from.broadcast(channel.clone(), message)).await;
+        let got = tokio::time::timeout(PATIENCE, receive(to, Duration::from_millis(500)))
+            .await
+            .unwrap_or_default();
         if got.iter().any(
             |e| matches!(e, SessionEvent::Broadcast(m) if m.payload.bytes() == what.as_bytes()),
         ) {
