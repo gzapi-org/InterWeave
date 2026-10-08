@@ -211,6 +211,8 @@ group-writable `config.yaml` refused, a `config.yaml` that is a link
 refused, the plain XDG layout as the control)
 are p2p-network-dev's, on the same PR as this note.
 
+**Closed 2026-10-08 (InterWeave #226, 36e6adc6, rust-ui-dev).** The carried item above is done: `HumanStore::open` checks the nearest existing ancestor with `profile-config`'s walk before creating anything, creates missing components one at a time, resolves a `..` after a missing component by text first, then judges the directory with `resolve_owned_private_dir` and opens the database and every companion (`-wal`, `-shm`, `-journal`, each checked as what is at its path, never followed) under the path that returns; a refusal is `StoreError::DirectoryNotPrivate`, naming the directory, ancestor or link and the rule it broke. The body, the log row, the digest, the threat row and configuration.md read so.
+
 ### Amendment 2026-10-08 — The ancestor walk stops at the trust boundary the binding supplies
 
 **Trigger.** rust-ui-dev's observation (GZCoord 01a11b1f-2246), while
