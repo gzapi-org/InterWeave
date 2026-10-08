@@ -450,9 +450,11 @@ enum EndedBy {
     Reader,
 }
 
-/// The connection is over, for either half: the end recorded, every
-/// waiting call answered with it, and a session waiting in `ready` woken
-/// to read it from `events`.
+/// The connection is over, for either half: the end recorded and a
+/// session waiting in `ready` woken to read it from `events`. The
+/// reader's end answers every waiting call with the code the session ends
+/// with; the writer's is provisional and answers none, the reader's
+/// following it ([`Shared::end`]).
 fn finish(shared: &Shared, inbox: Option<&Inbox>, code: TransportError, clean: bool, by: EndedBy) {
     shared.end(code, clean, by);
     if let Some(inbox) = inbox {
