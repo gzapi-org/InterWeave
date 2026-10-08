@@ -278,6 +278,18 @@ async fn item_9_ready_resolves_on_what_waits_and_takes_nothing() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn item_9_an_ended_session_answers_events_with_its_end() {
+    let pair = IpcPair::start().await;
+    let (a, _) = pair.bindings();
+    let session = suite::a_session_to_end(&a, &human()).await;
+    let IpcPair { pair, a, b, .. } = pair;
+    a.stop().await;
+    suite::an_ended_session_answers_events_with_its_end(&session).await;
+    b.stop().await;
+    pair.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn item_10_the_runtimes_state_is_owed_once_at_open() {
     let pair = IpcPair::start().await;
     let (_, b) = pair.bindings();

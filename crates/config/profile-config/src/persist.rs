@@ -23,7 +23,7 @@
 
 use std::fs;
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::PersistError;
 
@@ -94,18 +94,23 @@ fn write_atomic_with_mode(
     contents: &[u8],
     mode: Option<u32>,
 ) -> Result<(), PersistError> {
-    let parent = parent_dir(path);
     // PRIVATE MATERIAL GETS A PRIVATE PARENT, created as one and then
     // checked. `create_dir_all` produces a `0755` directory when the
     // path does not exist yet, and does nothing at all when it does --
     // so the module's own statement that "the directory matters as much
-    // as the file" was an argument the code did not make.
-    if mode.is_some() {
-        create_private_dir(parent)?;
-        require_private_dir(parent)?;
+    // as the file" was an argument the code did not make. Everything
+    // after happens under the parent AS RESOLVED by that check
+    // (ADR-0028 A 2026-10-08).
+    let (parent, path) = if mode.is_some() {
+        create_private_dir(parent_dir(path))?;
+        let parent = resolve_private_dir(parent_dir(path))?;
+        let path = parent.join(file_name(path)?);
+        (parent, path)
     } else {
-        fs::create_dir_all(parent).map_err(PersistError::Io)?;
-    }
+        fs::create_dir_all(parent_dir(path)).map_err(PersistError::Io)?;
+        (parent_dir(path).to_path_buf(), path.to_path_buf())
+    };
+    let (parent, path) = (parent.as_path(), path.as_path());
 
     let temp = temp_beside(path);
 
@@ -199,9 +204,11 @@ impl Drop for Unpublished<'_> {
 /// link is published: that error means `path` EXISTS and its name may
 /// not survive a crash.
 pub fn create_private_exclusive(path: &Path, contents: &[u8]) -> Result<(), PersistError> {
-    let parent = parent_dir(path);
-    create_private_dir(parent)?;
-    require_private_dir(parent)?;
+    create_private_dir(parent_dir(path))?;
+    // Under the parent as resolved, as `write_atomic_with_mode` works.
+    let parent = resolve_private_dir(parent_dir(path))?;
+    let path = parent.join(file_name(path)?);
+    let (parent, path) = (parent.as_path(), path.as_path());
 
     let temp = temp_beside(path);
     let mut file = open_for_write(&temp, Some(OWNER_ONLY_FILE))?;
@@ -266,11 +273,25 @@ fn fsync_dir(parent: &Path) -> Result<(), PersistError> {
 /// directory as the parent, a private write still requires that
 /// directory to be owner-only, which for key material is the answer.
 /// The difference is that it now says so.
-fn parent_dir(path: &Path) -> &Path {
+pub(crate) fn parent_dir(path: &Path) -> &Path {
     match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
     }
+}
+
+/// The name `path` gives its file, to join to the directory as resolved.
+///
+/// # Errors
+/// [`PersistError::Io`] (`InvalidInput`) for a path naming no file --
+/// one ending in `..` or `/`.
+pub(crate) fn file_name(path: &Path) -> Result<&std::ffi::OsStr, PersistError> {
+    path.file_name().ok_or_else(|| {
+        PersistError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the path names no file",
+        ))
+    })
 }
 
 /// A temporary path beside `path`, unique to this writer.
@@ -320,18 +341,44 @@ fn temp_beside(path: &Path) -> std::path::PathBuf {
     std::path::PathBuf::from(temp)
 }
 
-/// Refuse a directory that is not owner-only.
+/// Refuse a directory that is not owner-only, or whose place on disk
+/// another account could change; answer where it is on disk.
 ///
-/// Ownership is a separate question and is answered by
-/// [`require_same_owner`], which needs a file this process created to
-/// compare against.
+/// THE DIRECTORY ITSELF: not a symbolic link, mode within
+/// [`OWNER_ONLY_DIR`]. Ownership of the directory itself is a separate
+/// question, answered by [`require_same_owner`] for a writer (which
+/// compares against a file it just made) and by
+/// [`resolve_owned_private_dir_as`] for a caller holding none.
+///
+/// ITS ANCESTORS AND THE LINKS ON ITS PATH (ADR-0028 A 2026-10-08):
+/// see [`resolve_judged_as`]. A directory with a sound mode under an
+/// ancestor another account can write is a directory that account can
+/// rename away and replace, so the mode alone promised nothing.
+///
+/// The callers that open -- the private writers, the identity loader,
+/// both locks, the trust overlay's read -- open under the RETURNED path:
+/// the rule makes that path's components unchangeable by anyone
+/// but root and this uid, which is what a check before an open needs to
+/// mean -- it is the precondition under which the kernel refuses the
+/// swap, so no check-then-open race is left to argue about.
 ///
 /// # Errors
-/// Returns [`PersistError::DirectoryNotPrivate`] if the mode is wider
-/// than [`OWNER_ONLY_DIR`] or the path is a symbolic link,
-/// [`PersistError::Io`] if it cannot be inspected, or
-/// [`PersistError::UnsupportedPlatform`] where this cannot be checked.
-pub fn require_private_dir(dir: &Path) -> Result<(), PersistError> {
+/// Returns [`PersistError::DirectoryNotPrivate`] naming the directory,
+/// ancestor or link that broke a rule and which; [`PersistError::Io`] if
+/// the directory itself cannot be inspected (`NotFound` among them), or
+/// [`PersistError::UnsupportedPlatform`] where this cannot be checked --
+/// every target but Linux, the uid being read from `/proc`.
+pub fn resolve_private_dir(dir: &Path) -> Result<PathBuf, PersistError> {
+    resolve_private_dir_as(dir, effective_uid()?)
+}
+
+/// [`resolve_private_dir`] for `uid` -- apart so a test can name a uid
+/// that is not this process's, since staging a directory another
+/// account owns needs that account.
+///
+/// # Errors
+/// As [`resolve_private_dir`].
+pub fn resolve_private_dir_as(dir: &Path, uid: u32) -> Result<PathBuf, PersistError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -354,20 +401,32 @@ pub fn require_private_dir(dir: &Path) -> Result<(), PersistError> {
                 detail: format!("mode is {mode:04o}, wider than {OWNER_ONLY_DIR:04o}"),
             });
         }
-        Ok(())
+        let resolved = resolve_judged_as(dir, uid)?;
+        if let Some(parent) = resolved.parent() {
+            judge_ancestors(parent, uid)?;
+        }
+        Ok(resolved)
     }
     #[cfg(not(unix))]
     {
-        let _ = dir;
+        let (_, _) = (dir, uid);
         Err(PersistError::UnsupportedPlatform)
     }
 }
 
+/// [`resolve_private_dir`], for a caller that only asks.
+///
+/// # Errors
+/// As [`resolve_private_dir`].
+pub fn require_private_dir(dir: &Path) -> Result<(), PersistError> {
+    resolve_private_dir(dir).map(drop)
+}
+
 /// Refuse a directory that is not owner-only or not owned by this
-/// process's effective uid: [`require_private_dir`] and the ownership
-/// question together, for a caller holding no file of its own to compare
-/// against -- the profile lock before it creates one, and the identity
-/// loader, which only reads.
+/// process's effective uid, and answer where it is on disk:
+/// [`resolve_private_dir`] and the ownership question together, for a
+/// caller holding no file of its own to compare against -- the profile
+/// lock before it creates one, and the identity loader, which only reads.
 ///
 /// LINUX ONLY: the uid is read from `/proc/self/status`
 /// ([`effective_uid`]), so every other target answers
@@ -376,35 +435,246 @@ pub fn require_private_dir(dir: &Path) -> Result<(), PersistError> {
 ///
 /// # Errors
 /// [`PersistError::DirectoryNotPrivate`] for a link, a mode wider than
-/// [`OWNER_ONLY_DIR`] or another owner; [`PersistError::Io`] if it cannot
-/// be inspected; [`PersistError::UnsupportedPlatform`] where the uid
-/// cannot be read.
-pub fn require_owned_private_dir(dir: &Path) -> Result<(), PersistError> {
+/// [`OWNER_ONLY_DIR`], another owner, or an ancestor or link breaking
+/// [`resolve_judged_as`]'s rule; [`PersistError::Io`] if it cannot be
+/// inspected; [`PersistError::UnsupportedPlatform`] where the uid cannot
+/// be read.
+pub fn resolve_owned_private_dir(dir: &Path) -> Result<PathBuf, PersistError> {
+    resolve_owned_private_dir_as(dir, effective_uid()?)
+}
+
+/// [`resolve_owned_private_dir`] for `uid`, apart so a test can name a
+/// uid that is not this process's -- in this crate and in a caller that
+/// must show it asks the owner, not only the mode (the identity loader's
+/// `a_key_directory_owned_by_another_uid_is_refused`).
+///
+/// # Errors
+/// As [`resolve_owned_private_dir`].
+pub fn resolve_owned_private_dir_as(dir: &Path, uid: u32) -> Result<PathBuf, PersistError> {
     #[cfg(unix)]
     {
-        require_owned_private_dir_as(dir, effective_uid()?)
+        use std::os::unix::fs::MetadataExt as _;
+        let resolved = resolve_private_dir_as(dir, uid)?;
+        let owner = std::fs::symlink_metadata(&resolved)
+            .map_err(PersistError::Io)?
+            .uid();
+        if owner != uid {
+            return Err(PersistError::DirectoryNotPrivate {
+                path: dir.to_path_buf(),
+                detail: format!("owned by uid {owner}, not {uid}"),
+            });
+        }
+        Ok(resolved)
     }
     #[cfg(not(unix))]
     {
-        let _ = dir;
+        let (_, _) = (dir, uid);
         Err(PersistError::UnsupportedPlatform)
     }
 }
 
-/// [`require_owned_private_dir`] for `uid`, apart so a test can name a uid
-/// that is not this process's: staging a directory another account owns
-/// needs that account.
+/// [`resolve_owned_private_dir`], for a caller that only asks.
+///
+/// # Errors
+/// As [`resolve_owned_private_dir`].
+pub fn require_owned_private_dir(dir: &Path) -> Result<(), PersistError> {
+    resolve_owned_private_dir(dir).map(drop)
+}
+
+/// [`require_owned_private_dir`] for `uid`.
+///
+/// # Errors
+/// As [`resolve_owned_private_dir`].
+pub fn require_owned_private_dir_as(dir: &Path, uid: u32) -> Result<(), PersistError> {
+    resolve_owned_private_dir_as(dir, uid).map(drop)
+}
+
+/// A directory that is not private but whose contents decide what is --
+/// the configuration directory, whose `config.yaml` names the key path
+/// and the allowlist -- judged for who can change it, not for who can
+/// read it: the directory itself, its ancestors and the links on its
+/// path meet [`resolve_judged_as`]'s rule, with no owner-only mode asked
+/// (ADR-0028 A 2026-10-08). Answers where it is on disk, to open under.
+///
+/// # Errors
+/// [`PersistError::DirectoryNotPrivate`] naming what broke the rule;
+/// [`PersistError::Io`] if the directory cannot be inspected;
+/// [`PersistError::UnsupportedPlatform`] where the uid cannot be read.
+pub fn resolve_guarded_dir(dir: &Path) -> Result<PathBuf, PersistError> {
+    resolve_guarded_dir_as(dir, effective_uid()?)
+}
+
+/// [`resolve_guarded_dir`] for `uid`.
+///
+/// # Errors
+/// As [`resolve_guarded_dir`].
+pub fn resolve_guarded_dir_as(dir: &Path, uid: u32) -> Result<PathBuf, PersistError> {
+    #[cfg(unix)]
+    {
+        fs::symlink_metadata(dir).map_err(PersistError::Io)?;
+        let resolved = resolve_judged_as(dir, uid)?;
+        judge_ancestors(&resolved, uid)?;
+        Ok(resolved)
+    }
+    #[cfg(not(unix))]
+    {
+        let (_, _) = (dir, uid);
+        Err(PersistError::UnsupportedPlatform)
+    }
+}
+
+/// How many symbolic links one resolution follows before it refuses, as
+/// the kernel's own `ELOOP` limit does.
 #[cfg(unix)]
-fn require_owned_private_dir_as(dir: &Path, uid: u32) -> Result<(), PersistError> {
-    use std::os::unix::fs::MetadataExt as _;
-    require_private_dir(dir)?;
-    let owner = std::fs::symlink_metadata(dir)
-        .map_err(PersistError::Io)?
-        .uid();
-    if owner != uid {
+const MAX_LINK_HOPS: u32 = 40;
+
+/// `dir` resolved on disk, component by component, judging every
+/// symbolic link it traverses (ADR-0028 A 2026-10-08): the link is owned
+/// by root or `uid`, and the directory holding it, its ancestors with it,
+/// meet [`judge_ancestor`]'s rule. A link another account could repoint
+/// -- one it owns, or one in a directory it can write -- would change
+/// where the path leads between the check and the open, out of sight of
+/// a walk over the resolved path alone.
+///
+/// The resolution is the kernel's, done by hand so each link is seen: a
+/// relative path starts at the current directory (which `getcwd`
+/// answers resolved), `..` takes the parent of what is resolved so far
+/// -- links already followed, as the kernel takes it -- and a link's
+/// target is resolved in its place.
+///
+/// # Errors
+/// [`PersistError::Io`] for a component that is absent (`NotFound`, which
+/// callers read as "not there yet"); [`PersistError::DirectoryNotPrivate`]
+/// for a link or an ancestor that breaks the rule, cannot be inspected,
+/// or past [`MAX_LINK_HOPS`].
+#[cfg(unix)]
+fn resolve_judged_as(dir: &Path, uid: u32) -> Result<PathBuf, PersistError> {
+    use std::collections::VecDeque;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    use std::path::Component;
+
+    let start = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        std::env::current_dir().map_err(PersistError::Io)?.join(dir)
+    };
+    let mut pending: VecDeque<std::ffi::OsString> = VecDeque::new();
+    let mut resolved = PathBuf::from("/");
+    for component in start.components() {
+        if let Component::Normal(name) = component {
+            pending.push_back(name.to_owned());
+        } else if component == Component::ParentDir {
+            pending.push_back("..".into());
+        }
+    }
+    let mut hops = 0;
+    while let Some(name) = pending.pop_front() {
+        if name == ".." {
+            resolved.pop();
+            continue;
+        }
+        let next = resolved.join(&name);
+        let meta = match fs::symlink_metadata(&next) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(PersistError::Io(e));
+            }
+            Err(e) => return judge_ancestor(&next, Err(e), uid).map(|()| next),
+        };
+        if !meta.file_type().is_symlink() {
+            resolved = next;
+            continue;
+        }
+        hops += 1;
+        if hops > MAX_LINK_HOPS {
+            return Err(PersistError::DirectoryNotPrivate {
+                path: dir.to_path_buf(),
+                detail: format!("more than {MAX_LINK_HOPS} symbolic links on its path"),
+            });
+        }
+        judge_link(&next, meta.uid(), meta.permissions().mode(), uid)?;
+        judge_ancestors(&resolved, uid)?;
+        let target = fs::read_link(&next).map_err(PersistError::Io)?;
+        if target.is_absolute() {
+            resolved = PathBuf::from("/");
+        }
+        let mut names: Vec<std::ffi::OsString> = Vec::new();
+        for component in target.components() {
+            if let Component::Normal(name) = component {
+                names.push(name.to_owned());
+            } else if component == Component::ParentDir {
+                names.push("..".into());
+            }
+        }
+        for name in names.into_iter().rev() {
+            pending.push_front(name);
+        }
+    }
+    Ok(resolved)
+}
+
+/// `dir` and every directory above it, up to and including `/`, each
+/// meeting [`judge_ancestor`]'s rule.
+#[cfg(unix)]
+fn judge_ancestors(dir: &Path, uid: u32) -> Result<(), PersistError> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    for ancestor in dir.ancestors() {
+        let seen = fs::symlink_metadata(ancestor).map(|m| (m.uid(), m.permissions().mode()));
+        judge_ancestor(ancestor, seen, uid)?;
+    }
+    Ok(())
+}
+
+/// The rule for a directory above a private one, or on the path to one
+/// (ADR-0028 A 2026-10-08): owned by root or `uid` -- any other owner can
+/// rename its entries whatever the mode says -- and carrying no group- or
+/// other-write bit, unless the sticky bit is set: in a sticky directory
+/// an entry is renamed only by its owner, the directory's owner or root,
+/// and the owner rule above already makes the directory root's or ours.
+/// One that cannot be inspected is refused, not judged on its name.
+fn judge_ancestor(
+    path: &Path,
+    seen: std::io::Result<(u32, u32)>,
+    uid: u32,
+) -> Result<(), PersistError> {
+    let refuse = |detail: String| {
+        Err(PersistError::DirectoryNotPrivate {
+            path: path.to_path_buf(),
+            detail,
+        })
+    };
+    let (owner, mode) = match seen {
+        Ok(seen) => seen,
+        Err(e) => {
+            return refuse(format!(
+                "an ancestor that cannot be inspected ({e}) is refused, not judged on its name"
+            ));
+        }
+    };
+    let mode = mode & 0o7777;
+    if owner != 0 && owner != uid {
+        return refuse(format!(
+            "an ancestor owned by uid {owner}, mode {mode:04o}: owned by neither root nor uid {uid}"
+        ));
+    }
+    if mode & 0o022 != 0 && mode & 0o1000 == 0 {
+        return refuse(format!(
+            "an ancestor owned by uid {owner}, mode {mode:04o}: group- or other-writable and not sticky"
+        ));
+    }
+    Ok(())
+}
+
+/// The rule for a symbolic link on the path to a private directory: owned
+/// by root or `uid`. (Its holding directory is judged as an ancestor.)
+fn judge_link(path: &Path, owner: u32, mode: u32, uid: u32) -> Result<(), PersistError> {
+    if owner != 0 && owner != uid {
         return Err(PersistError::DirectoryNotPrivate {
-            path: dir.to_path_buf(),
-            detail: format!("owned by uid {owner}, not {uid}"),
+            path: path.to_path_buf(),
+            detail: format!(
+                "a symbolic link owned by uid {owner}, mode {:04o}: owned by neither root nor uid {uid}",
+                mode & 0o7777
+            ),
         });
     }
     Ok(())
@@ -415,7 +685,7 @@ fn require_owned_private_dir_as(dir: &Path, uid: u32) -> Result<(), PersistError
 ///
 /// # Errors
 /// [`PersistError::UnsupportedPlatform`] where it cannot be read.
-pub(crate) fn effective_uid() -> Result<u32, PersistError> {
+pub fn effective_uid() -> Result<u32, PersistError> {
     let status = std::fs::read_to_string("/proc/self/status")
         .map_err(|_| PersistError::UnsupportedPlatform)?;
     status
@@ -558,14 +828,18 @@ mod tests {
             Err(PersistError::DirectoryNotPrivate { .. })
         ));
 
+        // The DIRECTORY'S OWN owner, asked of a directory straight under
+        // `/tmp`: every ancestor there is root's, so another uid is
+        // refused at the directory itself and not at an ancestor of ours
+        // (#224 review A F1: under our own tempdir the ancestor walk
+        // answered first and the owner check went untested).
+        let alone = owned_private_dir_under_tmp();
         let uid = effective_uid().expect("readable");
-        require_owned_private_dir_as(&dir, uid).expect("the control: ours");
-        match require_owned_private_dir_as(&dir, uid.wrapping_add(1)) {
-            Err(PersistError::DirectoryNotPrivate { detail, .. }) => {
-                assert!(
-                    detail.contains("owned by uid"),
-                    "the detail names the owner"
-                );
+        require_owned_private_dir_as(alone.path(), uid).expect("the control: ours");
+        match require_owned_private_dir_as(alone.path(), uid.wrapping_add(1)) {
+            Err(PersistError::DirectoryNotPrivate { path, detail }) => {
+                assert_eq!(path, alone.path(), "refused at the directory itself");
+                assert!(detail.starts_with("owned by uid"), "{detail}");
             }
             other => panic!("refused as another's: {other:?}"),
         }
@@ -575,6 +849,208 @@ mod tests {
             require_owned_private_dir(&dir),
             Err(PersistError::DirectoryNotPrivate { .. })
         ));
+    }
+
+    /// An owner-only directory of ours directly under `/tmp`, whose every
+    /// ancestor is root's: `/tmp` is asserted root's and sticky, the
+    /// precondition that lets another uid be refused at the directory
+    /// alone.
+    #[cfg(target_os = "linux")]
+    fn owned_private_dir_under_tmp() -> tempfile::TempDir {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let tmp = fs::symlink_metadata("/tmp").expect("/tmp");
+        assert!(
+            tmp.uid() == 0 && tmp.permissions().mode() & 0o1000 != 0,
+            "the precondition: /tmp is root's and sticky"
+        );
+        let dir = tempfile::Builder::new()
+            .tempdir_in("/tmp")
+            .expect("a directory under /tmp");
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).expect("chmod");
+        dir
+    }
+
+    /// `mode` on `dir`, whatever the umask gave it.
+    #[cfg(unix)]
+    fn chmod(dir: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(dir, fs::Permissions::from_mode(mode)).expect("chmod");
+    }
+
+    /// `root/<names...>/p`: each named directory at `mode`, `p` owner-only
+    /// -- a private directory under ancestors the test chooses.
+    #[cfg(unix)]
+    fn private_under(root: &Path, names: &[&str], mode: u32) -> PathBuf {
+        let mut dir = root.to_path_buf();
+        for name in names {
+            dir = dir.join(name);
+            fs::create_dir(&dir).expect("mkdir");
+            chmod(&dir, mode);
+        }
+        let private = dir.join("p");
+        fs::create_dir(&private).expect("mkdir");
+        chmod(&private, 0o700);
+        private
+    }
+
+    /// The detail of a refusal, which must name `path`.
+    #[cfg(unix)]
+    fn refused_at(result: Result<PathBuf, PersistError>, path: &Path) -> String {
+        match result {
+            Err(PersistError::DirectoryNotPrivate { path: at, detail }) => {
+                assert_eq!(
+                    at, path,
+                    "the refusal names the failing component: {detail}"
+                );
+                detail
+            }
+            other => panic!("refused at {}: {other:?}", path.display()),
+        }
+    }
+
+    /// ADR-0028 A 2026-10-08, the ancestors: a group-writable ancestor is
+    /// refused and named, and the same tree at `0755` -- ours -- is the
+    /// control, answered at its place on disk.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_group_writable_ancestor_is_refused() {
+        let root = tempfile::tempdir().expect("tempdir");
+        chmod(root.path(), 0o700);
+        let private = private_under(root.path(), &["a"], 0o770);
+        let a = root.path().join("a");
+        let detail = refused_at(resolve_private_dir(&private), &a);
+        assert!(
+            detail.contains("0770") && detail.contains("not sticky"),
+            "{detail}"
+        );
+        chmod(&a, 0o755);
+        assert_eq!(
+            resolve_private_dir(&private).expect("the control"),
+            fs::canonicalize(&private).expect("canonical")
+        );
+    }
+
+    /// An other-writable ancestor without the sticky bit is refused; with
+    /// it, ours, accepted -- a `/tmp`-shaped directory.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_other_writable_ancestor_needs_the_sticky_bit() {
+        let root = tempfile::tempdir().expect("tempdir");
+        chmod(root.path(), 0o700);
+        let private = private_under(root.path(), &["a"], 0o757);
+        let a = root.path().join("a");
+        refused_at(resolve_private_dir(&private), &a);
+        chmod(&a, 0o1777);
+        resolve_private_dir(&private).expect("sticky and ours");
+    }
+
+    /// An ancestor another account owns is refused at `0755` and when
+    /// sticky: its owner can rename its entries whatever the mode. Staged
+    /// by asking for a uid that is not this process's; this process's
+    /// own uid on the same tree is the control.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_ancestor_another_uid_owns_is_refused_sticky_or_not() {
+        let root = tempfile::tempdir().expect("tempdir");
+        chmod(root.path(), 0o700);
+        let private = private_under(root.path(), &["a"], 0o755);
+        let a = root.path().join("a");
+        let uid = effective_uid().expect("uid");
+        resolve_private_dir_as(&private, uid).expect("the control: ours");
+        let other = uid.wrapping_add(1);
+        let detail = refused_at(resolve_private_dir_as(&private, other), &a);
+        assert!(detail.contains("neither root nor uid"), "{detail}");
+        chmod(&a, 0o1777);
+        refused_at(resolve_private_dir_as(&private, other), &a);
+    }
+
+    /// A link on the path, ours, in a passing directory and leading to a
+    /// passing directory, is followed -- the answer is where it leads;
+    /// held in an other-writable directory, or owned by another uid, it
+    /// is refused and named.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_link_on_the_path_is_judged_and_followed() {
+        let root = tempfile::tempdir().expect("tempdir");
+        chmod(root.path(), 0o700);
+        let target = private_under(root.path(), &["a"], 0o755);
+        std::os::unix::fs::symlink(root.path().join("a"), root.path().join("via")).expect("link");
+        let through = root.path().join("via").join("p");
+        assert_eq!(
+            resolve_private_dir(&through).expect("a sound link is followed"),
+            fs::canonicalize(&target).expect("canonical")
+        );
+
+        let uid = effective_uid().expect("uid");
+        let detail = refused_at(
+            resolve_private_dir_as(&through, uid.wrapping_add(1)),
+            &root.path().join("via"),
+        );
+        assert!(detail.contains("symbolic link"), "{detail}");
+
+        let open = root.path().join("open");
+        fs::create_dir(&open).expect("mkdir");
+        chmod(&open, 0o777);
+        std::os::unix::fs::symlink(root.path().join("a"), open.join("via")).expect("link");
+        refused_at(resolve_private_dir(&open.join("via").join("p")), &open);
+    }
+
+    /// The rule itself on what a tree cannot stage: a root-owned `0755`
+    /// ancestor passes, one that cannot be inspected is refused rather
+    /// than judged on its name, and a link owned by root passes.
+    #[test]
+    fn the_ancestor_rule_on_root_and_the_uninspectable() {
+        let path = Path::new("/srv");
+        judge_ancestor(path, Ok((0, 0o40755)), 1000).expect("root's, 0755");
+        judge_ancestor(path, Ok((1000, 0o41777)), 1000).expect("ours, sticky");
+        match judge_ancestor(
+            path,
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            1000,
+        ) {
+            Err(PersistError::DirectoryNotPrivate { detail, .. }) => {
+                assert!(detail.contains("cannot be inspected"), "{detail}");
+            }
+            other => panic!("refused: {other:?}"),
+        }
+        judge_link(path, 0, 0o120_777, 1000).expect("root's link");
+        assert!(judge_link(path, 1001, 0o120_777, 1000).is_err());
+    }
+
+    /// The plain per-user layout -- the state root and every directory to
+    /// the profile ours at `0755`, the profile owner-only -- passes: the
+    /// control for every refusal above.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_plain_xdg_layout_passes() {
+        let home = tempfile::tempdir().expect("tempdir");
+        chmod(home.path(), 0o700);
+        let private = private_under(
+            home.path(),
+            &[".local", "state", "interweave", "profiles"],
+            0o755,
+        );
+        resolve_owned_private_dir(&private).expect("the plain layout");
+    }
+
+    /// The configuration directory is judged for who can change it, not
+    /// who can read it: ours at `0755` passes, group-writable or under a
+    /// group-writable ancestor it is refused.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_guarded_directory_is_judged_for_writers_not_readers() {
+        let root = tempfile::tempdir().expect("tempdir");
+        chmod(root.path(), 0o700);
+        let config = root.path().join("a").join("config");
+        fs::create_dir_all(&config).expect("mkdir");
+        chmod(&root.path().join("a"), 0o755);
+        chmod(&config, 0o755);
+        resolve_guarded_dir(&config).expect("readable by all, written by us");
+        chmod(&config, 0o775);
+        refused_at(resolve_guarded_dir(&config), &config);
+        chmod(&config, 0o755);
+        chmod(&root.path().join("a"), 0o775);
+        refused_at(resolve_guarded_dir(&config), &root.path().join("a"));
     }
 
     /// A directory whose fsync cannot succeed, without a race.

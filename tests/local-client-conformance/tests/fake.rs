@@ -278,6 +278,14 @@ async fn item_9_ready_resolves_on_what_waits_and_takes_nothing() {
 }
 
 #[tokio::test]
+async fn item_9_an_ended_session_answers_events_with_its_end() {
+    let p = pair();
+    let session = suite::a_session_to_end(&p.a, &human()).await;
+    p.a.stop();
+    suite::an_ended_session_answers_events_with_its_end(&session).await;
+}
+
+#[tokio::test]
 async fn item_10_the_runtimes_state_is_owed_once_at_open() {
     let p = pair();
     suite::the_runtimes_state_is_owed_once_at_open(&p.b).await;

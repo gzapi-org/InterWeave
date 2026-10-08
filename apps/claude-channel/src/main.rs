@@ -149,6 +149,8 @@ mod unix {
             LoadError::Invalid(_) => "Invalid",
             LoadError::KeyFileInHumanDir { .. } => "KeyFileInHumanDir",
             LoadError::KeyFileUnresolved { .. } => "KeyFileUnresolved",
+            LoadError::ConfigDirUnguarded(_) => "ConfigDirUnguarded",
+            LoadError::ConfigFileUnguarded { .. } => "ConfigFileUnguarded",
         }
     }
 
