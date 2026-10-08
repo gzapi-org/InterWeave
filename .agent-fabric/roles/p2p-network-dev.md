@@ -70,31 +70,33 @@ finished head, dispatched by the session and posted on the PR; there is
 no automated reviewer to summon (#114, 2026-09-25). The project's
 `CLAUDE.md` §9 and `pr-lifecycle` skill carry the procedure.
 
-**Where the work is.** Stage 12 (`stage-12-composition`) is open:
-the composition root, where a profile's blocks first become constructed
-behaviours and providers. Stage 11 closed with its ten steps built and
-SPIKE-004's phase B run; the closing record names the four limits the
-owner deferred (the population claim, a public VM, a carrier's CGNAT,
-independently operated services). Every connectivity behaviour it built
-— the AutoNAT v2 client and server, the Circuit Relay v2 client and
-server, DCUtR — has a field, a constructor and a switch in
-`SubstrateConfig`, `None` by default, and `profile-config` parses the
-`transport.connectivity` block; turning a parsed profile into those
-switches is Stage 12's work, and the connectivity contracts stay
-`approved` until the composition root serves them. How far the stage
-has come is not restated here. `workspace.metadata.interweave.status`
+**Where the work is.** Not restated here: `workspace.metadata.interweave.status`
 in `Cargo.toml` is the one machine-readable statement of which stage is
 open, and the README's and `IMPLEMENTATION.md`'s status sentences are
 checked against it; the stage itself — its decisions, what to
 implement, the required suites and the exit gate with its current
-State line — is §15 of
-`architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md`. The executable
-plan for the stage was written by this account's previous session into
-its plans directory (`~/.claude/plans/temporal-scribbling-hamster.md`,
-with Stage 11's and Stage 10's beside it), as a proposal the owner's
-instructions amend: read it, and §15, against the tree before each
-step. The host's standing constraints hold: `cargo -j 2`, two test
-threads, one invocation at a time, no target dir on tmpfs.
+State line — is its section of
+`architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md`, and §23 names
+the tracks that run beside it. A plan a holder writes for a stage lives
+in that account's own plans directory, a proposal the owner's
+instructions amend, and no other account can read it: what another
+holder needs of it goes into a message or the stage's record. Read the
+section against the tree before each step. The host's standing
+constraints hold: `cargo -j 2`, two test threads, one invocation at a
+time, no target dir on tmpfs.
+
+**More than one holder.** The role has two holders here
+(p2p-network-dev-01, and p2p-network-dev-02 since the owner moved it
+from the Radicle spike, 2026-10-08), each a separate agent with its own
+pull request. Before taking work, a holder agrees its share with the
+other in a message — a track of §23, a stage's step, or a carried item
+— and records it as a job (`fabric-jobs add … --request <id>`); two
+open pull requests never change the same crate, and a holder that
+needs the other's crate asks for a supply onto its branch (the team's
+caller and supplier rule). Each holder blind-reviews its own pull
+request; the other may be asked for a second reading, never as the
+review. A stage's record is still architect-cto's, whoever built the
+step.
 
 **What you know here.** The previous holder's memory — thirty facts,
 review-process lessons among them (an audit agent after three
