@@ -139,18 +139,34 @@ pub enum StoreError {
         /// What was found.
         what: &'static str,
     },
-    /// A file or directory holding message content is reachable by
-    /// someone other than its owner.
+    /// A file holding message content -- the database or its `-wal` or
+    /// `-shm` companion -- is reachable by someone other than its owner.
+    /// Its directory is [`StoreError::DirectoryNotPrivate`]'s.
     ///
     /// Refused rather than repaired, for the reason the identity key is:
     /// content that has been broadly readable should be treated as
     /// exposed, and quietly narrowing the mode would hide that it ever
     /// was.
     PermissionsTooOpen {
-        /// Which file or directory.
+        /// Which file.
         what: String,
         /// The mode it carries.
         mode: u32,
+    },
+    /// The directory holding the store is not private, or its place on
+    /// disk is one another account could change (ADR-0028 A 2026-10-08):
+    /// a link, a mode wider than owner-only, another owner, or an
+    /// ancestor or link on its path that is not root's or this uid's or
+    /// that others can write.
+    ///
+    /// Refused rather than repaired, as [`StoreError::PermissionsTooOpen`]
+    /// is; `detail` names what broke the rule and which, which is what a
+    /// person needs to fix the layout with `chown`/`chmod`.
+    DirectoryNotPrivate {
+        /// The directory, ancestor or link that broke the rule.
+        path: std::path::PathBuf,
+        /// What it is and the rule it broke.
+        detail: String,
     },
     /// One peer used an `app_message_id` it had already used, for
     /// different content.
@@ -209,7 +225,9 @@ pub enum StoreError {
     /// it is not committed as unread again. A duplicate, as
     /// [`StoreError::is_duplicate`] says.
     AlreadyRead,
-    /// Owner-only permissions cannot be enforced on this platform.
+    /// Owner-only permissions, or who owns the store's directory and its
+    /// ancestors, cannot be checked on this platform: the uid is read
+    /// from `/proc`, so every target but Linux and Android answers this.
     ///
     /// Refusing beats creating a directory of message content this build
     /// cannot protect.
@@ -217,6 +235,29 @@ pub enum StoreError {
 }
 
 impl StoreError {
+    /// profile-config's answer about the store's directory `dir`, in the
+    /// store's own terms.
+    ///
+    /// A cause the directory helpers do not answer today is read as a
+    /// refusal of `dir`, not as an I/O failure: an `Io` is shown as "try
+    /// again", which no wait fixes for a privacy refusal
+    /// (`another_persist_cause_is_a_refusal_not_a_retry`).
+    pub(crate) fn from_persist(
+        dir: &std::path::Path,
+        error: interweave_profile_config::PersistError,
+    ) -> Self {
+        use interweave_profile_config::PersistError as P;
+        match error {
+            P::DirectoryNotPrivate { path, detail } => Self::DirectoryNotPrivate { path, detail },
+            P::Io(e) => Self::Io(e),
+            P::UnsupportedPlatform => Self::UnsupportedPlatform,
+            other => Self::DirectoryNotPrivate {
+                path: dir.to_path_buf(),
+                detail: other.to_string(),
+            },
+        }
+    }
+
     /// Whether the file needs recovery rather than a retry: it is not a
     /// database this build can read -- corrupt, not a database at all, or
     /// from a newer version, or its migration failed. A client then shows
@@ -301,6 +342,11 @@ impl core::fmt::Display for StoreError {
                 f,
                 "{what} is mode {mode:04o}; message content must be owner-only"
             ),
+            Self::DirectoryNotPrivate { path, detail } => write!(
+                f,
+                "{} must be private to this user and unchangeable by any other: {detail}",
+                path.display()
+            ),
             Self::IdentityConflict {
                 app_message_id,
                 source_peer,
@@ -318,7 +364,7 @@ impl core::fmt::Display for StoreError {
             Self::AlreadyRead => write!(f, "this message was already read here and not kept"),
             Self::UnsupportedPlatform => write!(
                 f,
-                "owner-only directory permissions cannot be enforced on this platform"
+                "owner-only directory permissions cannot be checked on this platform"
             ),
         }
     }
@@ -330,6 +376,28 @@ impl core::error::Error for StoreError {
             Self::Sql(e) => Some(e),
             Self::Io(e) => Some(e),
             _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod persist_tests {
+    use super::StoreError;
+    use interweave_profile_config::PersistError;
+    use std::path::Path;
+
+    #[test]
+    fn another_persist_cause_is_a_refusal_not_a_retry() {
+        let dir = Path::new("/state/human");
+        let mapped = StoreError::from_persist(
+            dir,
+            PersistError::FileNotPrivate {
+                path: dir.join("x"),
+            },
+        );
+        match mapped {
+            StoreError::DirectoryNotPrivate { path, .. } => assert_eq!(path, dir),
+            other => panic!("expected a refusal of the directory, got {other:?}"),
         }
     }
 }
