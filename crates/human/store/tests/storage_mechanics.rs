@@ -1199,8 +1199,222 @@ fn an_already_open_state_directory_is_refused_rather_than_tightened() {
     std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o755)).expect("chmod");
 
     match HumanStore::open(&state.join("human.sqlite3"), StoreOptions::default()) {
-        Err(StoreError::PermissionsTooOpen { mode, .. }) => assert_eq!(mode, 0o755),
-        other => panic!("expected a permissions refusal, got {other:?}"),
+        Err(StoreError::DirectoryNotPrivate { path, detail }) => {
+            assert_eq!(path, state);
+            assert!(detail.contains("0755"), "the mode is named: {detail}");
+        }
+        other => panic!("expected a directory refusal, got {other:?}"),
+    }
+    let mode = std::fs::metadata(&state)
+        .expect("stat")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o755, "refused, not tightened");
+}
+
+/// A directory under `/tmp` (sticky and root's, so the ancestor rule
+/// passes up to it) that others can write and that is not sticky -- the
+/// ancestor the rule exists to refuse.
+#[cfg(target_os = "linux")]
+fn shared_ancestor() -> (tempfile::TempDir, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir_in("/tmp").expect("tempdir under /tmp");
+    let shared = dir.path().join("shared");
+    std::fs::create_dir(&shared).expect("mkdir");
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777))
+        .expect("writable by others on purpose");
+    (dir, shared)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_private_state_directory_under_an_ancestor_others_can_write_is_refused_naming_it() {
+    // ADR-0028 A 2026-10-08: a sound 0700 directory under an ancestor
+    // another account can write is one that account can rename away and
+    // replace, so the mode alone promised nothing.
+    use std::os::unix::fs::PermissionsExt as _;
+    let (_dir, shared) = shared_ancestor();
+    let state = shared.join("state");
+    std::fs::create_dir(&state).expect("mkdir");
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+
+    match HumanStore::open(&state.join("human.sqlite3"), StoreOptions::default()) {
+        Err(StoreError::DirectoryNotPrivate { path, detail }) => {
+            assert_eq!(path, shared, "the failing ancestor is named: {detail}");
+            assert!(detail.contains("0777"), "its mode is named: {detail}");
+        }
+        other => panic!("expected the ancestor refused, got {other:?}"),
+    }
+    assert!(
+        !state.join("human.sqlite3").exists(),
+        "no database was created under the refused ancestor"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_path_naming_no_file_is_refused_before_any_directory_is_made() {
+    // `state/new/..` names no file; its parent `state/new` must not be
+    // created on the way to that refusal.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let new = dir.path().join("new");
+    match HumanStore::open(&new.join(".."), StoreOptions::default()) {
+        Err(StoreError::NotAFile { .. }) => {}
+        other => panic!("expected the path refused as naming no file, got {other:?}"),
+    }
+    assert!(
+        !new.exists(),
+        "nothing was created for a path naming no file"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_path_through_a_missing_directory_and_back_opens_as_before() {
+    // `x/new/../state` under an ancestor of ours that is sound but not
+    // owner-only: `x/new/..` is `x`, which this process does not make and
+    // must not judge as its private directory.
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir_in("/tmp").expect("tempdir under /tmp");
+    let x = dir.path().join("x");
+    std::fs::create_dir(&x).expect("mkdir");
+    std::fs::set_permissions(&x, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let path = x.join("new").join("..").join("state").join("human.sqlite3");
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
+    let state = x.join("state");
+    assert!(
+        state.join("human.sqlite3").is_file(),
+        "the store is at x/state"
+    );
+    let mode = std::fs::metadata(&state)
+        .expect("stat")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o700, "made owner-only");
+
+    // And back down into a directory that IS there, sound but not
+    // owner-only: `x/other/../wide` is `x/wide`, an ancestor, not ours to
+    // judge as private.
+    let wide = x.join("wide");
+    std::fs::create_dir(&wide).expect("mkdir");
+    std::fs::set_permissions(&wide, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let path = x
+        .join("other")
+        .join("..")
+        .join("wide")
+        .join("b")
+        .join("human.sqlite3");
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
+    assert!(
+        wide.join("b").join("human.sqlite3").is_file(),
+        "the store is at x/wide/b"
+    );
+    assert!(
+        !x.join("other").exists(),
+        "nothing made for a name the path backs out of"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_refused_state_directory_creates_nothing() {
+    // Judged before anything is created: a missing state directory under
+    // an ancestor that breaks the rule is not made, so the refusal leaves
+    // the tree as it found it.
+    let (_dir, shared) = shared_ancestor();
+    let state = shared.join("state").join("human");
+
+    match HumanStore::open(&state.join("human.sqlite3"), StoreOptions::default()) {
+        Err(StoreError::DirectoryNotPrivate { path, .. }) => assert_eq!(path, shared),
+        other => panic!("expected the ancestor refused, got {other:?}"),
+    }
+    assert!(
+        !shared.join("state").exists(),
+        "nothing was created beneath the refused ancestor"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_link_above_the_state_directory_is_judged_by_where_it_sits() {
+    // A link on the configured path is followed only when it sits where
+    // no other account can repoint it; the store then lives under the
+    // link's target, which is what was judged. The state directory
+    // ITSELF as a link is refused outright (the first case).
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir_in("/tmp").expect("tempdir under /tmp");
+    let real = dir.path().join("real");
+    std::fs::create_dir_all(real.join("state")).expect("mkdir");
+    for d in [&real, &real.join("state")] {
+        std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+    }
+    let open = |state: &std::path::Path| {
+        HumanStore::open(&state.join("human.sqlite3"), StoreOptions::default())
+    };
+
+    let sound = dir.path().join("sound");
+    std::fs::create_dir(&sound).expect("mkdir");
+    std::os::unix::fs::symlink(real.join("state"), sound.join("state")).expect("link");
+    assert!(
+        matches!(open(&sound.join("state")), Err(StoreError::DirectoryNotPrivate { ref detail, .. }) if detail.contains("symbolic link")),
+        "the state directory itself as a link is refused"
+    );
+
+    std::os::unix::fs::symlink(&real, sound.join("profile")).expect("link");
+    drop(
+        open(&sound.join("profile").join("state"))
+            .expect("a link only root or this uid can change is followed"),
+    );
+    assert!(
+        real.join("state").join("human.sqlite3").is_file(),
+        "the store is under the target"
+    );
+
+    let (_shared_dir, shared) = shared_ancestor();
+    std::os::unix::fs::symlink(&real, shared.join("profile")).expect("link");
+    match open(&shared.join("profile").join("state")) {
+        Err(StoreError::DirectoryNotPrivate { path, .. }) => assert_eq!(path, shared),
+        other => panic!("a link in a directory others can write is refused, got {other:?}"),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_companion_that_is_a_link_is_refused_not_followed() {
+    // A companion left as a link to an owner-only file elsewhere is
+    // judged as what is at the path, never as its target, and the target
+    // is not touched. Without the store's judgement SQLite refuses a
+    // linked `-wal` or `-shm` as `CannotOpen`, which reads as a failure
+    // worth retrying, and opens over a linked `-journal`; the refusal must
+    // say what is wrong.
+    use std::os::unix::fs::PermissionsExt as _;
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state").join("human.sqlite3");
+        drop(HumanStore::open(&path, StoreOptions::default()).expect("a fresh store"));
+
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::write(&elsewhere, b"").expect("target");
+        std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o600))
+            .expect("owner-only, so only the link itself is wrong");
+        let mut companion = path.as_os_str().to_owned();
+        companion.push(suffix);
+        let companion = std::path::PathBuf::from(companion);
+        let _ = std::fs::remove_file(&companion);
+        std::os::unix::fs::symlink(&elsewhere, &companion).expect("link");
+
+        match HumanStore::open(&path, StoreOptions::default()) {
+            Err(StoreError::NotAFile { what }) => {
+                assert!(what.contains("not a regular file"), "{suffix}: {what}");
+            }
+            other => panic!("{suffix}: expected the link refused, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(&elsewhere).expect("target"),
+            b"",
+            "{suffix}: the link's target is untouched"
+        );
     }
 }
 
@@ -2392,7 +2606,7 @@ fn a_bare_relative_path_still_checks_its_directory() {
 
     let explicit = HumanStore::open(&dir.path().join("messages.db"), StoreOptions::default());
     assert!(
-        matches!(explicit, Err(StoreError::PermissionsTooOpen { .. })),
+        matches!(explicit, Err(StoreError::DirectoryNotPrivate { .. })),
         "an explicit path into a world-traversable directory is refused: {explicit:?}"
     );
 }

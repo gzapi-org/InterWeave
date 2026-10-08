@@ -27,6 +27,11 @@ workspace = true
 [dependencies]
 interweave-human-core = { path = "../core" }
 interweave-transport-api = { path = "../../api/transport-api" }
+# The private-directory rule (ADR-0028 A 2026-10-08): the state directory
+# is judged, ancestors and links with it, by profile-config's one walk
+# rather than by a copy here -- a second copy of the rule is a second
+# place for it to drift.
+interweave-profile-config = { path = "../../config/profile-config" }
 # Bundled on purpose: the desktop and Android clients must run the SAME
 # SQLite, and a system library makes the storage engine a property of the
 # host rather than of the release. `default-features = false` drops the
