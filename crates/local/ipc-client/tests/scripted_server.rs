@@ -299,6 +299,39 @@ async fn a_call_on_an_ended_connection_is_refused_not_left_waiting() {
     );
 }
 
+/// A write that fails ends the connection then and there, before the
+/// reader sees anything: the server here stops reading and keeps its
+/// write half open, so the client's next write fails and its reader goes
+/// on waiting. The call's error and the session's end are one fact
+/// (#199's carried risk: in between, `events(0)` read live, so a caller
+/// asking whether the session ended took the failure for a refusal).
+/// The control is the session reading live before the write.
+#[tokio::test]
+async fn a_failed_write_ends_the_session_before_the_reader_sees_it() {
+    let script = Script::new();
+    let (session, server) = opened(&script, 8, &["events", "commands"]).await;
+    assert!(session.events(0).await.is_ok(), "the control: live");
+    let held = server.stream.into_std().expect("a std stream");
+    held.shutdown(std::net::Shutdown::Read)
+        .expect("the server stops reading");
+    // A session already waiting in `ready` is woken by the end too.
+    let (ready, answer) = tokio::join!(
+        tokio::time::timeout(PATIENCE, session.ready()),
+        tokio::time::timeout(PATIENCE, session.join(general())),
+    );
+    assert_eq!(
+        answer.expect("the call comes back"),
+        Err(interweave_transport_api::TransportError::BackendUnavailable)
+    );
+    ready.expect("ready is woken by the end").ok();
+    assert_eq!(
+        session.events(0).await.map(|e| e.len()),
+        Err(interweave_transport_api::TransportError::BackendUnavailable),
+        "ended as the call failed"
+    );
+    drop(held);
+}
+
 /// A server granting more than a session may hold is capped, not trusted.
 #[tokio::test]
 async fn a_grant_past_the_session_ceiling_is_capped() {

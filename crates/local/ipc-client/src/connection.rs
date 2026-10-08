@@ -236,7 +236,14 @@ pub(crate) async fn open(
     // reading -- the server closed it, or broke the protocol -- is shut on
     // this side too, so the server sees it end and releases the session.
     let (ended, ended_rx) = watch::channel(false);
-    let writer = tokio::spawn(write_loop(write, out_rx, pong_rx, ended_rx));
+    let inbox = events_tx.as_ref().map(|(_, inbox)| Arc::clone(inbox));
+    let writer = tokio::spawn(write_loop(
+        write,
+        out_rx,
+        pong_rx,
+        ended_rx,
+        (Arc::clone(&shared), inbox),
+    ));
     let reader = tokio::spawn(read_loop(
         reader,
         response.ipc_version,
@@ -377,11 +384,28 @@ impl Drop for CancelOnDrop {
     }
 }
 
+/// The connection is over, for either half: the end recorded, every
+/// waiting call answered with it, and a session waiting in `ready` woken
+/// to read it from `events`.
+fn finish(shared: &Shared, inbox: Option<&Inbox>, code: TransportError, clean: bool) {
+    shared.end(code, clean);
+    if let Some(inbox) = inbox {
+        inbox.wake_all();
+    }
+}
+
+/// The writer. One that stops for its own reason -- a failed write, a
+/// frame past the ceiling -- ends the connection BEFORE it drops its
+/// queue, so a call that fails on the dropped queue finds the end already
+/// recorded and `events` already refusing: the reader may never see the
+/// end, a server that stopped reading and kept writing being one way
+/// (`a_failed_write_ends_the_session_before_the_reader_sees_it`).
 async fn write_loop(
     mut write: OwnedWriteHalf,
     mut out: mpsc::Receiver<Outgoing>,
     mut pong: watch::Receiver<Option<Frame>>,
     mut ended: watch::Receiver<bool>,
+    (shared, inbox): (Arc<Shared>, Option<Arc<Inbox>>),
 ) {
     loop {
         // An echo goes ahead of whatever requests are queued: the server
@@ -402,9 +426,21 @@ async fn write_loop(
             break;
         };
         let Ok(bytes) = frame.encode() else {
+            finish(
+                &shared,
+                inbox.as_deref(),
+                TransportError::PayloadTooLarge,
+                false,
+            );
             break;
         };
         if write.write_all(&bytes).await.is_err() {
+            finish(
+                &shared,
+                inbox.as_deref(),
+                TransportError::BackendUnavailable,
+                false,
+            );
             break;
         }
     }
@@ -470,12 +506,13 @@ async fn read_loop(
             Err(code) => break (code, false),
         }
     };
-    shared.end(code, clean);
+    finish(
+        &shared,
+        events.as_ref().map(|(_, inbox)| &**inbox),
+        code,
+        clean,
+    );
     let _ = ended.send(true);
-    // A session waiting in `ready` reads the end from `events`.
-    if let Some((_, inbox)) = &events {
-        inbox.wake_all();
-    }
 }
 
 /// Frames off the read half.
