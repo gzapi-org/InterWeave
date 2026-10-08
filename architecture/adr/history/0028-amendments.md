@@ -182,8 +182,9 @@ plain per-user layout (`/home` root's at `0755`, the home and
 `~/.local/state` the user's), a container's root-owned tree, a sticky
 `/tmp`. The rule speaks to local accounts: another host presenting the
 daemon's uid over a network filesystem, or that filesystem's server,
-is outside it, as disk theft is. Unix only, as the helpers are today;
-other platforms keep `UnsupportedPlatform`. A layout refused in the
+is outside it, as disk theft is. Linux only — the effective uid is read
+from `/proc`, so on every other target the writers now refuse as the
+loader and locks did; they keep `UnsupportedPlatform`. A layout refused in the
 field is reported to architect-cto as an observation and decides the
 revisit; nothing is loosened ahead of one. Carried: the human store's
 own directory helpers (`crates/human/store/src/store.rs`,
