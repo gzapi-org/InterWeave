@@ -611,7 +611,8 @@ impl ProfileIdentity {
     /// which that `load` applies to the stored identity exactly as it does
     /// to a direct one -- or
     /// [`IdentityError::Storage`] if the write fails OR if the directory
-    /// holding the stored key is a symlink or accessible to group or other
+    /// holding the stored key is a symlink, accessible to group or other,
+    /// or under an ancestor or link breaking ADR-0028 A 2026-10-08's rule
     /// -- the read-side cause `load` documents, reached through the same
     /// `load` as the three variants above, and not something a caller would
     /// expect from a sentence about writing.
@@ -649,7 +650,10 @@ impl ProfileIdentity {
     ///
     /// Returns [`IdentityError::Storage`] if the DIRECTORY holding the key
     /// is a symlink, is accessible to group or other, or is owned by
-    /// another uid than this process's effective one. This is a separate
+    /// another uid than this process's effective one -- or if an ancestor
+    /// of it or a link on its path breaks ADR-0028 A 2026-10-08's rule
+    /// (owned by root or this uid, writable by no one else unless
+    /// sticky). This is a separate
     /// object from the file mode below and surfaces as a different variant,
     /// which the operator-visible contract did not say: a state directory
     /// that drifted to `0755` -- what a hand-made `mkdir` gives under the
@@ -714,14 +718,13 @@ impl ProfileIdentity {
         // on PR #86.
         // Unconditional: every path has a directory to check, because
         // `parent_or_dot` supplies `.` for the one shape that has no
-        // directory component. The braces scope the `match` and are not a
-        // condition that went missing.
+        // directory component.
         //
         // AND READ UNDER THE DIRECTORY AS JUDGED: the check resolves the
         // directory on disk, its ancestors and the links on its path
         // judged with it (ADR-0028 A 2026-10-08), and the key is opened
-        // under that resolved directory, never the configured text, so
-        // what was judged is what is read.
+        // under that resolved directory, so what was judged is what is
+        // read.
         let resolved =
             match uid.and_then(|uid| resolve_owned_private_dir_as(parent_or_dot(path), uid)) {
                 Ok(dir) => dir,
