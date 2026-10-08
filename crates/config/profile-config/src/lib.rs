@@ -50,8 +50,9 @@ pub use load::{LoadError, MAX_PROFILE_BYTES};
 pub use lock::{DAEMON_LOCK_WAIT, HUMAN_CLIENT_LOCK_FILE, HumanClientLock, LOCK_FILE, ProfileLock};
 pub use paths::{HUMAN_DIR, NAMESPACE, PROFILES, ProfilePaths, XdgRoots, absolute_or_none};
 pub use persist::{
-    OWNER_ONLY_DIR, OWNER_ONLY_FILE, create_private_dir, create_private_exclusive, is_owner_only,
-    require_owned_private_dir, require_private_dir, write_atomic, write_private_atomic,
+    OWNER_ONLY_DIR, OWNER_ONLY_FILE, create_private_dir, create_private_exclusive, effective_uid,
+    is_owner_only, require_owned_private_dir, require_owned_private_dir_as, require_private_dir,
+    write_atomic, write_private_atomic,
 };
 
 /// Which provider a `discovery.providers` entry configures.

@@ -380,34 +380,38 @@ pub fn require_private_dir(dir: &Path) -> Result<(), PersistError> {
 /// be inspected; [`PersistError::UnsupportedPlatform`] where the uid
 /// cannot be read.
 pub fn require_owned_private_dir(dir: &Path) -> Result<(), PersistError> {
-    #[cfg(unix)]
-    {
-        require_owned_private_dir_as(dir, effective_uid()?)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = dir;
-        Err(PersistError::UnsupportedPlatform)
-    }
+    require_owned_private_dir_as(dir, effective_uid()?)
 }
 
 /// [`require_owned_private_dir`] for `uid`, apart so a test can name a uid
-/// that is not this process's: staging a directory another account owns
-/// needs that account.
-#[cfg(unix)]
-fn require_owned_private_dir_as(dir: &Path, uid: u32) -> Result<(), PersistError> {
-    use std::os::unix::fs::MetadataExt as _;
-    require_private_dir(dir)?;
-    let owner = std::fs::symlink_metadata(dir)
-        .map_err(PersistError::Io)?
-        .uid();
-    if owner != uid {
-        return Err(PersistError::DirectoryNotPrivate {
-            path: dir.to_path_buf(),
-            detail: format!("owned by uid {owner}, not {uid}"),
-        });
+/// that is not this process's -- staging a directory another account owns
+/// needs that account -- in this crate and in a caller that must show it
+/// asks the owner, not only the mode (the identity loader's
+/// `a_key_directory_owned_by_another_uid_is_refused`).
+///
+/// # Errors
+/// As [`require_owned_private_dir`].
+pub fn require_owned_private_dir_as(dir: &Path, uid: u32) -> Result<(), PersistError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        require_private_dir(dir)?;
+        let owner = std::fs::symlink_metadata(dir)
+            .map_err(PersistError::Io)?
+            .uid();
+        if owner != uid {
+            return Err(PersistError::DirectoryNotPrivate {
+                path: dir.to_path_buf(),
+                detail: format!("owned by uid {owner}, not {uid}"),
+            });
+        }
+        Ok(())
     }
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        let (_, _) = (dir, uid);
+        Err(PersistError::UnsupportedPlatform)
+    }
 }
 
 /// This process's effective uid, from `/proc/self/status`: `geteuid`
@@ -415,7 +419,7 @@ fn require_owned_private_dir_as(dir: &Path, uid: u32) -> Result<(), PersistError
 ///
 /// # Errors
 /// [`PersistError::UnsupportedPlatform`] where it cannot be read.
-pub(crate) fn effective_uid() -> Result<u32, PersistError> {
+pub fn effective_uid() -> Result<u32, PersistError> {
     let status = std::fs::read_to_string("/proc/self/status")
         .map_err(|_| PersistError::UnsupportedPlatform)?;
     status
