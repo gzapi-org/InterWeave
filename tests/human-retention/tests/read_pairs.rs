@@ -8,6 +8,8 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
+mod common;
+
 use interweave_human_retention_tests::{INBOUND_BODY, PEER, unread_inbound};
 use interweave_human_store::{
     AppMessageId, HumanStore, InboundOrigin, NewInbound, READ_PAIR_CAP, StoreError, StoreOptions,
@@ -27,7 +29,7 @@ fn copy_with(payload: &[u8]) -> NewInbound {
 
 #[test]
 fn a_copy_of_a_message_read_and_not_kept_is_not_unread_after_a_restart() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     let mut store = open(&path);
     let row = store
@@ -93,7 +95,7 @@ fn the_pair_is_the_origin_so_another_peer_or_endpoint_reusing_the_id_is_admitted
 
 #[test]
 fn removing_keep_records_the_pair_too() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     let mut store = open(&path);
     let row = store
@@ -146,7 +148,7 @@ fn the_pairs_are_bounded_and_the_oldest_goes_first() {
 
 #[test]
 fn the_pairs_hold_no_content_and_a_column_that_could_is_refused_at_open() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = common::private_tempdir();
     let path = dir.path().join("state").join("human.sqlite3");
     let mut store = open(&path);
     let row = store
