@@ -139,15 +139,16 @@ pub enum StoreError {
         /// What was found.
         what: &'static str,
     },
-    /// A file or directory holding message content is reachable by
-    /// someone other than its owner.
+    /// A file holding message content -- the database or its `-wal` or
+    /// `-shm` companion -- is reachable by someone other than its owner.
+    /// Its directory is [`StoreError::DirectoryNotPrivate`]'s.
     ///
     /// Refused rather than repaired, for the reason the identity key is:
     /// content that has been broadly readable should be treated as
     /// exposed, and quietly narrowing the mode would hide that it ever
     /// was.
     PermissionsTooOpen {
-        /// Which file or directory.
+        /// Which file.
         what: String,
         /// The mode it carries.
         mode: u32,
