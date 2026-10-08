@@ -11,9 +11,14 @@
 //!
 //! The ENVELOPE is what this codec holds: which of the ten classes a body
 //! is, the top-level members each class requires and allows, and the rules
-//! the frame schema states at that level — a response's `ok` against its
-//! `result`/`error`, an event's closed `event_type` set, the request id's
-//! bounds, the version objects. What rides inside — a request's params, an
+//! `ipc/frame`, `ipc/hello`, `ipc/hello-response` and `ipc/close` state at
+//! that level — a response's `ok` against its `result`/`error`, an event's
+//! closed `event_type` set, the request id's bounds, the version objects,
+//! the keepalive nonce's and the lease epoch's length and alphabet,
+//! hello-response's endpoint/epoch/event-queue implications, close's
+//! `VersionIncompatible ⇒ supported`, the 2048-character messages, the
+//! 128-character client version, and the at-most-eight unique capability
+//! and feature lists. What rides inside — a request's params, an
 //! event's data, the capability and error-code vocabularies — is the
 //! method and event catalogue's, which `ipc/request` and `ipc/event` own,
 //! and is carried through as JSON untouched.
@@ -155,15 +160,26 @@ impl Envelope {
     }
 }
 
-/// Split one frame off the front of `bytes`: `(body, rest)`.
+/// What the front of a byte stream holds.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Split<'a> {
+    /// A whole frame: its body, and what follows it.
+    Frame(&'a [u8], &'a [u8]),
+    /// A legal prefix (or part of one) whose body has not all arrived:
+    /// read more. Typed, so a reader never decides this from an error's
+    /// wording.
+    Incomplete,
+}
+
+/// Split one frame off the front of `bytes`.
 ///
 /// # Errors
-/// A short prefix, a zero length, a length past the ceiling — refused
-/// before the body is taken — or a body shorter than declared.
-pub fn split_frame(bytes: &[u8]) -> Result<(&[u8], &[u8]), DecodeError> {
-    let prefix = bytes
-        .get(..4)
-        .ok_or_else(|| DecodeError("fewer than 4 prefix bytes".to_owned()))?;
+/// A zero length or a length past the ceiling, refused from the prefix
+/// alone, before any body is waited for.
+pub fn split_frame(bytes: &[u8]) -> Result<Split<'_>, DecodeError> {
+    let Some(prefix) = bytes.get(..4) else {
+        return Ok(Split::Incomplete);
+    };
     let n = u32::from_be_bytes([prefix[0], prefix[1], prefix[2], prefix[3]]);
     let n = usize::try_from(n).unwrap_or(usize::MAX);
     if n == 0 {
@@ -176,20 +192,23 @@ pub fn split_frame(bytes: &[u8]) -> Result<(&[u8], &[u8]), DecodeError> {
     }
     let rest = &bytes[4..];
     if rest.len() < n {
-        return Err(DecodeError(format!(
-            "{n} body bytes declared, {} present",
-            rest.len()
-        )));
+        return Ok(Split::Incomplete);
     }
-    Ok(rest.split_at(n))
+    let (body, after) = rest.split_at(n);
+    Ok(Split::Frame(body, after))
 }
 
 /// Decode exactly one frame.
 ///
 /// # Errors
-/// As [`split_frame`] and [`Envelope::decode_body`], or bytes after it.
+/// As [`split_frame`] and [`Envelope::decode_body`], a frame cut short,
+/// or bytes after it.
 pub fn decode_frame(bytes: &[u8]) -> Result<Envelope, DecodeError> {
-    let (body, rest) = split_frame(bytes)?;
+    let Split::Frame(body, rest) = split_frame(bytes)? else {
+        return Err(DecodeError(
+            "a short frame: prefix or body incomplete".to_owned(),
+        ));
+    };
     if !rest.is_empty() {
         return Err(DecodeError(format!(
             "{} byte(s) after the frame",
@@ -223,9 +242,18 @@ fn check_class(class: Class, v: &Value) -> Result<(), DecodeError> {
             let client = v.get("client");
             object_with(client, &["kind"], &["version"], "client")?;
             bounded_str(client.and_then(|c| c.get("kind")), 1, 64, "client.kind")?;
+            if let Some(version) = client.and_then(|c| c.get("version")) {
+                bounded_str(Some(version), 0, 128, "client.version")?;
+            }
             if let Some(e) = v.get("endpoint") {
                 object_with(Some(e), &["id"], &[], "endpoint")?;
                 bounded_str(e.get("id"), 1, 64, "endpoint.id")?;
+            }
+            if let Some(c) = v.get("requested_capabilities") {
+                unique_strings(c, 0, usize::MAX, "requested_capabilities")?;
+            }
+            if let Some(f) = v.get("features") {
+                unique_strings(f, 1, 64, "features")?;
             }
         }
         Class::HelloResponse => {
@@ -236,9 +264,53 @@ fn check_class(class: Class, v: &Value) -> Result<(), DecodeError> {
                     "transport_contract_version is not N.N".to_owned(),
                 ));
             }
+            bounded_str(v.get("peer"), 1, usize::MAX, "peer")?;
+            unique_strings(
+                v.get("granted_capabilities").unwrap_or(&Value::Null),
+                0,
+                usize::MAX,
+                "granted_capabilities",
+            )?;
+            // hello-response's allOf: endpoint, its epoch and its event
+            // queue are present together or not at all.
+            let present =
+                ["endpoint", "endpoint_lease_epoch", "event_queue"].map(|k| v.get(k).is_some());
+            if present.iter().any(|p| *p) && !present.iter().all(|p| *p) {
+                return Err(DecodeError(
+                    "endpoint, endpoint_lease_epoch and event_queue come together".to_owned(),
+                ));
+            }
+            if let Some(e) = v.get("endpoint")
+                && !e.as_str().is_some_and(crate::is_endpoint_id)
+            {
+                return Err(DecodeError(
+                    "endpoint outside the EndpointId grammar".to_owned(),
+                ));
+            }
+            if let Some(epoch) = v.get("endpoint_lease_epoch") {
+                token(epoch, 16, 64, "endpoint_lease_epoch")?;
+            }
+            if let Some(q) = v.get("event_queue") {
+                non_negative(q, "event_queue")?;
+                if q.as_i64() == Some(0) {
+                    return Err(DecodeError("event_queue 0".to_owned()));
+                }
+            }
         }
         Class::Close => {
             bounded_str(v.get("code"), 1, usize::MAX, "code")?;
+            if let Some(m) = v.get("message") {
+                bounded_str(Some(m), 0, 2048, "message")?;
+            }
+            // close's allOf: a VersionIncompatible close names what the
+            // server supports.
+            if v.get("code").and_then(Value::as_str) == Some("VersionIncompatible")
+                && v.get("supported").is_none()
+            {
+                return Err(DecodeError(
+                    "VersionIncompatible without supported".to_owned(),
+                ));
+            }
             if let Some(Value::Array(items)) = v.get("supported") {
                 if items.is_empty() || items.len() > 8 {
                     return Err(DecodeError("supported holds 1..8 versions".to_owned()));
@@ -273,6 +345,10 @@ fn check_class(class: Class, v: &Value) -> Result<(), DecodeError> {
                     }
                     let e = v.get("error");
                     object_with(e, &["code"], &["message"], "error")?;
+                    bounded_str(e.and_then(|e| e.get("code")), 1, usize::MAX, "error.code")?;
+                    if let Some(m) = e.and_then(|e| e.get("message")) {
+                        bounded_str(Some(m), 0, 2048, "error.message")?;
+                    }
                 }
                 Some(Value::Bool(true)) => {
                     if v.get("error").is_some() {
@@ -304,7 +380,40 @@ fn check_class(class: Class, v: &Value) -> Result<(), DecodeError> {
                 return Err(DecodeError("health outside its closed set".to_owned()));
             }
         }
-        Class::Ping | Class::Pong => bounded_str(v.get("nonce"), 1, usize::MAX, "nonce")?,
+        // frame's $defs/keepalive_nonce.
+        Class::Ping | Class::Pong => {
+            token(v.get("nonce").unwrap_or(&Value::Null), 16, 64, "nonce")?;
+        }
+    }
+    Ok(())
+}
+
+/// `^[A-Za-z0-9_-]+$` of `min..=max` characters: the keepalive nonce and
+/// the lease epoch.
+fn token(v: &Value, min: usize, max: usize, what: &str) -> Result<(), DecodeError> {
+    bounded_str(Some(v), min, max, what)?;
+    if !v.as_str().is_some_and(|s| {
+        s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    }) {
+        return Err(DecodeError(format!("{what} outside [A-Za-z0-9_-]")));
+    }
+    Ok(())
+}
+
+/// An array of at most 8 unique strings, each `min..=max` characters.
+fn unique_strings(v: &Value, min: usize, max: usize, what: &str) -> Result<(), DecodeError> {
+    let Value::Array(items) = v else {
+        return Err(DecodeError(format!("{what} is not an array")));
+    };
+    if items.len() > 8 {
+        return Err(DecodeError(format!("{what} holds more than 8")));
+    }
+    for (n, item) in items.iter().enumerate() {
+        bounded_str(Some(item), min.max(1), max, what)?;
+        if items[..n].contains(item) {
+            return Err(DecodeError(format!("{what} repeats an item")));
+        }
     }
     Ok(())
 }

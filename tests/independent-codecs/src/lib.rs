@@ -37,7 +37,8 @@ pub mod json;
 mod wire;
 
 /// Why a frame was refused. The message names the rule, for a test's
-/// failure output; nothing branches on its text.
+/// failure output. Where a reader must branch (more bytes or a refusal),
+/// the codec returns a type for it: [`ipc_v2::Split`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodeError(pub String);
 

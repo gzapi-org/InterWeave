@@ -232,6 +232,62 @@ fn ipc_envelope_rules_hold_beside_their_controls() {
         assert!(ipc(ok).is_ok(), "control refused: {ok}: {:?}", ipc(ok));
         assert!(ipc(bad).is_err(), "accepted: {bad}");
     }
+    // The schema rules below the class level, each beside its control.
+    let nonce = |n: &str| format!(r#"{{"type":"ping","nonce":"{n}"}}"#);
+    let lease = |members: &str| {
+        format!(
+            r#"{{"type":"hello_response","ipc_version":{{"major":2,"minor":3}},"transport_contract_version":"2.0","peer":"12D3KooW","granted_capabilities":["events"]{members}}}"#
+        )
+    };
+    let full = r#","endpoint":"human","endpoint_lease_epoch":"AAAAAAAAAAAAAAAA","event_queue":256"#;
+    let owned: Vec<(String, String)> = vec![
+        // frame $defs/keepalive_nonce: 16..64 of [A-Za-z0-9_-].
+        (nonce(&"A".repeat(16)), nonce(&"A".repeat(15))),
+        (nonce(&"_-".repeat(32)), nonce(&"A".repeat(65))),
+        (nonce(&"A".repeat(16)), nonce(&format!("{}=", "A".repeat(16)))),
+        // hello-response: the three lease members together or not at all.
+        (lease(""), lease(r#","endpoint":"human""#)),
+        (lease(full), lease(r#","endpoint":"human","endpoint_lease_epoch":"AAAAAAAAAAAAAAAA""#)),
+        (lease(full), lease(r#","event_queue":256"#)),
+        (lease(full), lease(&full.replace("AAAAAAAAAAAAAAAA", "AAAAAAAAAAAAAAA"))),
+        (lease(full), lease(&full.replace("256", "0"))),
+        (lease(full), lease(&full.replace("\"human\"", "\"Human\""))),
+        (
+            lease(""),
+            lease("").replace(r#"["events"]"#, r#"["events","events"]"#),
+        ),
+        // close: VersionIncompatible names what is supported; message <= 2048.
+        (
+            r#"{"type":"close","code":"Timeout"}"#.to_owned(),
+            r#"{"type":"close","code":"VersionIncompatible"}"#.to_owned(),
+        ),
+        (
+            format!(r#"{{"type":"close","code":"Timeout","message":"{}"}}"#, "é".repeat(2048)),
+            format!(r#"{{"type":"close","code":"Timeout","message":"{}"}}"#, "é".repeat(2049)),
+        ),
+        // response error.message <= 2048.
+        (
+            format!(r#"{{"type":"response","id":"1","ok":false,"error":{{"code":"Timeout","message":"{}"}}}}"#, "m".repeat(2048)),
+            format!(r#"{{"type":"response","id":"1","ok":false,"error":{{"code":"Timeout","message":"{}"}}}}"#, "m".repeat(2049)),
+        ),
+        // hello: client.version <= 128; features unique, at most 8.
+        (
+            format!(r#"{{"type":"hello","ipc_version":{{"major":2,"minor":0}},"client":{{"kind":"k","version":"{}"}}}}"#, "v".repeat(128)),
+            format!(r#"{{"type":"hello","ipc_version":{{"major":2,"minor":0}},"client":{{"kind":"k","version":"{}"}}}}"#, "v".repeat(129)),
+        ),
+        (
+            r#"{"type":"hello","ipc_version":{"major":2,"minor":0},"client":{"kind":"k"},"features":["keepalive"]}"#.to_owned(),
+            r#"{"type":"hello","ipc_version":{"major":2,"minor":0},"client":{"kind":"k"},"features":["keepalive","keepalive"]}"#.to_owned(),
+        ),
+        (
+            r#"{"type":"hello","ipc_version":{"major":2,"minor":0},"client":{"kind":"k"},"requested_capabilities":["a","b","c","d","e","f","g","h"]}"#.to_owned(),
+            r#"{"type":"hello","ipc_version":{"major":2,"minor":0},"client":{"kind":"k"},"requested_capabilities":["a","b","c","d","e","f","g","h","i"]}"#.to_owned(),
+        ),
+    ];
+    for (ok, bad) in &owned {
+        assert!(ipc(ok).is_ok(), "control refused: {ok}: {:?}", ipc(ok));
+        assert!(ipc(bad).is_err(), "accepted: {bad}");
+    }
     assert!(ipc("[]").is_err());
     assert!(ipc_v2::decode_frame(&[0, 0, 0, 2, b'{', b'}', 0]).is_err());
 }

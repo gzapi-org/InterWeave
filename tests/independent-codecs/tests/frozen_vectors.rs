@@ -208,15 +208,17 @@ fn class_of(t: &str) -> Option<Class> {
 /// a zero length are refused at the prefix, before any body is read.
 #[test]
 fn the_frame_ceiling_is_exact_at_both_ends() {
+    // Padded through a request's params, which the envelope bounds by
+    // nothing but the frame: every bounded member stays legal.
     let pad = |n: usize| {
-        let head = r#"{"type":"ping","nonce":""#;
-        let tail = r#""}"#;
+        let head = r#"{"type":"request","id":"1","method":"channel.join","params":{"pad":""#;
+        let tail = r#""}}"#;
         format!("{head}{}{tail}", "A".repeat(n - head.len() - tail.len()))
     };
     let at = pad(ipc_v2::MAX_BODY_BYTES);
     let frame = ipc_v2::encode_frame(at.as_bytes()).unwrap();
     assert_eq!(frame[..4], [0x00, 0x02, 0x00, 0x00]);
-    assert_eq!(ipc_v2::decode_frame(&frame).unwrap().class, Class::Ping);
+    assert_eq!(ipc_v2::decode_frame(&frame).unwrap().class, Class::Request);
 
     let over = pad(ipc_v2::MAX_BODY_BYTES + 1);
     assert!(ipc_v2::encode_frame(over.as_bytes()).is_err());
