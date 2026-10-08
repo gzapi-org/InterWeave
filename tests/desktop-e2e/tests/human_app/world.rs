@@ -162,7 +162,16 @@ pub(crate) struct Peer {
 
 impl Peer {
     pub(crate) fn new(home: &Home) -> Self {
-        let store_dir = tempfile::tempdir().expect("a store directory");
+        // Owner-only at creation, whatever the umask: under umask 002 a
+        // bare `tempdir()` is group-writable and the store refuses it as
+        // an ancestor (ADR-0028 A 2026-10-08).
+        let store_dir = {
+            use std::os::unix::fs::PermissionsExt as _;
+            tempfile::Builder::new()
+                .permissions(std::fs::Permissions::from_mode(0o700))
+                .tempdir()
+                .expect("a store directory")
+        };
         let store = HumanStore::open(
             &store_dir.path().join("state/human.sqlite"),
             StoreOptions::default(),
