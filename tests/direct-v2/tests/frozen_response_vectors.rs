@@ -61,38 +61,46 @@ fn reason(name: &str) -> DirectRejectReason {
     }
 }
 
+/// The names in `schemas/direct/reject-reason.schema.json`'s `enum`, in
+/// order, read from the schema file itself.
+fn schema_reasons() -> Vec<String> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../architecture/contracts/schemas/direct/reject-reason.schema.json");
+    let text = std::fs::read_to_string(path).expect("the schema");
+    let start = text.find("\"enum\"").expect("an enum");
+    let open = start + text[start..].find('[').expect("its list");
+    let close = open + text[open..].find(']').expect("its end");
+    let names: Vec<String> = text[open + 1..close]
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_owned)
+        .collect();
+    // A parse that found nothing would make the coverage loop vacuous.
+    assert!(names.len() >= 7, "the schema's reasons, parsed: {names:?}");
+    names
+}
+
 #[test]
 fn every_response_vector_encodes_to_its_frozen_bytes_and_decodes_back() {
     let all = vectors();
-    // A vector dropped fails the count. A reason with no vector fails the
-    // coverage loop: `covered` matches every variant exhaustively, so a
-    // variant added to the type does not compile until it is listed, and
-    // once listed it needs a vector. The schema's enum is held to the same
-    // list by the independent codecs' `the_reason_order_is_the_schemas`.
+    // A vector dropped fails the count. Coverage is held to the
+    // VOCABULARY'S authority, the schema's enum read from its file: every
+    // name there must map to a production variant (`reason` panics on one
+    // it does not know) and have a frozen vector. A reason added to the
+    // schema without a production variant or without a vector fails here.
+    // A variant added to production alone is not seen by this test; the
+    // wire numbering it would need is the schema's, so it has no code
+    // until the schema names it.
     assert_eq!(all.len(), 9, "nine vectors, per the fixture README");
-    let covered = |r: DirectRejectReason| {
-        match r {
-        DirectRejectReason::NoRoute
-        | DirectRejectReason::UnauthorizedPeer
-        | DirectRejectReason::Overloaded
-        | DirectRejectReason::Malformed
-        | DirectRejectReason::TooLarge
-        | DirectRejectReason::ShuttingDown
-        | DirectRejectReason::Unsupported => all.iter().any(|(_, response, _)| {
-            matches!(response, DirectResponse::Rejected { reason, .. } if *reason == r)
-        }),
-    }
-    };
-    for r in [
-        DirectRejectReason::NoRoute,
-        DirectRejectReason::UnauthorizedPeer,
-        DirectRejectReason::Overloaded,
-        DirectRejectReason::Malformed,
-        DirectRejectReason::TooLarge,
-        DirectRejectReason::ShuttingDown,
-        DirectRejectReason::Unsupported,
-    ] {
-        assert!(covered(r), "{r:?} has no frozen vector");
+    for name in schema_reasons() {
+        let r = reason(&name);
+        assert!(
+            all.iter().any(|(_, response, _)| {
+                matches!(response, DirectResponse::Rejected { reason, .. } if *reason == r)
+            }),
+            "{name} has no frozen vector"
+        );
     }
     for (name, response, frame) in all {
         assert_eq!(
