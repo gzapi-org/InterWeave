@@ -35,7 +35,7 @@ DirectMessageV2 {
 
 All multi-byte integer fields are **big-endian** (network byte order): `sent_at_ms` as u64be and `payload_len` as u32be. This matches the rest of the repository — the IPC frame's 4-byte length prefix and `DirectContentFingerprintV1`'s u16be/u32be lengths — and is the only choice under which those three agree. The single-byte length fields have no byte order.
 
-`media_type_len = 0` encodes **absence**. No empty media-type string exists on the wire. A non-zero length encodes a present ASCII media type and maps to `media_present = 1`; zero maps to `media_present = 0` in `DirectContentFingerprintV1`.
+`media_type_len = 0` encodes **absence**. No empty media-type string exists on the wire. A non-zero length encodes a present printable-ASCII media type (0x20..0x7E, A 2026-10-08) and maps to `media_present = 1`; zero maps to `media_present = 0` in `DirectContentFingerprintV1`.
 
 Endpoint strings must satisfy `EndpointId` grammar before routing. Codec rejects invalid/oversized declared lengths before allocation. `sent_at_ms` is not authorization, ordering, freshness, replay-window, or dedup input.
 
@@ -137,3 +137,5 @@ Stop accepting new direct requests, respond `shutting_down` where possible, allo
 ## Protocol family / future compatibility
 
 A future compatible implementation may advertise multiple request-response protocol IDs where safe. Endpoint-addressed sends must never silently downgrade to a protocol that cannot preserve endpoint routing.
+
+**A newer minor lists the older minor's id beside it** (A 2026-10-08): an implementation that speaks `/interweave/direct/2.<n>.0` advertises every older `2.<m>.0` it still speaks until that minor is retired by its own record, and multistream-select picks the newest id both sides list — so a 2.1.0 peer against a 2.0.0 peer exchanges on 2.0.0, and the older peer sees nothing of 2.1.0. A peer that offers only a newer id against an older peer fails `UnsupportedProtocols`, which is the unsupported-major shape by design: a minor that drops the older id IS a major, and a new id is where every non-additive change — a new tag, field or reason code in the response layout above — goes. The upgrade matrix's direct rows (`testing.md` §Compatibility fixtures) assert exactly this.

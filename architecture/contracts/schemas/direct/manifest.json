@@ -20,6 +20,6 @@
   ],
   "not_modelled": {
     "DirectMessageV2 request frame": "A BYTE frame \u2014 fixed-width length prefixes over raw bytes (message_id 16 bytes, u8 endpoint lengths, u32 payload length), not a JSON document. JSON Schema cannot express it, and pretending otherwise would produce a contract that validates nothing an implementation actually parses. It stays with the codec, and cross-implementation agreement on it belongs in fixtures/direct-v2/ as byte vectors. ADR-0049 records this exact case as a revisit condition: byte-level framing is where Protobuf or CDDL would earn its place.",
-    "AcceptedV2 / RejectedV2 responses": "Byte frames for the same reason. Their vocabularies ARE modelled \u2014 see reject-reason \u2014 because the coarse code set is what a reviewer needs to check against the privacy rule, and it is stable independently of how the bytes are laid out."
+    "AcceptedV2 / RejectedV2 responses": "Byte frames for the same reason. Their vocabularies ARE modelled \u2014 see reject-reason \u2014 because the coarse code set is what a reviewer needs to check against the privacy rule, and it is stable independently of how the bytes are laid out. The layout itself is DIRECT.md \u00a7Response byte layout (A 2026-10-08) with its frozen vectors in fixtures/direct-v2/direct-response-v2-frame.json; the reason numbering is the reject-reason enum's order from 1."
   }
 }

@@ -32,7 +32,7 @@ BroadcastMessageV1 {
   message_id: 16 bytes,          // exactly 128 bits, APPLICATION identity
   sent_at_ms: u64,               // diagnostic only
   media_type_len: u8,            // 0 => absent
-  media_type: bytes,             // 1..128 ASCII when present
+  media_type: bytes,             // 1..128 printable ASCII (0x20..0x7E, A 2026-10-08) when present
   payload_len: u32,
   payload: bytes <= effective profile max_payload_bytes <= 49152,
 }
