@@ -26,9 +26,17 @@ The byte-exact encoding of those vectors is pinned beside the codecs, in `tests/
 
   Every frame HEAD writes in these rows is read through the independent codecs. The raw peers stand in for a newer build and speak only those codecs.
 
+- **The upgrade matrix's previous-build axis** (`upgrade_matrix_previous.rs`). Each build in `tools/ci/previous-builds.txt` (the first is `stage13-45ba3928`, the Stage 13 build that spoke IPC 2.0) is built from its own commit as a second binary and run against HEAD:
+
+  - **The entry set:** the built entries under `INTERWEAVE_PREVIOUS_BUILDS` are exactly the list.
+  - **HEAD's client on the old daemon:** a leased data session and an admin status.
+  - **The old `transportctl` on HEAD's daemon:** `status` and `endpoints list`, with the sockets bound where HEAD's path rules put them.
+  - **Peer to peer:** direct messages and broadcasts between the old daemon and HEAD, in both directions.
+
+  The rows are `#[ignore]`. CI builds the list (devex-tooling's `tools/ci/build_previous_builds.sh`) and runs the file with `--ignored`, where an unset variable or a missing entry fails.
+
 **Not yet proved:**
 
-- **The previous-build axis.** Its first entry is the Stage 13 build that spoke IPC 2.0 (#165's merge), built from its own commit as a second binary and run against HEAD both ways. The CI build of that binary is devex-tooling's piece, and the rows wait for it.
 - **The desktop ↔ Android matrix** on real devices waits for the Android app.
 - **Same-host rows only.** The direct and broadcast rows run on the host's private-range address, since ADR-0052 refuses a loopback peer address. They show nothing about NAT, relays or a second host.
 
