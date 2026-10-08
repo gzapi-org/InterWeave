@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# rust/cleartext-logging finds its SOURCES BY NAME: a call whose target
+# function is named like an id ("uid" among them), or a variable or
+# field so named, is "sensitive data", and a panic!, assert! or eprintln!
+# it reaches is the "log". ADR-0028's refusals name the owner uid and
+# mode of the component that broke the rule on purpose, so every test
+# that prints such a refusal with {:?} raised a "high" alert, dismissed
+# by hand each time (alerts 1, 22-42).
+#
+# A barrierModel row on a function's ReturnValue (the call node, which
+# is the source node) stops that function's result being a source for
+# the query's taint kind, `log-injection`, and nothing else: every other
+# name the heuristic matches, a `password` included, still alerts.
+#
+# Measured with CodeQL 2.27.1 (the version default setup ran on #228) on
+# #228's profile-config and profile-identity: 31 results without this
+# pack, 24 with it — every `effective_uid(...)` and `meta.uid()` source
+# gone; a canary `eprintln!("{password}")` still reported with it.
+#
+# WHAT NO ROW CAN DO: a VARIABLE named `uid` is a source by its name, and
+# models name functions only. The 24 left are all of that shape — a
+# `uid` parameter or local in load.rs/persist.rs reaching a test's panic.
+# Renaming those identifiers is the crates' owners' call; until then
+# such an alert is dismissed as "false positive" by the PR's author,
+# citing this file.
+#
+# THE RULE FOR A ROW: it names one function, says what the function
+# returns, and why that value is not the secret its name suggests. A
+# row that cannot say that is not reviewable. The path is the canonical
+# one — the crate's `lib` name (hyphens as underscores) and the module
+# that defines the function, not a re-export; a trait method as
+# `<Type as path::Trait>::method`. A row whose path matches nothing is
+# silently inert: the alert it was for comes back, which is the signal.
+extensions:
+  - addsTo:
+      pack: codeql/rust-all
+      extensible: barrierModel
+    data:
+      # This process's effective uid, a u32 read from /proc/self/status:
+      # every account on the host can read every process's.
+      - ["interweave_profile_config::persist::effective_uid", "ReturnValue", "log-injection", "manual"]
+      # A file's owner uid, a u32 from stat(2): any account that can see
+      # the file's name can read it.
+      - ["<std::fs::Metadata as std::os::unix::fs::MetadataExt>::uid", "ReturnValue", "log-injection", "manual"]
