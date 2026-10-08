@@ -4946,6 +4946,71 @@ Carried here from Stage 14 (§17): human-client-ui.md §13's render-parity bulle
 
 Carried here from Stage 15 (§18): the trust-audit sink — the embedded host installs a log sink that admits the composition's audit target (`interweave::audit`) at INFO whatever level it otherwise filters at, as the daemon does (LOCAL-CLIENT.md §5, A 2026-10-04); a platform test proves a trust set appears in it.
 
+### Exit gate
+
+**State (2026-10-08):** open since 2026-10-06, when Stage 16's closing
+record moved the status to `stage-17-android-human-client` (54d1c8b8);
+no Android package is built yet, SPIKE-008 and SPIKE-009 are not closed,
+and nothing below is met. This section gained its gate on 2026-10-08
+(fabric-coordinator's observation, after InterWeave #227's thread); the
+closing record will be appended under it, as §18's and §19's were.
+
+The first-party human client runs on Android as the same library
+composition the desktop proved — embedded runtime, store, chat protocol,
+UI model — with the platform's own guarantees (Keystore, foreground
+service, backup exclusion, SELinux-confined app data) measured on a
+device, and Android and desktop peers exchanging HumanChatV2 over direct
+and relayed paths. **This stage does not close until:** (a) SPIKE-008
+and SPIKE-009 are closed PASS with their evidence files: the exact
+Ed25519 secret round-trips through Keystore wrapping with the PeerId
+preserved, and on Keystore invalidation the wrapped secret is refused,
+the app enters recovery and never mints a new key over the profile, the
+PeerId restored from the recovery phrase (SPIKE-009 D6a/D6b: an
+invalidated key never gives a seed back); (b) every step of "Implement in order" has a test named for it in
+the closing record and green — host Rust tests for the session and
+domain logic, instrumented tests on a real device (API level recorded)
+for each line of "Platform tests", process death and restart included;
+step 10 by the store-listing check the packaging batch defines; (c)
+`tests/android-e2e` proves Android ↔ desktop interoperability through a
+direct and a relayed path, HumanChatV2 both directions, plain and
+compressed, with the captured payloads validated against the envelope
+schema; and `tests/interoperability`'s three items this section holds
+(§15 (2)) — the desktop ↔ Android platform matrix on real devices, the
+upgrade matrices, and the independent codecs — are each proved, or
+re-carried in the closing record with the reason, the matrix comparing
+the decoded envelope fields the scope of 2026-09-30 names, never the
+payload carry alone — and the closing record states whether the relayed
+route indicator was proved live on this path, the fact §21 (Stage 18)
+holds its own carry against; (d) ADR-0028's trust boundary (A 2026-10-08) is supplied by the
+embedded runtime as the app's own data directory and the runtime's
+private directories sit directly under it at `0700` — the store opens
+on the device, and a platform test shows a directory under the
+platform's `files/` refused — and the persisted trust overlay is kept
+under that boundary by the embedded runtime as ADR-0028 (A 2026-10-07)
+binds it; (e) the endpoint runtime overlay's persistence, carried to
+this section by ADR-0028 (A 2026-10-07, "when their carried item is
+taken (plan §20)"), is either landed in the overlay's file shape or
+re-carried in the closing record with the reason; (f) the render-parity
+bullet and the accessibility reach carried from §17 and §18 are proved
+on the Android accessibility services, or carried to the owner's
+release gate with the reason named, and a PeerId copies in its exact
+canonical form (human-client-ui.md §11) on the device — proved here, not
+deferrable, as §18 carried it; (g) the trust-audit sink's platform
+test shows a trust set in the embedded host's log under a filter
+stricter than INFO, so the sink's admission of the audit target is what
+is proved, not the default level; (h) OWASP
+Dependency-Check runs in CI against the NVD with the key as a repository
+secret, as a required context (`CLAUDE.md` §9's list and the ruleset) on
+`pull_request`, `merge_group` and pushes to `main` — a job that reports
+nothing gates nothing — its suppressions file holds only entries with
+their sentence, and the Gradle graph is green under it, the pin landed
+by devex-tooling;
+(i) the ledger holds no `stage-17` entry, and the closing record moves
+the status to the lowest open stage on the owner's word. No contract
+flips at this gate: the Android binding consumes contracts already
+`active` (ADR-0049; each flip is recorded in the stage that made it),
+and a new contract this stage finds it needs lands `approved` first.
+
 ## 21. Stage 18 — full adversarial/security gate
 
 Security tests are added continuously at each lower stage. This stage runs the complete release matrix together.
