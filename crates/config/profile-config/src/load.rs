@@ -83,7 +83,9 @@ pub enum LoadError {
     /// `config.yaml` itself is a symbolic link, not a regular file, or
     /// can be written by an account other than root and this one -- owned
     /// by another, other-writable, or group-writable by a group that is
-    /// not the owner's private group (ADR-0028 A 2026-10-08).
+    /// not the owner's private group -- the owner being the account this
+    /// process runs as, never the file's -- or under an access ACL
+    /// (ADR-0028 A 2026-10-08).
     /// Readable by others is allowed: it is not secret.
     ConfigFileUnguarded {
         /// The file.

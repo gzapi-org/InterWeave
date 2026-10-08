@@ -889,17 +889,28 @@ pub(crate) fn owners_private_group(
             ));
         }
     }
-    let (Ok(Some(user)), Ok(Some((group, members)))) = (names.user_name(euid), names.group(gid))
-    else {
-        return Err(format!(
-            "group-writable; whether group {gid} is the owner's private group could not be read"
-        ));
+    // The amendment's wording, "the owner" meaning this process's
+    // account, with which read failed and why after it.
+    let unread = |why: String| {
+        format!(
+            "group-writable; whether group {gid} is the owner's private group could not be read: {why}"
+        )
+    };
+    let user = match names.user_name(euid) {
+        Ok(Some(user)) => user,
+        Ok(None) => return Err(unread(format!("uid {euid} has no account entry"))),
+        Err(e) => return Err(unread(format!("the account of uid {euid}: {e}"))),
+    };
+    let (group, members) = match names.group(gid) {
+        Ok(Some(group)) => group,
+        Ok(None) => return Err(unread(format!("group {gid} has no entry"))),
+        Err(e) => return Err(unread(format!("group {gid}: {e}"))),
     };
     if group == user && members.is_empty() {
         return Ok(());
     }
     Err(format!(
-        "group-writable by group {group} (gid {gid}), not the owner's private group"
+        "group-writable by group {group} (gid {gid}), not the owner's private group (the owner being this process's account, {user}, uid {euid})"
     ))
 }
 
@@ -1305,6 +1316,10 @@ mod tests {
             || Ok(false),
         ));
         assert!(roots.contains("group root (gid 0)"), "{roots}");
+        assert!(
+            roots.contains("alice, uid 1000"),
+            "names our account: {roots}"
+        );
         let acl = refused(judge_ancestor_with(
             path,
             Ok((1000, 1001, 0o40775)),
@@ -1326,6 +1341,31 @@ mod tests {
         );
         let unknown = refused(judge(4242, 0o40775, &names));
         assert!(unknown.contains("whether group 4242 is"), "{unknown}");
+        assert!(unknown.contains("group 4242 has no entry"), "{unknown}");
+        let no_account = refused(judge(
+            1001,
+            0o40775,
+            &FakeNames {
+                users: vec![],
+                ..names_clone(&names)
+            },
+        ));
+        assert!(
+            no_account.contains("uid 1000 has no account entry"),
+            "the user read is named, not the group: {no_account}"
+        );
+        let failed = refused(judge(
+            1001,
+            0o40775,
+            &FakeNames {
+                fails: true,
+                ..names_clone(&names)
+            },
+        ));
+        assert!(
+            failed.contains("the account of uid 1000: other error"),
+            "the io error is kept: {failed}"
+        );
         // The ACL is asked of a group-writable directory only: a 0755
         // one passes without the read, whether it would answer or fail.
         judge_ancestor_with(path, Ok((1000, 100, 0o40755)), 1000, &names, || {
