@@ -77,17 +77,26 @@ struct Shared {
 }
 
 impl Shared {
+    /// Why the connection ended, once the end is final. A writer's
+    /// provisional end is not shown to any caller: the reader's end
+    /// always follows it, answers every call registered meanwhile and
+    /// wakes `ready` again, so a call, `events` and `ready` all read the
+    /// one code the session ends with (`LOCAL-IPC.md` §Close;
+    /// `a_provisional_end_is_shown_to_nobody`).
     fn ended(&self) -> Option<TransportError> {
-        *self.ended.lock().unwrap_or_else(PoisonError::into_inner)
+        let ended = self.ended.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.provisional.load(Ordering::SeqCst) {
+            return None;
+        }
+        *ended
     }
 
-    /// Register a call, unless the connection has already ended. Checked
-    /// under the lock `end` drains under, for the window between the
-    /// reader's end and the writer's exit: a call registered after `end`
-    /// drained would wait on an answer nothing will send. Outside that
-    /// window the writer's exit fails the send first (the scripted
-    /// `a_call_on_an_ended_connection_is_refused_not_left_waiting`); the
-    /// window itself is too narrow for a test to reach on purpose.
+    /// Register a call, unless the connection has already ended for good.
+    /// Checked under the lock `end` drains under: a call registered after
+    /// the reader's `end` drained would wait on an answer nothing will
+    /// send (`a_call_on_an_ended_connection_is_refused_not_left_waiting`).
+    /// A call registered while the end is still the writer's provisional
+    /// one is answered by the reader's end that follows it.
     fn register(
         &self,
         id: &RequestId,
@@ -109,15 +118,16 @@ impl Shared {
     }
 
     /// The connection is over: the code is recorded, and every waiting
-    /// call is answered with it then, not when it is next polled. The first end recorded stands, except
-    /// that a writer's failure is provisional: the server's own `close`
-    /// frame, read after it, replaces its code, so a caller is told why the
-    /// SERVER ended the connection rather than that a write failed against
-    /// the socket it was closing. The writer's end drops no call: the
-    /// reader, which then reads only what has already arrived, answers them
-    /// when it stops, so a call answers the code the session ends with
-    /// (`a_failed_write_keeps_the_servers_close_code`; architect-cto's
-    /// ruling, 01a11be2).
+    /// call is answered with it then, not when it is next polled. The
+    /// first end recorded stands, except that a writer's failure is
+    /// provisional: the server's own `close` frame, read after it,
+    /// replaces its code, so a caller is told why the SERVER ended the
+    /// connection rather than that a write failed against the socket it
+    /// was closing. The writer's end answers no call: the reader, which
+    /// then reads what has already arrived, answers them when it stops,
+    /// and its end makes the code final, so a call answers the code the
+    /// session ends with (`a_failed_write_keeps_the_servers_close_code`;
+    /// architect-cto's ruling, 01a11be2).
     fn end(&self, code: TransportError, clean: bool, by: EndedBy) {
         let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
         let mut ended = self.ended.lock().unwrap_or_else(PoisonError::into_inner);
@@ -128,10 +138,11 @@ impl Shared {
             *ended = Some(code);
             self.provisional
                 .store(by == EndedBy::Writer, Ordering::SeqCst);
-        } else if by == EndedBy::ServerClose && self.provisional.swap(false, Ordering::SeqCst) {
+        } else if by == EndedBy::ServerClose && self.provisional.load(Ordering::SeqCst) {
             *ended = Some(code);
         }
         if by != EndedBy::Writer {
+            self.provisional.store(false, Ordering::SeqCst);
             let code = ended.unwrap_or(code);
             for (_, answer) in pending.drain() {
                 let _ = answer.send(Err(code));
@@ -365,10 +376,11 @@ impl Connection {
             out: self.out.clone(),
             shared: Arc::clone(&self.shared),
         };
-        self.out
-            .send(Outgoing::Bytes(bytes))
-            .await
-            .map_err(|_| self.gone())?;
+        // A writer that has stopped refuses the send, but the call is
+        // registered: the reader's end, which always follows, answers it
+        // with the code the session ends with, not whatever was recorded
+        // at this instant.
+        let _ = self.out.send(Outgoing::Bytes(bytes)).await;
         let response = response.await.map_err(|_| self.gone())??;
         guard.id = None;
         response.outcome()
@@ -384,7 +396,10 @@ impl Connection {
     /// did not close within [`CLOSE_WAIT`].
     pub(crate) async fn close(mut self) -> Result<(), TransportError> {
         self.shared.closing.store(true, Ordering::SeqCst);
-        if self.shared.uninvited.load(Ordering::SeqCst) {
+        // Ended for good already: nothing left to release. A writer's
+        // provisional end waits below for the reader's, which names the
+        // code.
+        if self.shared.uninvited.load(Ordering::SeqCst) && self.has_ended() {
             return Err(self.gone());
         }
         let _ = self.out.send(Outgoing::Finish).await;
@@ -773,6 +788,38 @@ mod tests {
         Request::ChannelJoin(ChannelParams {
             channel: ChannelId::parse("general").expect("channel"),
         })
+    }
+
+    /// The writer's provisional end is shown to nobody: a call still
+    /// registers, and is answered by the reader's end with the code that
+    /// end makes final -- here the server's `close` -- which is the code
+    /// every later reader of the end sees. The control: the reader's end
+    /// is final, and a call after it is refused with that code.
+    #[test]
+    fn a_provisional_end_is_shown_to_nobody() {
+        let shared = Shared::default();
+        shared.end(TransportError::BackendUnavailable, false, EndedBy::Writer);
+        assert_eq!(shared.ended(), None, "provisional: not shown");
+        let (answer, mut answered) = oneshot::channel();
+        let id = RequestId::new("r0").expect("id");
+        assert_eq!(shared.register(&id, answer), Ok(()), "still registers");
+        shared.end(
+            TransportError::ProtocolViolation,
+            false,
+            EndedBy::ServerClose,
+        );
+        assert_eq!(
+            answered.try_recv().expect("answered").map(|_| ()),
+            Err(TransportError::ProtocolViolation)
+        );
+        assert_eq!(shared.ended(), Some(TransportError::ProtocolViolation));
+        let (late, _) = oneshot::channel();
+        let id = RequestId::new("r1").expect("id");
+        assert_eq!(
+            shared.register(&id, late),
+            Err(TransportError::ProtocolViolation),
+            "final: refused"
+        );
     }
 
     async fn next(reader: &mut Reader) -> Frame {
