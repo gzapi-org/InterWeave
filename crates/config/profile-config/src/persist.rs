@@ -612,6 +612,18 @@ pub fn resolve_guarded_dir_as(dir: &Path, uid: u32) -> Result<PathBuf, PersistEr
         fs::symlink_metadata(dir).map_err(PersistError::Io)?;
         let resolved = resolve_judged_as(dir, uid)?;
         judge_ancestors(&resolved, uid)?;
+        // Asked of the resolved path, which holds no link: a file passed
+        // as the directory, and the open under it failed later as
+        // `ENOTDIR` (`a_guarded_directory_that_is_a_file_is_refused`).
+        if !fs::symlink_metadata(&resolved)
+            .map_err(PersistError::Io)?
+            .is_dir()
+        {
+            return Err(PersistError::DirectoryNotPrivate {
+                path: dir.to_path_buf(),
+                detail: "it is not a directory".to_owned(),
+            });
+        }
         Ok(resolved)
     }
     #[cfg(not(unix))]
@@ -1167,6 +1179,21 @@ mod tests {
         chmod(&config, 0o755);
         chmod(&root.path().join("a"), 0o775);
         refused_at(resolve_guarded_dir(&config), &root.path().join("a"));
+    }
+
+    /// A file is not a guarded directory, refused naming it; the
+    /// directory beside it is the control. (`create_private_dir` under a
+    /// file never reaches this: its walk meets `ENOTDIR` first.)
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_guarded_directory_that_is_a_file_is_refused() {
+        let root = tempfile::tempdir().expect("tempdir");
+        chmod(root.path(), 0o700);
+        let file = root.path().join("file");
+        fs::write(&file, b"").expect("write");
+        let detail = refused_at(resolve_guarded_dir(&file), &file);
+        assert_eq!(detail, "it is not a directory");
+        resolve_guarded_dir(root.path()).expect("the control");
     }
 
     /// The entries of `dir`, by name.
