@@ -253,6 +253,7 @@ fn ipc_envelope_rules_hold_beside_their_controls() {
         (lease(""), lease("").replace(GOLDEN_PEER, &format!("{}0{}", &GOLDEN_PEER[..8], &GOLDEN_PEER[9..]))),
         (lease(""), lease("").replace(GOLDEN_PEER, &format!("{}O{}", &GOLDEN_PEER[..8], &GOLDEN_PEER[9..]))),
         (lease(""), lease("").replace(GOLDEN_PEER, &format!("{}l{}", &GOLDEN_PEER[..8], &GOLDEN_PEER[9..]))),
+        (lease(""), lease("").replace(GOLDEN_PEER, &format!("{}I{}", &GOLDEN_PEER[..8], &GOLDEN_PEER[9..]))),
         (lease(""), lease("").replace(GOLDEN_PEER, &format!("{GOLDEN_PEER}x"))),
         (
             lease("").replace(GOLDEN_PEER, &format!("Qm{}", &GOLDEN_PEER[8..])),
