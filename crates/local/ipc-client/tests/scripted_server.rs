@@ -299,15 +299,15 @@ async fn a_call_on_an_ended_connection_is_refused_not_left_waiting() {
     );
 }
 
-/// A write that fails ends the connection then and there, before the
-/// reader sees anything: the server here stops reading and keeps its
-/// write half open, so the client's next write fails and its reader goes
-/// on waiting. The call's error and the session's end are one fact
-/// (#199's carried risk: in between, `events(0)` read live, so a caller
-/// asking whether the session ended took the failure for a refusal).
-/// The control is the session reading live before the write.
+/// A write that fails ends the connection though the server stops
+/// reading and keeps its write half open, so nothing it sends will end the
+/// reader: the reader reads what has arrived and ends, and the call comes
+/// back. The call's error and the session's end are one fact (#199's
+/// carried risk: a call failed while `events(0)` read live, so a caller
+/// asking whether the session ended took the failure for a refusal). The
+/// control is the session reading live before the write.
 #[tokio::test]
-async fn a_failed_write_ends_the_session_before_the_reader_sees_it() {
+async fn a_failed_write_ends_the_session_though_the_server_keeps_writing_open() {
     let script = Script::new();
     let (session, server) = opened(&script, 8, &["events", "commands"]).await;
     assert!(session.events(0).await.is_ok(), "the control: live");
@@ -336,35 +336,124 @@ async fn a_failed_write_ends_the_session_before_the_reader_sees_it() {
 /// when a write of the client's fails against the socket the server is
 /// closing first (#224 review B F1): the writer's end is provisional and
 /// the `close` read after it replaces it. The call that met the failed
-/// write is answered at once, as the session ends; it is the session's
-/// end that names the server's reason. Current-thread, so the writer
-/// runs before the reader is polled -- the order that loses the code.
+/// write answers that same code, not the writer's (architect-cto,
+/// 01a11be2): it is answered when the reader has read what arrived.
+/// Current-thread, so the writer runs before the reader is polled -- the
+/// order that loses the code. The control is the same script with no
+/// `close` written: the call and the end are `BackendUnavailable`.
 #[tokio::test(flavor = "current_thread")]
 async fn a_failed_write_keeps_the_servers_close_code() {
     use interweave_transport_api::TransportError;
+    for (close, expected) in [
+        (true, TransportError::ShuttingDown),
+        (false, TransportError::BackendUnavailable),
+    ] {
+        let script = Script::new();
+        let (session, mut server) = opened(&script, 8, &["events", "commands"]).await;
+        if close {
+            server
+                .write(&json!({"type": "close", "code": "ShuttingDown"}))
+                .await;
+        }
+        drop(server);
+        let answer = tokio::time::timeout(PATIENCE, session.join(general()))
+            .await
+            .expect("the call comes back");
+        assert_eq!(answer, Err(expected), "the call answers the session's end");
+        assert_eq!(
+            session.events(0).await.map(|e| e.len()),
+            Err(expected),
+            "the session ends with the same code"
+        );
+    }
+}
+
+/// After a failed write the reader does not wait for room: with the
+/// buffer full and an event in hand, the reading ends there and the call
+/// is answered, though the server's `close` sits unread behind that event
+/// -- a session that never drains would otherwise hold the call for good.
+/// What fitted before the end is still delivered, then the end.
+#[tokio::test]
+async fn a_failed_write_with_a_full_buffer_answers_without_waiting_for_room() {
+    use interweave_transport_api::TransportError;
     let script = Script::new();
-    let (session, mut server) = opened(&script, 8, &["events", "commands"]).await;
+    let (session, mut server) = opened(&script, 1, &["events", "commands"]).await;
+    server.event(0).await;
+    server.event(1).await;
     server
         .write(&json!({"type": "close", "code": "ShuttingDown"}))
         .await;
     drop(server);
     let answer = tokio::time::timeout(PATIENCE, session.join(general()))
         .await
+        .expect("the call comes back without the buffer drained");
+    assert_eq!(answer, Err(TransportError::BackendUnavailable));
+    assert_eq!(
+        session.events(usize::MAX).await.map(|e| e.len()),
+        Ok(1),
+        "what fitted is delivered"
+    );
+    assert_eq!(
+        session.events(usize::MAX).await.map(|e| e.len()),
+        Err(TransportError::BackendUnavailable),
+        "then the end"
+    );
+}
+
+/// A daemon that shuts its read half and keeps writing -- pings here,
+/// as fast as it can -- feeds the reader after a failed write for as long
+/// as it likes: the reader is cut off at its drain budget, ends
+/// `BackendUnavailable`, and the waiting call comes back. Whether the
+/// budget or a stall in the flood ends the reading here is the
+/// scheduler's; the budget itself is pinned by the unit test
+/// `the_drain_stops_at_its_budget_however_much_keeps_arriving`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_server_that_keeps_writing_after_a_failed_write_is_cut_off() {
+    use interweave_transport_api::TransportError;
+    use std::io::Write as _;
+    let script = Script::new();
+    let (session, server) = opened(&script, 8, &["events", "commands"]).await;
+    let held = server.stream.into_std().expect("a std stream");
+    held.set_nonblocking(false).expect("blocking");
+    held.shutdown(std::net::Shutdown::Read)
+        .expect("the server stops reading");
+    let ping =
+        encode_frame(r#"{"type":"ping","nonce":"AAAAAAAAAAAAAAAAAAAAAA"}"#).expect("a frame");
+    let batch: Vec<u8> = ping
+        .iter()
+        .copied()
+        .cycle()
+        .take(ping.len() * 4096)
+        .collect();
+    let flood = std::thread::spawn(move || {
+        let mut held = held;
+        // Until the client goes: then the write fails and the flood ends.
+        while held.write_all(&batch).is_ok() {}
+    });
+    let answer = tokio::time::timeout(PATIENCE, session.join(general()))
+        .await
+        .expect("the call comes back though the server never stops writing");
+    assert_eq!(answer, Err(TransportError::BackendUnavailable));
+    drop(session);
+    flood.join().expect("the flood ends with the client");
+}
+
+/// A frame the client refuses, read in the drain after a failed write,
+/// ends the connection `ProtocolViolation`, as the same frame does with no
+/// write failing first (`an_event_to_a_session_without_events_is_a_protocol_violation`,
+/// the control): one server behaviour, one code, whichever half saw the
+/// end first. Current-thread, so the writer fails before the reader runs.
+#[tokio::test(flavor = "current_thread")]
+async fn a_refused_frame_read_after_a_failed_write_is_the_violation() {
+    use interweave_transport_api::TransportError;
+    let script = Script::new();
+    let (session, mut server) = opened(&script, 8, &["commands"]).await;
+    server.event(0).await;
+    drop(server);
+    let answer = tokio::time::timeout(PATIENCE, session.join(general()))
+        .await
         .expect("the call comes back");
-    assert!(answer.is_err(), "no server, no join: {answer:?}");
-    let deadline = tokio::time::Instant::now() + PATIENCE;
-    loop {
-        let end = session.events(0).await.map(|e| e.len());
-        if end == Err(TransportError::ShuttingDown) {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the server's code never replaced the writer's: {end:?}"
-        );
-        tokio::task::yield_now().await;
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    assert_eq!(answer, Err(TransportError::ProtocolViolation));
 }
 
 /// A server granting more than a session may hold is capped, not trusted.
@@ -444,6 +533,117 @@ async fn a_ping_is_echoed_with_its_nonce() {
             other => panic!("a pong, got {other:?}"),
         }
     }
+}
+
+/// Write a ping and read its echo: the server runs keepalive.
+async fn ping(server: &mut Server) {
+    server
+        .write(&json!({"type": "ping", "nonce": "AAAAAAAAAAAAAAAAAAAAAA"}))
+        .await;
+    assert!(matches!(server.read().await, Some(Frame::Pong(_))));
+}
+
+/// No ping read, no silence bound: a daemon with keepalive off never
+/// pings, and its idle client is bounded only by OS liveness and the
+/// caller's own timeouts (`LOCAL-IPC.md`, A 2026-10-08).
+#[tokio::test(start_paused = true)]
+async fn no_ping_read_never_times_out() {
+    let script = Script::new();
+    let (session, _server) = opened(&script, 8, &["events", "commands"]).await;
+    tokio::time::sleep(Duration::from_secs(600)).await;
+    assert_eq!(
+        session.events(0).await.map(|e| e.len()),
+        Ok(0),
+        "live after ten silent minutes"
+    );
+}
+
+/// A ping read arms the bound: 120 s with no frame read then ends the
+/// connection `Timeout`, and the call waiting on the silent server
+/// answers the same code -- at the bound, not before.
+#[tokio::test(start_paused = true)]
+async fn a_ping_then_silence_ends_timeout() {
+    use interweave_ipc_protocol::CLIENT_SILENCE_TIMEOUT;
+    use interweave_transport_api::TransportError;
+    let script = Script::new();
+    let (session, mut server) = opened(&script, 8, &["events", "commands"]).await;
+    // Taken before the ping is written, so the bound is armed after it;
+    // the paused clock may move while the echo is read, within PATIENCE.
+    let armed = tokio::time::Instant::now();
+    ping(&mut server).await;
+    let answer = tokio::time::timeout(Duration::from_secs(600), session.join(general()))
+        .await
+        .expect("the call comes back");
+    let waited = armed.elapsed();
+    assert_eq!(answer, Err(TransportError::Timeout));
+    assert!(
+        waited >= CLIENT_SILENCE_TIMEOUT && waited < CLIENT_SILENCE_TIMEOUT + PATIENCE,
+        "at the bound: {waited:?}"
+    );
+    assert_eq!(
+        session.events(0).await.map(|e| e.len()),
+        Err(TransportError::Timeout),
+        "the session ends with the same code"
+    );
+    drop(server);
+}
+
+/// A reader paused on a full buffer is not reading: the bound is
+/// suspended, and the fate of a client that never drains is the server's
+/// wedge close. Drained, the reader reads again and the bound starts
+/// afresh -- the control, ending `Timeout` once it has.
+#[tokio::test(start_paused = true)]
+async fn a_paused_reader_does_not_time_out() {
+    use interweave_ipc_protocol::CLIENT_SILENCE_TIMEOUT;
+    use interweave_transport_api::TransportError;
+    let script = Script::new();
+    let (session, mut server) = opened(&script, 1, &["events", "commands"]).await;
+    ping(&mut server).await;
+    server.event(0).await;
+    server.event(1).await;
+    tokio::time::sleep(Duration::from_secs(600)).await;
+    assert_eq!(
+        session.events(0).await.map(|e| e.len()),
+        Ok(0),
+        "paused for ten minutes, still live"
+    );
+    assert!(
+        !session
+            .events(usize::MAX)
+            .await
+            .expect("drained")
+            .is_empty()
+    );
+    tokio::time::sleep(CLIENT_SILENCE_TIMEOUT / 2).await;
+    assert_eq!(
+        session.events(0).await.map(|e| e.len()),
+        Ok(0),
+        "the bound starts afresh as the reader resumes, not from before the pause"
+    );
+    tokio::time::sleep(CLIENT_SILENCE_TIMEOUT / 2 + Duration::from_secs(1)).await;
+    assert_eq!(
+        session.events(0).await.map(|e| e.len()),
+        Err(TransportError::Timeout),
+        "reading again, the bound ran"
+    );
+    drop(server);
+}
+
+/// A healthy server pinging at the default interval never lets the bound
+/// fire.
+#[tokio::test(start_paused = true)]
+async fn a_server_pinging_at_the_default_interval_never_times_out() {
+    let script = Script::new();
+    let (session, mut server) = opened(&script, 8, &["events", "commands"]).await;
+    for _ in 0..20 {
+        ping(&mut server).await;
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    }
+    assert_eq!(
+        session.events(0).await.map(|e| e.len()),
+        Ok(0),
+        "live after ten minutes of pings"
+    );
 }
 
 /// A server that ends the connection itself with a `close` frame -- here

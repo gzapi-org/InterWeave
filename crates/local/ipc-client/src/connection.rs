@@ -8,14 +8,17 @@
 //! carries requests, cancels and pongs.
 
 use std::collections::HashMap;
+use std::io::Read;
+use std::os::fd::AsFd as _;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use interweave_ipc_protocol::{
-    Cancel, DecodedFrame, Frame, FrameError, HELLO_TIMEOUT, Hello, HelloResponse, IPC_MAX_MINOR,
-    IpcVersion, Request, RequestId, ResponseFrame, decode_frame,
+    CLIENT_SILENCE_TIMEOUT, Cancel, DecodedFrame, Frame, FrameError, HELLO_TIMEOUT, Hello,
+    HelloResponse, IPC_MAX_MINOR, IpcVersion, Request, RequestFrame, RequestId, ResponseFrame,
+    decode_frame,
 };
 use interweave_local_client_api::{LocalSessionEvent, SessionEvent};
 use interweave_transport_api::TransportError;
@@ -31,23 +34,40 @@ use tokio::task::JoinHandle;
 /// to hold what a caller sends before the writer takes it.
 const OUTGOING: usize = 64;
 
+/// The most the reader takes in once the writer has failed, before it
+/// ends: "what has already arrived" read as a bound, since how much the
+/// socket holds is not asked of the kernel (that is an `ioctl`, and this
+/// crate forbids `unsafe`). A conforming daemon has at most a socket
+/// buffer queued when it closes -- 208 KiB at Linux's default -- so its
+/// `close` is inside the bound; a daemon that shut its read half and
+/// keeps writing is cut off here rather than holding every waiting call
+/// (`the_drain_stops_at_its_budget_however_much_keeps_arriving`; over a
+/// socket, `a_server_that_keeps_writing_after_a_failed_write_is_cut_off`).
+const DRAIN_BUDGET: usize = 1024 * 1024;
+
 /// How long `close` waits for the server to finish the session -- it
 /// releases the lease before it closes the socket -- before giving up.
 const CLOSE_WAIT: Duration = Duration::from_secs(5);
 
-/// What the writer is handed.
+/// What the writer is handed: frames already encoded, each by the code
+/// that made it, so a frame that cannot be encoded fails where it was
+/// made and never reaches the connection's own end.
 enum Outgoing {
-    Frame(Frame),
+    Bytes(Vec<u8>),
     /// Shut the write half: the server reads end of stream, closes the
     /// session and then the socket.
     Finish,
 }
 
+/// What a waiting call is handed: its response, or the connection's end.
+type Answer = Result<ResponseFrame, TransportError>;
+
 /// What the reader and the callers share.
 #[derive(Default)]
 struct Shared {
-    /// Calls waiting for their response, by id.
-    pending: Mutex<HashMap<String, oneshot::Sender<ResponseFrame>>>,
+    /// Calls waiting for their response, by id: answered with it, or with
+    /// the code the connection ended with, handed over as it ends.
+    pending: Mutex<HashMap<String, oneshot::Sender<Answer>>>,
     /// Why the connection ended, once it has.
     ended: Mutex<Option<TransportError>>,
     /// The recorded end is the writer's own failure, which a server's
@@ -68,21 +88,30 @@ struct Shared {
 }
 
 impl Shared {
+    /// Why the connection ended, once the end is final. A writer's
+    /// provisional end is not shown to any caller: the reader's end
+    /// always follows it, answers every call registered meanwhile and
+    /// wakes `ready` again, so a call, `events` and `ready` all read the
+    /// one code the session ends with (`LOCAL-IPC.md` §Close;
+    /// `a_provisional_end_is_shown_to_nobody`).
     fn ended(&self) -> Option<TransportError> {
-        *self.ended.lock().unwrap_or_else(PoisonError::into_inner)
+        let ended = self.ended.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.provisional.load(Ordering::SeqCst) {
+            return None;
+        }
+        *ended
     }
 
-    /// Register a call, unless the connection has already ended. Checked
-    /// under the lock `end` drains under, for the window between the
-    /// reader's end and the writer's exit: a call registered after `end`
-    /// drained would wait on an answer nothing will send. Outside that
-    /// window the writer's exit fails the send first (the scripted
-    /// `a_call_on_an_ended_connection_is_refused_not_left_waiting`); the
-    /// window itself is too narrow for a test to reach on purpose.
+    /// Register a call, unless the connection has already ended for good.
+    /// Checked under the lock `end` drains under: a call registered after
+    /// the reader's `end` drained would wait on an answer nothing will
+    /// send (`a_call_on_an_ended_connection_is_refused_not_left_waiting`).
+    /// A call registered while the end is still the writer's provisional
+    /// one is answered by the reader's end that follows it.
     fn register(
         &self,
         id: &RequestId,
-        answer: oneshot::Sender<ResponseFrame>,
+        answer: oneshot::Sender<Answer>,
     ) -> Result<(), TransportError> {
         let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(code) = self.ended() {
@@ -92,19 +121,26 @@ impl Shared {
         Ok(())
     }
 
-    fn take(&self, id: &str) -> Option<oneshot::Sender<ResponseFrame>> {
+    fn take(&self, id: &str) -> Option<oneshot::Sender<Answer>> {
         self.pending
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(id)
     }
 
-    /// The connection is over: every waiting call is dropped, and reads
-    /// the code. The first end recorded stands, except that a writer's
-    /// failure is provisional: the server's own `close` frame, read after
-    /// it, replaces its code, so a caller is told why the SERVER ended the
-    /// connection rather than that a write failed against the socket it
-    /// was closing (`a_failed_write_keeps_the_servers_close_code`).
+    /// The connection is over: the code is recorded, and every waiting
+    /// call is answered with it then, not when it is next polled. The
+    /// first end recorded stands, except that a writer's failure is
+    /// provisional: the reader's end that follows replaces its code with
+    /// what it read -- the server's own `close` frame, or a frame this
+    /// client refuses -- so a caller is told why the connection ended
+    /// rather than that a write failed against the socket the server was
+    /// closing, and one server behaviour gets one code whichever half saw
+    /// it first (`a_refused_frame_read_after_a_failed_write_is_the_violation`). The writer's end answers no call: the reader, which
+    /// then reads what has already arrived, answers them when it stops,
+    /// and its end makes the code final, so a call answers the code the
+    /// session ends with (`a_failed_write_keeps_the_servers_close_code`;
+    /// architect-cto's ruling, 01a11be2).
     fn end(&self, code: TransportError, clean: bool, by: EndedBy) {
         let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
         let mut ended = self.ended.lock().unwrap_or_else(PoisonError::into_inner);
@@ -115,10 +151,16 @@ impl Shared {
             *ended = Some(code);
             self.provisional
                 .store(by == EndedBy::Writer, Ordering::SeqCst);
-        } else if by == EndedBy::ServerClose && self.provisional.swap(false, Ordering::SeqCst) {
+        } else if by != EndedBy::Writer && self.provisional.load(Ordering::SeqCst) {
             *ended = Some(code);
         }
-        pending.clear();
+        if by != EndedBy::Writer {
+            self.provisional.store(false, Ordering::SeqCst);
+            let code = ended.unwrap_or(code);
+            for (_, answer) in pending.drain() {
+                let _ = answer.send(Err(code));
+            }
+        }
     }
 }
 
@@ -236,7 +278,7 @@ pub(crate) async fn open(
     // Latest wins: the server holds one nonce outstanding at a time, so
     // an echo for an older ping still unwritten is replaced, not queued
     // ahead of the current one.
-    let (pong, pong_rx) = watch::channel::<Option<Frame>>(None);
+    let (pong, pong_rx) = watch::channel::<Option<Vec<u8>>>(None);
     let shared = Arc::new(Shared::default());
     let (events_tx, events) = match event_queue(&response) {
         Some(bound) => {
@@ -250,12 +292,15 @@ pub(crate) async fn open(
     // reading -- the server closed it, or broke the protocol -- is shut on
     // this side too, so the server sees it end and releases the session.
     let (ended, ended_rx) = watch::channel(false);
+    // And the writer's failure is the reader's cue to stop waiting: it
+    // reads what has already arrived, then ends.
+    let (write_failed, write_failed_rx) = watch::channel(false);
     let inbox = events_tx.as_ref().map(|(_, inbox)| Arc::clone(inbox));
     let writer = tokio::spawn(write_loop(
         write,
         out_rx,
         pong_rx,
-        ended_rx,
+        (ended_rx, write_failed),
         (Arc::clone(&shared), inbox),
     ));
     let reader = tokio::spawn(read_loop(
@@ -264,7 +309,7 @@ pub(crate) async fn open(
         Arc::clone(&shared),
         pong,
         events_tx,
-        ended,
+        (ended, write_failed_rx),
     ));
     Ok(Opened {
         connection: Connection {
@@ -317,22 +362,39 @@ impl Connection {
         &self,
         request: Request,
     ) -> Result<T, TransportError> {
+        self.exchange(|id| request.into_frame(id, None)).await
+    }
+
+    /// [`call`](Self::call) for the frame `frame` makes under a fresh id.
+    /// A frame past the 128 KiB ceiling is refused here, as that call's
+    /// `PayloadTooLarge`, and the connection carries on: no request a
+    /// typed [`Request`] can hold is that large -- the largest legal
+    /// `direct.send` fits with its whole envelope (`ipc-protocol`'s
+    /// `the_largest_legal_payload_fits_with_its_whole_envelope`) -- so the
+    /// refusal is reached through this seam alone
+    /// (`an_unencodable_request_fails_its_call_and_not_the_connection`).
+    async fn exchange<T: DeserializeOwned>(
+        &self,
+        frame: impl FnOnce(RequestId) -> RequestFrame,
+    ) -> Result<T, TransportError> {
         let n = self.next_id.fetch_add(1, Ordering::Relaxed);
         let id = RequestId::new(format!("r{n}"))?;
+        let bytes = Frame::Request(frame(id.clone()))
+            .encode()
+            .map_err(|_| TransportError::PayloadTooLarge)?;
         let (answer, response) = oneshot::channel();
         self.shared.register(&id, answer)?;
         let mut guard = CancelOnDrop {
-            id: Some(id.clone()),
+            id: Some(id),
             out: self.out.clone(),
             shared: Arc::clone(&self.shared),
         };
-        self.out
-            .send(Outgoing::Frame(Frame::Request(
-                request.into_frame(id, None),
-            )))
-            .await
-            .map_err(|_| self.gone())?;
-        let response = response.await.map_err(|_| self.gone())?;
+        // A writer that has stopped refuses the send, but the call is
+        // registered: the reader's end, which always follows, answers it
+        // with the code the session ends with, not whatever was recorded
+        // at this instant.
+        let _ = self.out.send(Outgoing::Bytes(bytes)).await;
+        let response = response.await.map_err(|_| self.gone())??;
         guard.id = None;
         response.outcome()
     }
@@ -347,7 +409,10 @@ impl Connection {
     /// did not close within [`CLOSE_WAIT`].
     pub(crate) async fn close(mut self) -> Result<(), TransportError> {
         self.shared.closing.store(true, Ordering::SeqCst);
-        if self.shared.uninvited.load(Ordering::SeqCst) {
+        // Ended for good already: nothing left to release. A writer's
+        // provisional end waits below for the reader's, which names the
+        // code.
+        if self.shared.uninvited.load(Ordering::SeqCst) && self.has_ended() {
             return Err(self.gone());
         }
         let _ = self.out.send(Outgoing::Finish).await;
@@ -389,11 +454,13 @@ impl Drop for CancelOnDrop {
         };
         // Still waiting: tell the server, advisory as LOCAL-IPC's cancel
         // is. A full writer queue skips it; the answer is discarded here
-        // either way, because the id is no longer pending.
-        if self.shared.take(id.as_str()).is_some() {
-            let _ = self
-                .out
-                .try_send(Outgoing::Frame(Frame::Cancel(Cancel::new(id))));
+        // either way, because the id is no longer pending. A cancel carries
+        // an id of 128 characters at most, far inside the ceiling; were it
+        // refused, it would be skipped as a full queue skips it.
+        if self.shared.take(id.as_str()).is_some()
+            && let Ok(bytes) = Frame::Cancel(Cancel::new(id)).encode()
+        {
+            let _ = self.out.try_send(Outgoing::Bytes(bytes));
         }
     }
 }
@@ -402,7 +469,8 @@ impl Drop for CancelOnDrop {
 /// replace the recorded code ([`Shared::end`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EndedBy {
-    /// The writer failed on its own.
+    /// The writer failed on its own. Provisional, and it answers no call:
+    /// the reader's end that follows does both.
     Writer,
     /// The reader read the server's `close` frame.
     ServerClose,
@@ -410,9 +478,11 @@ enum EndedBy {
     Reader,
 }
 
-/// The connection is over, for either half: the end recorded, every
-/// waiting call answered with it, and a session waiting in `ready` woken
-/// to read it from `events`.
+/// The connection is over, for either half: the end recorded and a
+/// session waiting in `ready` woken to read it from `events`. The
+/// reader's end answers every waiting call with the code the session ends
+/// with; the writer's is provisional and answers none, the reader's
+/// following it ([`Shared::end`]).
 fn finish(shared: &Shared, inbox: Option<&Inbox>, code: TransportError, clean: bool, by: EndedBy) {
     shared.end(code, clean, by);
     if let Some(inbox) = inbox {
@@ -420,17 +490,18 @@ fn finish(shared: &Shared, inbox: Option<&Inbox>, code: TransportError, clean: b
     }
 }
 
-/// The writer. One that stops for its own reason -- a failed write, a
-/// frame past the ceiling -- ends the connection BEFORE it drops its
-/// queue, so a call that fails on the dropped queue finds the end already
-/// recorded and `events` already refusing: the reader may never see the
-/// end, a server that stopped reading and kept writing being one way
-/// (`a_failed_write_ends_the_session_before_the_reader_sees_it`).
+/// The writer. One whose write fails records a provisional end, which no
+/// caller sees ([`Shared::ended`]), and then tells the reader -- which may
+/// be waiting on a server that stopped reading and kept its write half
+/// open -- to read what has arrived and stop. The reader's end answers
+/// every call, a send refused by the stopped writer's queue included, and
+/// makes the code final
+/// (`a_failed_write_ends_the_session_though_the_server_keeps_writing_open`).
 async fn write_loop(
     mut write: OwnedWriteHalf,
     mut out: mpsc::Receiver<Outgoing>,
-    mut pong: watch::Receiver<Option<Frame>>,
-    mut ended: watch::Receiver<bool>,
+    mut pong: watch::Receiver<Option<Vec<u8>>>,
+    (mut ended, write_failed): (watch::Receiver<bool>, watch::Sender<bool>),
     (shared, inbox): (Arc<Shared>, Option<Arc<Inbox>>),
 ) {
     loop {
@@ -440,7 +511,7 @@ async fn write_loop(
             biased;
             _ = ended.wait_for(|ended| *ended) => break,
             Ok(()) = pong.changed() => match pong.borrow_and_update().clone() {
-                Some(frame) => Outgoing::Frame(frame),
+                Some(bytes) => Outgoing::Bytes(bytes),
                 None => continue,
             },
             next = out.recv() => match next {
@@ -448,17 +519,7 @@ async fn write_loop(
                 None => break,
             },
         };
-        let Outgoing::Frame(frame) = next else {
-            break;
-        };
-        let Ok(bytes) = frame.encode() else {
-            finish(
-                &shared,
-                inbox.as_deref(),
-                TransportError::PayloadTooLarge,
-                false,
-                EndedBy::Writer,
-            );
+        let Outgoing::Bytes(bytes) = next else {
             break;
         };
         if write.write_all(&bytes).await.is_err() {
@@ -469,26 +530,77 @@ async fn write_loop(
                 false,
                 EndedBy::Writer,
             );
+            write_failed.send_replace(true);
             break;
         }
     }
     let _ = write.shutdown().await;
 }
 
+/// The reader. Until the writer fails it waits on the socket; after, it
+/// reads what has already arrived, up to [`DRAIN_BUDGET`] -- a Unix socket keeps what the
+/// server sent before it closed, so a `close` already sent is read -- and
+/// then ends, answering every waiting call with the code the session
+/// ends with (`a_failed_write_keeps_the_servers_close_code`). Nothing it
+/// waits on afterwards can hold a call: a server that stopped reading and
+/// kept its write half open sends nothing more to wait for
+/// (`a_failed_write_ends_the_session_though_the_server_keeps_writing_open`).
+///
+/// And it bounds a silent server, once it has evidence the server runs
+/// keepalive: [`CLIENT_SILENCE_TIMEOUT`] arms at the first `ping` read --
+/// the wire says nothing else about keepalive, and a daemon with it off
+/// never pings (`no_ping_read_never_times_out`) -- and then, with no
+/// frame of any kind read for that long, the connection ends `Timeout`
+/// and so does every waiting call (`a_ping_then_silence_ends_timeout`).
+/// A reader paused on a full buffer is not reading, so the bound is
+/// suspended there and starts afresh when it reads again
+/// (`a_paused_reader_does_not_time_out`).
 async fn read_loop(
     mut reader: Reader,
     version: IpcVersion,
     shared: Arc<Shared>,
-    echoes: watch::Sender<Option<Frame>>,
+    echoes: watch::Sender<Option<Vec<u8>>>,
     events: Option<(mpsc::Sender<SessionEvent>, Arc<Inbox>)>,
-    ended: watch::Sender<bool>,
+    (ended, mut write_failed): (watch::Sender<bool>, watch::Receiver<bool>),
 ) {
+    let mut draining = false;
+    // When the silence bound ends the connection: `None` until a ping is
+    // read.
+    let mut silence: Option<tokio::time::Instant> = None;
     let (code, clean, by) = loop {
-        match reader.next().await {
+        let next = if draining {
+            match reader.next_now() {
+                // Nothing more has arrived, or the drain budget is spent:
+                // the provisional end stands.
+                Ok(None) => break (TransportError::BackendUnavailable, false, EndedBy::Reader),
+                next => next,
+            }
+        } else {
+            tokio::select! {
+                biased;
+                // Cancel-safe: `next` keeps what it read in its buffer. A
+                // writer that ended without failing drops its sender, which
+                // disables this arm rather than firing it.
+                Ok(_) = write_failed.wait_for(|failed| *failed) => {
+                    draining = true;
+                    continue;
+                }
+                next = reader.next() => next,
+                () = tokio::time::sleep_until(silence.unwrap_or_else(tokio::time::Instant::now)),
+                    if silence.is_some() =>
+                {
+                    break (TransportError::Timeout, false, EndedBy::Reader);
+                }
+            }
+        };
+        if let (Ok(Some(_)), Some(deadline)) = (&next, silence.as_mut()) {
+            *deadline = tokio::time::Instant::now() + CLIENT_SILENCE_TIMEOUT;
+        }
+        match next {
             Ok(Some(Frame::Response(response))) => {
                 // An id no call waits for was cancelled: discarded.
                 if let Some(answer) = shared.take(response.id.as_str()) {
-                    let _ = answer.send(response);
+                    let _ = answer.send(Ok(response));
                 }
             }
             Ok(Some(Frame::Event(frame))) => {
@@ -509,13 +621,47 @@ async fn read_loop(
                 // session drains it (LOCAL-IPC.md, A 2026-09-30) -- the
                 // client holds the granted bound plus that one. A session
                 // already closed takes nothing, and reading goes on to the
-                // end.
-                if events.send(event).await.is_ok() {
-                    inbox.wake_all();
+                // end. Once the writer has failed the reader no longer
+                // waits for room: an event that does not fit ends the
+                // reading there, as nothing more having arrived does.
+                let room = if draining {
+                    events.try_reserve()
+                } else {
+                    tokio::select! {
+                        biased;
+                        room = events.reserve() => room.map_err(|_| {
+                            mpsc::error::TrySendError::Closed(())
+                        }),
+                        Ok(_) = write_failed.wait_for(|failed| *failed) => {
+                            draining = true;
+                            events.try_reserve()
+                        }
+                    }
+                };
+                // Reading again: the suspended bound starts afresh.
+                if let Some(deadline) = silence.as_mut() {
+                    *deadline = tokio::time::Instant::now() + CLIENT_SILENCE_TIMEOUT;
+                }
+                match room {
+                    Ok(permit) => {
+                        permit.send(event);
+                        inbox.wake_all();
+                    }
+                    Err(mpsc::error::TrySendError::Closed(())) => {}
+                    Err(mpsc::error::TrySendError::Full(())) => {
+                        break (TransportError::BackendUnavailable, false, EndedBy::Reader);
+                    }
                 }
             }
             Ok(Some(Frame::Ping(ping))) => {
-                echoes.send_replace(Some(Frame::Pong(ping.echo())));
+                // The server runs keepalive: the silence bound is armed.
+                silence.get_or_insert_with(|| tokio::time::Instant::now() + CLIENT_SILENCE_TIMEOUT);
+                // A nonce is 64 characters at most, far inside the
+                // ceiling; were its echo refused, the ping would go
+                // unanswered and the server's keepalive would decide.
+                if let Ok(bytes) = Frame::Pong(ping.echo()).encode() {
+                    echoes.send_replace(Some(bytes));
+                }
             }
             // Held for a session reading events, the newest only; a
             // connection without them has no use for it.
@@ -548,6 +694,10 @@ async fn read_loop(
 struct Reader {
     inner: OwnedReadHalf,
     buf: Vec<u8>,
+    /// The duplicate [`Reader::next_now`] reads through, once it has.
+    now: Option<std::os::unix::net::UnixStream>,
+    /// What [`Reader::next_now`] has read, against [`DRAIN_BUDGET`].
+    drained: usize,
 }
 
 impl Reader {
@@ -555,6 +705,8 @@ impl Reader {
         Self {
             inner,
             buf: Vec::new(),
+            now: None,
+            drained: 0,
         }
     }
 
@@ -586,5 +738,254 @@ impl Reader {
             }
             self.buf.extend_from_slice(&chunk[..read]);
         }
+    }
+
+    /// The next frame among what has already arrived, without waiting:
+    /// `None` once nothing complete is left to read, the stream's end
+    /// included, or once [`DRAIN_BUDGET`] bytes have been read.
+    ///
+    /// Read through a duplicate of the socket, not `try_read`: tokio's
+    /// `try_read` answers `WouldBlock` without asking the kernel until its
+    /// reactor has seen the socket readable, so a `close` already sitting
+    /// in the socket went unread when the writer failed first (measured,
+    /// current-thread). The duplicate shares the descriptor's non-blocking
+    /// mode, so its read never waits either
+    /// (`a_failed_write_ends_the_session_though_the_server_keeps_writing_open`, whose
+    /// server keeps its write half open, would hang if it did).
+    fn next_now(&mut self) -> Result<Option<Frame>, TransportError> {
+        let socket = match &mut self.now {
+            Some(socket) => socket,
+            None => self.now.insert(
+                self.inner
+                    .as_ref()
+                    .as_fd()
+                    .try_clone_to_owned()
+                    .map(std::os::unix::net::UnixStream::from)
+                    .map_err(|_| TransportError::BackendUnavailable)?,
+            ),
+        };
+        drain_next(&mut self.buf, &mut self.drained, socket)
+    }
+}
+
+/// One step of the drain: the next frame already in `buf`, else one read
+/// from `source` while `drained` is under [`DRAIN_BUDGET`]; `None` when
+/// the source has nothing more now, has ended, or the budget is spent
+/// (`the_drain_stops_at_its_budget_however_much_keeps_arriving`).
+fn drain_next(
+    buf: &mut Vec<u8>,
+    drained: &mut usize,
+    source: &mut impl Read,
+) -> Result<Option<Frame>, TransportError> {
+    loop {
+        match decode_frame(buf) {
+            Ok(DecodedFrame { body, consumed }) => {
+                buf.drain(..consumed);
+                return Frame::parse(&body).map(Some);
+            }
+            Err(FrameError::Incomplete { .. }) => {}
+            Err(_) => return Err(TransportError::ProtocolViolation),
+        }
+        if *drained >= DRAIN_BUDGET {
+            return Ok(None);
+        }
+        let mut chunk = [0_u8; 8192];
+        match source.read(&mut chunk) {
+            Ok(0) => return Ok(None),
+            Ok(read) => {
+                *drained += read;
+                buf.extend_from_slice(&chunk[..read]);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
+            Err(_) => return Err(TransportError::BackendUnavailable),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used, clippy::panic)]
+
+    use std::collections::BTreeSet;
+
+    use interweave_ipc_protocol::{
+        ChannelParams, MAX_BODY_BYTES, RequestedCapability, encode_frame,
+    };
+    use interweave_transport_api::ChannelId;
+    use serde::de::IgnoredAny;
+    use tokio::net::UnixListener;
+
+    use super::*;
+
+    const PEER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+    const PATIENCE: Duration = Duration::from_secs(5);
+
+    fn join() -> Request {
+        Request::ChannelJoin(ChannelParams {
+            channel: ChannelId::parse("general").expect("channel"),
+        })
+    }
+
+    /// The writer's provisional end is shown to nobody: a call still
+    /// registers, and is answered by the reader's end with the code that
+    /// end makes final -- here the server's `close` -- which is the code
+    /// every later reader of the end sees. The control: the reader's end
+    /// is final, and a call after it is refused with that code.
+    #[test]
+    fn a_provisional_end_is_shown_to_nobody() {
+        let shared = Shared::default();
+        shared.end(TransportError::BackendUnavailable, false, EndedBy::Writer);
+        assert_eq!(shared.ended(), None, "provisional: not shown");
+        let (answer, mut answered) = oneshot::channel();
+        let id = RequestId::new("r0").expect("id");
+        assert_eq!(shared.register(&id, answer), Ok(()), "still registers");
+        shared.end(
+            TransportError::ProtocolViolation,
+            false,
+            EndedBy::ServerClose,
+        );
+        assert_eq!(
+            answered.try_recv().expect("answered").map(|_| ()),
+            Err(TransportError::ProtocolViolation)
+        );
+        assert_eq!(shared.ended(), Some(TransportError::ProtocolViolation));
+        let (late, _) = oneshot::channel();
+        let id = RequestId::new("r1").expect("id");
+        assert_eq!(
+            shared.register(&id, late),
+            Err(TransportError::ProtocolViolation),
+            "final: refused"
+        );
+    }
+
+    /// Any end the reader reads makes the provisional code final, not only
+    /// a `close`: a frame the client refuses after a failed write ends
+    /// `ProtocolViolation`, as it would with no write failing first.
+    #[test]
+    fn a_reader_end_replaces_a_provisional_code() {
+        let shared = Shared::default();
+        shared.end(TransportError::BackendUnavailable, false, EndedBy::Writer);
+        shared.end(TransportError::ProtocolViolation, false, EndedBy::Reader);
+        assert_eq!(shared.ended(), Some(TransportError::ProtocolViolation));
+    }
+
+    /// A source that never runs dry: ping frames end to end, as a daemon
+    /// that keeps writing would supply them, which refuses to be read far
+    /// past the budget -- so a drain without one fails here rather than
+    /// spinning.
+    struct Flood {
+        frame: Vec<u8>,
+        at: usize,
+        served: usize,
+    }
+
+    impl Read for Flood {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            assert!(
+                self.served < 4 * DRAIN_BUDGET,
+                "the drain read past its budget"
+            );
+            for byte in out.iter_mut() {
+                *byte = self.frame[self.at];
+                self.at = (self.at + 1) % self.frame.len();
+            }
+            self.served += out.len();
+            Ok(out.len())
+        }
+    }
+
+    /// The drain takes at most its budget, plus the one read that crosses
+    /// it, however much keeps arriving, and parses what it took.
+    #[test]
+    fn the_drain_stops_at_its_budget_however_much_keeps_arriving() {
+        let mut flood = Flood {
+            frame: encode_frame(r#"{"type":"ping","nonce":"AAAAAAAAAAAAAAAAAAAAAA"}"#)
+                .expect("a frame"),
+            at: 0,
+            served: 0,
+        };
+        let (mut buf, mut drained, mut frames) = (Vec::new(), 0, 0_usize);
+        while let Some(frame) = drain_next(&mut buf, &mut drained, &mut flood).expect("frames") {
+            assert!(matches!(frame, Frame::Ping(_)));
+            frames += 1;
+        }
+        assert!(frames > 0, "what arrived is read");
+        assert!(
+            (DRAIN_BUDGET..DRAIN_BUDGET + 8192).contains(&flood.served),
+            "stopped at the budget: {}",
+            flood.served
+        );
+    }
+
+    async fn next(reader: &mut Reader) -> Frame {
+        tokio::time::timeout(PATIENCE, reader.next())
+            .await
+            .expect("the client writes in time")
+            .expect("a frame")
+            .expect("not the end")
+    }
+
+    /// A request frame past the 128 KiB ceiling -- built through the
+    /// `exchange` seam, since no typed `Request` is that large -- fails
+    /// its own call with `PayloadTooLarge` and puts nothing on the wire:
+    /// the server's next frame is the control's request, answered, on a
+    /// connection that never ended.
+    #[tokio::test]
+    async fn an_unencodable_request_fails_its_call_and_not_the_connection() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("data.sock");
+        let listener = UnixListener::bind(&path).expect("binds");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accepts");
+            let (read, mut write) = stream.into_split();
+            let mut reader = Reader::new(read);
+            assert!(matches!(next(&mut reader).await, Frame::Hello(_)));
+            let answer = |body: String| encode_frame(&body).expect("a frame");
+            write
+                .write_all(&answer(format!(
+                    r#"{{"type":"hello_response","ipc_version":{{"major":2,"minor":0}},"transport_contract_version":"2.0","peer":"{PEER}","granted_capabilities":["commands"]}}"#
+                )))
+                .await
+                .expect("written");
+            let Frame::Request(request) = next(&mut reader).await else {
+                panic!("a request");
+            };
+            write
+                .write_all(&answer(format!(
+                    r#"{{"type":"response","id":"{}","ok":true,"result":{{}}}}"#,
+                    request.id.as_str()
+                )))
+                .await
+                .expect("written");
+            request.method
+        });
+        let hello = crate::session::hello(
+            "k",
+            None,
+            BTreeSet::from([RequestedCapability::Commands]),
+            BTreeSet::new(),
+        );
+        let opened = open(&path, hello, |_| None).await.expect("opens");
+        let connection = opened.connection;
+
+        let refused = connection
+            .exchange::<IgnoredAny>(|id| {
+                let mut frame = join().into_frame(id, None);
+                frame.method = "m".repeat(MAX_BODY_BYTES);
+                frame
+            })
+            .await;
+        assert_eq!(refused.map(|_| ()), Err(TransportError::PayloadTooLarge));
+        assert!(!connection.has_ended(), "the connection carries on");
+
+        let control = tokio::time::timeout(PATIENCE, connection.call::<IgnoredAny>(join()))
+            .await
+            .expect("answered in time");
+        assert!(control.is_ok(), "the control is answered: {control:?}");
+        assert_eq!(
+            server.await.expect("the server"),
+            "channel.join",
+            "the refused frame never reached the wire"
+        );
     }
 }

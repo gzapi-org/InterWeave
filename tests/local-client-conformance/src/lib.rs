@@ -205,9 +205,10 @@ pub async fn a_session_to_end<B: DataSessionBinding>(
 
 /// The second half (`DataSessionPort::events`): once the session has
 /// ended, `ready()` resolves and `events(0)` answers the end -- an error,
-/// never the empty list a live session gives -- as every other `max`
-/// does. A caller asks `events(0)` whether its session ended without
-/// taking anything.
+/// never the empty list a live session gives -- and so does every other
+/// `max`, since nothing waits. A caller asks `events(0)` whether its
+/// session ended without taking anything. With events waiting at the
+/// end, see [`an_ended_session_delivers_what_waited_then_its_end`].
 pub async fn an_ended_session_answers_events_with_its_end<S: DataSessionPort>(session: &S) {
     let _ = tokio::time::timeout(PATIENCE, session.ready())
         .await
@@ -218,6 +219,74 @@ pub async fn an_ended_session_answers_events_with_its_end<S: DataSessionPort>(se
         session.events(usize::MAX).await.map(|taken| taken.len()),
         zero,
         "every max answers the same end"
+    );
+}
+
+/// Item 9's end with something waiting: a session leased on `endpoint`,
+/// with what was owed at open drained, and then a direct message from
+/// `sender` on `source` waiting for it -- `ready()` resolved, nothing
+/// taken, `events(0)` still the live empty list (the control: a waiting
+/// event is not an end). The sender's session is returned beside it, to
+/// be kept open until the runner has ended the receiver's runtime.
+pub async fn a_session_to_end_with_a_message_waiting<B: DataSessionBinding>(
+    sender: &B,
+    receiver: &B,
+    receiver_peer: &TransportIdentity,
+    source: &EndpointId,
+    endpoint: &EndpointId,
+) -> (B::Session, B::Session) {
+    let from = sender.open(full(Some(source))).await.expect("leases");
+    let to = a_session_to_end(receiver, endpoint).await;
+    from.send_direct(
+        DirectDestination {
+            peer: receiver_peer.clone(),
+            endpoint: Some(endpoint.clone()),
+        },
+        MessageId::from_bytes([10; 16]),
+        text("waiting"),
+    )
+    .await
+    .expect("accepted");
+    tokio::time::timeout(PATIENCE, to.ready())
+        .await
+        .expect("the message ends the wait")
+        .expect("ready");
+    assert_eq!(
+        to.events(0).await.map(|taken| taken.len()),
+        Ok(0),
+        "live with an event waiting: max 0 takes nothing"
+    );
+    (to, from)
+}
+
+/// Item 9's end, with events still waiting (`DataSessionPort::events`,
+/// architect-cto's ruling 01a11be2): once the session has ended,
+/// `events(0)` answers the end at once, whatever remains buffered; a
+/// positive `max` first delivers what waited, then answers the same end.
+/// For a binding that keeps events past its end -- IPC, where they wait
+/// at the client.
+pub async fn an_ended_session_delivers_what_waited_then_its_end<S: DataSessionPort>(session: &S) {
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    let zero = loop {
+        let zero = session.events(0).await.map(|taken| taken.len());
+        if zero.is_err() {
+            break zero;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the session never ended"
+        );
+        tokio::time::sleep(SETTLE / 10).await;
+    };
+    let waited = session
+        .events(usize::MAX)
+        .await
+        .expect("what waited is delivered before the end");
+    assert!(!waited.is_empty(), "something waited at the end");
+    assert_eq!(
+        session.events(usize::MAX).await.map(|taken| taken.len()),
+        zero,
+        "then the same end max 0 answered"
     );
 }
 
