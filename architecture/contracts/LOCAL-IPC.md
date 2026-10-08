@@ -505,6 +505,19 @@ connection accepted past the connection limits of §Multiple clients
 request id reused while outstanding (`ProtocolViolation`). An error
 that has a request id is a `response{ok: false}`, never a `close`.
 
+A call that is still waiting when the connection ends answers the code
+the session ends with (A 2026-10-08): the `close` frame's code when one
+was read — a client whose write failed keeps reading what the server
+sent before it closed, which a Unix socket preserves, and answers its
+waiting calls once the reader stops — and `BackendUnavailable` when the
+connection ended with no `close` frame read. The call and the session's
+end carry one code, read once: a client branches on a call's code
+(`ProtocolViolation` is not retried, `BackendUnavailable` is), and a
+`BackendUnavailable` answered to a call whose connection is about to
+read `ProtocolViolation` would tell it to retry a session the daemon
+refused. No timer of its own: §Liveness bounds a server that keeps its
+write half open and sends nothing.
+
 ## Cancellation mapping and request concurrency
 
 A `cancel` for a request the server still holds pending — not yet handed
