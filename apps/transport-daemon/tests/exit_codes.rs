@@ -38,7 +38,7 @@ fn help_is_zero_and_a_usage_error_is_two() {
 
 #[test]
 fn a_refused_start_is_one_and_says_why() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = private_tempdir().expect("tempdir");
     let out = daemon()
         .args(["--profile", "absent"])
         .env("XDG_CONFIG_HOME", tmp.path().join("config"))
@@ -53,4 +53,14 @@ fn a_refused_start_is_one_and_says_why() {
         String::from_utf8_lossy(&out.stderr).contains("transport-daemon: "),
         "the reason is printed"
     );
+}
+
+/// A temporary directory made `0700` at creation, whatever the umask: the
+/// ancestor rule judges it, and `tempfile::tempdir()` under umask `002`
+/// with a shared primary group is `0775`, refused (j37).
+fn private_tempdir() -> std::io::Result<tempfile::TempDir> {
+    use std::os::unix::fs::PermissionsExt as _;
+    tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
 }

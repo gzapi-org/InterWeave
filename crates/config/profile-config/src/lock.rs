@@ -258,7 +258,9 @@ fn open_lock_file(dirs: &[&Path], path: &Path, create: bool) -> Result<File, Per
         // creating `human_dir()` under a state directory then refused
         // left a new directory under the one it judged unsafe
         // (`a_refused_acquire_creates_nothing`). A missing directory ends
-        // the walk: nothing beneath it exists to judge.
+        // the walk: nothing beneath it exists to judge, and what is above
+        // it is judged by `create_private_dir` before it creates
+        // (`a_refused_ancestor_of_a_missing_state_dir_creates_nothing`).
         for dir in dirs {
             match std::fs::symlink_metadata(dir) {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
@@ -334,6 +336,16 @@ fn write_diagnostics(mut file: &File) -> std::io::Result<()> {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     #![allow(clippy::expect_used)]
+    /// A temporary directory made `0700` at creation, whatever the umask: the
+    /// ancestor rule judges it, and `tempfile::tempdir()` under umask `002`
+    /// with a shared primary group is `0775`, refused (j37).
+    fn private_tempdir() -> std::io::Result<tempfile::TempDir> {
+        use std::os::unix::fs::PermissionsExt as _;
+        tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+    }
+
     use super::O_NOFOLLOW;
 
     /// The flag the lock opens with refuses a link: opening one with it
@@ -342,7 +354,7 @@ mod tests {
     #[test]
     fn the_no_follow_flag_refuses_a_link() {
         use std::os::unix::fs::OpenOptionsExt as _;
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = private_tempdir().expect("tempdir");
         let target = dir.path().join("target");
         std::fs::write(&target, b"x").expect("write");
         let link = dir.path().join("link");

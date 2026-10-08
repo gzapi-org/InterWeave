@@ -39,7 +39,7 @@ fn mode(path: &Path) -> u32 {
 /// lets go.
 #[test]
 fn a_second_client_is_refused_while_the_first_holds_it() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path());
     assert!(!HumanClientLock::is_held(&p).expect("probe"), "none yet");
     let first = HumanClientLock::acquire(&p, Duration::ZERO).expect("the first client");
@@ -69,7 +69,7 @@ fn a_second_client_is_refused_while_the_first_holds_it() {
 /// its file is owner-only and stays after release.
 #[test]
 fn it_lives_in_the_human_dir_created_owner_only() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path());
     assert!(!p.human_dir().exists());
     let lock = HumanClientLock::acquire(&p, Duration::ZERO).expect("locks");
@@ -87,7 +87,7 @@ fn it_lives_in_the_human_dir_created_owner_only() {
 /// client's -- the client runs beside the daemon, never instead of it.
 #[test]
 fn the_client_lock_and_the_profile_lock_do_not_exclude_each_other() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path());
     let daemon = ProfileLock::acquire(&p, Duration::ZERO).expect("the daemon's");
     let client = HumanClientLock::acquire(&p, Duration::ZERO).expect("the client's beside it");
@@ -103,7 +103,7 @@ fn the_client_lock_and_the_profile_lock_do_not_exclude_each_other() {
 /// holding the old inode.
 #[test]
 fn a_wide_human_dir_is_refused_with_or_without_the_file() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path());
     create_private_dir(&p.human_dir()).expect("the store's dir");
     drop(HumanClientLock::acquire(&p, Duration::ZERO).expect("an existing 0700 dir is fine"));
@@ -133,7 +133,7 @@ fn a_wide_human_dir_is_refused_with_or_without_the_file() {
 /// owner-only again, which locks.
 #[test]
 fn a_wide_state_directory_is_refused_for_the_client_too() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path());
     create_private_dir(&p.human_dir()).expect("both dirs, owner-only");
     std::fs::set_permissions(p.state_dir(), std::fs::Permissions::from_mode(0o770)).expect("chmod");
@@ -156,7 +156,7 @@ fn a_wide_state_directory_is_refused_for_the_client_too() {
 /// with the state directory owner-only creates `human_dir()` and locks.
 #[test]
 fn a_refused_acquire_creates_nothing() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path());
     create_private_dir(p.state_dir()).expect("state dir");
     std::fs::set_permissions(p.state_dir(), std::fs::Permissions::from_mode(0o755)).expect("chmod");
@@ -178,7 +178,7 @@ fn a_refused_acquire_creates_nothing() {
 /// no holder's file.
 #[test]
 fn an_absent_human_dir_is_not_held_and_not_created() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path());
     create_private_dir(p.state_dir()).expect("state dir");
     assert!(!HumanClientLock::is_held(&p).expect("probe"));
@@ -195,7 +195,7 @@ fn human_dir(p: &ProfilePaths) -> std::path::PathBuf {
 /// before anything is written or created, by the holder and the probe.
 #[test]
 fn a_planted_or_dangling_symlink_is_refused_and_nothing_is_touched() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path());
     let target = dir.path().join("precious");
     std::fs::write(&target, b"keep me").expect("write");
@@ -231,7 +231,7 @@ fn a_planted_or_dangling_symlink_is_refused_and_nothing_is_touched() {
 /// control is the same file, owner-only and single-linked, accepted.
 #[test]
 fn a_hard_linked_or_wide_lock_file_is_refused() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path());
     drop(HumanClientLock::acquire(&p, Duration::ZERO).expect("created"));
     let second = dir.path().join("second-name");
@@ -255,4 +255,43 @@ fn a_hard_linked_or_wide_lock_file_is_refused() {
         HumanClientLock::is_held(&p),
         Err(PersistError::FileNotPrivate { .. })
     ));
+}
+
+/// The state root under a directory others can write, with nothing of
+/// the profile's tree there yet: both locks are refused naming that
+/// directory, and neither creates anything under it -- the case
+/// `a_refused_acquire_creates_nothing` does not reach, since there the
+/// refused directory exists and here it is an ANCESTOR of the missing
+/// state directory. The same layout at `0755` is the control.
+#[test]
+fn a_refused_ancestor_of_a_missing_state_dir_creates_nothing() {
+    let dir = private_tempdir().expect("tempdir");
+    let p = paths(dir.path());
+    let wide = dir.path().join("state");
+    std::fs::create_dir(&wide).expect("mkdir");
+    std::fs::set_permissions(&wide, std::fs::Permissions::from_mode(0o777)).expect("chmod");
+    let refused = |r: Result<(), PersistError>| match r {
+        Err(PersistError::DirectoryNotPrivate { path, .. }) => assert_eq!(path, wide),
+        other => panic!("refused naming {}: {other:?}", wide.display()),
+    };
+    refused(HumanClientLock::acquire(&p, Duration::ZERO).map(drop));
+    refused(ProfileLock::acquire(&p, Duration::ZERO).map(drop));
+    let left: Vec<_> = std::fs::read_dir(&wide).expect("read").collect();
+    assert!(left.is_empty(), "nothing created: {left:?}");
+
+    std::fs::set_permissions(&wide, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    drop(HumanClientLock::acquire(&p, Duration::ZERO).expect("the control"));
+    drop(ProfileLock::acquire(&p, Duration::ZERO).expect("the control"));
+    assert_eq!(mode(p.state_dir()), OWNER_ONLY_DIR);
+    assert_eq!(mode(&p.human_dir()), OWNER_ONLY_DIR);
+}
+
+/// A temporary directory made `0700` at creation, whatever the umask: the
+/// ancestor rule judges it, and `tempfile::tempdir()` under umask `002`
+/// with a shared primary group is `0775`, refused (j37).
+fn private_tempdir() -> std::io::Result<tempfile::TempDir> {
+    use std::os::unix::fs::PermissionsExt as _;
+    tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
 }

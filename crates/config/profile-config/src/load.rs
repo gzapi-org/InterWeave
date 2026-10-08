@@ -82,7 +82,10 @@ pub enum LoadError {
     ConfigDirUnguarded(crate::PersistError),
     /// `config.yaml` itself is a symbolic link, not a regular file, or
     /// can be written by an account other than root and this one -- owned
-    /// by another, or group- or other-writable (ADR-0028 A 2026-10-08).
+    /// by another, other-writable, or group-writable by a group that is
+    /// not the owner's private group -- the owner being the account this
+    /// process runs as, never the file's -- or under an access ACL
+    /// (ADR-0028 A 2026-10-08).
     /// Readable by others is allowed: it is not secret.
     ConfigFileUnguarded {
         /// The file.
@@ -101,16 +104,20 @@ fn open_guarded(path: &std::path::Path) -> Result<std::fs::File, LoadError> {
     open_guarded_as(
         path,
         crate::effective_uid().map_err(LoadError::ConfigDirUnguarded),
+        &crate::persist::HostNames,
     )
 }
 
 /// [`open_guarded`] with the owner compared against `uid` -- this
 /// process's effective uid, or why it cannot be read -- apart so a test
 /// can name another uid: a file another account owns needs that account
-/// (`a_document_another_uid_owns_is_refused`).
+/// (`a_document_another_uid_owns_is_refused`) -- and with `names` standing
+/// for the name service the group-write clause reads
+/// (`a_group_writable_document_needs_the_owners_private_group`).
 fn open_guarded_as(
     path: &std::path::Path,
     uid: Result<u32, LoadError>,
+    names: &impl crate::persist::NameService,
 ) -> Result<std::fs::File, LoadError> {
     let refuse = |detail: String| LoadError::ConfigFileUnguarded {
         path: path.to_path_buf(),
@@ -119,9 +126,13 @@ fn open_guarded_as(
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+        // O_NONBLOCK so a FIFO in its place opens at once and is refused
+        // below as not a regular file, rather than holding start until a
+        // writer appears; it changes nothing for a regular file
+        // (`a_document_that_is_a_fifo_is_refused_without_waiting`).
         let file = match std::fs::OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(path)
         {
             Ok(file) => file,
@@ -132,31 +143,59 @@ fn open_guarded_as(
         };
         let uid = uid?;
         let meta = file.metadata().map_err(LoadError::Read)?;
-        let (owner, mode) = (meta.uid(), meta.mode() & 0o7777);
+        let (owner, gid, mode) = (meta.uid(), meta.gid(), meta.mode() & 0o7777);
         if !meta.is_file() {
             return Err(refuse(format!(
                 "owned by uid {owner}, mode {mode:04o}: not a regular file"
             )));
         }
-        if owner != 0 && owner != uid {
-            return Err(refuse(format!(
-                "owned by uid {owner}, mode {mode:04o}: owned by neither root nor uid {uid}"
-            )));
-        }
-        if mode & 0o022 != 0 {
-            return Err(refuse(format!(
-                "owned by uid {owner}, mode {mode:04o}: group- or other-writable"
-            )));
-        }
+        judge_document((owner, gid, mode), uid, names, || {
+            crate::persist::access_acl_of(&file)
+        })
+        .map_err(refuse)?;
         Ok(file)
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (refuse, uid);
+        let _ = (refuse, uid, names);
         Err(LoadError::ConfigDirUnguarded(
             crate::PersistError::UnsupportedPlatform,
         ))
     }
+}
+
+/// The writer rules for `config.yaml`, on what its opened handle said:
+/// `seen` is `(owner, gid, mode)`, `uid` this process's, `acl` whether
+/// the file carries an access ACL (asked only of a group-writable one).
+/// Apart from the open so a test can stage an owner it cannot create a
+/// file as (`a_group_writable_document_is_judged_for_this_process`).
+///
+/// # Errors
+/// The refusal's detail.
+fn judge_document(
+    (owner, gid, mode): (u32, u32, u32),
+    uid: u32,
+    names: &impl crate::persist::NameService,
+    acl: impl FnOnce() -> std::io::Result<bool>,
+) -> Result<(), String> {
+    if owner != 0 && owner != uid {
+        return Err(format!(
+            "owned by uid {owner}, mode {mode:04o}: owned by neither root nor uid {uid}"
+        ));
+    }
+    if mode & 0o002 != 0 {
+        return Err(format!(
+            "owned by uid {owner}, mode {mode:04o}: other-writable"
+        ));
+    }
+    // The directory walk's predicate, not a copy of it, asked for this
+    // process's account and never the file's owner.
+    if mode & 0o020 != 0
+        && let Err(detail) = crate::persist::owners_private_group(names, uid, gid, acl())
+    {
+        return Err(format!("owned by uid {owner}, mode {mode:04o}: {detail}"));
+    }
+    Ok(())
 }
 
 impl core::fmt::Display for LoadError {
@@ -350,6 +389,16 @@ fn resolve_existing_prefix(path: &std::path::Path) -> std::io::Result<std::path:
 
 #[cfg(test)]
 mod tests {
+    /// A temporary directory made `0700` at creation, whatever the umask: the
+    /// ancestor rule judges it, and `tempfile::tempdir()` under umask `002`
+    /// with a shared primary group is `0775`, refused (j37).
+    fn private_tempdir() -> std::io::Result<tempfile::TempDir> {
+        use std::os::unix::fs::PermissionsExt as _;
+        tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+    }
+
     use super::{LoadError, open_guarded_as};
 
     /// `config.yaml`'s owner clause (ADR-0028 A 2026-10-08): a file of
@@ -362,18 +411,112 @@ mod tests {
     #[allow(clippy::expect_used, clippy::panic)]
     fn a_document_another_uid_owns_is_refused() {
         use std::os::unix::fs::PermissionsExt as _;
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = private_tempdir().expect("tempdir");
         let path = dir.path().join("config.yaml");
         std::fs::write(&path, b"schema_version: 2\n").expect("write");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
         let uid = crate::effective_uid().expect("the uid");
-        open_guarded_as(&path, Ok(uid)).expect("the control: ours");
-        match open_guarded_as(&path, Ok(uid.wrapping_add(1))) {
+        let names = &crate::persist::HostNames;
+        open_guarded_as(&path, Ok(uid), names).expect("the control: ours");
+        match open_guarded_as(&path, Ok(uid.wrapping_add(1)), names) {
             Err(LoadError::ConfigFileUnguarded { path: at, detail }) => {
                 assert_eq!(at, path);
                 assert!(detail.contains("owned by neither root nor uid"), "{detail}");
             }
             other => panic!("refused as another's: {:?}", other.err()),
         }
+    }
+
+    /// The predicate on `config.yaml` asks for THIS PROCESS's private
+    /// group, never the file owner's: a root-owned `0664` document in
+    /// group `root` is refused for uid 1000, and the same document in
+    /// alice's private group passes for her. A document without group
+    /// write never asks its ACL.
+    #[test]
+    #[allow(clippy::expect_used, clippy::panic)]
+    fn a_group_writable_document_is_judged_for_this_process() {
+        struct Names;
+        impl crate::persist::NameService for Names {
+            fn user_name(&self, uid: u32) -> std::io::Result<Option<String>> {
+                Ok(match uid {
+                    0 => Some("root".to_owned()),
+                    1000 => Some("alice".to_owned()),
+                    _ => None,
+                })
+            }
+            fn group(&self, gid: u32) -> std::io::Result<Option<(String, Vec<String>)>> {
+                Ok(match gid {
+                    0 => Some(("root".to_owned(), Vec::new())),
+                    1001 => Some(("alice".to_owned(), Vec::new())),
+                    _ => None,
+                })
+            }
+        }
+        let detail = super::judge_document((0, 0, 0o664), 1000, &Names, || Ok(false))
+            .expect_err("root's group is not ours");
+        assert!(detail.contains("group root (gid 0)"), "{detail}");
+        super::judge_document((0, 1001, 0o664), 1000, &Names, || Ok(false))
+            .expect("our private group, root owning the file");
+        super::judge_document((1000, 0, 0o644), 1000, &Names, || {
+            panic!("the ACL is not asked of a document without group write")
+        })
+        .expect("0644");
+    }
+
+    /// The private-group predicate on `config.yaml`'s own group-write
+    /// bit, with the name service staged: a `0664` document passes when
+    /// its group is the owner's private group, and is refused naming the
+    /// group when that group is shared, or as unreadable when the entry
+    /// is missing, or when it carries an access ACL. Other-write is
+    /// refused whatever the group.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[allow(clippy::expect_used, clippy::panic)]
+    fn a_group_writable_document_needs_the_owners_private_group() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        struct Names(Option<&'static str>);
+        impl crate::persist::NameService for Names {
+            fn user_name(&self, _: u32) -> std::io::Result<Option<String>> {
+                Ok(Some("alice".to_owned()))
+            }
+            fn group(&self, _: u32) -> std::io::Result<Option<(String, Vec<String>)>> {
+                Ok(self.0.map(|name| (name.to_owned(), Vec::new())))
+            }
+        }
+        let dir = private_tempdir().expect("tempdir");
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, b"schema_version: 2\n").expect("write");
+        let gid = std::fs::metadata(&path).expect("meta").gid();
+        let chmod = |m: u32| {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(m)).expect("chmod");
+        };
+        let uid = crate::effective_uid().expect("the uid");
+        chmod(0o664);
+        open_guarded_as(&path, Ok(uid), &Names(Some("alice"))).expect("a group of one");
+        let refused = |names: Names| match open_guarded_as(&path, Ok(uid), &names) {
+            Err(LoadError::ConfigFileUnguarded { detail, .. }) => detail,
+            other => panic!("refused: {:?}", other.err()),
+        };
+        let shared = refused(Names(Some("users")));
+        assert!(
+            shared.contains(&format!("group users (gid {gid})")),
+            "{shared}"
+        );
+        let missing = refused(Names(None));
+        assert!(missing.contains("could not be read"), "{missing}");
+        // An access ACL granting another account write makes the group
+        // bits its mask: refused, the private group notwithstanding.
+        let ran = std::process::Command::new("setfacl")
+            .args(["-m", "u:nobody:rw"])
+            .arg(&path)
+            .status()
+            .expect("setfacl runs");
+        assert!(ran.success(), "setfacl");
+        chmod(0o664);
+        let acl = refused(Names(Some("alice")));
+        assert!(acl.contains("access ACL"), "{acl}");
+        chmod(0o666);
+        let other = refused(Names(Some("alice")));
+        assert!(other.contains("other-writable"), "{other}");
     }
 }

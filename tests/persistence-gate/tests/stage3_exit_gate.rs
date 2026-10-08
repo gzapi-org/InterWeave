@@ -97,7 +97,7 @@ fn write_whole_profile(p: &ProfilePaths) {
 
 #[test]
 fn a_whole_profile_reloads_from_its_paths_after_a_restart() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path());
     write_whole_profile(&p);
 
@@ -127,7 +127,7 @@ fn deleting_the_peer_cache_costs_a_cold_start_and_nothing_else() {
     // meaningful if identity, configuration, and retained messages are
     // all still there afterwards — and those live in three packages, so
     // no single crate can state it.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path());
     write_whole_profile(&p);
 
@@ -162,7 +162,7 @@ fn deleting_the_peer_cache_costs_a_cold_start_and_nothing_else() {
 fn deleting_the_human_store_leaves_identity_and_configuration_intact() {
     // The other direction. Application retention is not part of transport
     // profile recovery, so losing it must not cost a PeerId.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path());
     write_whole_profile(&p);
 
@@ -181,7 +181,7 @@ fn deleting_the_human_store_leaves_identity_and_configuration_intact() {
 fn a_corrupt_peer_cache_does_not_stop_a_profile_from_loading() {
     // Failure injection. The cache is the one store whose loss is
     // harmless, so it must be the one that cannot take startup down.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path());
     write_whole_profile(&p);
     std::fs::write(p.peer_cache_file(), b"\x00\x01 not json at all").expect("corrupt it");
@@ -206,7 +206,7 @@ fn a_full_human_store_degrades_without_touching_the_rest_of_the_profile() {
     // Failure injection at the store that matters. The client must stop
     // presenting itself as a durable receiver — and must NOT respond by
     // dropping identity, configuration, or the messages it already holds.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path());
     create_private_dir(p.identity_dir()).expect("identity dir");
     write_private_atomic(&p.identity_file(), FAKE_IDENTITY).expect("identity");
@@ -258,7 +258,7 @@ fn a_full_human_store_degrades_without_touching_the_rest_of_the_profile() {
 
 #[test]
 fn a_transport_terminal_outbound_is_gone_after_a_restart_while_the_rest_survives() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir().expect("tempdir");
     let p = paths(dir.path());
     write_whole_profile(&p);
     let db = p.state_dir().join("human.sqlite3");
@@ -280,4 +280,14 @@ fn a_transport_terminal_outbound_is_gone_after_a_restart_while_the_rest_survives
     );
     let cache = PeerCache::load(&p.peer_cache_file(), CacheLimits::default()).expect("cache");
     assert_eq!(cache.candidates(2_000).len(), 1);
+}
+
+/// A temporary directory made `0700` at creation, whatever the umask: the
+/// ancestor rule judges it, and `tempfile::tempdir()` under umask `002`
+/// with a shared primary group is `0775`, refused (j37).
+fn private_tempdir() -> std::io::Result<tempfile::TempDir> {
+    use std::os::unix::fs::PermissionsExt as _;
+    tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
 }
