@@ -289,8 +289,8 @@ at-rest sentence names the boundary.
 
 **Trigger.** p2p-network-dev-01's observation (GZCoord 01a11c0b): the
 ancestor rule of the same morning refuses any group-writable ancestor
-whoever is in the group. Under umask 002 — the scheme Fedora-family
-logins apply to a user-private-group account by design — directories a
+whoever is in the group. Under umask 002 — the user-private-group scheme, documented and
+supported, whichever release's login applies it — directories a
 user creates are `0775` in their own private group, of which they are
 the only member, `~/.config` and `~/.local/state` among them; the
 daemon, `transportctl` and the human client would refuse such a
@@ -301,18 +301,25 @@ naming the rule; under 022 they pass. This host's shells run 022.
 
 **Decision.** A group-write bit — on an ancestor, on a traversed link's
 directory, or on `config.yaml` itself (one predicate for both clauses,
-so they cannot diverge) — is accepted when the group is the OWNER'S
-PRIVATE GROUP: the group's name equals the owner's user name, both read
-through the name service (the `getpwuid_r` / `getgrgid_r` family, NSS-
+so they cannot diverge) — is accepted when the group is the PRIVATE GROUP OF THE DAEMON'S
+EFFECTIVE USER — never of the directory's owner, since a root-owned
+`0775` directory in group `root` would otherwise pass while accounts
+with primary gid 0 exist: the group's name equals that user's name, both
+read through the name service (the `getpwuid_r` / `getgrgid_r` family, NSS-
 backed, through nix's `user` feature in safe Rust — never `/etc/group`
 read by hand, which misses NSS sources), and the group's member list is
 empty. A read that cannot be completed, or that answers no such user or
-group, REFUSES, with the detail "group-writable, and whether the group
-is the owner's private group could not be read". Other-write stays
+group, REFUSES, with the detail "group-writable; whether group <gid> is
+the owner's private group could not be read". Other-write stays
 refused unless sticky; the private directory itself stays owner-only
 (`0700`, no bit for anyone): the predicate is about what others may
 write above and around it. The rule's premise — no account but root and
-ours can rename the directory — holds for a group of one.
+ours can rename the directory — holds for a group of one with two
+residuals the rule accepts as root's acts (the review of this note):
+an account whose PRIMARY group is the owner's private group
+(`useradd -g`), which `gr_mem` never lists and which no name service
+enumerates reliably (sssd without enumeration), so the predicate does
+not try; and a name service that answers falsely, trusted as root is.
 
 **Alternatives rejected.** Leaving the rule and making the tests
 independent of the umask: a supported setup could not start InterWeave,
