@@ -30,7 +30,13 @@
 //! without one. Two canonicalisations would make one route two keys,
 //! and the operator's own seed would be refused at the door that
 //! spelled it differently -- the defect this repository has already
-//! shipped once on another key pair.
+//! shipped once on another key pair. A CIRCUIT is the exception that
+//! proves it: its key keeps the destination, and a door hands it bare
+//! (`<relay route>/p2p/R/p2p-circuit`) with the peer beside it, so EVERY
+//! door asks with `probe_for(address, peer)` -- the learn and mDNS doors,
+//! Identify's, the Kademlia stash and query results, and the funnel
+//! (#246 review F1, re-review N1). A bare circuit asked without its peer
+//! matches nothing.
 //!
 //! Keyed by the ADDRESS, not by (peer, address): the rule's own words
 //! are "an address in that set". A peer re-advertising the operator's
