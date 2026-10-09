@@ -2339,8 +2339,9 @@ async fn drain(runtime: &mut SwarmRuntime, window: Duration) {
 /// the bind's own offer, passes only what the host still holds
 /// (`NetworkSet::holds`). What this measures is the wrapper's offered set
 /// (`listeners_offered`); an address offered BEFORE the removal stays in
-/// libp2p-dcutr 0.15.0's own candidate cache, which nothing prunes and
-/// which every new relayed handler's CONNECT carries -- a gap that
+/// libp2p-dcutr 0.15.0's own candidate cache (an LRU of 20), which
+/// nothing prunes when its address departs and which every new relayed
+/// handler's CONNECT carries -- a gap that
 /// predates the platform's view, recorded on #250. The control: before
 /// the view, the private listener is offered.
 #[tokio::test]
