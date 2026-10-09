@@ -497,11 +497,13 @@ impl UiModel {
                 self.paths.clear();
             }
             ClientEvent::Connectivity(connectivity) => self.connectivity = connectivity,
-            // A path change updates the route indicator and nothing else:
-            // no item, no unread count, no conversation (`human-client-ui.md`
+            // A path notice -- a route's begin, a change, or the peer's
+            // return -- updates the route indicator and nothing else: no
+            // item, no unread count, no conversation (`human-client-ui.md`
             // §7 and §13). Kept for a peer a direct conversation is with;
-            // the facade hands a path change over after the messages of
-            // the same take, so a first message's conversation is there.
+            // the facade hands a path notice over after the messages of
+            // the same take, so the conversation a route's first message
+            // starts is there.
             ClientEvent::PeerPath { peer, path } => {
                 let known = self.items.values().any(|item| {
                     matches!(&item.conversation, ConversationKey::Direct { peer: p, .. } if *p == peer)
