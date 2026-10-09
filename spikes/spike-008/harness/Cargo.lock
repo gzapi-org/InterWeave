@@ -48,7 +48,7 @@ checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 [[package]]
 name = "interweave-human-core"
 version = "0.0.0"
-source = "git+https://github.com/gzapi-org/InterWeave.git?rev=d019ac06f5149567ab37d7c59c61895c974598e6#d019ac06f5149567ab37d7c59c61895c974598e6"
+source = "git+https://github.com/gzapi-org/InterWeave.git?rev=034348048f548e208ed37ac4bcd08aba1e342a65#034348048f548e208ed37ac4bcd08aba1e342a65"
 dependencies = [
  "serde",
 ]
@@ -56,7 +56,7 @@ dependencies = [
 [[package]]
 name = "interweave-human-store"
 version = "0.0.0"
-source = "git+https://github.com/gzapi-org/InterWeave.git?rev=d019ac06f5149567ab37d7c59c61895c974598e6#d019ac06f5149567ab37d7c59c61895c974598e6"
+source = "git+https://github.com/gzapi-org/InterWeave.git?rev=034348048f548e208ed37ac4bcd08aba1e342a65#034348048f548e208ed37ac4bcd08aba1e342a65"
 dependencies = [
  "interweave-human-core",
  "interweave-transport-api",
@@ -66,7 +66,7 @@ dependencies = [
 [[package]]
 name = "interweave-transport-api"
 version = "0.0.0"
-source = "git+https://github.com/gzapi-org/InterWeave.git?rev=d019ac06f5149567ab37d7c59c61895c974598e6#d019ac06f5149567ab37d7c59c61895c974598e6"
+source = "git+https://github.com/gzapi-org/InterWeave.git?rev=034348048f548e208ed37ac4bcd08aba1e342a65#034348048f548e208ed37ac4bcd08aba1e342a65"
 dependencies = [
  "bs58",
  "serde",

@@ -22,7 +22,8 @@ export struct ConversationRow {
     handle: int,
     title: string,
     // Says direct or channel as text, never colour alone (U2a).
-    // Direct or channel and the unread count, from one template.
+    // Direct or channel and the unread count, from one template; the
+    // kind alone when nothing is unread.
     description: string,
     selected: bool,
 }
