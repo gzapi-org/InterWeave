@@ -240,7 +240,7 @@ impl FakeNode {
         state.path = Some(path);
         let now = wall_ms();
         for queues in state.sessions.values_mut() {
-            if queues.routes.contains(peer) {
+            if !queues.declines_route_notices && queues.routes.contains(peer) {
                 queues.owe_path(peer, None, path, RECONNECTED, now);
             }
         }
@@ -322,6 +322,10 @@ struct Queues {
     /// One pending path notice per routed peer, merged as the runtime
     /// merges them; the merges are not counted here.
     paths: BTreeMap<TransportIdentity, (Option<PeerPath>, PeerPath, String, u64)>,
+    /// A session opened `without_route_notices` is owed no notice without
+    /// a `previous`, as the runtime's (`Owed::route_notices`); stored as
+    /// the refusal so the derived default takes them.
+    declines_route_notices: bool,
     /// Every `ready` waiting on this session -- it takes `&self`, so
     /// there may be several -- woken by what is queued, and all of them.
     wakers: Vec<Waker>,
@@ -366,7 +370,7 @@ impl Queues {
         if self.routes.contains(&peer) {
             return;
         }
-        if let Some(path) = path {
+        if let Some(path) = path.filter(|_| !self.declines_route_notices) {
             self.owe_path(&peer, None, path, ROUTE_ESTABLISHED, wall_ms());
         }
         self.routes.insert(peer);
@@ -671,6 +675,7 @@ impl DataSessionBinding for FakeNode {
         // it on connect.
         let owed = Queues {
             state: Some(state_event(state.health)),
+            declines_route_notices: !request.route_notices(),
             ..Queues::default()
         };
         state.sessions.insert(session_id, owed);
