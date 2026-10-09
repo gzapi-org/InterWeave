@@ -1835,8 +1835,8 @@ impl ConnectionManager {
         backoff || retry
     }
 
-    /// The network this profile is on GAINED an address: every
-    /// data-plane peer it holds off is dialable now, once
+    /// The network this profile is on GAINED an address: every peer it
+    /// holds off is dialable now, once
     /// (`transport/libp2p/CONNECTIVITY.md` §14; architect-cto's ruling
     /// of 2026-10-09, relay seq 33736).
     ///
@@ -1851,8 +1851,16 @@ impl ConnectionManager {
     /// from where it stood. One redial per peer per change: the first
     /// failure after the lift sets the backoff again.
     ///
-    /// ONLY an allowlisted peer (`DataPlaneTrusted`): an infrastructure
-    /// peer is redialled by its own adapter's schedule. A claimed
+    /// The RETRY is made due for an allowlisted peer (`DataPlaneTrusted`)
+    /// only: this scheduler's own dial to an infrastructure peer is
+    /// refused, and such a peer is redialled by its adapter's schedule --
+    /// the relay client's ladder, made due by the same change
+    /// (`ReservationManager::network_added`). Its peer BACKOFF is lifted
+    /// all the same, or the adapter's due ask would be refused at the
+    /// gate by the backoff the offline failure set (measured:
+    /// `relay_client.rs`'s `an_addition_asks_a_backed_off_relay_at_once_
+    /// and_without_one_it_waits` failed at the gate without it). An
+    /// unauthorized peer is lifted nothing. A claimed
     /// retry -- a dial in flight -- is left to settle, since
     /// [`Self::take_due_retries`] never hands a claimed entry out
     /// whatever its due time. Address
@@ -1866,14 +1874,15 @@ impl ConnectionManager {
             .retries
             .keys()
             .chain(self.policy.backed_off_peers())
-            .filter(|p| matches!(self.classify(p), ConnectionClass::DataPlaneTrusted))
+            .filter(|p| !matches!(self.classify(p), ConnectionClass::Unauthorized))
             .cloned()
             .collect();
         let mut lifted = 0;
         for peer in &peers {
             let backoff = self.policy.lift_peer_backoff(peer);
+            let data_plane = matches!(self.classify(peer), ConnectionClass::DataPlaneTrusted);
             let retry = match self.retries.get_mut(peer) {
-                Some(entry) if entry.due_at_ms > now_ms => {
+                Some(entry) if data_plane && entry.due_at_ms > now_ms => {
                     entry.due_at_ms = now_ms;
                     true
                 }
@@ -3498,7 +3507,7 @@ mod tests {
     }
 
     #[test]
-    fn a_network_addition_makes_each_held_off_allowlisted_peer_dialable_once() {
+    fn a_network_addition_makes_each_held_off_peer_dialable_once_and_the_allowlisted_due() {
         let mut m = ConnectionManager::new(ConnectionPolicy::new(64, 64), 8);
         let _ = m.set_trust(trusting(&[P1], &[P2]), &[]);
         for p in [P1, P2] {
@@ -3516,19 +3525,23 @@ mod tests {
         );
         assert!(m.take_due_retries(1_000, 8).is_empty());
 
-        assert_eq!(m.network_added(1_000), 1, "the allowlisted peer only");
+        assert_eq!(m.network_added(1_000), 2, "both held-off peers");
         assert!(
             m.handle().load().admit(&request(P1, "/a"), 1_000).is_ok(),
             "dialable at once"
         );
-        assert_eq!(m.take_due_retries(1_000, 8), vec![peer(P1)], "and due");
         assert_eq!(
+            m.take_due_retries(1_000, 8),
+            vec![peer(P1)],
+            "and due -- the allowlisted peer only: the infrastructure peer's \
+             redial is its adapter's"
+        );
+        assert!(
             m.handle()
                 .load()
                 .admit(&request_at(P2, "/a", DialOrigin::RelayReservation), 1_000)
-                .err(),
-            Some(DialDenial::PeerBackoff),
-            "an infrastructure peer keeps its own schedule"
+                .is_ok(),
+            "the infrastructure peer's adapter is not refused by the old backoff"
         );
 
         // ONCE: the redial fails and the cadence RESUMES -- the second
@@ -3547,6 +3560,26 @@ mod tests {
         );
         assert!(!m.is_retry_due(&peer(P1), 60_999));
         assert!(m.is_retry_due(&peer(P1), 61_000));
+    }
+
+    #[test]
+    fn a_network_addition_lifts_nothing_for_a_peer_no_longer_classified() {
+        let mut m = manager(8);
+        let t = m
+            .handle()
+            .load()
+            .admit(&request(P2, "/a"), 0)
+            .expect("admitted");
+        let _ = m.record_failure(t, 0);
+        let _ = m.set_trust(trusting(&[P1], &[]), &[]);
+        let held = m.peer_gate_state(&peer(P2), 1_000).backoff_until_ms;
+        assert!(held.is_some(), "the control: the backoff stands");
+        assert_eq!(m.network_added(1_000), 0);
+        assert_eq!(
+            m.peer_gate_state(&peer(P2), 1_000).backoff_until_ms,
+            held,
+            "a peer the trust no longer classifies keeps it"
+        );
     }
 
     #[test]
