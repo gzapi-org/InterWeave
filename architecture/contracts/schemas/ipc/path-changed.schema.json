@@ -20,7 +20,7 @@
         "direct",
         "relayed"
       ],
-      "description": "The path before the change. ABSENT when the route begins or a routed peer connects again after a `peer.disconnected` (1.1.0, IPC 2.4): the notice then carries the peer's current path with `reason_class` `route_established` or `reconnected`; a connection below 2.4 is never sent a notice without `previous`."
+      "description": "The path before the change. ABSENT when the route begins or a routed peer connects again after a `peer.disconnected` (1.1.0, IPC 2.4): the notice then carries the peer's current path; its `reason_class` is `route_established` or `reconnected` when fresh, or a later change's class when such a pending notice was merged with that change (coalescing keeps the absent `previous` and takes the newer `current`, `reason_class` and `observed_at`). A connection below 2.4 is never sent a notice without `previous`."
     },
     "current": {
       "enum": [
@@ -32,7 +32,7 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 128,
-      "description": "Why the path changed: the runtime's reason classes (`direct_established`, `direct_lost`, ...), and for a notice without `previous` (1.1.0) `route_established` when the route begins or `reconnected` when a routed peer connects again."
+      "description": "Why the path changed: the runtime's reason classes (`direct_established`, `direct_lost`, ...); on a notice without `previous` (1.1.0) `route_established` when the route begins or `reconnected` when a routed peer connects again, or — when that pending notice was merged with a later change — the later change's class."
     },
     "observed_at": {
       "type": "integer",
