@@ -148,9 +148,9 @@ ui_texts! {
     /// `{alt}` is the image's alt text, verbatim, never empty
     /// ([`UiText::ImageNotShownWithoutAlt`] stands in for that).
     ImageNotShown => "[Image not shown: {alt}]",
-    /// The same, for an image whose alt text is empty or only spaces:
+    /// The same, for an image whose alt text is empty or only whitespace:
     /// named as an image, with no empty name after a colon.
-    ImageNotShownWithoutAlt => "[Image not shown]", // PLACEHOLDER (en)
+    ImageNotShownWithoutAlt => "[Image not shown]",
     /// Show a message's source as received, in place of the drawn body.
     ShowSource => "Show source",
     /// Return from the source to the drawn body.

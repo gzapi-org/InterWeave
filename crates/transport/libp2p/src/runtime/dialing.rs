@@ -623,15 +623,19 @@ pub(super) fn settle_failed_dial(
 ///   dial was refused on the Swarm's peer condition (measured on #245
 ///   after a daemon restart, rust-ui-dev-01's 01a1217f).
 ///
-/// `None` for any other dial, for a failure the relay or the destination
-/// answered -- scored as before -- and for an address with no relay `/p2p`
-/// before its `/p2p-circuit`.
+/// `None` for any other dial, for any error that is not a transport
+/// failure -- a `WrongPeerId` keeps its quarantine whatever the table
+/// says (#247 review R3) -- for a failure the relay or the destination
+/// answered, scored as before, and for an address with no relay `/p2p`
+/// before its `/p2p-circuit`. With the relay, whether a direct connection
+/// to it came up AFTER this dial was admitted: the hop has been reached
+/// since, and the retry is due now (`record_relay_hop_unreached`).
 pub(super) fn unreached_relay(
     ticket: &DialTicket,
     open: &HashMap<libp2p::swarm::ConnectionId, OpenConnection>,
     error: &DialError,
-) -> Option<TransportIdentity> {
-    if ticket.origin() != DialOrigin::RelayCircuit {
+) -> Option<(TransportIdentity, bool)> {
+    if ticket.origin() != DialOrigin::RelayCircuit || !matches!(error, DialError::Transport(_)) {
         return None;
     }
     let address: Multiaddr = ticket.address().parse().ok()?;
@@ -643,10 +647,13 @@ pub(super) fn unreached_relay(
         return None;
     };
     let relay = to_transport_identity(relay).ok()?;
-    let reached = open
-        .values()
-        .any(|c| c.peer == relay && c.path == PeerPath::Direct);
-    (!reached || hop_canceled(error)).then_some(relay)
+    let direct = || {
+        open.values()
+            .filter(|c| c.peer == relay && c.path == PeerPath::Direct)
+    };
+    let reached = direct().next().is_some();
+    let came_up = direct().any(|c| c.since_ms >= ticket.admitted_at_ms());
+    (!reached || hop_canceled(error)).then_some((relay, came_up))
 }
 
 /// What `libp2p-relay`'s client transport says when the behaviour drops a
@@ -655,6 +662,12 @@ pub(super) fn unreached_relay(
 /// `Either`s hide the type from a downcast but keep its `Display`, so the
 /// text is the only handle; `the_relay_clients_canceled_text_is_pinned`
 /// fails if a crate bump changes it.
+///
+/// ACCEPTED, NOT TESTED: libp2p-relay 0.22's client also drops the request
+/// -- and so answers this -- when the relay connection closes with the
+/// request already sent, so a circuit the relay saw is then settled as the
+/// hop's: the route ranked down, no peer backoff, the retry at the
+/// ordinary cadence. Telling the two apart needs the crate to say which.
 pub(super) const RELAY_HOP_CANCELED: &str = "Response from behaviour was canceled";
 
 /// Whether every attempt of `error` is the relay client's canceled
@@ -918,12 +931,17 @@ pub(super) fn learn_discovered(
     now_ms: u64,
 ) -> usize {
     let mut remembered = 0;
+    let owner = peer.as_str().parse::<PeerId>().ok();
     for text in addresses {
-        let verdict = match text.parse::<Multiaddr>() {
-            Ok(address) => boundary
-                .operator
-                .admits_discovered(&address, boundary.own_listeners.iter().map(String::as_str)),
-            Err(_) => Err(interweave_transport_runtime::reachability::CandidateRefusal::NotLiteral),
+        let verdict = match (text.parse::<Multiaddr>(), &owner) {
+            (Ok(address), Some(owner)) => boundary.operator.admits_discovered(
+                &address,
+                owner,
+                boundary.own_listeners.iter().map(String::as_str),
+            ),
+            (Ok(_), None) | (Err(_), _) => {
+                Err(interweave_transport_runtime::reachability::CandidateRefusal::NotLiteral)
+            }
         };
         if !boundary
             .stores
@@ -1133,8 +1151,8 @@ pub(super) fn settle_outcome(
                 // A CIRCUIT THAT NEVER REACHED ITS RELAY says nothing
                 // about the destination (`record_relay_hop_unreached`).
                 match unreached_relay(&ticket, open, error) {
-                    Some(relay) => {
-                        let _ = manager.record_relay_hop_unreached(ticket, &relay, now_ms);
+                    Some((relay, came_up)) => {
+                        let _ = manager.record_relay_hop_unreached(ticket, &relay, came_up, now_ms);
                     }
                     None => settle_failed_dial(manager, ticket, error, now_ms),
                 }
@@ -1847,7 +1865,8 @@ mod tests {
     }
 
     /// `unreached_relay` settles a circuit failure as the relay hop's in
-    /// both of its shapes -- the relay not connected (any error), and the
+    /// both of its shapes -- the relay not connected (any transport
+    /// failure), and the
     /// relay CONNECTED with the client's canceled request (#245
     /// re-review N1, the restart race) -- and not for a connected relay
     /// that answered (the control), nor for a dial that is not a circuit.
@@ -1865,7 +1884,7 @@ mod tests {
                     address: circuit.clone(),
                     origin: DialOrigin::RelayCircuit,
                 },
-                0,
+                5,
             )
             .expect("a circuit to a data-plane peer is admitted");
         let address: Multiaddr = circuit.parse().expect("valid");
@@ -1888,17 +1907,33 @@ mod tests {
         let mut open = HashMap::new();
         assert_eq!(
             super::unreached_relay(&ticket, &open, &answered()),
-            Some(ident(RELAY)),
+            Some((ident(RELAY), false)),
             "not connected to the relay: the hop's, whatever the error"
         );
+        // Connected at 0, before the dial was admitted at 5.
         open.insert(
             ConnectionId::new_unchecked(1),
             open_to(&ident(RELAY), &mut m),
         );
         assert_eq!(
             super::unreached_relay(&ticket, &open, &canceled()),
-            Some(ident(RELAY)),
-            "connected, but the request was dropped unsent: the hop's"
+            Some((ident(RELAY), false)),
+            "connected, but the request was dropped unsent: the hop's, nothing new"
+        );
+        // A second connection to the relay established at 10, after the
+        // dial: the restart race, the retry due now (#247 review F1).
+        let mut fresh = open_to(&ident(RELAY), &mut m);
+        fresh.since_ms = 10;
+        open.insert(ConnectionId::new_unchecked(2), fresh);
+        assert_eq!(
+            super::unreached_relay(&ticket, &open, &canceled()),
+            Some((ident(RELAY), true)),
+            "the relay came up during the dial"
+        );
+        assert_eq!(
+            super::unreached_relay(&ticket, &open, &DialError::Aborted),
+            None,
+            "not a transport failure: settled as before (R3)"
         );
         assert_eq!(
             super::unreached_relay(&ticket, &open, &answered()),

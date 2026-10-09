@@ -76,6 +76,53 @@ async fn an_address_the_operator_adds_is_an_operator_address() {
     runtime.shutdown().await.expect("clean shutdown");
 }
 
+/// An operator's BARE circuit to a peer is recorded as the circuit TO
+/// that peer -- the one form every door asks about -- so it is found with
+/// its destination and not bare, and not as a circuit to another peer
+/// through the same relay (#246 re-review N3; the key is
+/// `operator_set::operator_key`).
+#[tokio::test]
+async fn an_operator_circuit_is_recorded_as_the_route_to_its_peer() {
+    let subject = ProfileIdentity::generate();
+    let peer = ProfileIdentity::generate()
+        .transport_identity()
+        .expect("peer id");
+    let other = ProfileIdentity::generate()
+        .transport_identity()
+        .expect("peer id");
+    let relay = ProfileIdentity::generate()
+        .transport_identity()
+        .expect("peer id");
+    let runtime =
+        SwarmRuntime::start(&subject, SubstrateConfig::default(), trusting(&peer)).expect("starts");
+    let bare: Multiaddr = format!(
+        "/ip4/203.0.113.7/tcp/4001/p2p/{}/p2p-circuit",
+        relay.as_str()
+    )
+    .parse()
+    .expect("valid");
+    let to = |p: &interweave_transport_api::TransportIdentity| -> Multiaddr {
+        format!("{bare}/p2p/{}", p.as_str()).parse().expect("valid")
+    };
+    runtime
+        .add_address(peer.clone(), bare.clone())
+        .await
+        .expect("the command reaches the task");
+    assert!(
+        runtime.is_operator_address(&to(&peer)),
+        "the route to its peer"
+    );
+    assert!(
+        !runtime.is_operator_address(&bare),
+        "a bare circuit names no route"
+    );
+    assert!(
+        !runtime.is_operator_address(&to(&other)),
+        "and not a circuit to another peer through the same relay"
+    );
+    runtime.shutdown().await.expect("clean shutdown");
+}
+
 /// The profile's configuration is the other half of the door: a static
 /// AutoNAT server the operator configured is an operator address from
 /// the moment the runtime starts.

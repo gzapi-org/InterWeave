@@ -899,8 +899,8 @@ impl ConnectionPolicy {
         // Nothing evictable now means every entry is a LIVE QUARANTINE,
         // which ordinary failures do not create; a table in that state
         // describes a hostile peer set, not a busy one. The peer branch
-        // below already refuses on the same terms; this one only looked
-        // like it did.
+        // in `record_address_failure` refuses on the same terms; this one
+        // only looked like it did.
         // A book entry's record is bounded by the book, not by the
         // table, so it takes no room from outside it (ADR-0011, amendment
         // 2026-09-28; `a_book_entrys_first_record_takes_no_room_from_outside_it`).

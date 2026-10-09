@@ -663,7 +663,7 @@ impl MdnsState {
             let text = route.to_string();
             let verdict = self
                 .operator
-                .admits_discovered(&route, own_listeners.clone());
+                .admits_discovered(&route, peer, own_listeners.clone());
             let admitted = match tally {
                 Tally::Learned => self
                     .stores

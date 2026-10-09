@@ -260,7 +260,11 @@ pub struct PathChanged {
     /// The path before: the pending notice's, when one was replaced.
     /// ABSENT, never `null`, when the route began or the routed peer
     /// connected again (1.1.0, sent from [`ROUTE_NOTICE_SINCE_MINOR`]).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::frame::absent_or"
+    )]
     pub previous: Option<PeerPath>,
     /// The path now.
     pub current: PeerPath,

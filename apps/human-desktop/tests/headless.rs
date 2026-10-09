@@ -606,7 +606,9 @@ fn closing_while_the_facade_waits_on_a_full_queue_completes() {
 
 /// A path change reaches the window as the conversation's route indicator
 /// -- through the facade thread and the model -- and as nothing else: no
-/// message, no conversation (human-client-ui.md sections 7 and 13).
+/// message, no conversation (human-client-ui.md sections 7 and 13). The
+/// route's begin says the path first (`route_established`, the pair's
+/// Direct); the change is then the one away from it.
 #[test]
 fn a_path_change_reaches_the_route_indicator_and_nothing_else() {
     use interweave_transport_api::PeerPath;
@@ -642,11 +644,24 @@ fn a_path_change_reaches_the_route_indicator_and_nothing_else() {
         alice.side().model().conversations(),
         alice.side().model().len(),
     );
-    assert_eq!(alice.side().model().path(&key), None, "not said yet");
+    pump_until(&mut alice, "the path the route began on", |app| {
+        app.side().model().path(&key).is_some()
+    });
+    assert_eq!(
+        alice.side().model().path(&key),
+        Some(PeerPath::Direct),
+        "said at the route's begin"
+    );
 
-    a.path_changed(b.peer(), PeerPath::Relayed, PeerPath::Direct, "dcutr", 5);
-    pump_until(&mut alice, "the path in alice's model", |app| {
-        app.side().model().path(&key) == Some(PeerPath::Direct)
+    a.path_changed(
+        b.peer(),
+        PeerPath::Direct,
+        PeerPath::Relayed,
+        "direct_lost",
+        5,
+    );
+    pump_until(&mut alice, "the changed path in alice's model", |app| {
+        app.side().model().path(&key) == Some(PeerPath::Relayed)
     });
     assert_eq!(
         (
@@ -654,7 +669,7 @@ fn a_path_change_reaches_the_route_indicator_and_nothing_else() {
             alice.side().model().len()
         ),
         before,
-        "no message and no conversation came of it"
+        "no message and no conversation came of the begin or the change"
     );
     assert!(
         alice.close(Duration::from_secs(5)),
