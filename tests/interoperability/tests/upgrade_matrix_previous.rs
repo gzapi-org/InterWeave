@@ -602,7 +602,7 @@ async fn each_previous_daemon_exchanges_with_head_both_ways() {
             ));
             match Daemon::try_start(&head_home, &head_bin, "HEAD's daemon", &[]).await {
                 Ok(head) => break (old_home, old, old_peer, head_home, head),
-                Err(log) if port_taken(&log) => continue,
+                Err(log) if port_taken(&log) => {}
                 Err(log) => panic!("HEAD's daemon exited before serving:\n{log}"),
             }
         };
