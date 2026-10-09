@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# CodeQL model pack for this repository's Rust. Code scanning runs on
+# GitHub's DEFAULT setup (no workflow, no config file in the tree), and
+# default setup loads every model pack under `.github/codeql/extensions/`
+# by itself — this file's location is what wires it, nothing else does.
+# What the rows are and the rule for adding one: `models/uid.model.yml`.
+name: interweave/rust-models
+version: 0.0.1
+library: true
+extensionTargets:
+  codeql/rust-all: '*'
+dataExtensions:
+  - models/**/*.yml

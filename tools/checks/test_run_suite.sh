@@ -158,6 +158,29 @@ assert_rc       "no argument exits 2"            2
 RUN_OUT="$(bash "$UNDER_TEST" "$SANDBOX/nope.sh" 2>&1)"; RUN_RC=$?
 assert_rc       "unreadable suite exits 2"       2
 
+# The hand-over to agent-fabric's run-suite.sh: every case above ran the
+# real one (CI points AGENT_FABRIC_ROOT at its pinned checkout); these pin
+# what the hand-over itself promises, against a recording stub.
+hcheck() { if eval "$2"; then pass "$1"; else fail "$1" "$hout"; fi; }
+hstub="$(mktemp -d)"
+mkdir -p "$hstub/fabric/runtime/github" "$hstub/fabric/projects/interweave/integration/gh"
+cat > "$hstub/fabric/runtime/github/run-suite.sh" <<'STUB'
+#!/usr/bin/env bash
+printf 'config=%s cache=%s' "${NONE-<unset>}" "${AGENT_FABRIC_TOOL_CACHE-<unset>}"; printf ' [%s]' "$@"; echo
+exit 3
+STUB
+# shellcheck disable=SC2034 # read in hcheck's eval'd conditions
+hrun() { hout="$(env -u AGENT_FABRIC_NONE -u AGENT_FABRIC_TOOL_CACHE -u INTERWEAVE_TOOL_CACHE AGENT_FABRIC_ROOT="$hstub/fabric" "$@" 2>&1)"; hrc=$?; }
+# shellcheck disable=SC2034 # read in hcheck's eval'd conditions
+hrepo="$( cd -- "$SCRIPT_DIR/../.." && pwd )"
+hrun bash "$UNDER_TEST" a 'two words'
+hcheck "the fabric's runner gets the arguments untouched, and its exit is ours" '[[ $hrc -eq 3 && "$hout" == *" [a] [two words]" ]]'
+hout="$(AGENT_FABRIC_ROOT="$hstub/none" bash "$UNDER_TEST" x 2>&1)"
+# shellcheck disable=SC2034 # read in hcheck's eval'd conditions
+hrc=$?
+hcheck "no agent-fabric: exit 2, naming where it looked" '[[ $hrc -eq 2 && "$hout" == *"agent-fabric not found at $hstub/none"* ]]'
+rm -rf "$hstub"
+
 echo
 if [[ "$failures" -eq 0 ]]; then
     echo "test_run_suite: OK — all assertions passed."

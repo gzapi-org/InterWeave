@@ -4,7 +4,7 @@ Android foreground-service/lifecycle/backup/recovery-screen platform behavior.
 
 Do not treat experiments placed here as production implementation. Evidence and final decision must be recorded against [`architecture/roadmap/SPIKES.md`](../../architecture/roadmap/SPIKES.md); the verdict is architect-cto's to write there, not this file's.
 
-**Status: RUN (2026-10-06/07, six recorded parts).** Parts 3 and 4: duplicate suppression across a restart, a full store, the network in forced Doze, the store's own directory, and a released message's bytes in the database files. Part 1: L1, L3, L4, L5, S1, E1, R1–R3, B1, B3. Part 2: P1, L2, L6, L7, L8, L9, and S1 across a reboot. Not run: B2 (the owner's decision), B4 and B5 (a second device). No verdict is recorded; the verdict is architect-cto's.
+**Status: CLOSED PASS (2026-10-09), within the bounds recorded in [`SPIKES.md`](../../architecture/roadmap/SPIKES.md#spike-008--android-execution--store-policy-viability). Run 2026-10-06/07, six recorded parts.** Parts 3 and 4: duplicate suppression across a restart, a full store, the network in forced Doze, the store's own directory, and a released message's bytes in the database files. Part 1: L1, L3, L4, L5, S1, E1, R1–R3, B1, B3. Part 2: P1, L2, L6, L7, L8, L9, and S1 across a reboot. Not run: B2 (the owner's decision), B4 and B5 (a second device). The verdict is SPIKES.md's.
 
 ## The device
 
@@ -28,7 +28,7 @@ A dedicated test device, reachable over adb, on which the owner allowed the full
 
 ## The harness
 
-- **[`harness/`](./harness):** the Rust core, the **production human store** (`interweave-human-store`, pinned at d019ac06) over raw JNI. It seeds the three durable states through the store's own API, drives the transitions a client drives, and reports a census by TEST label, including the store's own `backup_eligible_content`. `harness/tests/store.rs` runs the same cycle on the host, with a reopen.
+- **[`harness/`](./harness):** the Rust core, the **production human store** (`interweave-human-store`, pinned at 03434804 since part 6; parts 1 to 5 ran at d019ac06) over raw JNI. It seeds the three durable states through the store's own API, drives the transitions a client drives, and reports a census by TEST label, including the store's own `backup_eligible_content`. `harness/tests/store.rs` runs the same cycle on the host, with a reopen.
 - **[`app/`](./app):**
   - a launcher Activity, the only start path;
   - the recovery Activity, non-exported, in its **own task** (`taskAffinity`, started with `FLAG_ACTIVITY_NEW_TASK`), `excludeFromRecents`, `FLAG_SECURE` set before content;
@@ -117,7 +117,7 @@ architect-cto's ruling: `RETENTION.md` §8 now says released content leaves ever
 
 `tests/released_content.rs` fails when `secure_delete`, the release truncate, the open truncate, the busy check or the one-time rewrite is switched off. The close truncate is not separately pinned, since SQLite's close does the same, and the tests pin its outcome only.
 
-The recorded run is [`REPRODUCTION-2026-10-07d.log`](./REPRODUCTION-2026-10-07d.log), with the harness re-pinned locally to the store change. The committed pin stays on `origin/main`.
+The recorded run is [`REPRODUCTION-2026-10-07d.log`](./REPRODUCTION-2026-10-07d.log), with the harness re-pinned locally to the store change, 03434804. At that time a pin had to be an ancestor of `origin/main`, and 03434804 was not yet merged, so the committed pin stayed at d019ac06. Once 03434804 was on `main`, the pin moved to it (2026-10-09, after architect-cto's observation on closing the spike). It is the parent of 9769076a, the commit that recorded this run. Built at the old pin, the harness reproduces part 5's result instead.
 
 | | observation |
 |---|---|

@@ -4,7 +4,7 @@ Android Keystore wrapping, invalidation and background/user-presence behavior.
 
 Do not treat experiments placed here as production implementation. Evidence and final decision must be recorded against [`architecture/roadmap/SPIKES.md`](../../architecture/roadmap/SPIKES.md); the verdict is architect-cto's to write there, not this file's.
 
-**Status: the HOST HALF has run (2026-10-06); the DEVICE HALF has run (2026-10-06: D1–D7, four recorded parts; D6b repeated in part 4 with an addition only), with D5's restart diagnostic not produced and D7's picker not exercised (below).** No verdict is recorded; the verdict is architect-cto's.
+**Status: CLOSED PASS (2026-10-09) for what a spike can measure, the client-side clauses of §20's gate carried to step 7's tests — [`SPIKES.md`](../../architecture/roadmap/SPIKES.md#spike-009--android-exact-key-custody). The HOST HALF has run (2026-10-06); the DEVICE HALF has run (2026-10-06: D1–D7, four recorded parts; D6b repeated in part 4 with an addition only), with D5's restart diagnostic not produced and D7's picker not exercised (below).** The verdict is SPIKES.md's.
 
 ## The host half: what was established
 
@@ -36,7 +36,7 @@ associated data = magic | version | policy | the profile's PeerId (UTF-8)
 - **The header and the PeerId are associated data**, through Android's `Cipher.updateAAD`, so a valid policy swapped for the other, or a ciphertext moved to another profile, fails authentication. An unknown version or policy byte is refused earlier, by the header check, before any decryption (H3's Version and Policy counts).
 - **The PeerId is not stored in the envelope.** It is the profile's, kept beside the envelope, and unwrap also re-derives it from the seed and compares.
 
-Whether this layout becomes the format is a decision for the contract's owner, after the device half has shown AndroidKeyStore produces it. **Verified on the test device (D2, below):** a Keystore AES-GCM cipher takes this associated data and returns a 12-byte IV and a 128-bit tag, so the device frames exactly this 66-byte layout.
+Whether this layout becomes the format is a decision for the contract's owner, after the device half has shown AndroidKeyStore produces it — taken 2026-10-09: adopted as the format (SPIKES.md, SPIKE-009 Result item 5; contract text with §20 step 6). **Verified on the test device (D2, below):** a Keystore AES-GCM cipher takes this associated data and returns a 12-byte IV and a 128-bit tag, so the device frames exactly this 66-byte layout.
 
 ## What the host half did not establish
 

@@ -8,7 +8,7 @@ Logical `ChannelId` is mapped to an internal topic key:
 sha256("interweave/topic/v1\0" || channel_id_ascii)
 ```
 
-The wire topic string — what GossipSub peers subscribe and publish by — is part of this contract (2026-10-09): the lowercase hexadecimal encoding of the 32-byte key, 64 characters from `[0-9a-f]`, no prefix, no separator (`TopicKey::wire_string` in transport-runtime is the production form; `fixtures/gossipsub/gossipsub-topic-key-v1.json` freezes it per vector as `wire_topic`, landing with #238; until then each vector's `sha256` field is that same string, and `tests/pubsub` holds `wire_string` to it). Two peers that agree on the key and differ on its spelling never meet, and no refusal tells them, so the spelling is frozen with the key. The hash prevents casual raw-topic disclosure but does not resist dictionary guessing of low-entropy channel names.
+The wire topic string — what GossipSub peers subscribe and publish by — is part of this contract (2026-10-09): the lowercase hexadecimal encoding of the 32-byte key, 64 characters from `[0-9a-f]`, no prefix, no separator (`TopicKey::wire_string` in transport-runtime is the production form; `fixtures/gossipsub/gossipsub-topic-key-v1.json` freezes it per vector as `wire_topic`, which `verify_fixture_vectors.py` recomputes and `tests/pubsub` holds `wire_string` to). Two peers that agree on the key and differ on its spelling never meet, and no refusal tells them, so the spelling is frozen with the key. The hash prevents casual raw-topic disclosure but does not resist dictionary guessing of low-entropy channel names.
 
 Golden topic-key fixture:
 
