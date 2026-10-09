@@ -752,18 +752,21 @@ fn an_inert_link_and_an_image_offer_nothing_to_activate() {
     );
 }
 
-/// An image with no alt text, or only spaces, is named as an image and
+/// An image with no alt text, or only whitespace, is named as an image and
 /// nothing more: no empty name after a colon.
 #[test]
 fn an_image_without_alt_text_is_named_without_an_empty_alt() {
     let mut view = view();
-    for source in [
+    for (row, source) in (1..).zip([
         "![](https://example.org/cat.png)",
         "![  ](https://example.org/cat.png)",
-    ] {
+        "![\u{a0}](https://example.org/cat.png)",
+    ]) {
+        // A row per source: the view caches a drawn body by item key,
+        // so a second message on row 1 would show the first one's body.
         let mut model = UiModel::new();
         let alice = peer();
-        model.received(received(1, &alice, source));
+        model.received(received(row, &alice, source));
         open(&mut view, &mut model, &direct(&alice));
         assert_eq!(
             labelled(&view, text(UiText::ImageNotShownWithoutAlt)).len(),
