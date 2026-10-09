@@ -51,11 +51,24 @@
 //! wrapper's attempts and cooldowns, the dial backoff -- rather than by
 //! each of them: the AutoNAT adapter used to compare the set itself, so
 //! with the client off a change was seen by nothing. The first time the
-//! set fills is not a change; every later difference is, including the
-//! set emptying and filling again, since the interface that returns is
-//! not known to be the one that left -- and only a removal INVALIDATES
-//! what was known (`NetworkChange::invalidates`): an addition is
-//! reported, offered, and makes the peers held off dialable once.
+//! set fills is not a change -- nothing is reported or invalidated --
+//! but it runs an addition's lift ([`NetworkSet::take_filled`]): a
+//! runtime started offline dialled and failed before it, and coming
+//! online is exactly the move the lift is for (ADR-0011 A 2026-10-09).
+//! Every later difference is a change, including the set emptying and
+//! filling again, since the interface that returns is not known to be
+//! the one that left -- and only a removal INVALIDATES what was known
+//! (`NetworkChange::invalidates`): an addition is reported, offered,
+//! and makes the peers held off dialable once.
+//!
+//! THE VIEW, ONCE PRESENT, IS AUTHORITATIVE for the addresses it names
+//! (the same ruling): the listeners add to the known set and never
+//! remove an address the view still holds -- a listener closed while
+//! the platform still reports its address leaves the set intact, and
+//! the view's own later departure of it is the removal. Without that,
+//! a one-sided drop took the address out of the set while the platform
+//! held it, and its real departure later was no removal at all, so
+//! connections made from it in between survived it.
 //!
 //! Pinned by `a_network_change_is_a_move_of_the_known_ip_set_after_it_first_fills`,
 //! `the_two_sources_report_one_move_once` and
@@ -86,6 +99,8 @@ pub(super) struct NetworkSet {
     /// Whether the known set has ever held an address: the first time
     /// it fills is not a change.
     filled_once: bool,
+    /// The first fill happened and its lift has not been taken.
+    filled_untaken: bool,
 }
 
 /// What changed: the IPs that left the known set and those that joined
@@ -137,7 +152,8 @@ impl NetworkSet {
             .filter_map(first_ip)
             .collect();
         let before = std::mem::replace(&mut self.listeners, now.clone());
-        self.apply(&before, &now)
+        let held_by_view = self.platform.clone().unwrap_or_default();
+        self.apply(&before, &now, &held_by_view)
     }
 
     /// Observe the platform's view: `Some` when it moved the known set
@@ -152,17 +168,36 @@ impl NetworkSet {
             .filter(|ip| !is_interface_scoped_ip(*ip))
             .collect();
         let before = self.platform.replace(now.clone()).unwrap_or_default();
-        self.apply(&before, &now)
+        self.apply(&before, &now, &BTreeSet::new())
     }
 
-    /// Apply one source's difference to the known set.
+    /// Whether the first fill of the known set has happened since this
+    /// was last asked: the runtime runs an addition's lift for it,
+    /// though it reported no change. `true` once.
+    pub(super) fn take_filled(&mut self) -> bool {
+        std::mem::take(&mut self.filled_untaken)
+    }
+
+    /// Whether `address` is on an IP this host is known to hold, or is
+    /// interface-scoped or names no IP: what may still be offered as a
+    /// candidate. A listener on an IP the view has said departed is
+    /// bound until the listener poll catches up, and must not be offered
+    /// meanwhile.
+    pub(super) fn holds(&self, address: &Multiaddr) -> bool {
+        first_ip(address).is_none_or(|ip| is_interface_scoped_ip(ip) || self.known.contains(&ip))
+    }
+
+    /// Apply one source's difference to the known set; an IP in
+    /// `protected` is never removed.
     fn apply(
         &mut self,
         before: &BTreeSet<IpAddr>,
         now: &BTreeSet<IpAddr>,
+        protected: &BTreeSet<IpAddr>,
     ) -> Option<NetworkChange> {
         let removed: Vec<IpAddr> = before
             .difference(now)
+            .filter(|ip| !protected.contains(*ip))
             .filter(|ip| self.known.remove(*ip))
             .copied()
             .collect();
@@ -173,7 +208,10 @@ impl NetworkSet {
             .collect();
         let moved = !removed.is_empty() || !added.is_empty();
         let change = (moved && self.filled_once).then_some(NetworkChange { removed, added });
-        self.filled_once |= !self.known.is_empty();
+        if !self.filled_once && !self.known.is_empty() {
+            self.filled_once = true;
+            self.filled_untaken = true;
+        }
         change
     }
 }
@@ -439,6 +477,76 @@ mod tests {
             change(&["192.168.1.5"], &[]),
             "and the set it filled moves"
         );
+    }
+
+    #[test]
+    fn the_first_fill_is_no_change_and_its_lift_is_taken_once() {
+        let mut set = NetworkSet::default();
+        // Offline at start: loopback only, and an empty first view.
+        assert_eq!(
+            set.observe_listeners(addrs(&["/ip4/127.0.0.1/tcp/0"]).iter()),
+            None
+        );
+        assert_eq!(set.observe_view(&[]), None);
+        assert!(!set.take_filled(), "nothing has filled");
+        // Online: the first fill, reported as no change ...
+        assert_eq!(set.observe_view(&[ip("192.168.1.5")]), None);
+        // ... whose lift is taken once.
+        assert!(set.take_filled());
+        assert!(!set.take_filled(), "once");
+        // A later addition is a change, and no fill.
+        assert_eq!(
+            set.observe_view(&[ip("192.168.1.5"), ip("10.8.0.2")]),
+            change(&[], &["10.8.0.2"])
+        );
+        assert!(!set.take_filled());
+        // Emptied and refilled: a change each way, never a first fill.
+        let _ = set.observe_view(&[]);
+        assert!(set.observe_view(&[ip("192.168.1.5")]).is_some());
+        assert!(!set.take_filled());
+    }
+
+    #[test]
+    fn the_view_once_present_holds_what_it_names_against_the_listeners() {
+        let mut set = NetworkSet::default();
+        let x = "/ip4/192.168.1.5/tcp/0";
+        let _ = set.observe_listeners(addrs(&[x]).iter());
+        assert_eq!(set.observe_view(&[ip("192.168.1.5")]), None);
+        // The listener drops X while the view still holds it: no
+        // removal, and X is still held.
+        assert_eq!(set.observe_listeners(addrs(&[]).iter()), None);
+        assert!(set.holds(&x.parse().expect("valid")));
+        // The view then drops X: that is the removal.
+        assert_eq!(set.observe_view(&[]), change(&["192.168.1.5"], &[]));
+        // The control: an address the view never named is removed by
+        // the listeners as ever.
+        let y = "/ip4/10.0.0.7/tcp/0";
+        assert_eq!(
+            set.observe_listeners(addrs(&[y]).iter()),
+            change(&[], &["10.0.0.7"])
+        );
+        assert_eq!(
+            set.observe_listeners(addrs(&[]).iter()),
+            change(&["10.0.0.7"], &[])
+        );
+    }
+
+    #[test]
+    fn a_listener_is_held_while_its_ip_is_known() {
+        let mut set = NetworkSet::default();
+        let x: Multiaddr = "/ip4/192.168.1.5/tcp/4001".parse().expect("valid");
+        let _ = set.observe_listeners(std::iter::once(&x));
+        assert!(set.holds(&x));
+        let _ = set.observe_view(&[ip("192.168.1.5")]);
+        let _ = set.observe_view(&[]);
+        assert!(!set.holds(&x), "the view said it departed");
+        for always in [
+            "/ip4/127.0.0.1/tcp/1",
+            "/ip6/fe80::1/tcp/1",
+            "/dns4/example.invalid/tcp/1",
+        ] {
+            assert!(set.holds(&always.parse().expect("valid")), "{always}");
+        }
     }
 
     #[test]

@@ -661,9 +661,13 @@ pub enum SwarmEvent {
     /// the punch lands after all) and every cooldown was lifted; and
     /// every connection running from a removed IP was closed, each
     /// reported as it closes, while one over an IP still held is kept
-    /// (§14 item 5). When an IP was ADDED, every allowlisted peer held
-    /// off by its dial backoff became dialable once; an addition alone
-    /// invalidates nothing (§14 item 1). Nothing is replayed (item 7):
+    /// (§14 item 5). When an IP was ADDED, every classified peer held
+    /// off by the dial gate's backoff became dialable, the scheduler's
+    /// retry was made due for the allowlisted ones, and every relay
+    /// reservation backing off became due -- each once per lift floor
+    /// (ADR-0011 A 2026-10-09); an addition alone invalidates nothing
+    /// (§14 item 1). The first fill of an empty set is not reported, but
+    /// runs the same lift. Nothing is replayed (item 7):
     /// an exchange the transition failed was answered to its caller.
     /// Informational; dropped when the outbox has no base room.
     NetworkChanged {

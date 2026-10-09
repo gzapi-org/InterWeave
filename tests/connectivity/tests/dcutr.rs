@@ -2091,9 +2091,9 @@ async fn a_network_change_lifts_the_cooldown_and_keeps_the_reservation() {
         "an addition lifts nothing"
     );
 
-    // THE CHANGE: the private listener goes away, and its IP with it --
-    // the view still naming it does not keep it: each source's own
-    // difference moves the one set.
+    // THE LISTENER GOES while the view still names its IP: the view,
+    // once present, is authoritative for what it names (ADR-0011 A
+    // 2026-10-09), so this is no change and the cooldown stands.
     assert!(
         wire.target
             .stop_listening(private_listener.clone())
@@ -2101,6 +2101,26 @@ async fn a_network_change_lifts_the_cooldown_and_keeps_the_reservation() {
             .expect("the command reaches the task"),
         "the listener was known"
     );
+    let quiet = settle(&mut wire, WINDOW).await;
+    assert!(
+        !quiet
+            .iter()
+            .any(|(s, e)| *s == Side::Target && matches!(e, SwarmEvent::NetworkChanged { .. })),
+        "the view still holds the IP: {quiet:?}"
+    );
+    assert_eq!(
+        wire.target
+            .dcutr_counters()
+            .expect("the target hole punches")
+            .cooldown_peers,
+        1,
+        "nothing departed, nothing lifted"
+    );
+
+    // THE CHANGE: the view drops the private IP, and that is the removal.
+    wire.target.network_changed(NetworkView {
+        addresses: vec![view_only],
+    });
     let mut changed = until(&mut wire, "the target to report the change", |s, e| {
         s == Side::Target && matches!(e, SwarmEvent::NetworkChanged { .. })
     })
@@ -2291,4 +2311,49 @@ async fn a_network_change_keeps_a_given_up_attempts_permit_until_the_crate_is_do
     assert_eq!(counters.attempts_ended.get("abandoned"), Some(&1));
 
     dialer.shutdown().await.expect("shutdown");
+}
+
+/// Read every event `runtime` emits for `window`.
+async fn drain(runtime: &mut SwarmRuntime, window: Duration) {
+    let deadline = tokio::time::Instant::now() + window;
+    while let Ok(Some(_)) = tokio::time::timeout_at(deadline, runtime.next_event()).await {}
+}
+
+/// A listener on an IP the platform's view said departed is bound until
+/// the listener poll catches up, and is not offered as a punch candidate
+/// meanwhile: the removal clears the offered set and the tick's re-offer
+/// passes only what the host still holds (`NetworkSet::holds`). The
+/// control: before the view, the private listener is offered.
+#[tokio::test]
+async fn a_listener_on_an_ip_the_view_removed_is_not_offered() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let id = ProfileIdentity::generate();
+    let mut subject = SwarmRuntime::start(&id, dialer_config(Some(punching())), trust(&[], &[]))
+        .expect("the subject starts");
+    let _private = listening(&subject, ip).await;
+    let offered = |runtime: &SwarmRuntime| {
+        runtime
+            .dcutr_counters()
+            .expect("the subject hole punches")
+            .listeners_offered
+    };
+    // Past a tick, so the tick's re-offer has run too.
+    drain(&mut subject, Duration::from_secs(2)).await;
+    assert_eq!(offered(&subject), 1, "the control: the private listener");
+
+    // Two views, each read before the next: the latest one wins, and a
+    // first view removes nothing it never named.
+    subject.network_changed(NetworkView {
+        addresses: vec![ip.into()],
+    });
+    drain(&mut subject, Duration::from_millis(500)).await;
+    subject.network_changed(NetworkView::default());
+    drain(&mut subject, Duration::from_secs(3)).await;
+    assert_eq!(
+        offered(&subject),
+        0,
+        "the departed IP's listener is not offered again"
+    );
+
+    subject.shutdown().await.expect("shutdown");
 }

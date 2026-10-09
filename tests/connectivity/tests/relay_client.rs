@@ -946,3 +946,101 @@ async fn an_addition_asks_a_backed_off_relay_at_once_and_without_one_it_waits() 
 
     subject.shutdown().await.expect("shutdown");
 }
+
+/// STARTED OFFLINE (ADR-0011 A 2026-10-09): the subject holds no address
+/// but loopback, so its known set is empty; its relay ask fails, and the
+/// relay backs off for a minute. Coming online is then the FIRST FILL of
+/// the set, which is no change and invalidates nothing -- but runs the
+/// lift, so the reservation is asked and accepted within seconds. The
+/// control, as before: without the view, it waits.
+#[tokio::test]
+async fn coming_online_after_an_offline_start_asks_the_backed_off_relay_at_once() {
+    const CONTROL: Duration = Duration::from_secs(5);
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let relay_keys = identity::Keypair::generate_ed25519();
+    let relay_peer = identity_of(&relay_keys);
+    let relay_addr = bound(&mut relay_server(relay_keys.clone())).await;
+
+    let subject_id = ProfileIdentity::generate();
+    let mut relay_settings = settings(
+        vec![StaticRelay {
+            peer: relay_peer.clone(),
+            address: format!("{relay_addr}/p2p/{}", relay_peer.as_str()),
+        }],
+        false,
+    );
+    relay_settings.reservations.retry_min_ms = 60_000;
+    relay_settings.reservations.retry_max_ms = 120_000;
+    // No listener at all: offline, as far as the known set can tell.
+    let mut subject = SwarmRuntime::start(
+        &subject_id,
+        SubstrateConfig {
+            relay_client: Some(relay_settings),
+            ..SubstrateConfig::default()
+        },
+        infrastructure_only(&[&relay_peer]),
+    )
+    .expect("the runtime starts");
+
+    let outcome_for = |wanted: RelayReservationOutcome| {
+        let relay_peer = relay_peer.clone();
+        move |e: &SwarmEvent| {
+            matches!(e, SwarmEvent::RelayReservationChanged { relay, outcome, .. }
+                if *relay == relay_peer && *outcome == wanted)
+        }
+    };
+    let failed = outcome_for(RelayReservationOutcome::Failed);
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let event = tokio::time::timeout_at(deadline, subject.next_event())
+            .await
+            .expect("the ask fails within the patience")
+            .expect("the runtime is alive");
+        if failed(&event) {
+            break;
+        }
+    }
+    let failed_at = tokio::time::Instant::now();
+
+    let mut relay = relay_server(relay_keys);
+    relay.listen_on(relay_addr.clone()).expect("listens again");
+    relay.add_external_address(relay_addr.clone());
+    let mut relay_seen = Seen::default();
+    let mut relays = Relays {
+        first: (&mut relay, &mut relay_seen),
+        second: None,
+        observer: None,
+    };
+
+    let events = settle(&mut subject, &mut relays, CONTROL).await;
+    let accepted = outcome_for(RelayReservationOutcome::Accepted);
+    assert!(
+        !events.iter().any(&accepted),
+        "without the view the relay waits its backoff: {events:?}"
+    );
+
+    // ONLINE: the first fill.
+    subject.network_changed(NetworkView {
+        addresses: vec![ip.into()],
+    });
+    let (_, _, before) = subject_event(
+        &mut subject,
+        &mut relays,
+        "the reservation to be accepted after coming online",
+        accepted,
+    )
+    .await;
+    assert!(
+        failed_at.elapsed() < Duration::from_secs(60),
+        "accepted inside the backoff: {:?}",
+        failed_at.elapsed()
+    );
+    assert!(
+        !before
+            .iter()
+            .any(|e| matches!(e, SwarmEvent::NetworkChanged { .. })),
+        "the first fill is reported as no change: {before:?}"
+    );
+
+    subject.shutdown().await.expect("shutdown");
+}

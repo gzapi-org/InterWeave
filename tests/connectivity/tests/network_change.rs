@@ -514,3 +514,47 @@ async fn an_addition_redials_a_held_off_peer_at_once_and_without_one_it_waits() 
         n.runtime.shutdown().await.expect("shutdown");
     }
 }
+
+/// The view is a snapshot slot, not a queue: two views handed in before
+/// the runtime reads either count as the LATEST one, so the change is
+/// computed against it alone -- the first view's address is never
+/// reported -- and nothing blocks the caller. On the current-thread
+/// runtime the task cannot run between the two reports.
+#[tokio::test]
+async fn the_latest_view_replaces_one_not_yet_read() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let id = ProfileIdentity::generate();
+    let mut subject = node(&[], &id);
+    let _private = subject
+        .runtime
+        .listen(format!("/ip4/{ip}/tcp/0").parse().expect("valid"))
+        .await
+        .expect("the subject's private listener");
+    let (superseded, latest) = (
+        std::net::IpAddr::from(std::net::Ipv4Addr::new(10, 255, 0, 1)),
+        std::net::IpAddr::from(std::net::Ipv4Addr::new(10, 255, 0, 2)),
+    );
+    subject.runtime.network_changed(NetworkView {
+        addresses: vec![ip.into(), superseded],
+    });
+    subject.runtime.network_changed(NetworkView {
+        addresses: vec![ip.into(), latest],
+    });
+    let mut events = Vec::new();
+    let deadline = tokio::time::Instant::now() + WINDOW;
+    while let Ok(Some(event)) =
+        tokio::time::timeout_at(deadline, subject.runtime.next_event()).await
+    {
+        events.push(event);
+    }
+    let changes: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, SwarmEvent::NetworkChanged { .. }))
+        .collect();
+    assert!(
+        matches!(changes.as_slice(), [SwarmEvent::NetworkChanged { removed, added }]
+            if removed.is_empty() && *added == vec![latest]),
+        "one change, against the latest view only: {changes:?}"
+    );
+    subject.runtime.shutdown().await.expect("shutdown");
+}

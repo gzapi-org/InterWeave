@@ -156,7 +156,8 @@ fn follow_verdict(
     reason = "the Swarm task's state a change reaches, borrowed for one call from two arms"
 )]
 fn on_network_change(
-    change: network_change::NetworkChange,
+    change: Option<network_change::NetworkChange>,
+    network: &mut network_change::NetworkSet,
     now: u64,
     swarm: &mut GatedSwarm,
     manager: &mut ConnectionManager,
@@ -167,13 +168,22 @@ fn on_network_change(
     outbox: &mut VecDeque<SwarmEvent>,
     event_capacity: usize,
 ) {
+    // THE FIRST FILL is no change, but a runtime started offline failed
+    // its first dials before it: the lift runs (ADR-0011 A 2026-10-09).
+    let filled = network.take_filled();
+    let Some(change) = change else {
+        if filled {
+            lift_held_off(now, manager, relay_state);
+        }
+        return;
+    };
     if change.invalidates() {
         if let Some(state) = autonat_state {
             let mut autonat_events = Vec::new();
             autonat_driver::network_changed(
                 state,
                 swarm,
-                active.values().flatten(),
+                active.values().flatten().filter(|a| network.holds(a)),
                 now,
                 &mut autonat_events,
             );
@@ -205,18 +215,31 @@ fn on_network_change(
             }
         }
     }
-    if change.adds() {
-        let _ = manager.network_added(now);
-        if let Some(state) = relay_state {
-            let _ = relay_driver::network_added(state, now);
-        }
+    if change.adds() || filled {
+        lift_held_off(now, manager, relay_state);
     }
-    dcutr_driver::offer_listeners(swarm.dcutr_mut(), active.values().flatten());
+    dcutr_driver::offer_listeners(
+        swarm.dcutr_mut(),
+        active.values().flatten().filter(|a| network.holds(a)),
+    );
     if may_buffer_delivery(outbox.len(), event_capacity) {
         outbox.push_back(SwarmEvent::NetworkChanged {
             removed: change.removed,
             added: change.added,
         });
+    }
+}
+
+/// An addition's lift, or the first fill's: every held-off peer and
+/// every backing-off relay due once, within the lift floor.
+fn lift_held_off(
+    now: u64,
+    manager: &mut ConnectionManager,
+    relay_state: Option<&mut relay_driver::RelayState>,
+) {
+    let _ = manager.network_added(now);
+    if let Some(state) = relay_state {
+        let _ = relay_driver::network_added(state, now);
     }
 }
 
@@ -1772,20 +1795,20 @@ impl SwarmRuntime {
                     // for this turn only, and nothing is reported.
                     Ok(()) = network_view.changed() => {
                         let view = network_view.borrow_and_update().clone();
-                        if let Some(change) = network.observe_view(&view.addresses) {
-                            on_network_change(
-                                change,
-                                now_ms(started),
-                                &mut swarm,
-                                &mut manager,
-                                autonat_state.as_mut(),
-                                relay_state.as_mut(),
-                                &active,
-                                &open,
-                                &mut outbox,
-                                config.event_capacity,
-                            );
-                        }
+                        let change = network.observe_view(&view.addresses);
+                        on_network_change(
+                            change,
+                            &mut network,
+                            now_ms(started),
+                            &mut swarm,
+                            &mut manager,
+                            autonat_state.as_mut(),
+                            relay_state.as_mut(),
+                            &active,
+                            &open,
+                            &mut outbox,
+                            config.event_capacity,
+                        );
                     }
                     // THE mDNS REFRESH TICK: what the crate's store still
                     // holds goes out again, and a rebuild that is due runs
@@ -2098,7 +2121,13 @@ impl SwarmRuntime {
                         // listeners this profile bound are candidates for
                         // its CONNECT (each offered once).
                         dcutr_driver::tick(swarm.dcutr_mut(), now);
-                        dcutr_driver::offer_listeners(swarm.dcutr_mut(), active.values().flatten());
+                        // Only what the host still holds: a listener on
+                        // an IP the platform's view said departed stays
+                        // bound until the poll catches up.
+                        dcutr_driver::offer_listeners(
+                            swarm.dcutr_mut(),
+                            active.values().flatten().filter(|a| network.holds(a)),
+                        );
 
                         // THE STABILITY GATE AND THE RETIREMENT (step 9).
                         // A punched direct connection becomes the peer's
@@ -2174,7 +2203,12 @@ impl SwarmRuntime {
                                 autonat_driver::AutonatTick {
                                     in_flight: &in_flight,
                                     open: &open,
-                                    listeners: active.values().flatten().cloned().collect(),
+                                    listeners: active
+                                        .values()
+                                        .flatten()
+                                        .filter(|a| network.holds(a))
+                                        .cloned()
+                                        .collect(),
                                     now_ms: now,
                                 },
                                 &mut autonat_events,
@@ -2957,11 +2991,11 @@ impl SwarmRuntime {
                                 // the listeners' bound set made, seen
                                 // here, once, as the listener event that
                                 // made it lands (`on_network_change`).
-                                if listener_event
-                                    && let Some(change) = network.observe_listeners(active.values().flatten())
-                                {
+                                if listener_event {
+                                    let change = network.observe_listeners(active.values().flatten());
                                     on_network_change(
                                         change,
+                                        &mut network,
                                         now_ms(started),
                                         &mut swarm,
                                         &mut manager,

@@ -1033,7 +1033,8 @@ pub(super) fn reconcile(
         now_ms,
     } = tick;
     // A NETWORK CHANGE is not noticed here: the runtime's detector
-    // (`network_change.rs`) sees the bound set change and calls
+    // (`network_change.rs`) sees the host's known IP set move -- the
+    // listeners' bound set or the platform's view -- and calls
     // `network_changed` below, whether or not this client is on (step
     // 10; until then the comparison lived in this tick, and with the
     // client off a change was seen by nothing).
