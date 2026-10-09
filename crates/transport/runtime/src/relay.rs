@@ -644,15 +644,29 @@ impl ReservationManager {
     /// at most once per `retry_min_ms`, the ladder's first step,
     /// measured from its previous lift, so repeated additions -- a LAN
     /// router announcing new prefixes, a flapping VPN -- cannot ask it
-    /// faster than its own ladder starts. Returns how many relays were
-    /// made due.
-    pub fn network_added(&mut self, now_ms: u64) -> usize {
+    /// faster than its own ladder starts.
+    ///
+    /// AND NOT WHILE THE GATE STILL HOLDS THE RELAY PEER: `gate_holds`
+    /// answers whether the dial gate's peer backoff still stands for a
+    /// relay after the same addition's gate lift. Where it does -- the
+    /// gate's 30 s floor not yet passed after a failed redial -- an ask
+    /// would be refused at the gate and recorded as a failure, and the
+    /// ladder would climb a rung for nothing; so the relay is not made
+    /// due, and the gate's floor governs it. Where the gate holds
+    /// nothing, `retry_min` is the ladder's only floor. Returns how many
+    /// relays were made due.
+    pub fn network_added(
+        &mut self,
+        now_ms: u64,
+        gate_holds: impl Fn(&TransportIdentity) -> bool,
+    ) -> usize {
         let floor = self.config.retry_min_ms;
         let mut due = 0;
-        for candidate in self.candidates.values_mut() {
+        for (relay, candidate) in &mut self.candidates {
             if candidate
                 .lifted_at_ms
                 .is_some_and(|at| now_ms.saturating_sub(at) < floor)
+                || gate_holds(relay)
             {
                 continue;
             }
@@ -998,7 +1012,7 @@ mod tests {
         assert!(m.tick(1_000).is_empty(), "waits its backoff");
         assert_eq!(m.askable_now(1_000), 0);
 
-        assert_eq!(m.network_added(1_000), 1);
+        assert_eq!(m.network_added(1_000, |_| false), 1);
         assert_eq!(m.tick(1_000).len(), 1, "asked at once");
         // ONCE, on the ladder: the ask fails, and the delay is the
         // ladder's second step, not its first again.
@@ -1012,14 +1026,39 @@ mod tests {
         );
         // THE FLOOR: the ask fails again at once, and a second addition
         // inside `retry_min` lifts nothing; one after it lifts again.
-        assert_eq!(m.network_added(1_000 + DEFAULT_RETRY_MIN_MS - 1), 0);
-        assert_eq!(m.network_added(1_000 + DEFAULT_RETRY_MIN_MS), 1);
+        assert_eq!(
+            m.network_added(1_000 + DEFAULT_RETRY_MIN_MS - 1, |_| false),
+            0
+        );
+        assert_eq!(m.network_added(1_000 + DEFAULT_RETRY_MIN_MS, |_| false), 1);
         // Nothing backing off: nothing to make due.
         assert_eq!(
-            with_static(&[R2]).network_added(0),
+            with_static(&[R2]).network_added(0, |_| false),
             0,
             "an idle relay is asked by the tick anyway"
         );
+    }
+
+    /// The two floors move together (ADR-0011 A 2026-10-09): an
+    /// addition while the gate still holds the relay peer -- inside the
+    /// gate's floor after a failed redial -- leaves the ladder alone,
+    /// so the ask is not refused at the gate and the ladder does not
+    /// climb for nothing. The control: the same addition with the gate
+    /// holding nothing makes the relay due.
+    #[test]
+    fn a_relay_the_gate_still_holds_is_not_made_due() {
+        let mut m = with_static(&[R1]);
+        assert_eq!(m.tick(0).len(), 1);
+        let _ = m.record_failed(&ident(R1), 0, 0).expect("known");
+        let before = m.state(&ident(R1)).cloned();
+        assert_eq!(m.network_added(1_000, |r| *r == ident(R1)), 0);
+        assert_eq!(
+            m.state(&ident(R1)).cloned(),
+            before,
+            "the ladder is untouched"
+        );
+        assert!(m.tick(1_000).is_empty(), "and nothing is asked");
+        assert_eq!(m.network_added(1_000, |_| false), 1, "the control");
     }
 
     #[test]

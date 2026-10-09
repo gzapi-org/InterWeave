@@ -1916,6 +1916,17 @@ impl ConnectionManager {
         lifted
     }
 
+    /// Whether the dial gate's peer backoff holds `peer` off at
+    /// `now_ms`: the answer the relay ladder's lift reads after
+    /// [`Self::network_added`], so the two floors move together
+    /// (ADR-0011 A 2026-10-09). Changes nothing.
+    #[must_use]
+    pub fn holds_off(&self, peer: &TransportIdentity, now_ms: u64) -> bool {
+        self.policy
+            .peer(peer)
+            .is_some_and(|backoff| backoff.is_punitive_at(now_ms))
+    }
+
     /// Record that an established connection has gone.
     ///
     /// Takes the slot rather than a count, so releasing it is the same
@@ -3620,6 +3631,21 @@ mod tests {
                 .admit(&request(P1, "/a"), 1_000 + RETRY_BASE_MS)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn holds_off_answers_the_gate_backoff_as_it_stands() {
+        let mut m = manager(8);
+        assert!(!m.holds_off(&peer(P1), 0), "nothing failed");
+        let t = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 0)
+            .expect("admitted");
+        let _ = m.record_failure(t, 0);
+        assert!(m.holds_off(&peer(P1), 1_000), "held off by the failure");
+        let _ = m.network_added(1_000);
+        assert!(!m.holds_off(&peer(P1), 1_000), "lifted");
     }
 
     #[test]
