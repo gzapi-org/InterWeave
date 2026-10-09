@@ -454,7 +454,7 @@ async fn path_changes_reach_only_routed_sessions_coalesced_per_peer() {
         .collect();
     assert_eq!(
         paths,
-        [(p.a_peer.clone(), PeerPath::Relayed, PeerPath::Direct, 3)],
+        [(p.a_peer.clone(), Some(PeerPath::Relayed), PeerPath::Direct, 3)],
         "one per peer, the latest, after the message"
     );
     assert!(

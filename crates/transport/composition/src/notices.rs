@@ -43,7 +43,7 @@ pub const MAX_ROUTED_PEERS: usize = interweave_trust_api::PeerTrustPolicy::MAX_A
 /// One pending path notice, before it is taken.
 #[derive(Clone)]
 struct PathNotice {
-    previous: PeerPath,
+    previous: Option<PeerPath>,
     current: PeerPath,
     reason_class: String,
     observed_at: u64,
@@ -320,9 +320,9 @@ impl SessionNotices {
                     self.paths_replaced.fetch_add(1, Ordering::Relaxed);
                     pending.previous
                 }
-                None => previous,
+                None => Some(previous),
             };
-            if merged != current {
+            if merged != Some(current) {
                 owed.paths.insert(
                     peer.clone(),
                     PathNotice {
@@ -640,7 +640,7 @@ mod tests {
         assert!(poll(b.as_mut()), "and so does the second");
     }
 
-    fn paths(events: &[LocalSessionEvent]) -> Vec<(PeerPath, PeerPath, String, u64)> {
+    fn paths(events: &[LocalSessionEvent]) -> Vec<(Option<PeerPath>, PeerPath, String, u64)> {
         events
             .iter()
             .map(|e| match e {
@@ -688,7 +688,7 @@ mod tests {
         );
         assert_eq!(
             paths(&notices.take_paths("routed", usize::MAX)),
-            [(Relayed, Direct, "dcutr".to_owned(), 4)],
+            [(Some(Relayed), Direct, "dcutr".to_owned(), 4)],
             "the first previous, the newest current, class and time"
         );
         assert_eq!(notices.diagnostics().paths_replaced_total, 2);
@@ -807,13 +807,13 @@ mod tests {
         );
         assert_eq!(
             paths(&notices.take_paths("s", usize::MAX)),
-            [(PeerPath::Relayed, PeerPath::Direct, "dcutr".to_owned(), 2)],
+            [(Some(PeerPath::Relayed), PeerPath::Direct, "dcutr".to_owned(), 2)],
             "the control: the other peer's notice stays; the gone peer's is withdrawn"
         );
         notices.path_changed(&gone, PeerPath::Relayed, PeerPath::Direct, "dcutr", 3);
         assert_eq!(
             paths(&notices.take_paths("s", usize::MAX)),
-            [(PeerPath::Relayed, PeerPath::Direct, "dcutr".to_owned(), 3)],
+            [(Some(PeerPath::Relayed), PeerPath::Direct, "dcutr".to_owned(), 3)],
             "the route stands: a change after the reconnect is owed"
         );
     }

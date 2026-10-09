@@ -1081,7 +1081,7 @@ mod tests {
         let path = || {
             SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
                 peer: peer(),
-                previous: interweave_transport_api::PeerPath::Relayed,
+                previous: Some(interweave_transport_api::PeerPath::Relayed),
                 current: interweave_transport_api::PeerPath::Direct,
                 reason_class: "dcutr".into(),
                 observed_at: 1,
@@ -1134,7 +1134,7 @@ mod tests {
         let refused = || {
             SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
                 peer: peer(),
-                previous: interweave_transport_api::PeerPath::Relayed,
+                previous: Some(interweave_transport_api::PeerPath::Relayed),
                 current: interweave_transport_api::PeerPath::Direct,
                 reason_class: String::new(),
                 observed_at: 1,

@@ -700,7 +700,7 @@ fn every_event() -> Vec<Event> {
         }),
         SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
             peer: peer(),
-            previous: interweave_transport_api::PeerPath::Relayed,
+            previous: Some(interweave_transport_api::PeerPath::Relayed),
             current: interweave_transport_api::PeerPath::Direct,
             reason_class: "dcutr".into(),
             observed_at: 3,
