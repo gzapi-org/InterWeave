@@ -30,10 +30,12 @@
 //! nothing left to report -- §14's handling runs once. Where the two
 //! sources disagree for good (an address one reports and the other
 //! never does), neither keeps re-reporting it, since each only applies
-//! its own differences. Where one lags the other across two moves --
-//! an address gone and back in the view before the poll saw it go --
-//! the late poll reports a move that already reversed, and the next
-//! poll reverses it again: a bounded spurious pair, never a stuck set.
+//! its own differences. Where the VIEW lags the listeners across two
+//! moves -- an address gone and back on the listeners before the view
+//! saw it go -- the late view reports a move that already reversed and
+//! the next view reverses it again: a bounded spurious pair, never a
+//! stuck set. The listeners lagging the view cannot do that, since the
+//! view protects what it names (below).
 //! A Wi-Fi reconnect that returns the same addresses (SPIKE-008 L7, a
 //! new network id on the same Wi-Fi) is NO change here: the host passes
 //! a view only when its addresses differ, and the connections that

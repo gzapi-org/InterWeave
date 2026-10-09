@@ -140,14 +140,15 @@ fn follow_verdict(
 /// was closed, on the belief that what died with its interface would
 /// close on its own, and SPIKE-004 phase B's `ifchange` row measured it
 /// standing for minutes. What is over an address still held is kept.
-/// AN ADDITION makes every allowlisted peer held off by its dial backoff
-/// dialable once, through the root gate like any dial
-/// (`ConnectionManager::network_added`; architect-cto's ruling of
-/// 2026-10-09, relay seq 33736): a peer that failed while this host was
-/// offline would otherwise wait out up to five minutes after it is back.
-/// And every relay backing off is asked again at the next tick, its
-/// ladder kept (`ReservationManager::network_added`; the ruling of relay
-/// seq 55562): a relay-only profile is otherwise unreachable for the
+/// AN ADDITION -- and the first fill of an empty set, which is reported
+/// as no change -- lifts the dial gate's backoff of every classified
+/// peer and makes the allowlisted ones' retry due, each dialled through
+/// the root gate like any dial (`ConnectionManager::network_added`): a
+/// peer that failed while this host was offline would otherwise wait out
+/// up to five minutes after it is back. And every relay backing off is
+/// asked again at the next tick, its ladder kept
+/// (`ReservationManager::network_added`). Each once per lift floor
+/// (ADR-0011 A 2026-10-09): a relay-only profile is otherwise unreachable for the
 /// rest of its relay backoff.
 /// Pinned by `tests/connectivity/tests/network_change.rs` and `dcutr.rs`'s
 /// `a_network_change_lifts_the_cooldown_and_keeps_the_reservation`.
