@@ -60,7 +60,7 @@ fn pair() -> Pair {
 }
 
 #[tokio::test]
-async fn item_12_a_route_begin_is_owed_the_peers_path() {
+async fn item_10_a_route_begin_is_owed_the_peers_path() {
     let p = pair();
     suite::a_route_begin_is_owed_the_peers_path(
         &p.a,

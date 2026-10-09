@@ -24,7 +24,7 @@ mod common;
 use common::{Pair, agent, human};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn item_12_a_route_begin_is_owed_the_peers_path() {
+async fn item_10_a_route_begin_is_owed_the_peers_path() {
     let pair = Pair::start().await;
     let (a, b) = pair.bindings();
     suite::a_route_begin_is_owed_the_peers_path(
