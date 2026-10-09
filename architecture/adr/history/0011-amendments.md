@@ -252,23 +252,29 @@ request — says nothing about the destination and is settled as the relay
 hop's, a third class beside the address failure and the identity
 mismatch: the address is ranked down (so a circuit through a relay that
 is up sorts ahead), the peer is not backed off, the route is kept. What
-qualifies is read off the connection table at settlement: with no direct
-connection to the relay, any failure is the hop's; with the relay
-connected, only the client's canceled request is, and a failure the relay
-or the destination answered, `WrongPeerId` included, is scored as before
+qualifies is a transport failure read off the connection table at
+settlement: with no direct connection to the relay, any transport failure
+is the hop's; with the relay connected, only the client's canceled
+request is; a failure the relay or the destination answered, and any
+non-transport error, `WrongPeerId` included, is scored as before
 (`unreached_relay`'s two shapes, pinned by its unit test). The reconnect is scheduled at the ordinary delay and
 marked as waiting on the relay; the first direct connection to that
 relay makes every retry waiting on it due now (a claimed entry is left
-alone), and a relay already connected when the failure settles makes it
-due at once — the measured restart race, where the canceled request
-arrives with the relay up. Once per failure, the gate still judging the
-dial; a relay that stays down costs the ordinary cadence. The gap at this
-note: #247's code makes the retry due only on a connection that
-establishes AFTER the settlement (`relay_reached`); a relay already
-connected at settlement leaves the retry at its ordinary delay, the peer
-unbacked-off meanwhile. The settlement site already knows whether the
-relay is reached; the fix is p2p-network-dev's, named in the review of
-this note. The paragraph is the second retry trigger beside
+alone), and a direct connection to the relay established after the dial
+was admitted and before its failure settled makes it due at once — the
+measured restart race, where the relay's `ConnectionEstablished` is
+delivered before the circuit's failure. A relay already up when the dial
+was admitted keeps the ordinary delay: a cancel that persists with the
+relay up would otherwise loop. Once per failure, the gate still judging
+the dial; a relay that stays down costs the ordinary cadence. The first
+draft of this note recorded a gap — the retry made due only by a
+connection establishing after the settlement — and a wider trigger
+("a relay already connected at settlement"); before the note landed,
+p2p-network-dev closed the gap on #247 with the narrower trigger above
+(dbf94001, 5444a3f2: `OpenConnection.since_ms` against the ticket's
+admission) and tightened both shapes to `DialError::Transport`, so a
+`WrongPeerId` keeps its quarantine whatever the connection table says
+(5444a3f2); the body reads as built. The paragraph is the second retry trigger beside
 "A new address makes the retry due" (A 2026-10-01), and the body says
 so. The code and its tests are p2p-network-dev's, on the pull request
 this note lands on; the raised finding was its blind review's F4.
