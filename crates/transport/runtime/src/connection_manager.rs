@@ -862,11 +862,12 @@ pub struct ConnectionManager {
     local_peer: Option<TransportIdentity>,
     retries: std::collections::BTreeMap<TransportIdentity, Retry>,
     /// When each peer was last lifted by a network addition, for the
-    /// lift floor ([`Self::network_added`]). An entry is inserted only
-    /// for a peer classified at that moment that held a backoff or a
-    /// retry, and entries older than [`RETRY_BASE_MS`] are pruned at the
-    /// next addition -- so it is bounded by the retry and peer-backoff
-    /// tables, both themselves bounded.
+    /// lift floor ([`Self::network_added`]). Each addition first prunes
+    /// every entry older than [`RETRY_BASE_MS`] or for a peer no longer
+    /// classified, then inserts only classified peers -- so it holds at
+    /// most the peers classified at the last addition, bounded by the
+    /// trust sets
+    /// (`network_lifts_are_bounded_by_the_peers_classified_at_the_last_addition`).
     network_lifts: std::collections::BTreeMap<TransportIdentity, u64>,
     /// Book peers the current trust no longer classifies, longest-revoked
     /// first, at most [`MAX_RETIRED_BOOK_PEERS`]: their entries are kept
@@ -1998,8 +1999,13 @@ impl ConnectionManager {
     /// dialable.
     pub fn network_added(&mut self, now_ms: u64) -> usize {
         self.observe(now_ms);
-        self.network_lifts
-            .retain(|_, at| now_ms.saturating_sub(*at) < RETRY_BASE_MS);
+        // Pruned by age AND by class, so the map never outgrows the peers
+        // classified now (`network_lifts_are_bounded_by_the_peers_classified_at_the_last_addition`).
+        let trust = &self.trust;
+        self.network_lifts.retain(|peer, at| {
+            now_ms.saturating_sub(*at) < RETRY_BASE_MS
+                && !matches!(trust.classify(peer), ConnectionClass::Unauthorized)
+        });
         let peers: std::collections::BTreeSet<TransportIdentity> = self
             .retries
             .keys()
@@ -3907,6 +3913,31 @@ mod tests {
         assert!(m.holds_off(&peer(P1), 1_000), "held off by the failure");
         let _ = m.network_added(1_000);
         assert!(!m.holds_off(&peer(P1), 1_000), "lifted");
+    }
+
+    #[test]
+    fn network_lifts_are_bounded_by_the_peers_classified_at_the_last_addition() {
+        let mut m = manager(8);
+        for (i, p) in [P1, P2].into_iter().enumerate() {
+            let at = u64::try_from(i).expect("small") * 1_000;
+            let t = m
+                .handle()
+                .load()
+                .admit(&request(p, "/a"), at)
+                .expect("admitted");
+            let _ = m.record_failure(t, at);
+            assert_eq!(m.network_added(at + 500), 1, "{p} lifted");
+        }
+        assert_eq!(m.network_lifts.len(), 2, "the control: both recorded");
+        // P2 loses its trust inside the window: the next addition prunes
+        // its entry though it is younger than the floor.
+        let _ = m.set_trust(trusting(&[P1], &[]), &[]);
+        let _ = m.network_added(2_000);
+        assert_eq!(
+            m.network_lifts.keys().cloned().collect::<Vec<_>>(),
+            vec![peer(P1)],
+            "only what is classified now"
+        );
     }
 
     #[test]
