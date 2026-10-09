@@ -50,7 +50,9 @@ serde_norway = "0.9.42"
 
 # `O_NOFOLLOW` for the profile lock (`lock.rs`): its value differs by
 # ABI, and a hand-typed table got aarch64 wrong. Already in the graph
-# through tokio; this adds no code to what is compiled.
+# through tokio; this adds no code to what is compiled. With the two
+# below, gated to Android as well as Linux: the embedded runtime (plan
+# §20) takes the same lock and reads the same guards on a device.
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 libc = "0.2.189"
 
@@ -58,7 +60,6 @@ libc = "0.2.189"
 # "a group of one is the owner's own"): `getpwuid_r` and `getgrgid_r`,
 # NSS-backed, as safe calls -- the crate forbids unsafe code. Already in
 # the graph through rtnetlink at this version; `user` adds no crate.
-[target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.30.1", default-features = false, features = ["user"] }
 # Whether a group-writable directory or file carries a POSIX access ACL,
 # which makes its group bits the ACL's mask (the same amendment, #231):

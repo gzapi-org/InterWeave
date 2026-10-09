@@ -3666,6 +3666,7 @@ dependencies = [
  "interweave-test-support",
  "interweave-transport-api",
  "interweave-transport-composition",
+ "interweave-transport-embedded",
  "serde_norway",
  "tempfile",
  "tokio",
@@ -3815,6 +3816,20 @@ name = "interweave-transport-daemon"
 version = "0.0.0"
 dependencies = [
  "interweave-ipc-server",
+ "interweave-profile-config",
+ "interweave-profile-identity",
+ "interweave-transport-composition",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "interweave-transport-embedded"
+version = "0.0.0"
+dependencies = [
+ "interweave-local-client-api",
  "interweave-profile-config",
  "interweave-profile-identity",
  "interweave-transport-composition",

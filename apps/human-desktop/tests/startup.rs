@@ -119,7 +119,9 @@ channels: {{ desired: [] }}
     }
 
     fn store(&self) -> PathBuf {
-        self.paths().human_dir().join("human.sqlite")
+        self.paths()
+            .human_dir()
+            .join(interweave_human_store::STORE_FILE)
     }
 }
 

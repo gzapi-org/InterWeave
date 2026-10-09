@@ -18,10 +18,6 @@ use interweave_transport_api::{ChannelId, EndpointId};
 /// on the endpoint it leases.
 pub const CLIENT_KIND: &str = "human-client";
 
-/// The store's file name in the profile's human directory (architect-cto's
-/// Q3 ruling, relay seq 11163).
-pub const STORE_FILE: &str = "human.sqlite";
-
 /// What the command line asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Launch {
@@ -108,11 +104,15 @@ pub struct Profile {
 }
 
 impl Profile {
-    /// The store's path: in the profile's human directory, never among the
-    /// daemon's files.
+    /// The store's path: the store's own file name in the profile's human
+    /// directory, never among the daemon's files (architect-cto's Q3
+    /// ruling, relay seq 11163). For what a refusal names; the store is
+    /// opened from the paths, by [`open_store`].
     #[must_use]
     pub fn store_path(&self) -> PathBuf {
-        self.paths.human_dir().join(STORE_FILE)
+        self.paths
+            .human_dir()
+            .join(interweave_human_store::STORE_FILE)
     }
 }
 
@@ -250,13 +250,13 @@ impl fmt::Display for Blocked {
     }
 }
 
-/// Open the store at `path`, classifying a failure by what a person can
-/// do about it.
+/// Open the profile's store, judged under its paths' trust boundary,
+/// classifying a failure by what a person can do about it.
 #[must_use]
-pub fn open_store(path: &Path, options: StoreOptions) -> Opened {
-    match HumanStore::open(path, options) {
+pub fn open_store(profile: &Profile, options: StoreOptions) -> Opened {
+    match HumanStore::open_profile(&profile.paths, options) {
         Ok(store) => Opened::Ready(store),
-        Err(error) => Opened::Blocked(classify(path, &error)),
+        Err(error) => Opened::Blocked(classify(&profile.store_path(), &error)),
     }
 }
 

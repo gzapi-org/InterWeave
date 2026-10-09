@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# Stage 17 (plan §20 step 1): the transport runtime composed for an
+# in-process host -- the Android app's foreground service -- with the
+# trust boundary its platform supplies. The Stage 12 composition and its
+# in-process LocalDataSession/LocalAdminPort binding, not a second
+# adapter (§15 (3)); no Android, JNI or UI type, so it builds for the
+# host and the device alike and its tests run on the host. The Service,
+# its lifecycle and the JNI side are rust-ui-dev's (architect-cto seq
+# 32946; the seams agreed in rust-ui-dev's seq 33010).
+[package]
+name = "interweave-transport-embedded"
+version = "0.0.0"
+publish = false
+description = "The InterWeave transport runtime hosted in-process under a platform-supplied trust boundary."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The admin port the host opens for its owner's own shutdown request
+# (`EmbeddedHost::request_shutdown`): the neutral traits the binding
+# implements.
+interweave-local-client-api = { path = "../../api/local-client-api" }
+interweave-profile-config = { path = "../../config/profile-config" }
+interweave-profile-identity = { path = "../../identity/profile-identity" }
+interweave-transport-composition = { path = "../composition" }
+# The host's own runtime: the Service thread is not async, and the
+# binding's futures need an executor the Service can drive them on.
+tokio = { workspace = true }
+# The log filter the host's sink applies (`log_admits`), in `tracing`'s
+# levels. Already in the graph through the composition.
+tracing = { workspace = true }
+
+[dev-dependencies]
+# A runtime of the test's own, to drop a host inside its async context.
+tokio = { workspace = true, features = ["rt"] }
+tempfile = { workspace = true }
+# The test's copy of the daemon's filter construction, the oracle
+# `log_admits` is held to (`tests/log_filter.rs`).
+tracing-subscriber = { workspace = true }

@@ -53,7 +53,7 @@ pub use records::{
     StoredInbound,
 };
 pub use schema::{REQUIRED_TABLES, SCHEMA_VERSION};
-pub use store::{HumanStore, READ_PAIR_CAP, StoreOptions};
+pub use store::{HumanStore, READ_PAIR_CAP, STORE_FILE, StoreOptions};
 
 // Re-exported so a caller acting on retention does not need a second
 // dependency to name the event it is reporting.
