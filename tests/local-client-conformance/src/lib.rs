@@ -440,7 +440,8 @@ pub async fn the_source_endpoint_is_the_senders_lease<B: DataSessionBinding>(
     unleased.close().await.expect("closes");
 }
 
-/// Item 12's route begin (A 2026-10-09): a session whose route to a peer
+/// Item 10's route begin (A 2026-10-09; item 12 is its relayed case,
+/// proved between daemons by `tests/desktop-e2e`): a session whose route to a peer
 /// BEGINS -- the sender at its send's acceptance, the receiver at its
 /// take -- is owed one `PeerPathChanged` with no `previous`, `current` the
 /// path the binding has to the peer (`path`), reason `route_established`;
