@@ -446,8 +446,8 @@ mod tests {
         impl crate::persist::NameService for Names {
             // A flag of this call's own: the test makes one read at a time
             // and must not share the process's with a test beside it.
-            fn outstanding(&self) -> &'static std::sync::atomic::AtomicBool {
-                Box::leak(Box::new(std::sync::atomic::AtomicBool::new(false)))
+            fn outstanding(&self) -> &'static crate::persist::ReadGate {
+                Box::leak(Box::new(crate::persist::ReadGate::new()))
             }
             fn user_name(&self, uid: u32) -> std::io::Result<Option<String>> {
                 Ok(match uid {
@@ -491,8 +491,8 @@ mod tests {
         impl crate::persist::NameService for Names {
             // A flag of this call's own: the test makes one read at a time
             // and must not share the process's with a test beside it.
-            fn outstanding(&self) -> &'static std::sync::atomic::AtomicBool {
-                Box::leak(Box::new(std::sync::atomic::AtomicBool::new(false)))
+            fn outstanding(&self) -> &'static crate::persist::ReadGate {
+                Box::leak(Box::new(crate::persist::ReadGate::new()))
             }
             fn user_name(&self, _: u32) -> std::io::Result<Option<String>> {
                 Ok(Some("alice".to_owned()))

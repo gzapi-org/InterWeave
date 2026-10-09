@@ -816,7 +816,7 @@ pub(crate) trait NameService: Clone + Send + 'static {
     /// test's. Required, with no default, so no test service can fall
     /// back on the process's flag and refuse another test running beside
     /// it.
-    fn outstanding(&self) -> &'static std::sync::atomic::AtomicBool;
+    fn outstanding(&self) -> &'static ReadGate;
 }
 
 /// The host's name service: `getpwuid_r` and `getgrgid_r`, so NSS
@@ -854,7 +854,7 @@ impl NameService for HostNames {
         }
     }
 
-    fn outstanding(&self) -> &'static std::sync::atomic::AtomicBool {
+    fn outstanding(&self) -> &'static ReadGate {
         &NSS_READ_OUTSTANDING
     }
 }
@@ -898,24 +898,79 @@ pub(crate) fn owners_private_group(
 /// refuse rather than hold the start. Not a configuration knob.
 pub const NSS_READ_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Whether a name-service read this process started has not returned
-/// yet. The predicate runs on every private write of a running daemon
-/// (each trust-overlay write), not once per start: under a hung name
-/// service each would otherwise leave one more thread blocked. So at
-/// most one read is outstanding per process, and a read asked for while
-/// it is refuses at once (ADR-0028, "The name-service read is bounded";
-/// `a_read_asked_for_while_one_is_outstanding_refuses_at_once`).
-static NSS_READ_OUTSTANDING: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+/// The process's name-service read gate. The predicate runs on every
+/// private write of a running daemon (each trust-overlay write), not
+/// once per start: under a hung name service each would otherwise leave
+/// one more thread blocked. So at most one read is outstanding per
+/// process; a read asked for while one is WAITS for it, up to its own
+/// deadline, then refuses -- a healthy concurrent read succeeds, a hung
+/// service costs one thread (ADR-0028, "The name-service read is
+/// bounded"; `a_read_asked_for_while_one_is_outstanding_waits_for_it`).
+static NSS_READ_OUTSTANDING: ReadGate = ReadGate::new();
 
-/// Clears the outstanding flag when the read's thread ends, however it
-/// ends -- a panicking name-service module included, or the flag would
-/// refuse every later read of the process.
-struct ReadReturned(&'static std::sync::atomic::AtomicBool);
+/// At most one read in flight, and a way to wait for it to end.
+pub(crate) struct ReadGate {
+    busy: std::sync::Mutex<bool>,
+    freed: std::sync::Condvar,
+}
+
+impl ReadGate {
+    pub(crate) const fn new() -> Self {
+        Self {
+            busy: std::sync::Mutex::new(false),
+            freed: std::sync::Condvar::new(),
+        }
+    }
+
+    /// Take the gate, waiting for an outstanding read to end until
+    /// `until`; `false` when it had not ended by then.
+    fn enter(&self, until: std::time::Instant) -> bool {
+        let mut busy = self
+            .busy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while *busy {
+            let now = std::time::Instant::now();
+            if now >= until {
+                return false;
+            }
+            busy = self
+                .freed
+                .wait_timeout(busy, until - now)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+        *busy = true;
+        true
+    }
+
+    /// Give the gate back, and wake whoever waits for it.
+    fn leave(&self) {
+        *self
+            .busy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
+        self.freed.notify_all();
+    }
+
+    /// Whether a read holds the gate.
+    #[cfg(test)]
+    fn is_busy(&self) -> bool {
+        *self
+            .busy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Gives the gate back when the read's thread ends, however it ends --
+/// a panicking name-service module included, or every later read of the
+/// process would wait out its deadline and refuse.
+struct ReadReturned(&'static ReadGate);
 
 impl Drop for ReadReturned {
     fn drop(&mut self) {
-        self.0.store(false, std::sync::atomic::Ordering::Release);
+        self.0.leave();
     }
 }
 
@@ -930,36 +985,42 @@ type NameReads = (
 /// a thread limit is not reported as a slow name service: the deadline
 /// passed (the thread is then left to finish or leak, one per refusal),
 /// the read ended without answering (it panicked), or no thread could be
-/// started -- or, while an earlier read of the same service has not
-/// returned ([`NameService::outstanding`]), nothing is started at all.
+/// started -- or an earlier read of the same service
+/// ([`NameService::outstanding`]) did not end within `deadline`, counted
+/// from this request, and nothing was started.
 fn read_names(
     names: &impl NameService,
     euid: u32,
     gid: u32,
     deadline: std::time::Duration,
 ) -> Result<NameReads, String> {
-    let outstanding = names.outstanding();
-    if outstanding.swap(true, std::sync::atomic::Ordering::AcqRel) {
-        return Err("an earlier name-service read has not returned".to_owned());
+    // One budget, from this caller's own request: the wait for an
+    // earlier read and the wait for this one's answer share it.
+    let until = std::time::Instant::now() + deadline;
+    let gate = names.outstanding();
+    if !gate.enter(until) {
+        return Err(format!(
+            "an earlier name-service read has not returned within {deadline:?}"
+        ));
     }
-    let returned = ReadReturned(outstanding);
+    let returned = ReadReturned(gate);
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     let names = names.clone();
     std::thread::Builder::new()
         .name("nss-read".to_owned())
         .spawn(move || {
             let reads = (names.user_name(euid), names.group(gid));
-            // Cleared BEFORE the answer is sent: a caller holding its
-            // answer may read again at once, and must not find its own
-            // finished read still marked outstanding
-            // (`reads_back_to_back_are_both_made`).
+            // Given back BEFORE the answer is sent, so a caller holding
+            // its answer that reads again finds the gate free rather than
+            // waiting on its own finished read.
             drop(returned);
             let _ = tx.send(reads);
         })
         // A thread that never started dropped its closure, and with it
         // the guard: the flag is already clear.
         .map_err(|e| format!("no thread could be started to read it: {e}"))?;
-    rx.recv_timeout(deadline).map_err(|e| match e {
+    let left = until.saturating_duration_since(std::time::Instant::now());
+    rx.recv_timeout(left).map_err(|e| match e {
         std::sync::mpsc::RecvTimeoutError::Timeout => {
             format!("the name service did not answer within {deadline:?}")
         }
@@ -1361,7 +1422,7 @@ mod tests {
     #[cfg(unix)]
     #[derive(Clone)]
     struct FakeNames {
-        guard: &'static std::sync::atomic::AtomicBool,
+        guard: &'static ReadGate,
         users: Vec<(u32, &'static str)>,
         groups: Vec<(u32, &'static str, Vec<&'static str>)>,
         fails: bool,
@@ -1395,7 +1456,7 @@ mod tests {
                     )
                 }))
         }
-        fn outstanding(&self) -> &'static std::sync::atomic::AtomicBool {
+        fn outstanding(&self) -> &'static ReadGate {
             self.guard
         }
     }
@@ -1598,26 +1659,26 @@ mod tests {
     /// A guard of a test's own, so tests running in parallel do not share
     /// the process's outstanding read.
     #[cfg(unix)]
-    fn fresh_guard() -> &'static std::sync::atomic::AtomicBool {
-        Box::leak(Box::new(std::sync::atomic::AtomicBool::new(false)))
+    fn fresh_guard() -> &'static ReadGate {
+        Box::leak(Box::new(ReadGate::new()))
     }
 
-    /// While a read the process started has not returned, a second one is
-    /// not started: it refuses at once, naming the earlier read, well
-    /// inside the deadline. Once the blocked read returns the guard
-    /// clears, and the next read is made and answers -- a recovered name
-    /// service is read again (ADR-0028, "The name-service read is
-    /// bounded"; architect-cto seq 29413).
+    /// While a read the process started has not returned, a second one
+    /// waits for it, up to its own deadline: when the first does not end
+    /// in time the second refuses AT its deadline, naming the earlier
+    /// read; when the first ends within it, the second is made and
+    /// answers -- a healthy concurrent read succeeds (ADR-0028, "The
+    /// name-service read is bounded"; architect-cto seq 29607).
     #[cfg(unix)]
     #[test]
-    fn a_read_asked_for_while_one_is_outstanding_refuses_at_once() {
+    fn a_read_asked_for_while_one_is_outstanding_waits_for_it() {
         #[derive(Clone)]
         struct Held(
             std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>,
-            &'static std::sync::atomic::AtomicBool,
+            &'static ReadGate,
         );
         impl NameService for Held {
-            fn outstanding(&self) -> &'static std::sync::atomic::AtomicBool {
+            fn outstanding(&self) -> &'static ReadGate {
                 self.1
             }
             fn user_name(&self, _: u32) -> std::io::Result<Option<String>> {
@@ -1629,9 +1690,9 @@ mod tests {
             }
         }
         #[derive(Clone)]
-        struct Answers(&'static std::sync::atomic::AtomicBool);
+        struct Answers(&'static ReadGate);
         impl NameService for Answers {
-            fn outstanding(&self) -> &'static std::sync::atomic::AtomicBool {
+            fn outstanding(&self) -> &'static ReadGate {
                 self.0
             }
             fn user_name(&self, _: u32) -> std::io::Result<Option<String>> {
@@ -1644,38 +1705,42 @@ mod tests {
         let guard = fresh_guard();
         let (release, held) = std::sync::mpsc::channel();
         let held = Held(std::sync::Arc::new(std::sync::Mutex::new(held)), guard);
-        let short = std::time::Duration::from_millis(50);
-        let first = owners_private_group_within(&held, 1000, 1001, Ok(false), short)
-            .expect_err("the first read is held past the deadline");
+        let first = owners_private_group_within(
+            &held,
+            1000,
+            1001,
+            Ok(false),
+            std::time::Duration::from_millis(50),
+        )
+        .expect_err("the first read is held past its deadline");
         assert!(first.contains("did not answer within 50ms"), "{first}");
 
+        // Still held: the second waits its whole 200 ms, then refuses.
         let started = std::time::Instant::now();
         let second = owners_private_group_within(
             &Answers(guard),
             1000,
             1001,
             Ok(false),
-            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(200),
         )
-        .expect_err("refused while the first read is outstanding");
+        .expect_err("refused while the first read stays outstanding");
+        let waited = started.elapsed();
         assert!(
-            second.contains("an earlier name-service read has not returned"),
+            second.contains("an earlier name-service read has not returned within 200ms"),
             "{second}"
         );
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(1),
-            "refused at once, not at the 5 s deadline"
+            waited >= std::time::Duration::from_millis(200)
+                && waited < std::time::Duration::from_secs(2),
+            "refused at its own deadline, having waited for it: {waited:?}"
         );
 
-        release.send(()).expect("the held read is released");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while guard.load(std::sync::atomic::Ordering::Acquire) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the guard clears once the held read returns"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
+        // Released within the third's deadline: it waits, then reads.
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            release.send(()).expect("the held read is released");
+        });
         owners_private_group_within(
             &Answers(guard),
             1000,
@@ -1683,7 +1748,9 @@ mod tests {
             Ok(false),
             std::time::Duration::from_secs(5),
         )
-        .expect("a recovered name service is read again");
+        .expect("a read that waited for the earlier one to end is made");
+        releaser.join().expect("the releaser");
+        assert!(!guard.is_busy(), "the gate is free once the reads are done");
     }
 
     /// Reads made back to back on one service, with no pause between
@@ -1695,9 +1762,9 @@ mod tests {
     #[test]
     fn reads_back_to_back_are_both_made() {
         #[derive(Clone)]
-        struct Answers(&'static std::sync::atomic::AtomicBool);
+        struct Answers(&'static ReadGate);
         impl NameService for Answers {
-            fn outstanding(&self) -> &'static std::sync::atomic::AtomicBool {
+            fn outstanding(&self) -> &'static ReadGate {
                 self.0
             }
             fn user_name(&self, _: u32) -> std::io::Result<Option<String>> {
@@ -1732,9 +1799,9 @@ mod tests {
     #[test]
     fn a_name_service_that_does_not_answer_is_refused_at_the_deadline() {
         #[derive(Clone)]
-        struct Slow(std::time::Duration, &'static std::sync::atomic::AtomicBool);
+        struct Slow(std::time::Duration, &'static ReadGate);
         impl NameService for Slow {
-            fn outstanding(&self) -> &'static std::sync::atomic::AtomicBool {
+            fn outstanding(&self) -> &'static ReadGate {
                 self.1
             }
             fn user_name(&self, _: u32) -> std::io::Result<Option<String>> {
@@ -1746,9 +1813,9 @@ mod tests {
             }
         }
         #[derive(Clone)]
-        struct Panics(&'static std::sync::atomic::AtomicBool);
+        struct Panics(&'static ReadGate);
         impl NameService for Panics {
-            fn outstanding(&self) -> &'static std::sync::atomic::AtomicBool {
+            fn outstanding(&self) -> &'static ReadGate {
                 self.0
             }
             fn user_name(&self, _: u32) -> std::io::Result<Option<String>> {
@@ -1813,7 +1880,7 @@ mod tests {
         // A read that panicked still returned: the guard clears, or the
         // process would refuse every later read.
         let cleared_by = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while after_panic.load(std::sync::atomic::Ordering::Acquire) {
+        while after_panic.is_busy() {
             assert!(
                 std::time::Instant::now() < cleared_by,
                 "a panicked read clears the guard"
