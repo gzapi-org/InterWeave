@@ -394,7 +394,11 @@ operation is refused within the deadline, and at most one read is
 outstanding per process: a caller that finds an earlier read outstanding
 does not spawn a second but waits for it, up to the deadline measured
 from its own request, then refuses with "an earlier name-service read
-has not returned within 5s" — a healthy concurrent read (the human
+has not returned within 5s"; one budget per caller — the wait and the
+caller's own read together end at that deadline, and a caller that
+finds the guard taken again waits again on what remains — so the
+slow-then-hung case refuses at 5 s too, not at 5 s plus a fresh 5 s; a
+healthy concurrent read (the human
 client's store beside a private write; callers nobody has enumerated,
 so no "they never overlap" is promised) succeeds after the first
 returns, a hung one costs one leaked thread and every caller refuses
@@ -423,9 +427,12 @@ the user name in one call): one call fewer, the same hang.
 #236 at 6cb59136, and the one-outstanding-read guard
 (`NSS_READ_OUTSTANDING` behind `NameService::outstanding()`, cleared by
 a `Drop` when the thread returns, each test service with its own flag)
-at f8b8aa33 and d44111e4; the wait-then-refuse form of this paragraph
-is the one piece still to land there, with the test that a second call
-during a hold released within the deadline succeeds. Until #236 lands on main, a hung name service blocks
+at f8b8aa33 and d44111e4; the wait-then-refuse form, one budget per
+caller, at 1693dd82 (a `ReadGate` — busy flag under a mutex, a condvar
+waking waiters, the helper thread's `Drop` giving it back — and the
+three-case test: held read refused at its deadline, second read during
+the hold refused at its own deadline naming the earlier read, third read
+succeeding once the hold is released in time). Until #236 lands on main, a hung name service blocks
 the start and every overlay write there: a defect at writing,
 affecting no host here. Under the deadline, a host
 whose directory service is down refuses to start InterWeave for a
