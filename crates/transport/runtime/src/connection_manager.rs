@@ -862,10 +862,11 @@ pub struct ConnectionManager {
     local_peer: Option<TransportIdentity>,
     retries: std::collections::BTreeMap<TransportIdentity, Retry>,
     /// When each peer was last lifted by a network addition, for the
-    /// lift floor ([`Self::network_added`]). Holds only peers lifted
-    /// within the last [`RETRY_BASE_MS`] -- older entries are pruned on
-    /// the next addition -- and only classified ones, so it is bounded
-    /// by the trust sets.
+    /// lift floor ([`Self::network_added`]). An entry is inserted only
+    /// for a peer classified at that moment that held a backoff or a
+    /// retry, and entries older than [`RETRY_BASE_MS`] are pruned at the
+    /// next addition -- so it is bounded by the retry and peer-backoff
+    /// tables, both themselves bounded.
     network_lifts: std::collections::BTreeMap<TransportIdentity, u64>,
     /// Book peers the current trust no longer classifies, longest-revoked
     /// first, at most [`MAX_RETIRED_BOOK_PEERS`]: their entries are kept
@@ -2009,10 +2010,12 @@ impl ConnectionManager {
             .collect();
         let mut lifted = 0;
         for peer in &peers {
-            let backoff = self.policy.lift_peer_backoff(peer);
+            let backoff = self.policy.lift_peer_backoff(peer, now_ms);
             let data_plane = matches!(self.classify(peer), ConnectionClass::DataPlaneTrusted);
             let retry = match self.retries.get_mut(peer) {
-                Some(entry) if data_plane && entry.due_at_ms > now_ms => {
+                // UNCLAIMED only: a claimed entry is a dial in flight,
+                // whose settlement rewrites the due time anyway.
+                Some(entry) if data_plane && !entry.claimed && entry.due_at_ms > now_ms => {
                     entry.due_at_ms = now_ms;
                     true
                 }
@@ -3943,7 +3946,9 @@ mod tests {
         assert!(m.record_identity_mismatch(q, 0));
         assert_eq!(m.take_due_retries(30_000, 8), vec![peer(P1)], "claimed");
 
-        let _ = m.network_added(31_000);
+        // The backoff expired at 30 s and the retry is claimed: nothing
+        // is held off, so nothing is lifted and no floor is spent.
+        assert_eq!(m.network_added(31_000), 0, "an expired backoff is no lift");
         assert!(
             m.take_due_retries(31_000, 8).is_empty(),
             "the dial in flight settles first"
@@ -3953,7 +3958,48 @@ mod tests {
             Some(DialDenial::AddressQuarantined),
             "a new network does not lift a mismatch's quarantine"
         );
-        assert_eq!(m.network_added(31_000), 0, "nothing left to lift");
+        // The scheduler's dial fails, and a real join later lifts it: the
+        // expired backoff above spent no floor.
+        let t = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 31_500)
+            .expect("admitted");
+        let _ = m.record_failure(t, 31_500);
+        assert_eq!(m.network_added(40_000), 1, "the floor was not spent");
+    }
+
+    /// A claimed retry is a dial in flight: an addition does not make it
+    /// due -- a manual dial's failure left it claimed with a future due
+    /// time -- so when the claim is given back it waits its own time.
+    #[test]
+    fn a_network_addition_leaves_a_claimed_retry_with_a_future_due_time_alone() {
+        let mut m = manager(8);
+        let t = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 0)
+            .expect("admitted");
+        let _ = m.record_failure(t, 0);
+        assert_eq!(m.take_due_retries(30_000, 8), vec![peer(P1)], "claimed");
+        // A manual dial to another address fails while the claim is held.
+        let manual = m
+            .handle()
+            .load()
+            .admit(&request_at(P1, "/b", DialOrigin::Manual), 30_500)
+            .expect("an untried address is admitted");
+        let _ = m.record_failure(manual, 30_500);
+        assert!(
+            !m.is_retry_due(&peer(P1), 31_000),
+            "claimed, and in the future"
+        );
+
+        let _ = m.network_added(31_000);
+        m.release_retry_claim(&peer(P1));
+        assert!(
+            !m.is_retry_due(&peer(P1), 31_000),
+            "the addition did not make the claimed retry due"
+        );
     }
 
     #[test]

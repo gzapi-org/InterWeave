@@ -728,12 +728,16 @@ impl ConnectionPolicy {
     /// now; the next failure sets it again, with the delay the caller's
     /// retry schedule gives. For a network change that added an address
     /// ([`crate::ConnectionManager::network_added`]). Returns whether a
-    /// backoff was in force.
-    pub(crate) fn lift_peer_backoff(&mut self, peer: &TransportIdentity) -> bool {
-        self.peers
-            .get_mut(peer)
-            .and_then(|b| b.until_ms.take())
-            .is_some()
+    /// backoff was in force at `now_ms`: an expired one held nothing off,
+    /// so it is not a lift and is left as it is.
+    pub(crate) fn lift_peer_backoff(&mut self, peer: &TransportIdentity, now_ms: u64) -> bool {
+        match self.peers.get_mut(peer) {
+            Some(backoff) if backoff.is_punitive_at(now_ms) => {
+                backoff.until_ms = None;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// The peers holding a peer-scoped backoff entry.
