@@ -377,10 +377,21 @@ profile-config beside `DAEMON_LOCK_WAIT`, not a configuration knob: a
 name service answers in milliseconds or is broken, the common NSS
 clients' own timeouts sit near 10 s, and the service manager's start
 budget far above. On expiry the predicate REFUSES with the existing
-detail and the cause, "group-writable; whether group <gid> is the
-daemon user's private group could not be read: the name service did not
-answer within 5 s"; the helper thread is left to finish or leak, at most
-one per start. The deadline wraps the `NameService` trait calls inside
+detail and the cause — the string the code emits, "group-writable;
+whether group <gid> is the owner's private group could not be read: the
+name service did not answer within 5s", where "the owner" is the account
+the process runs as (p2p-network-dev-01's term, kept because the same
+predicate serves `transportctl` and the human client, for which "daemon
+user" would be wrong; the body's group-of-one clause now says the same);
+the helper thread is left to finish or leak. The predicate runs wherever
+a private directory is resolved: at start (the daemon, `transportctl`,
+the human client's lock and store) and on every later private write —
+the trust overlay's `admin.trust.set` in a running daemon among them
+(the review of this note) — so "once per start" was false; each such
+operation is refused within the deadline, and at most one read is
+outstanding per process: a read requested while an earlier one has not
+returned refuses at once with "an earlier name-service read has not
+returned", so a hung service costs one leaked thread, not one per write. The deadline wraps the `NameService` trait calls inside
 the predicate, not the real `HostNames`, so a unit test with a blocking
 fake proves it: a name service that sleeps past the deadline yields the
 refusal naming the deadline; one that answers in time leaves every
@@ -393,10 +404,13 @@ learns nothing, where a refusal names the directory service. Deciding
 from a cheaper fact first (the passwd entry gives the primary gid and
 the user name in one call): one call fewer, the same hang.
 
-**Consequences.** Code: p2p-network-dev's, on their next batch — the
-deadline in `owners_private_group`, the constant, the blocking-fake
-test. Until it lands, a hung name service blocks the start on main: a
-defect at writing, affecting no host here. Under the deadline, a host
+**Consequences.** Code: p2p-network-dev's — the deadline in
+`owners_private_group`, the constant, the blocking-fake test are on
+#236 at 6cb59136 (one thread per read; the one-outstanding-read rule is
+the one piece still to add, with a test that a second read during a
+hung first refuses at once). Until it lands, a hung name service blocks
+the start and every overlay write on main: a defect at writing,
+affecting no host here. Under the deadline, a host
 whose directory service is down refuses to start InterWeave for a
 user-private-group account until it answers; the refusal says so.
 

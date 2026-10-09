@@ -10,7 +10,7 @@ Default values are conservative architecture targets, not performance promises. 
 | configured endpoints/profile | 16 | 64 |
 | advertised endpoints/profile | 16 | 32 |
 | endpoint directory cache TTL | 60 s | 5 min |
-| name-service read of the private-group predicate (`NSS_READ_DEADLINE`, ADR-0028 A 2026-10-08) | 5 s | 5 s — a constant, not a knob; expiry refuses the start closed and named |
+| name-service read of the private-group predicate (`NSS_READ_DEADLINE`, ADR-0028 A 2026-10-08) | 5 s | 5 s — a constant, not a knob; expiry refuses the operation (start or private write) closed and named; one read outstanding per process |
 | endpoint directory queries/peer/minute | 12 | 60 |
 | endpoint directory inflight/profile | 16 | 64 |
 | endpoint leases/client | 1 | 1 |
