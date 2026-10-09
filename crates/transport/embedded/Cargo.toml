@@ -41,5 +41,6 @@ tracing = { workspace = true }
 # A runtime of the test's own, to drop a host inside its async context.
 tokio = { workspace = true, features = ["rt"] }
 tempfile = { workspace = true }
-# The daemon's own filter construction, the oracle `log_admits` is held to.
+# The test's copy of the daemon's filter construction, the oracle
+# `log_admits` is held to (`tests/log_filter.rs`).
 tracing-subscriber = { workspace = true }

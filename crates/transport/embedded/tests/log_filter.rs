@@ -82,22 +82,50 @@ fn the_audit_target_passes_a_stricter_filter() {
     assert!(!log_admits(AUDIT_TARGET, Level::DEBUG, LogLevel::Error));
 }
 
-/// The oracle above is a copy; this holds the copy to the daemon's
-/// source, so a change to the daemon's filter fails here until the copy
-/// -- and `log_admits` -- follow it.
+/// The oracle above is a copy; this holds each of the daemon's filter
+/// lines to its counterpart in the copy -- both read as source -- so a
+/// change to either side of one fails here until the other, and
+/// `log_admits`, follow it.
 #[test]
 fn the_copy_is_the_daemons_construction() {
     let daemon = include_str!("../../../../apps/transport-daemon/src/daemon.rs");
-    for line in [
-        "const FIRST_PARTY: &str = \"interweave\";",
-        "let widest = if level == tracing::Level::DEBUG {",
-        ".with_default(std::cmp::min(level, tracing::Level::WARN))",
-        ".with_target(FIRST_PARTY, level)",
-        ".with_target(AUDIT_TARGET, tracing::Level::INFO),",
+    // The copy is the file BEFORE this function: below, its own strings
+    // name the copy's lines, and would be found in themselves.
+    let copy = include_str!("log_filter.rs")
+        .split("\nfn the_copy_is_the_daemons_construction")
+        .next()
+        .expect("the file");
+    for (in_daemon, in_copy) in [
+        (
+            "const FIRST_PARTY: &str = \"interweave\";",
+            ".with_target(\"interweave\", level)",
+        ),
+        (
+            "let widest = if level == tracing::Level::DEBUG {",
+            "let widest = if level == Level::DEBUG {",
+        ),
+        (
+            "        tracing::Level::INFO\n    };",
+            "        Level::INFO\n    };",
+        ),
+        (".with_max_level(widest)", "*at <= widest &&"),
+        (
+            ".with_default(std::cmp::min(level, tracing::Level::WARN))",
+            ".with_default(std::cmp::min(level, Level::WARN))",
+        ),
+        (
+            ".with_target(FIRST_PARTY, level)",
+            ".with_target(\"interweave\", level)",
+        ),
+        (
+            ".with_target(AUDIT_TARGET, tracing::Level::INFO),",
+            ".with_target(AUDIT_TARGET, Level::INFO);",
+        ),
     ] {
         assert!(
-            daemon.contains(line),
-            "the daemon's filter no longer has: {line}"
+            daemon.contains(in_daemon),
+            "the daemon's filter no longer has: {in_daemon}"
         );
+        assert!(copy.contains(in_copy), "the copy no longer has: {in_copy}");
     }
 }

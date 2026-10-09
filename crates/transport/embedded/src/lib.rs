@@ -155,9 +155,10 @@ const FIRST_PARTY: &str = "interweave";
 /// (`LOCAL-CLIENT.md` §5, A 2026-10-04). First-party targets at the
 /// profile's level; every other crate's at it, capped at WARN.
 /// `the_filter_admits_what_the_daemons_does` holds it to a copy of the
-/// daemon's `Targets` construction, and
-/// `the_copy_is_the_daemons_construction` holds that copy to the
-/// daemon's source, so the two cannot drift apart unseen.
+/// daemon's filter construction, and
+/// `the_copy_is_the_daemons_construction` finds each of the daemon's
+/// filter lines in the daemon's source and its counterpart in the copy,
+/// so a change to either side of one of those lines fails there.
 #[must_use]
 pub fn log_admits(target: &str, level: tracing::Level, profile: LogLevel) -> bool {
     let configured = match profile {
@@ -311,12 +312,14 @@ impl EmbeddedHost {
     /// admin port's shutdown does, through a port the host opens with
     /// that one capability. A thread waiting in
     /// [`wait_shutdown_requested`](Self::wait_shutdown_requested)
-    /// returns with it (`a_platform_stop_releases_the_waiter`).
+    /// returns with it (`a_platform_stop_releases_the_waiter`). The FIRST
+    /// request stands: if an admin port asked already, the waiter sees
+    /// that request's grace, not this one's.
     ///
     /// BLOCKS; call it off any async context.
     ///
     /// # Errors
-    /// [`EmbeddedRefused::Internal`] once the runtime has stopped.
+    /// [`EmbeddedRefused::Internal`] if the binding cannot open the port.
     pub fn request_shutdown(&self, grace: Duration) -> Result<(), EmbeddedRefused> {
         let capabilities = std::collections::BTreeSet::from([AdminCapability::Shutdown]);
         self.handle
