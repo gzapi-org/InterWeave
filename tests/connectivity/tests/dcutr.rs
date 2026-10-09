@@ -2334,10 +2334,15 @@ async fn drain(runtime: &mut SwarmRuntime, window: Duration) {
 }
 
 /// A listener on an IP the platform's view said departed is bound until
-/// the listener poll catches up, and is not offered as a punch candidate
-/// meanwhile: the removal clears the offered set and the tick's re-offer
-/// passes only what the host still holds (`NetworkSet::holds`). The
-/// control: before the view, the private listener is offered.
+/// the listener poll catches up, and is not offered AGAIN meanwhile: the
+/// removal clears the wrapper's offered set and the tick's re-offer, like
+/// the bind's own offer, passes only what the host still holds
+/// (`NetworkSet::holds`). What this measures is the wrapper's offered set
+/// (`listeners_offered`); an address offered BEFORE the removal stays in
+/// libp2p-dcutr 0.15.0's own candidate cache, which nothing prunes and
+/// which every new relayed handler's CONNECT carries -- a gap that
+/// predates the platform's view, recorded on #250. The control: before
+/// the view, the private listener is offered.
 #[tokio::test]
 async fn a_listener_on_an_ip_the_view_removed_is_not_offered() {
     let ip = interweave_test_support::net::require_private_interface_v4();
