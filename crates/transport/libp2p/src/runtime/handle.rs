@@ -14,7 +14,7 @@
 //! spawns while the ask-and-answer surface sits here.
 
 use libp2p::Multiaddr;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use interweave_transport_api::TransportError as DirectError;
 use interweave_transport_api::{DirectMessageV2, EndpointId, TransportIdentity};
@@ -23,9 +23,43 @@ use interweave_transport_runtime::TrustSources;
 use super::SwarmRuntime;
 use super::config::SubstrateError;
 use super::direct::DirectEndpoints;
-use super::messages::{DialRefusal, SwarmCommand, SwarmEvent};
+use super::messages::{DialRefusal, NetworkView, SwarmCommand, SwarmEvent};
+
+/// Where a host's network monitor hands the runtime the platform's view
+/// of this host's addresses (§20 step 5; `transport/libp2p/
+/// CONNECTIVITY.md` §14's second source). Cloneable and usable from any
+/// thread.
+#[derive(Clone, Debug)]
+pub struct NetworkMonitor {
+    view: watch::Sender<NetworkView>,
+}
+
+impl NetworkMonitor {
+    /// Hand in the platform's current view. NEVER BLOCKS and never
+    /// queues: the view replaces the last one not yet read, since only
+    /// the latest snapshot counts, and the runtime compares it with the
+    /// last view it read -- so the same addresses twice are no change.
+    /// After the substrate stops, a view goes nowhere.
+    pub fn report(&self, view: NetworkView) {
+        self.view.send_replace(view);
+    }
+}
 
 impl SwarmRuntime {
+    /// The handle a host's network monitor reports through
+    /// ([`NetworkMonitor`]).
+    #[must_use]
+    pub fn network_monitor(&self) -> NetworkMonitor {
+        NetworkMonitor {
+            view: self.network_view.clone(),
+        }
+    }
+
+    /// [`NetworkMonitor::report`] on this runtime.
+    pub fn network_changed(&self, view: NetworkView) {
+        self.network_monitor().report(view);
+    }
+
     /// A cloneable handle for session-scoped commands (`SwarmCommander`).
     #[must_use]
     pub fn commander(&self) -> SwarmCommander {

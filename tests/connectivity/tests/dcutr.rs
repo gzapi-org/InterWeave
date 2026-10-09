@@ -102,8 +102,8 @@ use interweave_transport_libp2p::runtime::DirectEndpoints;
 use interweave_transport_libp2p::runtime::dcutr_driver::DcutrSettings;
 use interweave_transport_libp2p::runtime::relay_driver::{RelayClientSettings, StaticRelay};
 use interweave_transport_libp2p::{
-    HolePunchOutcome, PathChange, PeerPath, RelayReservationOutcome, SubstrateConfig, SwarmEvent,
-    SwarmRuntime,
+    HolePunchOutcome, NetworkView, PathChange, PeerPath, RelayReservationOutcome, SubstrateConfig,
+    SwarmEvent, SwarmRuntime,
 };
 use interweave_transport_runtime::relay::ReservationConfig;
 use interweave_transport_runtime::{DialOrigin, TrustSources};
@@ -2063,10 +2063,15 @@ async fn a_network_change_lifts_the_cooldown_and_keeps_the_reservation() {
         "the dialer is in cooldown"
     );
 
-    // AN ADDITION FIRST: a second private listener joins. Reported --
-    // and it invalidates nothing (section 14 item 1 speaks of REMOVED
+    // AN ADDITION FIRST: the platform's view names an address the
+    // listeners have not bound (a second listener on the bound IP would
+    // be the same network, and this host has one private IP). Reported
+    // -- and it invalidates nothing (section 14 item 1 speaks of REMOVED
     // addresses): the cooldown stands.
-    let second_listener = listening(wire.target, ip).await;
+    let view_only = std::net::IpAddr::from(Ipv4Addr::new(10, 255, 0, 1));
+    wire.target.network_changed(NetworkView {
+        addresses: vec![ip.into(), view_only],
+    });
     let joined = until(&mut wire, "the target to report the addition", |s, e| {
         s == Side::Target && matches!(e, SwarmEvent::NetworkChanged { .. })
     })
@@ -2074,8 +2079,8 @@ async fn a_network_change_lifts_the_cooldown_and_keeps_the_reservation() {
     assert!(
         joined.iter().any(|(s, e)| *s == Side::Target
             && matches!(e, SwarmEvent::NetworkChanged { removed, added }
-                if removed.is_empty() && *added == vec![second_listener.to_string()])),
-        "the joined listener named, nothing removed: {joined:?}"
+                if removed.is_empty() && *added == vec![view_only])),
+        "the joined address named, nothing removed: {joined:?}"
     );
     assert_eq!(
         wire.target
@@ -2086,7 +2091,9 @@ async fn a_network_change_lifts_the_cooldown_and_keeps_the_reservation() {
         "an addition lifts nothing"
     );
 
-    // THE CHANGE: the first private listener goes away.
+    // THE CHANGE: the private listener goes away, and its IP with it --
+    // the view still naming it does not keep it: each source's own
+    // difference moves the one set.
     assert!(
         wire.target
             .stop_listening(private_listener.clone())
@@ -2101,8 +2108,8 @@ async fn a_network_change_lifts_the_cooldown_and_keeps_the_reservation() {
     assert!(
         changed.iter().any(|(s, e)| *s == Side::Target
             && matches!(e, SwarmEvent::NetworkChanged { removed, added }
-                if *removed == vec![private_listener.to_string()] && added.is_empty())),
-        "the departed listener named, nothing added: {changed:?}"
+                if *removed == vec![std::net::IpAddr::from(ip)] && added.is_empty())),
+        "the departed IP named, nothing added: {changed:?}"
     );
     let counters = wire
         .target

@@ -1,22 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
-//! `transport/libp2p/CONNECTIVITY.md` §14 item 5, on the wire: a
-//! network change CLOSES every connection running from an IP it took
-//! off this host, and keeps the rest (the rule since 2026-09-26,
-//! SPIKE-004 phase B's `ifchange` row).
+//! `transport/libp2p/CONNECTIVITY.md` §14 on the wire, from both of the
+//! detector's sources: the listeners' bound set and the platform's view.
 //!
-//! On one host an interface going away is a listener going away -- the
-//! same listener events the OS raises -- so the subject holds two
-//! listeners on this host's private address and drops them in turn:
+//! Item 5: a network change CLOSES every connection running from an IP
+//! it took off this host, and keeps the rest (the rule since
+//! 2026-09-26, SPIKE-004 phase B's `ifchange` row). On one host an
+//! interface going away is a listener going away -- the same listener
+//! events the OS raises -- so the subject holds two listeners on this
+//! host's private address and drops them in turn:
 //!
-//! - the first, while the second still carries the IP: a change is
-//!   reported and NOTHING closes -- the control, and the case a match on
-//!   the removed address alone would get wrong;
+//! - the first, while the second still carries the IP: the host is on
+//!   the same network, so NO change is reported and NOTHING closes --
+//!   the control, and the case a match on the removed address alone
+//!   would get wrong;
 //! - the second: the IP departs, and both connections running from it
 //!   close -- one that arrived on the first listener, and one the
 //!   subject DIALLED, whose local IP libp2p never reports and the
 //!   runtime reads from the kernel's route;
 //! - a connection over loopback, which no removal touched, stays.
+//!
+//! The platform's view (§20 step 5) does the same with every listener
+//! still bound -- the hand-over seen before the listener poll -- and an
+//! ADDITION it reports makes a peer held off by its dial backoff
+//! dialable at once (architect-cto's ruling of 2026-10-09, relay seq
+//! 33736), where without a view the peer waits its backoff.
 
 #![allow(clippy::expect_used, clippy::panic)]
 
@@ -24,7 +32,7 @@ use std::time::Duration;
 
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::TransportIdentity;
-use interweave_transport_libp2p::{SubstrateConfig, SwarmEvent, SwarmRuntime};
+use interweave_transport_libp2p::{NetworkView, SubstrateConfig, SwarmEvent, SwarmRuntime};
 use interweave_transport_runtime::TrustSources;
 use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 use libp2p::Multiaddr;
@@ -186,7 +194,8 @@ async fn a_removal_closes_what_ran_from_the_departed_ip_and_keeps_the_rest() {
     .await;
 
     // THE CONTROL: the first listener goes, the second still carries the
-    // IP. Reported, and nothing closes.
+    // IP. The host is on the same network: no change, and nothing closes.
+    // The listener's own close is what shows the window was live.
     assert!(
         subject
             .runtime
@@ -197,12 +206,12 @@ async fn a_removal_closes_what_ran_from_the_departed_ip_and_keeps_the_rest() {
     let mut events = drive(
         &mut subject.runtime,
         &mut others,
-        "the first removal reported",
+        "the first listener's close",
         PATIENCE,
         Some(|events: &[SwarmEvent]| {
-            events.iter().any(
-                |e| matches!(e, SwarmEvent::NetworkChanged { removed, .. } if !removed.is_empty()),
-            )
+            events
+                .iter()
+                .any(|e| matches!(e, SwarmEvent::ListeningStopped { addresses, .. } if addresses.contains(&first)))
         }),
     )
     .await;
@@ -217,11 +226,10 @@ async fn a_removal_closes_what_ran_from_the_departed_ip_and_keeps_the_rest() {
         .await,
     );
     assert!(
-        events
+        !events
             .iter()
-            .any(|e| matches!(e, SwarmEvent::NetworkChanged { removed, .. }
-            if *removed == vec![first.to_string()])),
-        "{events:?}"
+            .any(|e| matches!(e, SwarmEvent::NetworkChanged { .. })),
+        "the IP is still bound, so the network did not move: {events:?}"
     );
     assert!(
         !events
@@ -264,7 +272,7 @@ async fn a_removal_closes_what_ran_from_the_departed_ip_and_keeps_the_rest() {
         events
             .iter()
             .any(|e| matches!(e, SwarmEvent::NetworkChanged { removed, .. }
-            if *removed == vec![second.to_string()])),
+            if *removed == vec![std::net::IpAddr::from(ip)])),
         "{events:?}"
     );
     assert!(
@@ -273,6 +281,236 @@ async fn a_removal_closes_what_ran_from_the_departed_ip_and_keeps_the_rest() {
     );
 
     for n in [subject, arriving, dialled, on_loopback] {
+        n.runtime.shutdown().await.expect("shutdown");
+    }
+}
+
+/// The platform's view, with every listener still bound: the first view
+/// agreeing with the listeners moves nothing, and an empty one -- offline
+/// -- takes the private IP off the host, so what ran from it closes and
+/// the loopback connection stays. The hand-over seen before the listener
+/// poll, which on a device is 10 s behind or never comes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_view_without_the_ip_closes_what_ran_from_it_while_its_listener_is_still_bound() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let (subject_id, arriving_id, loopback_id) = (
+        ProfileIdentity::generate(),
+        ProfileIdentity::generate(),
+        ProfileIdentity::generate(),
+    );
+    let subject_peer = subject_id.transport_identity().expect("peer id");
+    let (arriving_peer, loopback_peer) = (
+        arriving_id.transport_identity().expect("peer id"),
+        loopback_id.transport_identity().expect("peer id"),
+    );
+    let mut subject = node(&[&arriving_peer, &loopback_peer], &subject_id);
+    let mut arriving = node(&[&subject_peer], &arriving_id);
+    let mut on_loopback = node(&[&subject_peer], &loopback_id);
+    let private = subject
+        .runtime
+        .listen(format!("/ip4/{ip}/tcp/0").parse().expect("valid"))
+        .await
+        .expect("the subject's private listener");
+    let loopback_addr = on_loopback
+        .runtime
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
+        .await
+        .expect("the loopback peer listens");
+    arriving
+        .runtime
+        .dial(subject_peer.clone(), private)
+        .await
+        .expect("reaches the task")
+        .expect("admitted");
+    subject
+        .runtime
+        .dial(loopback_peer.clone(), loopback_addr)
+        .await
+        .expect("reaches the task")
+        .expect("admitted");
+    let peers = [arriving_peer.clone(), loopback_peer.clone()];
+    let mut others = [&mut arriving.runtime, &mut on_loopback.runtime];
+    drive(
+        &mut subject.runtime,
+        &mut others,
+        "both connected",
+        PATIENCE,
+        Some(|events: &[SwarmEvent]| {
+            peers.iter().all(|p| {
+                events
+                    .iter()
+                    .any(|e| matches!(e, SwarmEvent::Connected { peer, .. } if peer == p))
+            })
+        }),
+    )
+    .await;
+
+    // The first view names what the listeners bound: nothing moved.
+    subject.runtime.network_changed(NetworkView {
+        addresses: vec![ip.into(), "127.0.0.1".parse().expect("an ip")],
+    });
+    let events = drive(
+        &mut subject.runtime,
+        &mut others,
+        "settling",
+        WINDOW,
+        None::<fn(&[SwarmEvent]) -> bool>,
+    )
+    .await;
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            SwarmEvent::NetworkChanged { .. } | SwarmEvent::Disconnected { .. }
+        )),
+        "a view that agrees is no change: {events:?}"
+    );
+
+    // OFFLINE: the private IP departs though its listener is bound.
+    subject.runtime.network_changed(NetworkView::default());
+    let mut events = drive(
+        &mut subject.runtime,
+        &mut others,
+        "the arrived connection closed",
+        PATIENCE,
+        Some(|events: &[SwarmEvent]| disconnected(events, &arriving_peer)),
+    )
+    .await;
+    events.extend(
+        drive(
+            &mut subject.runtime,
+            &mut others,
+            "settling",
+            WINDOW,
+            None::<fn(&[SwarmEvent]) -> bool>,
+        )
+        .await,
+    );
+    assert!(
+        events.iter().any(
+            |e| matches!(e, SwarmEvent::NetworkChanged { removed, added }
+            if *removed == vec![std::net::IpAddr::from(ip)] && added.is_empty())
+        ),
+        "{events:?}"
+    );
+    assert!(
+        !disconnected(&events, &loopback_peer),
+        "the loopback connection is over no departed IP and stays: {events:?}"
+    );
+
+    for n in [subject, arriving, on_loopback] {
+        n.runtime.shutdown().await.expect("shutdown");
+    }
+}
+
+/// A view that ADDS an address makes a peer held off by its dial backoff
+/// dialable at once: the scheduler redials it within a tick, through the
+/// gate, long before its 30 s retry -- and without the view, the control,
+/// it waits. The control's window is longer than conntrack's 10 s CLOSE
+/// state for the failed dial's port pair, so the redial is not dropped
+/// before TCP sees it (a same-port redial inside that window hangs).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_addition_redials_a_held_off_peer_at_once_and_without_one_it_waits() {
+    const CONTROL: Duration = Duration::from_secs(12);
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let (subject_id, far_id) = (ProfileIdentity::generate(), ProfileIdentity::generate());
+    let subject_peer = subject_id.transport_identity().expect("peer id");
+    let far_peer = far_id.transport_identity().expect("peer id");
+    let mut subject = node(&[&far_peer], &subject_id);
+    let mut far = node(&[&subject_peer], &far_id);
+    // The subject's private listener fills its set; the view later adds
+    // to it.
+    let _private = subject
+        .runtime
+        .listen(format!("/ip4/{ip}/tcp/0").parse().expect("valid"))
+        .await
+        .expect("the subject's private listener");
+    let far_addr = far
+        .runtime
+        .listen(format!("/ip4/{ip}/tcp/0").parse().expect("valid"))
+        .await
+        .expect("the far peer listens");
+    assert!(
+        far.runtime
+            .stop_listening(far_addr.clone())
+            .await
+            .expect("reaches the task")
+    );
+
+    // THE FAILURE: the far peer is not there, so the dial is refused and
+    // the peer held off for the first retry's 30 s.
+    subject
+        .runtime
+        .dial(far_peer.clone(), far_addr.clone())
+        .await
+        .expect("reaches the task")
+        .expect("admitted");
+    let mut others = [&mut far.runtime];
+    drive(
+        &mut subject.runtime,
+        &mut others,
+        "the dial to fail",
+        PATIENCE,
+        Some(|events: &[SwarmEvent]| {
+            events.iter().any(
+                |e| matches!(e, SwarmEvent::DialFailed { peer: Some(p), .. } if *p == far_peer),
+            )
+        }),
+    )
+    .await;
+    let failed_at = tokio::time::Instant::now();
+    // Back where it was.
+    let _ = others[0]
+        .listen(far_addr.clone())
+        .await
+        .expect("the far peer listens again on the same address");
+
+    // THE CONTROL: no view, and the peer waits its backoff.
+    let events = drive(
+        &mut subject.runtime,
+        &mut others,
+        "the control window",
+        CONTROL,
+        None::<fn(&[SwarmEvent]) -> bool>,
+    )
+    .await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, SwarmEvent::Connected { peer, .. } if *peer == far_peer)),
+        "without a change the peer waits its backoff: {events:?}"
+    );
+
+    // THE ADDITION: redialled at once.
+    let added = std::net::IpAddr::from(std::net::Ipv4Addr::new(10, 255, 0, 1));
+    subject.runtime.network_changed(NetworkView {
+        addresses: vec![ip.into(), added],
+    });
+    let events = drive(
+        &mut subject.runtime,
+        &mut others,
+        "the held-off peer redialled",
+        PATIENCE,
+        Some(|events: &[SwarmEvent]| {
+            events
+                .iter()
+                .any(|e| matches!(e, SwarmEvent::Connected { peer, .. } if *peer == far_peer))
+        }),
+    )
+    .await;
+    assert!(
+        failed_at.elapsed() < Duration::from_secs(30),
+        "connected inside the backoff, so the change made it due: {:?}",
+        failed_at.elapsed()
+    );
+    assert!(
+        events.iter().any(
+            |e| matches!(e, SwarmEvent::NetworkChanged { removed, added: a }
+            if removed.is_empty() && *a == vec![added])
+        ),
+        "{events:?}"
+    );
+
+    for n in [subject, far] {
         n.runtime.shutdown().await.expect("shutdown");
     }
 }
