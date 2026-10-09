@@ -444,7 +444,7 @@ mod tests {
         #[derive(Clone)]
         struct Names;
         impl crate::persist::NameService for Names {
-            // A flag of this call's own: the test makes one read at a time
+            // A gate of this call's own: the test makes one read at a time
             // and must not share the process's with a test beside it.
             fn outstanding(&self) -> &'static crate::persist::ReadGate {
                 Box::leak(Box::new(crate::persist::ReadGate::new()))
@@ -489,7 +489,7 @@ mod tests {
         #[derive(Clone)]
         struct Names(Option<&'static str>);
         impl crate::persist::NameService for Names {
-            // A flag of this call's own: the test makes one read at a time
+            // A gate of this call's own: the test makes one read at a time
             // and must not share the process's with a test beside it.
             fn outstanding(&self) -> &'static crate::persist::ReadGate {
                 Box::leak(Box::new(crate::persist::ReadGate::new()))

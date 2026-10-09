@@ -811,11 +811,11 @@ pub(crate) trait NameService: Clone + Send + 'static {
     fn user_name(&self, uid: u32) -> std::io::Result<Option<String>>;
     /// The name and listed members of the group `gid`.
     fn group(&self, gid: u32) -> std::io::Result<Option<(String, Vec<String>)>>;
-    /// The flag marking this service's read as outstanding: the
-    /// process's own for the host's name service, a test's own for a
-    /// test's. Required, with no default, so no test service can fall
-    /// back on the process's flag and refuse another test running beside
-    /// it.
+    /// The gate this service's reads pass one at a time: the process's
+    /// own for the host's name service, a test's own for a test's.
+    /// Required, with no default, so no test service can fall back on
+    /// the process's gate and make another test running beside it wait
+    /// or refuse.
     fn outstanding(&self) -> &'static ReadGate;
 }
 
@@ -1018,7 +1018,7 @@ fn read_names(
             let _ = tx.send(reads);
         })
         // A thread that never started dropped its closure, and with it
-        // the guard: the flag is already clear.
+        // the guard: the gate is already given back.
         .map_err(|e| format!("no thread could be started to read it: {e}"))?;
     let left = until.saturating_duration_since(std::time::Instant::now());
     rx.recv_timeout(left).map_err(|e| match e {
@@ -1801,6 +1801,83 @@ mod tests {
                 "read {round}: the gate is free once the answer arrives"
             );
         }
+    }
+
+    /// One budget per caller, counted from its request: a caller that
+    /// waited for an earlier read has only what is left for its own
+    /// answer. With a 1 s deadline, a held read released at 500 ms and
+    /// an answer that would take 3 s, the caller refuses at about 1 s --
+    /// not at 500 ms plus a fresh second (ADR-0028, "The name-service read
+    /// is bounded").
+    #[cfg(unix)]
+    #[test]
+    fn the_wait_and_the_answer_share_one_budget() {
+        #[derive(Clone)]
+        struct Held(
+            std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>,
+            &'static ReadGate,
+        );
+        impl NameService for Held {
+            fn outstanding(&self) -> &'static ReadGate {
+                self.1
+            }
+            fn user_name(&self, _: u32) -> std::io::Result<Option<String>> {
+                let _ = self.0.lock().expect("the release").recv();
+                Ok(Some("alice".to_owned()))
+            }
+            fn group(&self, _: u32) -> std::io::Result<Option<(String, Vec<String>)>> {
+                Ok(Some(("alice".to_owned(), Vec::new())))
+            }
+        }
+        #[derive(Clone)]
+        struct Late(&'static ReadGate);
+        impl NameService for Late {
+            fn outstanding(&self) -> &'static ReadGate {
+                self.0
+            }
+            fn user_name(&self, _: u32) -> std::io::Result<Option<String>> {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                Ok(Some("alice".to_owned()))
+            }
+            fn group(&self, _: u32) -> std::io::Result<Option<(String, Vec<String>)>> {
+                Ok(Some(("alice".to_owned(), Vec::new())))
+            }
+        }
+        let guard = fresh_guard();
+        let (release, held) = std::sync::mpsc::channel();
+        let held = Held(std::sync::Arc::new(std::sync::Mutex::new(held)), guard);
+        owners_private_group_within(
+            &held,
+            1000,
+            1001,
+            Ok(false),
+            std::time::Duration::from_millis(50),
+        )
+        .expect_err("the first read holds the gate past its deadline");
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            release.send(()).expect("the held read is released");
+        });
+        let started = std::time::Instant::now();
+        let detail = owners_private_group_within(
+            &Late(guard),
+            1000,
+            1001,
+            Ok(false),
+            std::time::Duration::from_secs(1),
+        )
+        .expect_err("its own answer comes too late");
+        let took = started.elapsed();
+        releaser.join().expect("the releaser");
+        assert!(
+            detail.contains("the name service did not answer within 1s"),
+            "{detail}"
+        );
+        assert!(
+            took >= std::time::Duration::from_secs(1)
+                && took < std::time::Duration::from_millis(1300),
+            "the wait and the answer ended at the caller's one deadline: {took:?}"
+        );
     }
 
     /// A name service that never answers within the deadline is refused
