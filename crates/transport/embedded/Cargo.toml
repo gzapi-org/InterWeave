@@ -29,7 +29,12 @@ interweave-transport-composition = { path = "../composition" }
 # The host's own runtime: the Service thread is not async, and the
 # binding's futures need an executor the Service can drive them on.
 tokio = { workspace = true }
+# The log filter the host's sink applies (`log_admits`), in `tracing`'s
+# levels. Already in the graph through the composition.
+tracing = { workspace = true }
 
 [dev-dependencies]
 interweave-local-client-api = { path = "../../api/local-client-api" }
 tempfile = { workspace = true }
+# The daemon's own filter construction, the oracle `log_admits` is held to.
+tracing-subscriber = { workspace = true }

@@ -24,6 +24,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use interweave_profile_config::sections::LogLevel;
 use interweave_profile_config::trust_overlay::OverlayError;
 use interweave_profile_config::{
     LoadError, PersistError, ProfileConfig, ProfileLock, ProfilePaths, TrustBoundary,
@@ -31,7 +32,8 @@ use interweave_profile_config::{
 };
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_composition::{
-    ComposedRuntime, CompositionError, CompositionOptions, InProcessBinding, ShutdownRequest,
+    AUDIT_TARGET, ComposedRuntime, CompositionError, CompositionOptions, InProcessBinding,
+    ShutdownRequest,
 };
 
 /// What the Service starts a host with.
@@ -126,6 +128,41 @@ impl From<CompositionError> for EmbeddedRefused {
     }
 }
 
+/// The prefix every first-party target begins with: the crates' module
+/// paths (`interweave_*`) and the named targets (`interweave::audit`,
+/// `interweave::connectivity`).
+const FIRST_PARTY: &str = "interweave";
+
+/// Whether the embedded host's log sink admits a record of `target` at
+/// `level` under the profile's `observability.log_level`: what the
+/// daemon's log admits, so the platform's writer -- logcat, the app's to
+/// choose -- carries the same lines (plan §20, carried from §18).
+///
+/// THE AUDIT TARGET ([`AUDIT_TARGET`]) at INFO WHATEVER THE LEVEL: each
+/// trust change's record is the contract's, not a diagnostic
+/// (`LOCAL-CLIENT.md` §5, A 2026-10-04). First-party targets at the
+/// profile's level; every other crate's at it, capped at WARN.
+/// `the_filter_admits_what_the_daemons_does` holds it to the daemon's
+/// own construction.
+#[must_use]
+pub fn log_admits(target: &str, level: tracing::Level, profile: LogLevel) -> bool {
+    let configured = match profile {
+        LogLevel::Error => tracing::Level::ERROR,
+        LogLevel::Warn => tracing::Level::WARN,
+        LogLevel::Info => tracing::Level::INFO,
+        LogLevel::Debug => tracing::Level::DEBUG,
+    };
+    // `tracing` orders the more verbose level as the greater.
+    let ceiling = if target.starts_with(AUDIT_TARGET) {
+        tracing::Level::INFO
+    } else if target.starts_with(FIRST_PARTY) {
+        configured
+    } else {
+        std::cmp::min(configured, tracing::Level::WARN)
+    };
+    level <= ceiling
+}
+
 /// How long [`EmbeddedHost::start`] waits for the profile lock: not at
 /// all. Two hosts of one profile in one process is the Service starting
 /// twice, which is refused at once; a host that died with its process
@@ -147,6 +184,7 @@ pub struct EmbeddedHost {
     handle: tokio::runtime::Handle,
     sessions: InProcessBinding,
     paths: ProfilePaths,
+    log_level: LogLevel,
     lock: Option<ProfileLock>,
 }
 
@@ -192,6 +230,7 @@ impl EmbeddedHost {
             handle: executor.handle().clone(),
             executor: Some(executor),
             paths,
+            log_level: config.observability.log_level,
             lock: Some(lock),
         })
     }
@@ -218,6 +257,12 @@ impl EmbeddedHost {
             .as_ref()
             .map(|composed| composed.listening().to_vec())
             .unwrap_or_default()
+    }
+
+    /// The profile's `observability.log_level`, for [`log_admits`].
+    #[must_use]
+    pub fn log_level(&self) -> LogLevel {
+        self.log_level
     }
 
     /// The profile's paths: the boundary and the root every private

@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use interweave_local_client_api::{AdminBinding, AdminCapability, AdminPort};
+use interweave_profile_config::sections::LogLevel;
 use interweave_profile_config::trust_overlay::TrustOverlay;
 use interweave_profile_config::{ProfilePaths, TrustBoundary, create_private_dir_within};
 use interweave_profile_identity::ProfileIdentity;
@@ -64,6 +65,8 @@ endpoints:
 transport:
   listen:
     addresses: [\"/ip4/127.0.0.1/tcp/0\"]
+observability:
+  log_level: warn
 "
     )
 }
@@ -137,6 +140,11 @@ fn the_host_serves_under_its_root() {
         0o700
     );
     assert_eq!(host.paths().boundary().path(), app.dir);
+    assert_eq!(
+        host.log_level(),
+        LogLevel::Warn,
+        "the profile's, not the default"
+    );
     assert_eq!(host.paths().boundary().runtime_root(), Some(root.as_path()));
 
     let other = ProfileIdentity::generate()
