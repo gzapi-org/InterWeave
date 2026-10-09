@@ -121,7 +121,8 @@ impl HumanStore {
     /// its human directory, judged by ADR-0028's walk up to the trust
     /// boundary the paths carry (A 2026-10-08) -- `/` on the desktop, the
     /// app's data directory in an embedded layout, which a walk to `/`
-    /// refuses (`an_embedded_profiles_store_opens_under_its_boundary_and_not_without_it`).
+    /// refuses where an ancestor above it is writable by others, as
+    /// Android's is (`an_embedded_profiles_store_opens_under_its_boundary_and_not_without_it`).
     /// The one opener a client composes: the boundary arrives with the
     /// paths, never as a value of its own.
     ///
