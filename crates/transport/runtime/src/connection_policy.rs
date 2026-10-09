@@ -724,6 +724,23 @@ impl ConnectionPolicy {
         self.peers.remove(peer).is_some()
     }
 
+    /// Lift `peer`'s peer-scoped backoff, so its next dial is admitted
+    /// now; the next failure sets it again, with the delay the caller's
+    /// retry schedule gives. For a network change that added an address
+    /// ([`crate::ConnectionManager::network_added`]). Returns whether a
+    /// backoff was in force.
+    pub(crate) fn lift_peer_backoff(&mut self, peer: &TransportIdentity) -> bool {
+        self.peers
+            .get_mut(peer)
+            .and_then(|b| b.until_ms.take())
+            .is_some()
+    }
+
+    /// The peers holding a peer-scoped backoff entry.
+    pub(crate) fn backed_off_peers(&self) -> impl Iterator<Item = &TransportIdentity> {
+        self.peers.keys()
+    }
+
     /// Decide whether a dial may proceed.
     ///
     /// Evaluated in the order ADR-0011 states: drain, then class and

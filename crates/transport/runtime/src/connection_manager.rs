@@ -1835,6 +1835,60 @@ impl ConnectionManager {
         backoff || retry
     }
 
+    /// The network this profile is on GAINED an address: every
+    /// data-plane peer it holds off is dialable now, once
+    /// (`transport/libp2p/CONNECTIVITY.md` §14; architect-cto's ruling
+    /// of 2026-10-09, relay seq 33736).
+    ///
+    /// A peer that failed while this host was offline, or on a network
+    /// it has since left, earned its backoff against a route that may
+    /// now work, and would otherwise wait out up to five minutes of it.
+    /// So the peer-scoped backoff is lifted and an unclaimed retry is
+    /// made due now -- the scheduler's next tick and discovery's
+    /// reconnect both find the peer dialable -- while the retry's
+    /// attempt number, which sets the next delay, is KEPT: the dial goes through
+    /// the gate like any other, and if it fails the backoff resumes
+    /// from where it stood. One redial per peer per change: the first
+    /// failure after the lift sets the backoff again.
+    ///
+    /// ONLY an allowlisted peer (`DataPlaneTrusted`): an infrastructure
+    /// peer is redialled by its own adapter's schedule. A claimed
+    /// retry -- a dial in flight -- is left to settle, since
+    /// [`Self::take_due_retries`] never hands a claimed entry out
+    /// whatever its due time. Address
+    /// quarantines stay: a new network does not make an address that
+    /// authenticated the wrong peer any better. Not for a removal,
+    /// which can only make fewer routes work. Returns how many peers
+    /// were made dialable.
+    pub fn network_added(&mut self, now_ms: u64) -> usize {
+        self.observe(now_ms);
+        let peers: std::collections::BTreeSet<TransportIdentity> = self
+            .retries
+            .keys()
+            .chain(self.policy.backed_off_peers())
+            .filter(|p| matches!(self.classify(p), ConnectionClass::DataPlaneTrusted))
+            .cloned()
+            .collect();
+        let mut lifted = 0;
+        for peer in &peers {
+            let backoff = self.policy.lift_peer_backoff(peer);
+            let retry = match self.retries.get_mut(peer) {
+                Some(entry) if entry.due_at_ms > now_ms => {
+                    entry.due_at_ms = now_ms;
+                    true
+                }
+                _ => false,
+            };
+            if backoff || retry {
+                lifted += 1;
+            }
+        }
+        if lifted > 0 {
+            self.publish();
+        }
+        lifted
+    }
+
     /// Record that an established connection has gone.
     ///
     /// Takes the slot rather than a count, so releasing it is the same
@@ -3441,6 +3495,88 @@ mod tests {
         assert!(m.is_retry_due(&peer(P1), 32_000));
         // Nothing to reset is said so.
         assert!(!m.record_inbound_retained(&peer(P2), 2_000));
+    }
+
+    #[test]
+    fn a_network_addition_makes_each_held_off_allowlisted_peer_dialable_once() {
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(64, 64), 8);
+        let _ = m.set_trust(trusting(&[P1], &[P2]), &[]);
+        for p in [P1, P2] {
+            let t = m
+                .handle()
+                .load()
+                .admit(&request_at(p, "/a", DialOrigin::RelayReservation), 0)
+                .expect("admitted");
+            let _ = m.record_failure(t, 0);
+        }
+        // The control: held off by the failure, its retry 30 s out.
+        assert_eq!(
+            m.handle().load().admit(&request(P1, "/a"), 1_000).err(),
+            Some(DialDenial::PeerBackoff)
+        );
+        assert!(m.take_due_retries(1_000, 8).is_empty());
+
+        assert_eq!(m.network_added(1_000), 1, "the allowlisted peer only");
+        assert!(
+            m.handle().load().admit(&request(P1, "/a"), 1_000).is_ok(),
+            "dialable at once"
+        );
+        assert_eq!(m.take_due_retries(1_000, 8), vec![peer(P1)], "and due");
+        assert_eq!(
+            m.handle()
+                .load()
+                .admit(&request_at(P2, "/a", DialOrigin::RelayReservation), 1_000)
+                .err(),
+            Some(DialDenial::PeerBackoff),
+            "an infrastructure peer keeps its own schedule"
+        );
+
+        // ONCE: the redial fails and the cadence RESUMES -- the second
+        // retry, 60 s, not the first's 30 s again.
+        let t = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 1_000)
+            .expect("admitted");
+        let retry = m.record_failure(t, 1_000).expect("a retry");
+        assert_eq!((retry.attempt, retry.delay_ms), (2, 60_000));
+        assert_eq!(
+            m.handle().load().admit(&request(P1, "/a"), 2_000).err(),
+            Some(DialDenial::PeerBackoff),
+            "held off again"
+        );
+        assert!(!m.is_retry_due(&peer(P1), 60_999));
+        assert!(m.is_retry_due(&peer(P1), 61_000));
+    }
+
+    #[test]
+    fn a_network_addition_leaves_a_claimed_retry_and_a_quarantine_alone() {
+        let mut m = manager(8);
+        let t = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/a"), 0)
+            .expect("admitted");
+        let _ = m.record_failure(t, 0);
+        let q = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/q"), 0)
+            .expect("admitted");
+        assert!(m.record_identity_mismatch(q, 0));
+        assert_eq!(m.take_due_retries(30_000, 8), vec![peer(P1)], "claimed");
+
+        let _ = m.network_added(31_000);
+        assert!(
+            m.take_due_retries(31_000, 8).is_empty(),
+            "the dial in flight settles first"
+        );
+        assert_eq!(
+            m.handle().load().admit(&request(P1, "/q"), 31_000).err(),
+            Some(DialDenial::AddressQuarantined),
+            "a new network does not lift a mismatch's quarantine"
+        );
+        assert_eq!(m.network_added(31_000), 0, "nothing left to lift");
     }
 
     #[test]
