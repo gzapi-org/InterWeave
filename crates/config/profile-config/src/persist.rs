@@ -1036,9 +1036,10 @@ fn walk_judged(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Err(PersistError::Io(e));
             }
-            // Above the boundary nothing is judged, so a component there
-            // that cannot be inspected is an error to report, not a rule
-            // broken.
+            // Above the boundary, before the walk has entered it, nothing
+            // is judged, so a component there that cannot be inspected is
+            // an error to report, not a rule broken; once it has entered,
+            // or at and under the boundary, it is judged.
             Err(e) => match boundary {
                 Some(boundary) if entered || boundary.covers(&next) => {
                     return judge_ancestor(&next, Err(e), uid)
@@ -1060,9 +1061,11 @@ fn walk_judged(
                 detail: format!("more than {MAX_LINK_HOPS} symbolic links on its path"),
             });
         }
-        // A link above the boundary is the platform's and is followed
-        // unjudged (`a_link_above_the_boundary_is_followed_unjudged`); one
-        // at or below it is judged with the directories holding it.
+        // A link above the boundary, met before the walk has entered it,
+        // is the platform's and is followed unjudged
+        // (`a_link_above_the_boundary_is_followed_unjudged`); one at or
+        // below it is judged with the directories holding it, and one met
+        // outside after entering is judged as under `/`.
         if let Some(boundary) = boundary {
             let judged_under = if boundary.covers(&next) {
                 Some(boundary)
