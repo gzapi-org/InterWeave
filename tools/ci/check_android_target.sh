@@ -25,8 +25,9 @@
 # reads CC_<target>, and an unset one falls back to the host's cc, which
 # cannot target Android.
 #
-# Environment: ANDROID_NDK_HOME, or ANDROID_HOME with the NDK under
-# ndk/<version> (the runner's SDK, after sdkmanager installs the pin).
+# Environment: ANDROID_HOME with the NDK under ndk/<version> (the runner's
+# SDK, after sdkmanager installs the pin), or ANDROID_NDK_HOME at an NDK of
+# exactly the pinned revision (its source.properties says which).
 # CARGO overrides the cargo binary (the self-test's seam).
 #
 # Exit codes: 0 every package checks; 1 cargo check failed; 2 usage,
@@ -50,12 +51,27 @@ ndk="$(grep -oE '^PKG_[0-9]+=ndk;[0-9.]+@' "$PINS" | head -n1 | sed 's/.*ndk;//;
 api="$(grep -oE '^PKG_[0-9]+=platforms;android-[0-9]+@' "$PINS" | sed 's/.*android-//; s/@$//' | sort -n | head -n1)"
 [[ -n "$api" ]] || die "no platforms;android-<n> package in $PINS"
 
-ndk_home="${ANDROID_NDK_HOME:-${ANDROID_HOME:+$ANDROID_HOME/ndk/$ndk}}"
-[[ -n "$ndk_home" ]] || die "neither ANDROID_NDK_HOME nor ANDROID_HOME is set; the NDK $ndk is needed"
+# The PINNED NDK, by its own source.properties: the SDK's ndk/<pin> first,
+# ANDROID_NDK_HOME only if it is that same revision. GitHub's runner image
+# exports ANDROID_NDK_HOME at the image's default NDK, so preferring it
+# compiled with an NDK nobody pinned while the log named the pin.
+revision() { awk -F' *= *' '$1=="Pkg.Revision" {print $2; exit}' "$1/source.properties" 2>/dev/null; }
+ndk_home=""
+for cand in ${ANDROID_HOME:+"$ANDROID_HOME/ndk/$ndk"} ${ANDROID_NDK_HOME:+"$ANDROID_NDK_HOME"}; do
+    [[ "$(revision "$cand")" == "$ndk" ]] && { ndk_home="$cand"; break; }
+done
+if [[ -z "$ndk_home" ]]; then
+    [[ -n "${ANDROID_HOME:-}${ANDROID_NDK_HOME:-}" ]] \
+        || die "neither ANDROID_NDK_HOME nor ANDROID_HOME is set; the NDK $ndk is needed"
+    seen=""
+    [[ -n "${ANDROID_HOME:-}" ]] && seen="$ANDROID_HOME/ndk/$ndk is '$(revision "$ANDROID_HOME/ndk/$ndk")'"
+    [[ -n "${ANDROID_NDK_HOME:-}" ]] && seen="${seen:+$seen; }ANDROID_NDK_HOME $ANDROID_NDK_HOME is '$(revision "$ANDROID_NDK_HOME")'"
+    die "no NDK $ndk ($seen) — sdkmanager --install 'ndk;$ndk'"
+fi
 bin="$ndk_home/toolchains/llvm/prebuilt/linux-x86_64/bin"
 arch="${target%%-*}"
 clang="$bin/$arch-linux-android$api-clang"
-[[ -x "$clang" ]] || die "no $clang — is NDK $ndk installed at $ndk_home? (sdkmanager --install 'ndk;$ndk')"
+[[ -x "$clang" ]] || die "no $clang in NDK $ndk at $ndk_home (an NDK without API $api's clang?)"
 [[ -x "$bin/llvm-ar" ]] || die "no $bin/llvm-ar in NDK $ndk"
 
 # Which packages the workspace has, by name, from cargo's own metadata.
@@ -74,7 +90,7 @@ fi
 
 T="${target//-/_}"
 export "CARGO_TARGET_${T^^}_LINKER=$clang" "CC_$T=$clang" "AR_$T=$bin/llvm-ar"
-echo "$me: $target, NDK $ndk, API $api: ${pkgs[*]}"
+echo "$me: $target, NDK $ndk at $ndk_home, API $api: ${pkgs[*]}"
 args=(); for p in "${pkgs[@]}"; do args+=(-p "$p"); done
 (cd "$REPO" && "$CARGO" check --locked --target "$target" "${args[@]}") || { echo "$me: cargo check failed for $target" >&2; exit 1; }
 echo "$me: OK — ${pkgs[*]} check for $target"
