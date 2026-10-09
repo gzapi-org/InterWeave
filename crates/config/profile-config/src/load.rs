@@ -418,6 +418,12 @@ mod tests {
         let uid = crate::effective_uid().expect("the uid");
         let names = &crate::persist::HostNames;
         open_guarded_as(&path, Ok(uid), names).expect("the control: ours");
+        // Off root only: a root-owned document is accepted by design, so
+        // as root this would fail for a reason other than the one named.
+        assert_ne!(
+            uid, 0,
+            "run as root, the document made here is root's, which the rule accepts"
+        );
         match open_guarded_as(&path, Ok(uid.wrapping_add(1)), names) {
             Err(LoadError::ConfigFileUnguarded { path: at, detail }) => {
                 assert_eq!(at, path);

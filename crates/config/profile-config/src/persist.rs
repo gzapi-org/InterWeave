@@ -1180,6 +1180,20 @@ mod tests {
         resolve_owned_private_dir(&dir).expect("the control");
     }
 
+    /// The uid a test passes as "another account's" over objects this
+    /// process made. Valid only off root: as root those objects are
+    /// root's, which every rule here accepts by design, so the test would
+    /// fail for a reason that is not the one it names -- refused here
+    /// with that reason instead.
+    #[cfg(target_os = "linux")]
+    fn another_uid(uid: u32) -> u32 {
+        assert_ne!(
+            uid, 0,
+            "this test stages another account by uid; run as root, the objects it made are root's, which the rule accepts"
+        );
+        uid.wrapping_add(1)
+    }
+
     /// An owner-only directory of ours directly under `/tmp`, whose every
     /// ancestor is root's: `/tmp` is asserted root's and sticky, the
     /// precondition that lets another uid be refused at the directory
@@ -1569,7 +1583,7 @@ mod tests {
         let a = root.path().join("a");
         let uid = effective_uid().expect("uid");
         resolve_private_dir_as(&private, uid).expect("the control: ours");
-        let other = uid.wrapping_add(1);
+        let other = another_uid(uid);
         let detail = refused_at(resolve_private_dir_as(&private, other), &a);
         assert!(detail.contains("neither root nor uid"), "{detail}");
         chmod(&a, 0o1777);
@@ -1595,7 +1609,7 @@ mod tests {
 
         let uid = effective_uid().expect("uid");
         let detail = refused_at(
-            resolve_private_dir_as(&through, uid.wrapping_add(1)),
+            resolve_private_dir_as(&through, another_uid(uid)),
             &root.path().join("via"),
         );
         assert!(detail.contains("symbolic link"), "{detail}");
