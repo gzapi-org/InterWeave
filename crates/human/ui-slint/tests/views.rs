@@ -773,13 +773,17 @@ fn an_image_without_alt_text_is_named_without_an_empty_alt() {
             1,
             "{source}"
         );
-        let with_empty = text(UiText::ImageNotShown).replace("{alt}", "");
+        // The template up to its alt text: whatever blank the alt is,
+        // drawn after a colon it would start with this.
+        let (named, _) = text(UiText::ImageNotShown)
+            .split_once("{alt}")
+            .expect("the template names its alt text");
         assert!(
             all(&view)
                 .iter()
                 .filter_map(ElementHandle::accessible_label)
-                .all(|l| !l.contains(with_empty.as_str())),
-            "{source}: no empty alt shown"
+                .all(|l| !l.contains(named)),
+            "{source}: no blank alt shown after a colon"
         );
     }
 }
