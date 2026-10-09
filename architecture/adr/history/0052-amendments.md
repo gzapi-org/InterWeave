@@ -208,3 +208,7 @@ connection exists, inbound or through an operator route. The hook is
 `admits_discovered` (6d2c1e92); this statement followed the hook's
 correction on the same PR rather than preceding it, which rule 8 asks
 for and the record says plainly.
+
+### Amendment 2026-10-09 — Rule 3's own listener is one on an IP the host is known to hold
+
+Stage 17 step 5 gave the network-change detector a second source, the platform's view (CONNECTIVITY.md §14, A 2026-10-09), and with it a state the listener set alone never had: a listener still BOUND on an IP the view has said departed, until the listener poll catches up. The offer sites stopped offering such a listener (`NetworkSet::holds`, de611722), and the punch's own-listener test (`HolePunchScope::within_boundary`) reads the offered set, so at that commit the punch already counts bound ∩ known — except the `NewListenAddr` offer, which is not yet filtered. The other instances of the same test — the discovery and advertised doors' `own_listeners` (the root funnel's, Kademlia's, the relay state's) — still read the bound set, so a departed LAN's listener keeps admitting private candidates there for the poll's lag. Ruled on p2p-network-dev's question: rule 3's "holds" means bound and on an IP the host is known to hold, at every instance of the test; nothing else in the rule changes (family and range, the per-instance decision, the dial-back's refusal). The gap at this note: the unfiltered `NewListenAddr` offer and the doors' bound-set `own_listeners`, p2p-network-dev's on `feat/network-change-binding`.
