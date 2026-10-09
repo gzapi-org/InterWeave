@@ -21,6 +21,8 @@ use interweave_profile_config::{ProfilePaths, XdgRoots};
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::{EndpointId, TransportIdentity};
 
+pub(crate) mod relay;
+
 pub(crate) const PATIENCE: Duration = Duration::from_secs(30);
 
 /// The workspace's own `transport-daemon`, beside this test's build.
@@ -302,13 +304,79 @@ pub(crate) fn example(
     listen: &str,
     route: Option<&str>,
 ) -> String {
+    concrete(
+        &example_text(name).replace("<PEER_A>", other.as_str()),
+        listen,
+        route,
+    )
+}
+
+/// The shipped desktop example as a daemon behind `relay` runs it: the
+/// relay its one static relay and its one infrastructure peer, no
+/// AutoNAT server (the client is `literal[true]` in the schema, so it is
+/// left on with nothing to dial), `allow` the data-plane allowlist,
+/// listening on `listen` and given `route`, when given, as its one
+/// static entry.
+///
+/// Listen on LOOPBACK to make a circuit the only route a peer learns:
+/// ADR-0052's floor refuses a peer-advertised loopback address at the
+/// address book's door, and DCUtR's own boundary refuses a loopback
+/// candidate before any socket, while the operator's door -- this
+/// profile's static relay and static entry -- admits it. So a `route`
+/// through the relay is the only path, and a direct `route` (the
+/// control) is the operator's own address.
+pub(crate) fn relayed_example(
+    allow: &[&TransportIdentity],
+    listen: &str,
+    relay: &relay::Relay,
+    route: Option<&str>,
+) -> String {
+    let mut raw = example_text("human-desktop.yaml");
+    let allowed = allow
+        .iter()
+        .map(|p| format!("\"{}\"", p.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    for (from, to) in [
+        (
+            r#"infrastructure: { allowed_peers: ["<INFRA_A>", "<INFRA_B>"] }"#.to_owned(),
+            format!(r#"infrastructure: {{ allowed_peers: ["{}"] }}"#, relay.peer.as_str()),
+        ),
+        (
+            r#"static_servers: ["/dns4/infra-a.example/tcp/4001/p2p/<INFRA_A>", "/dns4/infra-b.example/tcp/4001/p2p/<INFRA_B>"]"#
+                .to_owned(),
+            "static_servers: []".to_owned(),
+        ),
+        (
+            r#"static_relays: ["/dns4/infra-a.example/tcp/4001/p2p/<INFRA_A>", "/dns4/infra-b.example/tcp/4001/p2p/<INFRA_B>"]"#
+                .to_owned(),
+            format!(r#"static_relays: ["{}"]"#, relay.address),
+        ),
+        (
+            r#"allowed_peers: ["<PEER_A>"]"#.to_owned(),
+            format!("allowed_peers: [{allowed}]"),
+        ),
+    ] {
+        // A changed example fails here by name, rather than shipping a
+        // profile whose relay block silently kept the placeholders.
+        assert_eq!(raw.matches(&from).count(), 1, "the example still says {from}");
+        raw = raw.replace(&from, &to);
+    }
+    concrete(&raw, listen, route)
+}
+
+fn example_text(name: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../architecture/config/examples")
         .join(name);
-    let mut raw = std::fs::read_to_string(&path)
-        .expect("the example is readable")
-        .replace("<PEER_A>", other.as_str())
-        .replace("/ip4/0.0.0.0/tcp/4001", listen);
+    std::fs::read_to_string(&path).expect("the example is readable")
+}
+
+/// An example's text made concrete: the fixed listen port replaced by
+/// `listen`, every remaining placeholder a stranger, the static entry
+/// `route` when given, and debug logging.
+fn concrete(raw: &str, listen: &str, route: Option<&str>) -> String {
+    let mut raw = raw.replace("/ip4/0.0.0.0/tcp/4001", listen);
     while let Some(start) = raw.find('<') {
         let Some(len) = raw[start..].find('>') else {
             break;
