@@ -357,3 +357,105 @@ ruling). Until the code lands, a user-private-group account under umask
 IDENTITY.md, the threat row, configuration.md) and the `config.yaml`
 file clause carry the predicate by reference; the predicate is stated
 once, in Security implications.
+
+### Amendment 2026-10-08 — The name-service read is bounded
+
+**Trigger.** p2p-network-dev-01's question (GZCoord 01a11e60) after the
+review of #228 raised it as a risk: since "A group of one is the owner's
+own", a group-writable ancestor or `config.yaml` makes profile-config
+call `getpwuid_r` and `getgrgid_r` through NSS. With an sssd or LDAP
+source that hangs, those calls block the daemon's start — and the human
+client's lock — with no bound. Under umask 002 on a user-private-group
+host the predicate runs on every start, so the exposure is the normal
+layout, not an edge. The amendment had promised that "a read that
+cannot be completed refuses"; a read that never completes and never
+refuses is fail-stuck, not fail-closed.
+
+**Decision.** The predicate's two name-service reads run on a helper
+thread under one deadline, `NSS_READ_DEADLINE` = 5 s — a constant in
+profile-config beside `DAEMON_LOCK_WAIT`, not a configuration knob: a
+name service answers in milliseconds or is broken, the common NSS
+clients' own timeouts sit near 10 s, and the service manager's start
+budget far above. On expiry the predicate REFUSES with the existing
+detail and the cause — the string the code emits, "group-writable;
+whether group <gid> is the owner's private group could not be read: the
+name service did not answer within 5s", where "the owner" is the account
+the process runs as (p2p-network-dev-01's term, kept because the same
+predicate serves `transportctl` and the human client, for which "daemon
+user" would be wrong; the body's group-of-one clause names the owner the
+same way, once, and the prose sites use the term);
+the helper thread is left to finish or leak. The predicate runs wherever
+a private directory is resolved or `config.yaml` is loaded: at start (the
+daemon, `transportctl`, the human client's lock and store, every
+`ProfileConfig::load`) and on every later private write —
+the trust overlay's `admin.trust.set` in a running daemon among them
+(the review of this note) — so "once per start" was false; each such
+operation is refused, and at most one read is
+outstanding per process: a caller that finds an earlier read outstanding
+does not spawn a second but waits for it, up to the deadline measured
+from its own request, then refuses with "an earlier name-service read
+has not returned within 5s"; one budget per caller — the wait and the
+caller's own read together end at that deadline, and a caller that
+finds the guard taken again waits again on what remains — so the
+slow-then-hung case refuses at 5 s too, not at 5 s plus a fresh 5 s; a
+healthy concurrent read (the human
+client's store beside a private write; callers nobody has enumerated,
+so no "they never overlap" is promised) succeeds after the first
+returns, a hung one costs one leaked thread and every caller refuses
+within its own deadline (p2p-network-dev-01's observation 01a11e77: a
+refuse-at-once rule made two healthy parallel tests refuse each other,
+257 runs of 300). Those
+refusals last until the abandoned read returns — the guard clears when
+the thread does, so a recovered service is read on the next operation —
+or the process restarts; while they last, an `admin.trust.set` is
+refused and not persisted, so an operator restarts the daemon rather
+than waiting on a read that may never return. The deadline wraps the `NameService` trait calls inside
+the predicate, not the real `HostNames`, so a unit test with a blocking
+fake proves it: a name service that sleeps past the deadline yields the
+refusal naming the deadline; one that answers in time leaves every
+verdict as before.
+
+**What the deadline bounds** (the retired reviewer's thread on #239,
+judged real): each READ, not the operation. The walk calls the predicate
+once per group-writable, non-sticky directory it judges — the resolved
+path's depth up to the boundary, re-judged at each traversed link (at
+most 40) — and `ProfileConfig::load` once more for a group-writable
+`config.yaml`; every call starts its own budget, nothing is reused, and
+the operation stops at its first refusal. So an operation whose earlier
+reads answer slowly before one hangs may take a multiple of 5 s: a
+three-deep group-writable home with two answers at 4.9 s and a third
+hang refuses near 15 s. The promise is the finite bound, closed and
+named, never "within 5 s" for the operation; carrying one deadline
+through the operation would change six signatures for a case a hung
+service rarely produces (two slow answers, then a hang), and an
+implementation MAY instead reuse one answer for the same (euid, gid)
+within a walk, which makes the common one-group path one read.
+
+**Alternatives rejected.** Accepting the hang as the host's ("a hung
+name service hangs logins too"): true, and it restates the amendment's
+promise as fail-stuck; an operator reading a daemon that never starts
+learns nothing, where a refusal names the directory service. Deciding
+from a cheaper fact first (the passwd entry gives the primary gid and
+the user name in one call): one call fewer, the same hang.
+
+**Consequences.** Code: p2p-network-dev's — the deadline in
+`owners_private_group`, the constant, the blocking-fake test are on
+#236 at 6cb59136, and the one-outstanding-read guard
+(`NSS_READ_OUTSTANDING` behind `NameService::outstanding()`, cleared by
+a `Drop` when the thread returns, each test service with its own flag)
+at f8b8aa33 and d44111e4; the wait-then-refuse form, one budget per
+caller, at 1693dd82 (a `ReadGate` — busy flag under a mutex, a condvar
+waking waiters, the helper thread's `Drop` giving it back — and the
+three-case test: held read refused at its deadline, second read during
+the hold refused at its own deadline naming the earlier read, third read
+succeeding once the hold is released in time). Until #236 lands on main, a hung name service blocks
+the start and every overlay write there: a defect at writing,
+affecting no host here. Under the deadline, a host
+whose directory service is down refuses to start InterWeave for a
+user-private-group account until it answers; the refusal says so.
+
+**Propagation.** The body's predicate clause (Security implications),
+this note, the log row, the digest bullet and `resource-limits.md`'s
+table row; IDENTITY.md, the threat row and configuration.md carry the
+predicate by reference and change only in the term — "the owner's
+private group" where they said "the daemon user's".

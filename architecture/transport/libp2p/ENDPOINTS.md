@@ -119,6 +119,8 @@ Multi-byte integers are **big-endian**, matching `DIRECT.md`, the IPC length pre
 - `2` — `unauthorized`: the querying peer is not data-plane trusted (an infrastructure-only peer receives this, ADR-0036);
 - `3` — `unavailable`: the directory is disabled for this profile, or the node is draining.
 
+0 and 4..255 are unassigned. A reader refuses an unassigned reason as a malformed response, a local `ProtocolViolation`. It is never read as `unavailable` or any assigned reason: that peer answered on this protocol, and a code the text does not assign is a frame the text does not describe (production's codec refuses it; the rule is stated here so a codec written from the text alone agrees).
+
 A refusal carries no endpoint list. The maximum request is 1 byte; the maximum response is 1 + 8 + 4 + 1 + 32 × 65 = **2094 bytes**, and both codecs bound their reads to those ceilings before allocating. `fixtures/endpoints/endpoint-directory-v1-frame.json` freezes the empty, single-entry and ceiling frames, one refusal, and the request.
 
 The sender sorts the list lexicographically for deterministic fixtures. Only currently leased endpoints configured with `advertise: true` are included. No endpoint metadata beyond `EndpointId` is carried.
