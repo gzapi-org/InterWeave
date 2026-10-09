@@ -9,7 +9,8 @@
 //! `StyledText` is not given remote-derived text). So inline emphasis,
 //! strong, strikethrough and code spans are drawn as their text alone; a
 //! link's label stays where it stood, and its destination becomes a
-//! separate control; an image is a placeholder naming its alt text, and
+//! separate control; an image is a placeholder naming its alt text, or
+//! only that it is an image when the alt text is empty or blank, and
 //! nothing is fetched.
 
 use interweave_human_chat_protocol::{Block, Inline, Rendered};
