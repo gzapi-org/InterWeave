@@ -22,7 +22,10 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use interweave_local_client_api::{AdminBinding, AdminCapability, AdminPort};
+use interweave_local_client_api::{
+    AdminBinding, AdminCapability, AdminPort, DataSessionBinding as _, LocalSessionEvent,
+    SessionEvent,
+};
 use interweave_local_client_conformance_tests as suite;
 use interweave_profile_config::{
     PersistError, ProfilePaths, TrustBoundary, create_private_dir_within,
@@ -30,7 +33,7 @@ use interweave_profile_config::{
 use interweave_profile_identity::{ProfileIdentity, RecoveryPhrase};
 use interweave_transport_api::{ChannelId, EndpointId, TransportIdentity};
 use interweave_transport_composition::InProcessBinding;
-use interweave_transport_embedded::{EmbeddedHost, EmbeddedLaunch};
+use interweave_transport_embedded::{EmbeddedHost, EmbeddedLaunch, NetworkView};
 
 mod common;
 
@@ -77,7 +80,6 @@ impl Node {
     /// Write this app's `config.yaml`, trusting `trusted` and bootstrapping
     /// from `statics`, as the app provisions it before its first start.
     fn provision(&self, trusted: &TransportIdentity, statics: &[String]) {
-        let ip = interweave_test_support::net::require_private_interface_v4();
         let peers: Vec<String> = statics.iter().map(|s| format!("\"{s}\"")).collect();
         let document = format!(
             "schema_version: 2
@@ -90,7 +92,7 @@ ipc:
   client_event_queue: {QUEUE_BOUND}
 transport:
   listen:
-    addresses: [\"/ip4/{ip}/tcp/0\"]
+    addresses: [\"/ip4/0.0.0.0/tcp/0\"]
 trust:
   policy: static-allowlist
   allowed_peers: [\"{}\"]
@@ -161,7 +163,15 @@ impl EmbeddedPair {
         let (mut a, mut b) = (Node::new(), Node::new());
         b.provision(&a.peer, &[]);
         b.start();
-        let b_addr = format!("{}/p2p/{}", b.host().listening()[0], b.peer.as_str());
+        // B listens on the wildcard, as an embedded profile must; A
+        // dials it at the host's private address and the bound port.
+        let ip = interweave_test_support::net::require_private_interface_v4();
+        let bound = &b.host().listening()[0];
+        let port = bound
+            .rsplit_once("/tcp/")
+            .map(|(_, port)| port)
+            .expect("a TCP listener");
+        let b_addr = format!("/ip4/{ip}/tcp/{port}/p2p/{}", b.peer.as_str());
         a.provision(&b.peer, &[b_addr]);
         a.start();
         let pair = Self {
@@ -522,4 +532,42 @@ fn gate_d_a_private_dir_under_files_is_refused_by_the_runtime_root() {
     }
     assert!(!store.exists(), "nothing created under files/");
     node.stop();
+}
+
+/// §20 step 5 through the host: the platform's view reaches the runtime.
+/// A view naming the address the wildcard listener bound moves nothing --
+/// the control, over a window a session is watching -- and an empty one,
+/// offline, takes that address off the host, so A's connection to B, run
+/// from it, closes and A's session is told.
+#[test]
+fn a_platform_view_reaches_the_runtime_and_offline_closes_what_ran_from_the_address() {
+    let pair = EmbeddedPair::start();
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let (a, _) = pair.bindings();
+    let watcher = pair.run(a.open(suite::full(None))).expect("opens");
+    let b_peer = pair.b_peer.clone();
+    let told = |events: &[SessionEvent]| {
+        events.iter().any(|e| {
+            matches!(e, SessionEvent::Local(LocalSessionEvent::PeerDisconnected { peer, .. }) if *peer == b_peer)
+        })
+    };
+
+    pair.a.host().network_changed(NetworkView {
+        addresses: vec![ip.into()],
+    });
+    let quiet = pair.run(suite::arriving_within(&watcher, Duration::from_secs(2)));
+    assert!(!told(&quiet), "a view that agrees is no change: {quiet:?}");
+
+    pair.a.host().network_changed(NetworkView::default());
+    let heard = pair.run(async {
+        let deadline = tokio::time::Instant::now() + suite::PATIENCE;
+        let mut heard = Vec::new();
+        while !told(&heard) && tokio::time::Instant::now() < deadline {
+            heard.extend(suite::arriving_within(&watcher, Duration::from_millis(200)).await);
+        }
+        heard
+    });
+    assert!(told(&heard), "offline closed the connection: {heard:?}");
+    drop(watcher);
+    pair.stop();
 }
