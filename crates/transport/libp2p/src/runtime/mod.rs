@@ -145,9 +145,10 @@ fn follow_verdict(
 /// peer and makes the allowlisted ones' retry due, each dialled through
 /// the root gate like any dial (`ConnectionManager::network_added`): a
 /// peer that failed while this host was offline would otherwise wait out
-/// up to five minutes after it is back. And every relay backing off is
-/// asked again at the next tick, its ladder kept
-/// (`ReservationManager::network_added`). Each once per lift floor
+/// up to five minutes after it is back. And every relay backing off whose
+/// peer the gate does not still hold after that lift is asked again at
+/// the next tick, its ladder kept (`ReservationManager::network_added`).
+/// Each once per lift floor
 /// (ADR-0011 A 2026-10-09): a relay-only profile is otherwise unreachable for the
 /// rest of its relay backoff.
 /// Pinned by `tests/connectivity/tests/network_change.rs` and `dcutr.rs`'s
