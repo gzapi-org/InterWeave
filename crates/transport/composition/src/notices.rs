@@ -74,6 +74,13 @@ struct Owed {
     /// that its binding would then have to drop: it is owed every change
     /// as it was before them, `previous` included (#245 review F1).
     route_notices: bool,
+    /// Routes that began before this registry saw their peer connected --
+    /// the session and the driver are separate tasks, so a send can be
+    /// accepted, or a message taken, a moment before the driver records
+    /// the connection it rode: their begin is announced at that
+    /// connection, as `route_established` and not as a return. A subset
+    /// of `routes`, so bounded by it.
+    unannounced: BTreeSet<TransportIdentity>,
     wake: Arc<Notify>,
 }
 
@@ -176,6 +183,7 @@ impl SessionNotices {
                 routes: BTreeSet::new(),
                 paths: BTreeMap::new(),
                 route_notices: true,
+                unannounced: BTreeSet::new(),
                 wake: Arc::new(Notify::new()),
             });
         if state.is_some() {
@@ -204,6 +212,7 @@ impl SessionNotices {
     pub(crate) fn revoked(&self, peer: &TransportIdentity) {
         for owed in self.registry().sessions.values_mut() {
             owed.routes.remove(peer);
+            owed.unannounced.remove(peer);
             if owed.paths.remove(peer).is_some() {
                 self.paths_replaced.fetch_add(1, Ordering::Relaxed);
             }
@@ -267,9 +276,10 @@ impl SessionNotices {
     /// Hold that `owed` has a route to `peer`, within the bound; a route
     /// that BEGINS here, toward a peer connected now, is owed the peer's
     /// path with nothing before it (`route_established`, A 2026-10-09) --
-    /// one notice per begin. A route begun while the peer is not
-    /// connected is owed nothing until it connects ([`Self::connected`]):
-    /// a path unknown is not reported.
+    /// one notice per begin. A route begun while this registry has not
+    /// seen the peer connected is owed nothing yet -- a path unknown is
+    /// not reported -- and its begin is announced at the connection
+    /// ([`Self::connected`], `Owed::unannounced`).
     fn route(
         &self,
         owed: &mut Owed,
@@ -289,6 +299,8 @@ impl SessionNotices {
         }
         if let Some(path) = connected.get(peer) {
             self.owe_path(owed, peer, None, *path, ROUTE_ESTABLISHED, wall_ms());
+        } else {
+            owed.unannounced.insert(peer.clone());
         }
     }
 
@@ -331,14 +343,20 @@ impl SessionNotices {
     /// `peer` has a usable connection again, on `path`: each session that
     /// already holds a route to it is owed that path with nothing before
     /// it (`reconnected`, A 2026-10-09) -- its disconnect withdrew the
-    /// pending notice and the client cleared what it showed. A session
-    /// with no route yet is owed it when the route begins.
+    /// pending notice and the client cleared what it showed -- or, for a
+    /// route whose begin was not yet announced, `route_established`. A
+    /// session with no route yet is owed it when the route begins.
     pub(crate) fn connected(&self, peer: &TransportIdentity, path: PeerPath, observed_at: u64) {
         let mut registry = self.registry();
         registry.connected.insert(peer.clone(), path);
         for owed in registry.sessions.values_mut() {
             if owed.route_notices && owed.routes.contains(peer) {
-                self.owe_path(owed, peer, None, path, RECONNECTED, observed_at);
+                let class = if owed.unannounced.remove(peer) {
+                    ROUTE_ESTABLISHED
+                } else {
+                    RECONNECTED
+                };
+                self.owe_path(owed, peer, None, path, class, observed_at);
             }
         }
     }
@@ -953,14 +971,22 @@ mod tests {
         );
         assert!(!notices.ready("stranger"), "no exchange, nothing owed");
 
-        // q is not connected: the route begins with nothing owed, and its
-        // connect owes the path as a return.
+        // q is not yet seen connected -- the driver records the
+        // connection after the session's send was accepted: the route
+        // begins with nothing owed, and the connection announces its BEGIN,
+        // not a return; a later reconnect is a return.
         notices.sent_to("sender", &q);
         assert!(!notices.ready("sender"), "a path unknown is not reported");
         notices.connected(&q, Relayed, 7);
         assert_eq!(
             paths(&notices.take_paths("sender", usize::MAX)),
-            [(None, Relayed, "reconnected".to_owned(), 7)]
+            [(None, Relayed, "route_established".to_owned(), 7)]
+        );
+        notices.disconnected(&q, DisconnectReason::Closed);
+        notices.connected(&q, Relayed, 8);
+        assert_eq!(
+            paths(&notices.take_paths("sender", usize::MAX)),
+            [(None, Relayed, "reconnected".to_owned(), 8)]
         );
     }
 
