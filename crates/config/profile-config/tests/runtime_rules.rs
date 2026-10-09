@@ -2,9 +2,9 @@
 // Copyright 2026 Andrea Benetton
 
 //! The schema's `# Runtime cross-field validation`, the rules the model
-//! makes checkable (`runtime.rs`'s module note names all six): an
-//! embedded-android profile leases an enabled configured endpoint, and
-//! runs no infrastructure server. Each refusal beside its control -- the
+//! makes checkable (`runtime.rs`'s module note names all seven): an
+//! embedded-android profile leases an enabled configured endpoint, runs
+//! no infrastructure server, and listens on wildcard addresses only. Each refusal beside its control -- the
 //! same document as a daemon, or with the endpoint enabled -- so a
 //! refusal is the rule's and not the document's.
 

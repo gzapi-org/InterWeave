@@ -9,10 +9,11 @@
 //! modelling the block is what lets the schema's `# Runtime cross-field
 //! validation` be enforced at all).
 //!
-//! # Which of the six runtime rules are checked here
+//! # Which of the seven runtime rules are checked here
 //!
-//! The schema lists six, and a rule is checked only where the model
-//! holds both its sides:
+//! The schema lists seven, and a rule is checked only where the model
+//! holds both its sides (the wildcard-listener rule is the schema's
+//! fifth, written last here as the one added in 2026-10):
 //!
 //! 1. and 2. `daemon-ipc` runs the IPC boundary and `embedded-android`
 //!    does not (`ipc.enabled`) -- checked since Stage 13 modelled `ipc`
@@ -27,8 +28,8 @@
 //! 6. `stay-reachable` with `user-presence` derives a diagnostic, not a
 //!    refusal -- [`AndroidRuntimeConfig::background_restart_requires_user_authentication`].
 //!
-//! And a seventh the schema gained after the six (architect-cto's
-//! ruling of 2026-10-09, relay seq 33736, §20 step 5): `embedded-android`
+//! And the wildcard-listener rule (architect-cto's ruling of
+//! 2026-10-09, relay seq 33736, §20 step 5): `embedded-android`
 //! listens on WILDCARD addresses only (`/ip4/0.0.0.0`, `/ip6/::`). A
 //! listener on one address dies with it and nothing issues it again,
 //! and Android names no address that stays; a wildcard listener follows
@@ -164,8 +165,8 @@ pub(crate) struct RuntimeContext<'a> {
 }
 
 impl RuntimeConfig {
-    /// Rules 1 to 4 and the seventh, the wildcard listeners (see the
-    /// module note for all seven).
+    /// Rules 1 to 4 and the wildcard-listener rule (see the module note
+    /// for all seven).
     pub(crate) fn validate_into(
         &self,
         context: &RuntimeContext<'_>,
