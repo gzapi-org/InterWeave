@@ -1502,8 +1502,10 @@ impl ConnectionManager {
     /// seconds was refused, while the relay connected milliseconds later
     /// (rust-ui-dev-01's measurement on j6, 2026-10-09).
     ///
-    /// So the address and the peer are not scored, the route is kept
-    /// (learnt, as [`Self::record_failure`] learns an attempted address),
+    /// So the PEER is not scored -- no backoff -- while the address is
+    /// ranked down (`score_address_failure`), so a second circuit to the
+    /// same peer through a relay that is up sorts ahead of it; the route
+    /// is kept (learnt, as [`Self::record_failure`] learns an attempted address),
     /// and the reconnect is scheduled at the peer's ordinary delay AND
     /// marked as waiting on `relay`: the first direct connection to the
     /// relay makes it due at once ([`Self::relay_reached`]). A relay
@@ -1523,6 +1525,12 @@ impl ConnectionManager {
         let mut scheduled = None;
         if let Some(peer) = ticket.peer().cloned() {
             if !ticket.address().is_empty() {
+                // THE ROUTE IS RANKED DOWN, the peer is not backed off: a
+                // circuit through a relay that stays down must not keep
+                // sorting ahead of a circuit through one that is up, or
+                // every dial picks it again (#245 review F2).
+                self.policy
+                    .score_address_failure(&peer, ticket.address(), now_ms);
                 self.learn_address(&peer, ticket.address(), now_ms);
             }
             let delay = self.retry_delay_ms(&peer);
@@ -2848,7 +2856,7 @@ mod tests {
         m.relay_reached(&relay, 3);
         assert_eq!(
             m.take_due_retries(3, 8),
-            [p.clone()],
+            std::slice::from_ref(&p),
             "due the moment the relay connects"
         );
 
@@ -2861,6 +2869,40 @@ mod tests {
         assert!(
             m.policy().peer(&p).is_some_and(|b| !b.is_clear_at(1)),
             "the control: scored as the peer's failure, it backs the peer off"
+        );
+    }
+
+    /// A circuit that failed at its relay hop is RANKED DOWN, so a second
+    /// circuit to the same peer through another relay is the next
+    /// candidate rather than shadowed by it (#245 review F2). The control:
+    /// before the failure the first circuit sorts first.
+    #[test]
+    fn a_circuit_that_never_reached_its_relay_sorts_behind_one_through_another_relay() {
+        const R2: &str = "12D3KooWA9hFCGwGCpCbWWfLmYSpqPzXgLmPvbBrgWGNvNGSDVpS";
+        let through_r1 = format!("/ip4/10.0.0.1/tcp/4001/p2p/{P2}/p2p-circuit");
+        let through_r2 = format!("/ip4/10.0.0.2/tcp/4001/p2p/{R2}/p2p-circuit");
+        let p = peer(P1);
+        let mut m = manager(4);
+        m.learn_address(&p, &through_r1, 0);
+        m.learn_address(&p, &through_r2, 0);
+        assert_eq!(
+            m.dial_candidates(&p, 0).first(),
+            Some(&through_r1),
+            "the control: the first circuit sorts first"
+        );
+        let ticket = m
+            .handle()
+            .admit(&request_at(P1, &through_r1, DialOrigin::RelayCircuit), 0)
+            .expect("admitted");
+        let _ = m.record_relay_hop_unreached(ticket, &peer(P2), 0);
+        assert_eq!(
+            m.dial_candidates(&p, 1).first(),
+            Some(&through_r2),
+            "the circuit through the relay that is up is tried next"
+        );
+        assert!(
+            m.policy().peer(&p).is_none_or(|b| b.is_clear_at(1)),
+            "and the peer is still not backed off"
         );
     }
 
@@ -5395,6 +5437,9 @@ mod tests {
             // The quarantine write itself, not only its two enclosing
             // declarations. Counted directly so a third caller fails.
             ("record_address_failure(", 2),
+            // Its address half alone, which keys the same table: the
+            // relay-hop settlement's one call (#245 review F2).
+            ("score_address_failure(", 1),
             // THE BOOK, so that "keyed in exactly three places" is a
             // mechanism rather than a sentence. `.book` and not `self.policy.book`,
             // because rustfmt wraps a long chain between the receiver and
