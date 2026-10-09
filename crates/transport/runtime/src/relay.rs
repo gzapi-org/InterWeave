@@ -629,7 +629,8 @@ impl ReservationManager {
     }
 
     /// The network this profile is on GAINED an address: every relay
-    /// backing off is due now, once (`transport/libp2p/CONNECTIVITY.md`
+    /// backing off whose peer the dial gate does not still hold is due
+    /// now, once per lift floor (`transport/libp2p/CONNECTIVITY.md`
     /// §14; architect-cto's ruling of 2026-10-09, relay seq 55562).
     ///
     /// A relay that failed while this host was offline failed against
