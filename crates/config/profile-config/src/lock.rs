@@ -25,8 +25,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::persist::effective_uid;
 use crate::{
-    PersistError, ProfilePaths, create_private_dir, require_owned_private_dir,
-    resolve_owned_private_dir,
+    PersistError, ProfilePaths, TrustBoundary, create_private_dir_within,
+    require_owned_private_dir_within, resolve_owned_private_dir_within,
 };
 
 /// The lock file's name inside the profile's state directory.
@@ -75,9 +75,13 @@ impl ProfileLock {
     /// otherwise.
     pub fn acquire(paths: &ProfilePaths, wait: Duration) -> Result<Self, PersistError> {
         let path = Self::path_for(paths);
-        let file = acquire_in(&[paths.state_dir()], &path, wait, |path| {
-            PersistError::ProfileLocked { path }
-        })?;
+        let file = acquire_in(
+            &[paths.state_dir()],
+            paths.boundary(),
+            &path,
+            wait,
+            |path| PersistError::ProfileLocked { path },
+        )?;
         Ok(Self { _file: file, path })
     }
 
@@ -89,7 +93,11 @@ impl ProfileLock {
     /// # Errors
     /// As [`ProfileLock::acquire`], without creating anything.
     pub fn is_held(paths: &ProfilePaths) -> Result<bool, PersistError> {
-        held_in(&[paths.state_dir()], &Self::path_for(paths))
+        held_in(
+            &[paths.state_dir()],
+            paths.boundary(),
+            &Self::path_for(paths),
+        )
     }
 
     /// Where the lock lives.
@@ -130,9 +138,13 @@ impl HumanClientLock {
     pub fn acquire(paths: &ProfilePaths, wait: Duration) -> Result<Self, PersistError> {
         let path = Self::path_for(paths);
         let human = paths.human_dir();
-        let file = acquire_in(&[paths.state_dir(), &human], &path, wait, |path| {
-            PersistError::InstanceLocked { path }
-        })?;
+        let file = acquire_in(
+            &[paths.state_dir(), &human],
+            paths.boundary(),
+            &path,
+            wait,
+            |path| PersistError::InstanceLocked { path },
+        )?;
         Ok(Self { _file: file, path })
     }
 
@@ -144,6 +156,7 @@ impl HumanClientLock {
     pub fn is_held(paths: &ProfilePaths) -> Result<bool, PersistError> {
         held_in(
             &[paths.state_dir(), &paths.human_dir()],
+            paths.boundary(),
             &Self::path_for(paths),
         )
     }
@@ -156,15 +169,16 @@ impl HumanClientLock {
 }
 
 /// Open and take the lock at `path`, under `dirs` (outermost first, the
-/// last holding the file), retrying for up to `wait`; `locked` names the
-/// refusal when another holder keeps it.
+/// last holding the file) judged up to `boundary`, retrying for up to
+/// `wait`; `locked` names the refusal when another holder keeps it.
 fn acquire_in(
     dirs: &[&Path],
+    boundary: &TrustBoundary,
     path: &Path,
     wait: Duration,
     locked: fn(PathBuf) -> PersistError,
 ) -> Result<File, PersistError> {
-    let file = open_lock_file(dirs, path, true)?;
+    let file = open_lock_file(dirs, boundary, path, true)?;
     let deadline = Instant::now() + wait;
     loop {
         match file.try_lock() {
@@ -188,12 +202,12 @@ fn acquire_in(
 /// (`a_wide_human_dir_is_refused_with_or_without_the_file`). Only an
 /// absent directory, which holds no file and no holder's file, is not
 /// held as it stands.
-fn held_in(dirs: &[&Path], path: &Path) -> Result<bool, PersistError> {
+fn held_in(dirs: &[&Path], boundary: &TrustBoundary, path: &Path) -> Result<bool, PersistError> {
     for dir in dirs {
         match std::fs::symlink_metadata(dir) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(e) => return Err(PersistError::Io(e)),
-            Ok(_) => require_owned_private_dir(dir)?,
+            Ok(_) => require_owned_private_dir_within(dir, boundary)?,
         }
     }
     // `symlink_metadata`, not `exists`: `exists` follows a link, and a
@@ -204,7 +218,7 @@ fn held_in(dirs: &[&Path], path: &Path) -> Result<bool, PersistError> {
         Err(e) => return Err(PersistError::Io(e)),
         Ok(_) => {}
     }
-    let file = open_lock_file(dirs, path, false)?;
+    let file = open_lock_file(dirs, boundary, path, false)?;
     match file.try_lock() {
         Ok(()) => Ok(false),
         Err(TryLockError::WouldBlock) => Ok(true),
@@ -247,7 +261,12 @@ const O_NOFOLLOW: Option<i32> = None;
 /// goes through the directory as that judgement resolved it, so no
 /// account but root and this one can change what the path names
 /// between the check and the open.
-fn open_lock_file(dirs: &[&Path], path: &Path, create: bool) -> Result<File, PersistError> {
+fn open_lock_file(
+    dirs: &[&Path],
+    boundary: &TrustBoundary,
+    path: &Path,
+    create: bool,
+) -> Result<File, PersistError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
@@ -265,20 +284,21 @@ fn open_lock_file(dirs: &[&Path], path: &Path, create: bool) -> Result<File, Per
             match std::fs::symlink_metadata(dir) {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
                 Err(e) => return Err(PersistError::Io(e)),
-                Ok(_) => require_owned_private_dir(dir)?,
+                Ok(_) => require_owned_private_dir_within(dir, boundary)?,
             }
         }
         if create && let Some(innermost) = dirs.last() {
-            create_private_dir(innermost)?;
+            create_private_dir_within(innermost, boundary)?;
         }
         // And again once they all exist: what was missing is now this
         // process's own owner-only directory, and is checked as one.
         for dir in dirs {
-            require_owned_private_dir(dir)?;
+            require_owned_private_dir_within(dir, boundary)?;
         }
         // Opened under its directory as resolved, not the configured text.
-        let resolved = resolve_owned_private_dir(crate::persist::parent_dir(path))?
-            .join(crate::persist::file_name(path)?);
+        let resolved =
+            resolve_owned_private_dir_within(crate::persist::parent_dir(path), boundary)?
+                .join(crate::persist::file_name(path)?);
         let path = resolved.as_path();
         let not_private = || PersistError::FileNotPrivate {
             path: path.to_path_buf(),

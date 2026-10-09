@@ -286,7 +286,7 @@ impl ProfileConfig {
         // The directory judged for who can change it, and the file read
         // under it as resolved (ADR-0028 A 2026-10-08): an absent one is
         // still a read failure.
-        let dir = match crate::resolve_guarded_dir(paths.config_dir()) {
+        let dir = match crate::resolve_guarded_dir_within(paths.config_dir(), paths.boundary()) {
             Ok(dir) => dir,
             Err(crate::PersistError::Io(e)) => return Err(LoadError::Read(e)),
             Err(e) => return Err(LoadError::ConfigDirUnguarded(e)),

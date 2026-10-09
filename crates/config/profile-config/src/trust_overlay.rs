@@ -28,7 +28,7 @@ use interweave_transport_api::TransportIdentity;
 use interweave_trust_api::PeerTrustPolicy;
 use serde::{Deserialize, Serialize};
 
-use crate::{PersistError, ProfilePaths, persist};
+use crate::{PersistError, ProfilePaths, TrustBoundary, persist};
 
 /// The overlay's file name in the profile's state directory.
 pub const TRUST_OVERLAY_FILE: &str = "trust-overlay.json";
@@ -170,25 +170,39 @@ impl TrustOverlay {
         path: &Path,
         configured: &BTreeSet<TransportIdentity>,
     ) -> Result<(Self, BTreeSet<TransportIdentity>), OverlayError> {
-        let Some(mut overlay) = Self::read(path)? else {
+        Self::load_within(path, configured, &TrustBoundary::root())
+    }
+
+    /// [`load`](Self::load), the state directory's walk stopping at
+    /// `boundary` -- the embedded runtime's, whose overlay ADR-0028 (A
+    /// 2026-10-07) keeps under the boundary its platform supplies.
+    ///
+    /// # Errors
+    /// As [`load`](Self::load).
+    pub fn load_within(
+        path: &Path,
+        configured: &BTreeSet<TransportIdentity>,
+        boundary: &TrustBoundary,
+    ) -> Result<(Self, BTreeSet<TransportIdentity>), OverlayError> {
+        let Some(mut overlay) = Self::read(path, boundary)? else {
             return Ok((Self::default(), configured.clone()));
         };
         let changed = overlay.normalise(configured);
         let effective = overlay.effective(configured)?;
         if changed {
-            overlay.write(path)?;
+            overlay.write_within(path, boundary)?;
         }
         Ok((overlay, effective))
     }
 
     /// The overlay as it is on disk, unnormalised: `None` when absent.
-    fn read(path: &Path) -> Result<Option<Self>, OverlayError> {
+    fn read(path: &Path, boundary: &TrustBoundary) -> Result<Option<Self>, OverlayError> {
         // Read under the state directory AS RESOLVED (ADR-0028 A
         // 2026-10-08), as the overlay's write is: `ProfileLock` judged the
         // same directory before load, and this resolves it once more so
         // the read opens where that judgement led. An absent directory
         // holds no overlay.
-        let dir = match persist::resolve_private_dir(persist::parent_dir(path)) {
+        let dir = match persist::resolve_private_dir_within(persist::parent_dir(path), boundary) {
             Ok(dir) => dir,
             Err(PersistError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(None);
@@ -318,9 +332,18 @@ impl TrustOverlay {
     /// [`OverlayError::installed`] -- leaves THIS overlay in place, its
     /// name perhaps not durable.
     pub fn write(&self, path: &Path) -> Result<(), OverlayError> {
+        self.write_within(path, &TrustBoundary::root())
+    }
+
+    /// [`write`](Self::write), the state directory's walk stopping at
+    /// `boundary`.
+    ///
+    /// # Errors
+    /// As [`write`](Self::write).
+    pub fn write_within(&self, path: &Path, boundary: &TrustBoundary) -> Result<(), OverlayError> {
         let text = serde_json::to_vec_pretty(self)
             .map_err(|e| OverlayError::Write(PersistError::Io(std::io::Error::other(e))))?;
-        persist::write_private_atomic(path, &text).map_err(OverlayError::Write)
+        persist::write_private_atomic_within(path, &text, boundary).map_err(OverlayError::Write)
     }
 }
 

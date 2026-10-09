@@ -12,6 +12,14 @@
 //! run:      $XDG_RUNTIME_DIR/interweave/<profile>.sock
 //! ```
 //!
+//! An embedded runtime has no XDG roots and no sockets: its roles sit
+//! under one root it owns, directly under the trust boundary its
+//! platform supplies ([`ProfilePaths::resolve_embedded`]):
+//!
+//! ```text
+//! <boundary>/interweave/{config,data,state,cache}/profiles/<profile>/
+//! ```
+//!
 //! # Why the separation is load-bearing
 //!
 //! Each role has a different lifetime and a different backup policy.
@@ -29,6 +37,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::PersistError;
+use crate::persist::TrustBoundary;
 
 /// The namespace directory under each XDG root (ADR-0047).
 pub const NAMESPACE: &str = "interweave";
@@ -57,6 +66,12 @@ pub struct ProfilePaths {
     /// `None` when resolved offline: the identity tools and the lock
     /// need no runtime directory, and only the sockets live in one.
     run_dir: Option<PathBuf>,
+    /// Where the ancestor walk stops for every directory here (ADR-0028
+    /// A 2026-10-08): `/` for every desktop resolution, the app's data
+    /// directory for an embedded one. CARRIED rather than passed beside
+    /// the paths, so a caller judging these directories cannot pick a
+    /// different boundary than the one they were laid out under.
+    boundary: TrustBoundary,
 }
 
 /// The XDG base directories, already resolved.
@@ -203,7 +218,42 @@ impl ProfilePaths {
             state_dir: under(&roots.state_home),
             cache_dir: under(&roots.cache_home),
             run_dir: None,
+            boundary: TrustBoundary::root(),
         })
+    }
+
+    /// Resolve an embedded runtime's roles under `boundary`, the app's
+    /// data directory as its platform reports it (plan §20 step 1,
+    /// architect-cto's ruling of 2026-10-09): one root,
+    /// `<boundary>/interweave`, directly under the boundary -- never
+    /// under a platform-owned `0771` directory such as Android's `files/`
+    /// or `cache/` -- and the four offline roles under it, each with the
+    /// profile's tree beneath. No runtime directory: an embedded runtime
+    /// serves no socket. Derivation only: whoever writes creates each
+    /// directory owner-only, the root included.
+    ///
+    /// # Errors
+    /// Returns [`PersistError::InvalidProfileName`] for a name that could
+    /// escape or hide in a path.
+    pub fn resolve_embedded(profile: &str, boundary: TrustBoundary) -> Result<Self, PersistError> {
+        validate_profile(profile)?;
+        let root = boundary.path().join(NAMESPACE);
+        let under = |role: &str| root.join(role).join(PROFILES).join(profile);
+        Ok(Self {
+            profile: profile.to_owned(),
+            config_dir: under("config"),
+            identity_dir: under("data"),
+            state_dir: under("state"),
+            cache_dir: under("cache"),
+            run_dir: None,
+            boundary,
+        })
+    }
+
+    /// Where the ancestor walk stops for these directories.
+    #[must_use]
+    pub fn boundary(&self) -> &TrustBoundary {
+        &self.boundary
     }
 
     /// The profile these paths belong to.
