@@ -803,17 +803,26 @@ fn judge_ancestor_with(
 
 /// What the name service answers, as [`owners_private_group`] reads it:
 /// a user's name, and a group's name with its listed members. `Ok(None)`
-/// is "no such entry".
-pub(crate) trait NameService {
+/// is "no such entry". `Clone + Send + 'static` because the predicate
+/// reads it on a helper thread it may have to abandon
+/// ([`NSS_READ_DEADLINE`]).
+pub(crate) trait NameService: Clone + Send + 'static {
     /// The name of the account `uid`.
     fn user_name(&self, uid: u32) -> std::io::Result<Option<String>>;
     /// The name and listed members of the group `gid`.
     fn group(&self, gid: u32) -> std::io::Result<Option<(String, Vec<String>)>>;
+    /// The gate this service's reads pass one at a time: the process's
+    /// own for the host's name service, a test's own for a test's.
+    /// Required, with no default, so no test service can fall back on
+    /// the process's gate and make another test running beside it wait
+    /// or refuse.
+    fn outstanding(&self) -> &'static ReadGate;
 }
 
 /// The host's name service: `getpwuid_r` and `getgrgid_r`, so NSS
 /// sources answer as well as `/etc/passwd` and `/etc/group`. Off Linux
 /// nothing is read, and the predicate refuses as unreadable.
+#[derive(Clone, Copy)]
 pub(crate) struct HostNames;
 
 impl NameService for HostNames {
@@ -843,6 +852,10 @@ impl NameService for HostNames {
             let _ = gid;
             Err(std::io::ErrorKind::Unsupported.into())
         }
+    }
+
+    fn outstanding(&self) -> &'static ReadGate {
+        &NSS_READ_OUTSTANDING
     }
 }
 
@@ -876,6 +889,158 @@ pub(crate) fn owners_private_group(
     gid: u32,
     acl: std::io::Result<bool>,
 ) -> Result<(), String> {
+    owners_private_group_within(names, euid, gid, acl, NSS_READ_DEADLINE)
+}
+
+/// How long the private-group predicate waits for the name service
+/// (ADR-0028, "The name-service read is bounded"): a source answers in
+/// milliseconds or is broken, and a read that never completes must
+/// refuse rather than hold the start. Not a configuration knob.
+pub const NSS_READ_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The process's name-service read gate. The predicate runs on every
+/// private write of a running daemon (each trust-overlay write), not
+/// once per start: under a hung name service each would otherwise leave
+/// one more thread blocked. So at most one read is outstanding per
+/// process; a read asked for while one is WAITS for it, up to its own
+/// deadline, then refuses -- a healthy concurrent read succeeds, a hung
+/// service costs one thread (ADR-0028, "The name-service read is
+/// bounded"; `a_read_asked_for_while_one_is_outstanding_waits_for_it`,
+/// `the_host_name_service_uses_the_process_gate`).
+static NSS_READ_OUTSTANDING: ReadGate = ReadGate::new();
+
+/// At most one read in flight, and a way to wait for it to end.
+pub(crate) struct ReadGate {
+    busy: std::sync::Mutex<bool>,
+    freed: std::sync::Condvar,
+}
+
+impl ReadGate {
+    pub(crate) const fn new() -> Self {
+        Self {
+            busy: std::sync::Mutex::new(false),
+            freed: std::sync::Condvar::new(),
+        }
+    }
+
+    /// Take the gate, waiting for an outstanding read to end until
+    /// `until`; `false` when it had not ended by then.
+    fn enter(&self, until: std::time::Instant) -> bool {
+        let mut busy = self
+            .busy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while *busy {
+            let now = std::time::Instant::now();
+            if now >= until {
+                return false;
+            }
+            busy = self
+                .freed
+                .wait_timeout(busy, until - now)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+        *busy = true;
+        true
+    }
+
+    /// Give the gate back, and wake whoever waits for it.
+    fn leave(&self) {
+        *self
+            .busy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
+        self.freed.notify_all();
+    }
+
+    /// Whether a read holds the gate.
+    #[cfg(test)]
+    fn is_busy(&self) -> bool {
+        *self
+            .busy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Gives the gate back when the read's thread ends, however it ends --
+/// a panicking name-service module included, or every later read of the
+/// process would wait out its deadline and refuse.
+struct ReadReturned(&'static ReadGate);
+
+impl Drop for ReadReturned {
+    fn drop(&mut self) {
+        self.0.leave();
+    }
+}
+
+/// The predicate's two reads: the user's name, then the group.
+type NameReads = (
+    std::io::Result<Option<String>>,
+    std::io::Result<Option<(String, Vec<String>)>>,
+);
+
+/// The two reads the predicate makes, on a helper thread under
+/// `deadline`, or why they gave no answer -- each cause named apart, so
+/// a thread limit is not reported as a slow name service: the deadline
+/// passed (the thread is then left to finish or leak, one per refusal),
+/// the read ended without answering (it panicked), or no thread could be
+/// started -- or an earlier read of the same service
+/// ([`NameService::outstanding`]) did not end within `deadline`, counted
+/// from this request, and nothing was started.
+fn read_names(
+    names: &impl NameService,
+    euid: u32,
+    gid: u32,
+    deadline: std::time::Duration,
+) -> Result<NameReads, String> {
+    // One budget, from this caller's own request: the wait for an
+    // earlier read and the wait for this one's answer share it.
+    let until = std::time::Instant::now() + deadline;
+    let gate = names.outstanding();
+    if !gate.enter(until) {
+        return Err(format!(
+            "an earlier name-service read has not returned within {deadline:?}"
+        ));
+    }
+    let returned = ReadReturned(gate);
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let names = names.clone();
+    std::thread::Builder::new()
+        .name("nss-read".to_owned())
+        .spawn(move || {
+            let reads = (names.user_name(euid), names.group(gid));
+            // Given back BEFORE the answer is sent, so a caller holding
+            // its answer that reads again finds the gate free rather than
+            // waiting on its own finished read.
+            drop(returned);
+            let _ = tx.send(reads);
+        })
+        // A thread that never started dropped its closure, and with it
+        // the guard: the gate is already given back.
+        .map_err(|e| format!("no thread could be started to read it: {e}"))?;
+    let left = until.saturating_duration_since(std::time::Instant::now());
+    rx.recv_timeout(left).map_err(|e| match e {
+        std::sync::mpsc::RecvTimeoutError::Timeout => {
+            format!("the name service did not answer within {deadline:?}")
+        }
+        std::sync::mpsc::RecvTimeoutError::Disconnected => {
+            "the read ended without an answer".to_owned()
+        }
+    })
+}
+
+/// [`owners_private_group`] under `deadline`, apart so a test can wait
+/// for milliseconds rather than [`NSS_READ_DEADLINE`]
+/// (`a_name_service_that_does_not_answer_is_refused_at_the_deadline`).
+fn owners_private_group_within(
+    names: &impl NameService,
+    euid: u32,
+    gid: u32,
+    acl: std::io::Result<bool>,
+    deadline: std::time::Duration,
+) -> Result<(), String> {
     match acl {
         Ok(false) => {}
         Ok(true) => {
@@ -896,12 +1061,13 @@ pub(crate) fn owners_private_group(
             "group-writable; whether group {gid} is the owner's private group could not be read: {why}"
         )
     };
-    let user = match names.user_name(euid) {
+    let (user_read, group_read) = read_names(names, euid, gid, deadline).map_err(unread)?;
+    let user = match user_read {
         Ok(Some(user)) => user,
         Ok(None) => return Err(unread(format!("uid {euid} has no account entry"))),
         Err(e) => return Err(unread(format!("the account of uid {euid}: {e}"))),
     };
-    let (group, members) = match names.group(gid) {
+    let (group, members) = match group_read {
         Ok(Some(group)) => group,
         Ok(None) => {
             return Err(unread(format!(
@@ -1180,6 +1346,21 @@ mod tests {
         resolve_owned_private_dir(&dir).expect("the control");
     }
 
+    /// The uid a test passes as "another account's" over objects this
+    /// process made, for a test of the ancestor or link rule. Those rules
+    /// accept root's objects by design, so as root the test would fail
+    /// for a reason that is not the one it names -- refused here with
+    /// that reason instead. A test of the exact-owner rule needs no such
+    /// guard: it refuses root's object for any other uid.
+    #[cfg(target_os = "linux")]
+    fn another_uid(uid: u32) -> u32 {
+        assert_ne!(
+            uid, 0,
+            "this test stages another account by uid; run as root, the objects it made are root's, which the rule accepts"
+        );
+        uid.wrapping_add(1)
+    }
+
     /// An owner-only directory of ours directly under `/tmp`, whose every
     /// ancestor is root's: `/tmp` is asserted root's and sticky, the
     /// precondition that lets another uid be refused at the directory
@@ -1240,7 +1421,9 @@ mod tests {
     /// A name service a test stages: users and groups by id, or a read
     /// that fails -- every read, or the group read alone.
     #[cfg(unix)]
+    #[derive(Clone)]
     struct FakeNames {
+        guard: &'static ReadGate,
         users: Vec<(u32, &'static str)>,
         groups: Vec<(u32, &'static str, Vec<&'static str>)>,
         fails: bool,
@@ -1274,6 +1457,9 @@ mod tests {
                     )
                 }))
         }
+        fn outstanding(&self) -> &'static ReadGate {
+            self.guard
+        }
     }
 
     /// ADR-0028 A 2026-10-08, "a group of one is the owner's own" (#231),
@@ -1290,6 +1476,7 @@ mod tests {
     fn a_group_writable_ancestor_needs_the_owners_private_group() {
         let path = Path::new("/home/alice");
         let names = FakeNames {
+            guard: fresh_guard(),
             users: vec![(1000, "alice"), (0, "root")],
             groups: vec![
                 (0, "root", vec![]),
@@ -1361,7 +1548,7 @@ mod tests {
             0o40775,
             &FakeNames {
                 users: vec![],
-                ..names_clone(&names)
+                ..names.clone()
             },
         ));
         assert!(
@@ -1373,7 +1560,7 @@ mod tests {
             0o40775,
             &FakeNames {
                 fails: true,
-                ..names_clone(&names)
+                ..names.clone()
             },
         ));
         assert!(
@@ -1385,7 +1572,7 @@ mod tests {
             0o40775,
             &FakeNames {
                 group_fails: true,
-                ..names_clone(&names)
+                ..names.clone()
             },
         ));
         assert!(
@@ -1410,7 +1597,7 @@ mod tests {
                 0o40775,
                 &FakeNames {
                     users: vec![],
-                    ..names_clone(&names)
+                    ..names.clone()
                 },
             )),
             refused(judge(
@@ -1418,7 +1605,7 @@ mod tests {
                 0o40775,
                 &FakeNames {
                     fails: true,
-                    ..names_clone(&names)
+                    ..names.clone()
                 },
             )),
         ] {
@@ -1470,13 +1657,328 @@ mod tests {
         assert!(access_acl_of(&opened()).expect("read"), "an access ACL");
     }
 
+    /// The host's name service reads under the process's one gate: what
+    /// bounds a hung service to one thread per process. Every test
+    /// service carries a gate of its own instead.
+    #[test]
+    fn the_host_name_service_uses_the_process_gate() {
+        assert!(std::ptr::eq(
+            HostNames.outstanding(),
+            std::ptr::from_ref(&NSS_READ_OUTSTANDING)
+        ));
+    }
+
+    /// A guard of a test's own, so tests running in parallel do not share
+    /// the process's outstanding read.
     #[cfg(unix)]
-    fn names_clone(names: &FakeNames) -> FakeNames {
-        FakeNames {
-            users: names.users.clone(),
-            groups: names.groups.clone(),
-            fails: names.fails,
-            group_fails: names.group_fails,
+    fn fresh_guard() -> &'static ReadGate {
+        Box::leak(Box::new(ReadGate::new()))
+    }
+
+    /// While a read the process started has not returned, a second one
+    /// waits for it, up to its own deadline: when the first does not end
+    /// in time the second refuses AT its deadline, naming the earlier
+    /// read; when the first ends within it, the second is made and
+    /// answers -- a healthy concurrent read succeeds (ADR-0028, "The
+    /// name-service read is bounded"; architect-cto seq 29607).
+    #[cfg(unix)]
+    #[test]
+    fn a_read_asked_for_while_one_is_outstanding_waits_for_it() {
+        #[derive(Clone)]
+        struct Held(
+            std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>,
+            &'static ReadGate,
+        );
+        impl NameService for Held {
+            fn outstanding(&self) -> &'static ReadGate {
+                self.1
+            }
+            fn user_name(&self, _: u32) -> std::io::Result<Option<String>> {
+                let _ = self.0.lock().expect("the release").recv();
+                Ok(Some("alice".to_owned()))
+            }
+            fn group(&self, _: u32) -> std::io::Result<Option<(String, Vec<String>)>> {
+                Ok(Some(("alice".to_owned(), Vec::new())))
+            }
+        }
+        #[derive(Clone)]
+        struct Answers(&'static ReadGate);
+        impl NameService for Answers {
+            fn outstanding(&self) -> &'static ReadGate {
+                self.0
+            }
+            fn user_name(&self, _: u32) -> std::io::Result<Option<String>> {
+                Ok(Some("alice".to_owned()))
+            }
+            fn group(&self, _: u32) -> std::io::Result<Option<(String, Vec<String>)>> {
+                Ok(Some(("alice".to_owned(), Vec::new())))
+            }
+        }
+        let guard = fresh_guard();
+        let (release, held) = std::sync::mpsc::channel();
+        let held = Held(std::sync::Arc::new(std::sync::Mutex::new(held)), guard);
+        let first = owners_private_group_within(
+            &held,
+            1000,
+            1001,
+            Ok(false),
+            std::time::Duration::from_millis(50),
+        )
+        .expect_err("the first read is held past its deadline");
+        assert!(first.contains("did not answer within 50ms"), "{first}");
+
+        // Still held: the second waits its whole 200 ms, then refuses.
+        let started = std::time::Instant::now();
+        let second = owners_private_group_within(
+            &Answers(guard),
+            1000,
+            1001,
+            Ok(false),
+            std::time::Duration::from_millis(200),
+        )
+        .expect_err("refused while the first read stays outstanding");
+        let waited = started.elapsed();
+        assert!(
+            second.contains("an earlier name-service read has not returned within 200ms"),
+            "{second}"
+        );
+        assert!(
+            waited >= std::time::Duration::from_millis(200)
+                && waited < std::time::Duration::from_secs(2),
+            "refused at its own deadline, having waited for it: {waited:?}"
+        );
+
+        // Released within the third's deadline: it waits, then reads.
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            release.send(()).expect("the held read is released");
+        });
+        owners_private_group_within(
+            &Answers(guard),
+            1000,
+            1001,
+            Ok(false),
+            std::time::Duration::from_secs(5),
+        )
+        .expect("a read that waited for the earlier one to end is made");
+        releaser.join().expect("the releaser");
+        assert!(!guard.is_busy(), "the gate is free once the reads are done");
+    }
+
+    /// Reads made back to back on one service, with no pause between
+    /// them, are all made, and the gate is free the moment each answer
+    /// reaches the caller: it is given back before the answer is sent,
+    /// so the next read never waits on a finished one. Repeated, since
+    /// the reordering it pins is a race the caller usually wins.
+    #[cfg(unix)]
+    #[test]
+    fn reads_back_to_back_are_both_made() {
+        #[derive(Clone)]
+        struct Answers(&'static ReadGate);
+        impl NameService for Answers {
+            fn outstanding(&self) -> &'static ReadGate {
+                self.0
+            }
+            fn user_name(&self, _: u32) -> std::io::Result<Option<String>> {
+                Ok(Some("alice".to_owned()))
+            }
+            fn group(&self, _: u32) -> std::io::Result<Option<(String, Vec<String>)>> {
+                Ok(Some(("alice".to_owned(), Vec::new())))
+            }
+        }
+        let names = Answers(fresh_guard());
+        for round in 0..500 {
+            owners_private_group_within(
+                &names,
+                1000,
+                1001,
+                Ok(false),
+                std::time::Duration::from_secs(2),
+            )
+            .unwrap_or_else(|e| panic!("read {round}: {e}"));
+            assert!(
+                !names.0.is_busy(),
+                "read {round}: the gate is free once the answer arrives"
+            );
+        }
+    }
+
+    /// One budget per caller, counted from its request: a caller that
+    /// waited for an earlier read has only what is left for its own
+    /// answer. With a 1 s deadline, a held read released at 500 ms and
+    /// an answer that would take 3 s, the caller refuses at about 1 s --
+    /// not at 500 ms plus a fresh second (ADR-0028, "The name-service read
+    /// is bounded").
+    #[cfg(unix)]
+    #[test]
+    fn the_wait_and_the_answer_share_one_budget() {
+        #[derive(Clone)]
+        struct Held(
+            std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>,
+            &'static ReadGate,
+        );
+        impl NameService for Held {
+            fn outstanding(&self) -> &'static ReadGate {
+                self.1
+            }
+            fn user_name(&self, _: u32) -> std::io::Result<Option<String>> {
+                let _ = self.0.lock().expect("the release").recv();
+                Ok(Some("alice".to_owned()))
+            }
+            fn group(&self, _: u32) -> std::io::Result<Option<(String, Vec<String>)>> {
+                Ok(Some(("alice".to_owned(), Vec::new())))
+            }
+        }
+        #[derive(Clone)]
+        struct Late(&'static ReadGate);
+        impl NameService for Late {
+            fn outstanding(&self) -> &'static ReadGate {
+                self.0
+            }
+            fn user_name(&self, _: u32) -> std::io::Result<Option<String>> {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                Ok(Some("alice".to_owned()))
+            }
+            fn group(&self, _: u32) -> std::io::Result<Option<(String, Vec<String>)>> {
+                Ok(Some(("alice".to_owned(), Vec::new())))
+            }
+        }
+        let guard = fresh_guard();
+        let (release, held) = std::sync::mpsc::channel();
+        let held = Held(std::sync::Arc::new(std::sync::Mutex::new(held)), guard);
+        owners_private_group_within(
+            &held,
+            1000,
+            1001,
+            Ok(false),
+            std::time::Duration::from_millis(50),
+        )
+        .expect_err("the first read holds the gate past its deadline");
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            release.send(()).expect("the held read is released");
+        });
+        let started = std::time::Instant::now();
+        let detail = owners_private_group_within(
+            &Late(guard),
+            1000,
+            1001,
+            Ok(false),
+            std::time::Duration::from_secs(1),
+        )
+        .expect_err("its own answer comes too late");
+        let took = started.elapsed();
+        releaser.join().expect("the releaser");
+        assert!(
+            detail.contains("the name service did not answer within 1s"),
+            "{detail}"
+        );
+        assert!(
+            took >= std::time::Duration::from_secs(1)
+                && took < std::time::Duration::from_millis(1300),
+            "the wait and the answer ended at the caller's one deadline: {took:?}"
+        );
+    }
+
+    /// A name service that never answers within the deadline is refused
+    /// AT the deadline, naming it -- not after the read returns -- staged
+    /// with a 50 ms deadline and a read that takes 2 s; one that answers
+    /// within its deadline (2 s, so scheduling cannot pass for a timeout)
+    /// gives the unchanged verdict; and a read that ends without answering
+    /// (it panics) is refused when it ends, under a 5 s deadline, named as
+    /// that and not as a timeout (ADR-0028, "The name-service read is
+    /// bounded").
+    #[cfg(unix)]
+    #[test]
+    fn a_name_service_that_does_not_answer_is_refused_at_the_deadline() {
+        #[derive(Clone)]
+        struct Slow(std::time::Duration, &'static ReadGate);
+        impl NameService for Slow {
+            fn outstanding(&self) -> &'static ReadGate {
+                self.1
+            }
+            fn user_name(&self, _: u32) -> std::io::Result<Option<String>> {
+                std::thread::sleep(self.0);
+                Ok(Some("alice".to_owned()))
+            }
+            fn group(&self, _: u32) -> std::io::Result<Option<(String, Vec<String>)>> {
+                Ok(Some(("alice".to_owned(), Vec::new())))
+            }
+        }
+        #[derive(Clone)]
+        struct Panics(&'static ReadGate);
+        impl NameService for Panics {
+            fn outstanding(&self) -> &'static ReadGate {
+                self.0
+            }
+            fn user_name(&self, _: u32) -> std::io::Result<Option<String>> {
+                panic!("a name service module that panics")
+            }
+            fn group(&self, _: u32) -> std::io::Result<Option<(String, Vec<String>)>> {
+                Ok(None)
+            }
+        }
+        assert_eq!(NSS_READ_DEADLINE, std::time::Duration::from_secs(5));
+        let deadline = std::time::Duration::from_millis(50);
+        let started = std::time::Instant::now();
+        let detail = owners_private_group_within(
+            &Slow(std::time::Duration::from_secs(2), fresh_guard()),
+            1000,
+            1001,
+            Ok(false),
+            deadline,
+        )
+        .expect_err("a read past the deadline refuses");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "refused at the deadline, not when the read returned: {:?}",
+            started.elapsed()
+        );
+        assert!(detail.contains("whether group 1001 is"), "{detail}");
+        assert!(
+            detail.contains("the name service did not answer within 50ms"),
+            "{detail}"
+        );
+        // The control waits long enough that a loaded machine's thread
+        // start and scheduling cannot pass for a timeout.
+        owners_private_group_within(
+            &Slow(std::time::Duration::ZERO, fresh_guard()),
+            1000,
+            1001,
+            Ok(false),
+            std::time::Duration::from_secs(2),
+        )
+        .expect("the control: an answer in time, the private group");
+
+        // A read that ends without answering is named as that, not as a
+        // timeout: the thread panicked, and nothing was waited for.
+        let after_panic = fresh_guard();
+        let started = std::time::Instant::now();
+        let ended = owners_private_group_within(
+            &Panics(after_panic),
+            1000,
+            1001,
+            Ok(false),
+            std::time::Duration::from_secs(5),
+        )
+        .expect_err("a read that ended refuses");
+        assert!(
+            ended.contains("the read ended without an answer"),
+            "{ended}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(4),
+            "refused when the read ended, not at the 5 s deadline"
+        );
+        // A read that panicked still returned: the guard clears, or the
+        // process would refuse every later read.
+        let cleared_by = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while after_panic.is_busy() {
+            assert!(
+                std::time::Instant::now() < cleared_by,
+                "a panicked read clears the guard"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
 
@@ -1569,7 +2071,7 @@ mod tests {
         let a = root.path().join("a");
         let uid = effective_uid().expect("uid");
         resolve_private_dir_as(&private, uid).expect("the control: ours");
-        let other = uid.wrapping_add(1);
+        let other = another_uid(uid);
         let detail = refused_at(resolve_private_dir_as(&private, other), &a);
         assert!(detail.contains("neither root nor uid"), "{detail}");
         chmod(&a, 0o1777);
@@ -1595,7 +2097,7 @@ mod tests {
 
         let uid = effective_uid().expect("uid");
         let detail = refused_at(
-            resolve_private_dir_as(&through, uid.wrapping_add(1)),
+            resolve_private_dir_as(&through, another_uid(uid)),
             &root.path().join("via"),
         );
         assert!(detail.contains("symbolic link"), "{detail}");

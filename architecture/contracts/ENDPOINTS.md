@@ -173,7 +173,7 @@ canonical =
 fingerprint = SHA-256(canonical)
 ```
 
-Rules: `media_present` is exactly `0` or `1`; an absent media type uses `0` and has no media-length field; a present media type uses `1`, must be 1..128 ASCII bytes, and includes its two-byte big-endian length. Empty media type is invalid rather than an alias for absence. Payload length is the exact byte length before the payload. No JSON, UTF-8 normalization, endpoint fields, message ID, or timestamp participates.
+Rules: `media_present` is exactly `0` or `1`; an absent media type uses `0` and has no media-length field; a present media type uses `1`, must be 1..128 printable ASCII bytes (0x20..0x7E — the bound the schemas pin and the decoders enforce, A 2026-10-08), and includes its two-byte big-endian length. Empty media type is invalid rather than an alias for absence. Payload length is the exact byte length before the payload. No JSON, UTF-8 normalization, endpoint fields, message ID, or timestamp participates.
 
 Golden vector, re-frozen by ADR-0047 and held with its edge cases in
 [`fixtures/direct-v2/direct-content-fingerprint-v1.json`](../../fixtures/direct-v2/direct-content-fingerprint-v1.json),

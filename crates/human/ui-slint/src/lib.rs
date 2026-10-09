@@ -768,19 +768,25 @@ impl View {
                     ConversationKey::Direct { .. } => UiText::DirectConversation,
                     ConversationKey::Channel(_) => UiText::ChannelConversation,
                 });
-                let count = summary.unread.to_string();
-                let unread = fill(
-                    placeholder_en::text(UiText::UnreadCount),
-                    &[("count", &count)],
-                );
-                ConversationRow {
-                    handle: self.conversation_handles.of(&summary.key),
-                    title: summary.title.as_str().into(),
-                    description: fill(
+                // A count of zero is read aloud on every row and says
+                // nothing, so a row with nothing unread is its kind alone.
+                let description = if summary.unread == 0 {
+                    kind.to_owned()
+                } else {
+                    let count = summary.unread.to_string();
+                    let unread = fill(
+                        placeholder_en::text(UiText::UnreadCount),
+                        &[("count", &count)],
+                    );
+                    fill(
                         placeholder_en::text(UiText::ConversationDescription),
                         &[("kind", kind), ("unread", &unread)],
                     )
-                    .into(),
+                };
+                ConversationRow {
+                    handle: self.conversation_handles.of(&summary.key),
+                    title: summary.title.as_str().into(),
+                    description: description.into(),
                     selected: self.shown.as_ref() == Some(&summary.key),
                 }
             })
@@ -1127,7 +1133,13 @@ struct DrawnBody {
 }
 
 fn drawn_body(item: &MessageItem) -> DrawnBody {
-    let image = |alt: &str| fill(placeholder_en::text(UiText::ImageNotShown), &[("alt", alt)]);
+    let image = |alt: &str| {
+        if alt.trim().is_empty() {
+            placeholder_en::text(UiText::ImageNotShownWithoutAlt).to_owned()
+        } else {
+            fill(placeholder_en::text(UiText::ImageNotShown), &[("alt", alt)])
+        }
+    };
     let body = body::flatten(&item.body, &image);
     let plain = body
         .lines

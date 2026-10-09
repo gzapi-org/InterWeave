@@ -28,7 +28,7 @@ A dedicated test device, reachable over adb, on which the owner allowed the full
 
 ## The harness
 
-- **[`harness/`](./harness):** the Rust core, the **production human store** (`interweave-human-store`, pinned at d019ac06) over raw JNI. It seeds the three durable states through the store's own API, drives the transitions a client drives, and reports a census by TEST label, including the store's own `backup_eligible_content`. `harness/tests/store.rs` runs the same cycle on the host, with a reopen.
+- **[`harness/`](./harness):** the Rust core, the **production human store** (`interweave-human-store`, pinned at 03434804 since part 6; parts 1 to 5 ran at d019ac06) over raw JNI. It seeds the three durable states through the store's own API, drives the transitions a client drives, and reports a census by TEST label, including the store's own `backup_eligible_content`. `harness/tests/store.rs` runs the same cycle on the host, with a reopen.
 - **[`app/`](./app):**
   - a launcher Activity, the only start path;
   - the recovery Activity, non-exported, in its **own task** (`taskAffinity`, started with `FLAG_ACTIVITY_NEW_TASK`), `excludeFromRecents`, `FLAG_SECURE` set before content;
@@ -117,7 +117,7 @@ architect-cto's ruling: `RETENTION.md` §8 now says released content leaves ever
 
 `tests/released_content.rs` fails when `secure_delete`, the release truncate, the open truncate, the busy check or the one-time rewrite is switched off. The close truncate is not separately pinned, since SQLite's close does the same, and the tests pin its outcome only.
 
-The recorded run is [`REPRODUCTION-2026-10-07d.log`](./REPRODUCTION-2026-10-07d.log), with the harness re-pinned locally to the store change. The committed pin stays on `origin/main`.
+The recorded run is [`REPRODUCTION-2026-10-07d.log`](./REPRODUCTION-2026-10-07d.log), with the harness re-pinned locally to the store change, 03434804. At that time a pin had to be an ancestor of `origin/main`, and 03434804 was not yet merged, so the committed pin stayed at d019ac06. Once 03434804 was on `main`, the pin moved to it (2026-10-09, after architect-cto's observation on closing the spike). It is the parent of 9769076a, the commit that recorded this run. Built at the old pin, the harness reproduces part 5's result instead.
 
 | | observation |
 |---|---|

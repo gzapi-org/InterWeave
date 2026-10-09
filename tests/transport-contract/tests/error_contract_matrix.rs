@@ -344,6 +344,58 @@ const MATRIX: &[Clause] = &[
         error: "unsupported",
         proof: Proof::Vocabulary("every_direct_reject_reason_validates"),
     },
+    // --- the response byte layout (DIRECT.md §Response byte layout) --
+    //
+    // The numbering table is vocabulary: what makes it right is the frozen
+    // response vectors, which production encodes and decodes exactly.
+    Clause {
+        doc: DIRECT,
+        text: "| 1 | `no_route` |",
+        error: "no_route",
+        proof: Proof::Vocabulary("every_response_vector_encodes_to_its_frozen_bytes_and_decodes_back"),
+    },
+    Clause {
+        doc: DIRECT,
+        text: "| 2 | `unauthorized_peer` |",
+        error: "unauthorized_peer",
+        proof: Proof::Vocabulary("every_response_vector_encodes_to_its_frozen_bytes_and_decodes_back"),
+    },
+    Clause {
+        doc: DIRECT,
+        text: "| 3 | `overloaded` |",
+        error: "overloaded",
+        proof: Proof::Vocabulary("every_response_vector_encodes_to_its_frozen_bytes_and_decodes_back"),
+    },
+    Clause {
+        doc: DIRECT,
+        text: "| 4 | `malformed` |",
+        error: "malformed",
+        proof: Proof::Vocabulary("every_response_vector_encodes_to_its_frozen_bytes_and_decodes_back"),
+    },
+    Clause {
+        doc: DIRECT,
+        text: "| 5 | `too_large` |",
+        error: "too_large",
+        proof: Proof::Vocabulary("every_response_vector_encodes_to_its_frozen_bytes_and_decodes_back"),
+    },
+    Clause {
+        doc: DIRECT,
+        text: "| 6 | `shutting_down` |",
+        error: "shutting_down",
+        proof: Proof::Vocabulary("every_response_vector_encodes_to_its_frozen_bytes_and_decodes_back"),
+    },
+    Clause {
+        doc: DIRECT,
+        text: "| 7 | `unsupported` |",
+        error: "unsupported",
+        proof: Proof::Vocabulary("every_response_vector_encodes_to_its_frozen_bytes_and_decodes_back"),
+    },
+    Clause {
+        doc: DIRECT,
+        text: "A reader refuses an unassigned code as malformed response metadata, a local `ProtocolViolation`.",
+        error: "ProtocolViolation",
+        proof: Proof::Test("a_malformed_response_is_a_local_protocol_violation_at_head"),
+    },
     // --- one line, several rules ------------------------------------
     //
     // Totality is matched per CODE, not per line, so the second rule on
@@ -536,6 +588,30 @@ const PROSE: &[(&str, &str, &str, &str)] = &[
         "endpoint handshake error mapping is exact: malformed=`InvalidArgument`",
         "malformed",
         "names the handshake condition; its mapping is the row for InvalidArgument",
+    ),
+    (
+        DIRECT,
+        "A reader refuses an unassigned code as malformed response metadata",
+        "malformed",
+        "describes the response; the error it maps to is ProtocolViolation",
+    ),
+    (
+        DIRECT,
+        "It is never read as `unsupported`",
+        "unsupported",
+        "says which code the refusal is NOT; the error is ProtocolViolation",
+    ),
+    (
+        DIRECT,
+        "any byte after the last field is malformed response metadata as well",
+        "malformed",
+        "describes the response; the error it maps to is ProtocolViolation",
+    ),
+    (
+        DIRECT,
+        "which is the unsupported-major shape by design",
+        "unsupported",
+        "names the negotiation failure's shape, not the reject reason",
     ),
 ];
 

@@ -37,7 +37,7 @@
     },
     {
       "name": "with-media-type",
-      "description": "A present media type, 1..128 ASCII bytes.",
+      "description": "A present media type, 1..128 printable ASCII bytes (0x20..0x7E).",
       "version": 1,
       "message_id": "3ac9f1027b6e45d8ba10c4e93f5d7a26",
       "sent_at_ms": 1786600000000,

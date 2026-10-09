@@ -33,6 +33,16 @@ use crate::version::{IPC_MAJOR, IpcVersion, UnsupportedMajor, supported};
 /// `close{Timeout}`. A protocol constant, not a profile value.
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long a client that negotiated keepalive goes without reading any
+/// frame before it ends the connection `Timeout` (`LOCAL-IPC.md`
+/// §Disconnect/reconnect and optional keepalive, A 2026-10-08). The wire
+/// tells the client neither the server's keepalive values nor whether it
+/// granted the feature, so the bound arms at the first `ping` read, and a
+/// reader paused on a full buffer suspends it. A protocol constant, not a
+/// profile value. It sits above the server's own wedge threshold at the
+/// defaults, so the server judges first.
+pub const CLIENT_SILENCE_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// The transport contract this implementation speaks: Model B is
 /// transport v2. Distinct from the IPC version.
 pub const TRANSPORT_CONTRACT_VERSION: &str = "2.0";

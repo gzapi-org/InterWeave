@@ -12,8 +12,11 @@
 //! the one read that never reaches the server -- [`IpcSession`]'s
 //! `events`, which takes from what the server already pushed.
 //!
-//! Three things differ from the in-process binding, all of the wire and
-//! all named in `LOCAL-IPC.md` (A 2026-09-30):
+//! Five things differ from the in-process binding, all of the wire and
+//! all named in the contracts: the first three in `LOCAL-IPC.md` (A
+//! 2026-09-30), the fourth in `LOCAL-CLIENT.md` §Taking events and the
+//! fifth in `LOCAL-IPC.md` §Disconnect/reconnect and optional keepalive
+//! (both A 2026-10-08):
 //!
 //! - Events are pushed, so `events` returns what has ARRIVED; one the
 //!   binding admitted may still be on its way.
@@ -25,6 +28,12 @@
 //! - The grouped order of `events` (notices, then direct, then
 //!   broadcast) holds within one server pump; across pumps batches are
 //!   read as they arrive.
+//! - What arrived before the end is still delivered: a positive `max`
+//!   takes it, then answers the end, while `events(0)` answers the end
+//!   at once. In process the queues are the runtime's and go with it.
+//! - The connection can end `Timeout` on the client's own bound: once a
+//!   `ping` has been read, `CLIENT_SILENCE_TIMEOUT` with no frame read
+//!   ends it, and every waiting call with it.
 
 #![cfg(unix)]
 #![forbid(unsafe_code)]

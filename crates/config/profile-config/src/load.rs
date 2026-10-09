@@ -418,6 +418,12 @@ mod tests {
         let uid = crate::effective_uid().expect("the uid");
         let names = &crate::persist::HostNames;
         open_guarded_as(&path, Ok(uid), names).expect("the control: ours");
+        // Off root only: a root-owned document is accepted by design, so
+        // as root this would fail for a reason other than the one named.
+        assert_ne!(
+            uid, 0,
+            "run as root, the document made here is root's, which the rule accepts"
+        );
         match open_guarded_as(&path, Ok(uid.wrapping_add(1)), names) {
             Err(LoadError::ConfigFileUnguarded { path: at, detail }) => {
                 assert_eq!(at, path);
@@ -435,8 +441,14 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used, clippy::panic)]
     fn a_group_writable_document_is_judged_for_this_process() {
+        #[derive(Clone)]
         struct Names;
         impl crate::persist::NameService for Names {
+            // A gate of this call's own: the test makes one read at a time
+            // and must not share the process's with a test beside it.
+            fn outstanding(&self) -> &'static crate::persist::ReadGate {
+                Box::leak(Box::new(crate::persist::ReadGate::new()))
+            }
             fn user_name(&self, uid: u32) -> std::io::Result<Option<String>> {
                 Ok(match uid {
                     0 => Some("root".to_owned()),
@@ -474,8 +486,14 @@ mod tests {
     #[allow(clippy::expect_used, clippy::panic)]
     fn a_group_writable_document_needs_the_owners_private_group() {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        #[derive(Clone)]
         struct Names(Option<&'static str>);
         impl crate::persist::NameService for Names {
+            // A gate of this call's own: the test makes one read at a time
+            // and must not share the process's with a test beside it.
+            fn outstanding(&self) -> &'static crate::persist::ReadGate {
+                Box::leak(Box::new(crate::persist::ReadGate::new()))
+            }
             fn user_name(&self, _: u32) -> std::io::Result<Option<String>> {
                 Ok(Some("alice".to_owned()))
             }

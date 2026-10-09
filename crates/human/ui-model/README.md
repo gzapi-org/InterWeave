@@ -9,7 +9,7 @@ It names the client's vocabulary (`interweave-human-client-api`) and nothing tha
 
 **Current status:** active workspace member since Stage 14 batch 6, tested against `tests/local-client-fake` through the facade.
 
-The person-facing English in `labels.rs` (`placeholder_en`, `UiText`, `fill`) is development placeholder copy, unreviewed, held in one module so Stage 15 can replace it whole (architect-cto's ruling, relay message 01a0fe85-6b39-7d6e-8b2a-f0cc4280c7a8). Its tests hold only what is structural: no delivery label reads as read, seen, processed or delivered; `Unknown` never reads as offline; every template is filled by name.
+The person-facing English in `labels.rs` (`placeholder_en`, `UiText`, `fill`) was read by language-culture (relay message 01a12001-199d-75d9-8e8d-cceb01ea9bbf); it shipped in Stage 14 as unreviewed placeholder copy under architect-cto's ruling (relay message 01a0fe85-6b39-7d6e-8b2a-f0cc4280c7a8), and a value added later is again a placeholder until language-culture finalises it. Its tests hold only what is structural: no delivery label reads as read, seen, processed or delivered; `Unknown` never reads as offline; every template is filled by name.
 
 ## The contract
 

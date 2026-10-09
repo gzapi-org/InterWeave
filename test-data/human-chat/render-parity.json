@@ -304,6 +304,23 @@
             "level": 0,
             "marker": "",
             "quoted": false,
+            "text": "[Image not shown]"
+          }
+        ],
+        "links": []
+      },
+      "name": "image-without-alt-not-fetched",
+      "text": "![](https://example.org/p.png)"
+    },
+    {
+      "drawn": {
+        "lines": [
+          {
+            "depth": 0,
+            "kind": "Text",
+            "level": 0,
+            "marker": "",
+            "quoted": false,
             "text": "<b>not bold</b> <script>alert(1)</script>"
           }
         ],

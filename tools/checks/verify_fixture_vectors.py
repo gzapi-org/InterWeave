@@ -143,6 +143,38 @@ def direct_message_v2_frame(vector: dict) -> str:
     return out.hex()
 
 
+def direct_response_v2_frame(vector: dict) -> str:
+    """Encode one AcceptedV2 or RejectedV2 response, returning hex.
+
+    From architecture/transport/libp2p/DIRECT.md §Response byte layout.
+    The reason numbering is read from schemas/direct/reject-reason's
+    enum, in order from 1, which is how that section defines it. It is
+    never read from the vector file: a verifier that took the numbering
+    from the artifact it checks would agree with any renumbering.
+    """
+    mid = bytes.fromhex(vector["message_id"])
+    if len(mid) != 16:
+        raise ValueError(f"message_id is {len(mid)} bytes; the response echoes exactly 16")
+    kind = vector["kind"]
+    if kind == "accepted":
+        label = vector["resolved_destination_endpoint"].encode("ascii")
+        if not 1 <= len(label) <= 64:
+            raise ValueError("resolved_destination_endpoint is 1..64 bytes and never empty")
+        out = b"\x01" + mid + bytes([len(label)]) + label
+    elif kind == "rejected":
+        schema = pathlib.Path(__file__).resolve().parent.parent.parent / (
+            "architecture/contracts/schemas/direct/reject-reason.schema.json"
+        )
+        reasons = json.loads(schema.read_text(encoding="utf-8"))["enum"]
+        out = b"\x02" + mid + bytes([reasons.index(vector["reason"]) + 1])
+    else:
+        raise ValueError(f"unknown response kind '{kind}'")
+    stated_len = vector.get("frame_len")
+    if stated_len is not None and stated_len != len(out):
+        raise ValueError(f"frame_len disagrees: stored {stated_len}, computed {len(out)}")
+    return out.hex()
+
+
 def endpoint_directory_v1_frame(vector: dict) -> str:
     """Encode one /interweave/endpoints/1.0.0 frame, returning hex.
 
@@ -342,7 +374,18 @@ def gossipsub_topic_key_v1(vector: dict) -> str:
         raise ValueError(f"ChannelId is {len(raw)} bytes; the contract allows 1..128")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}", channel):
         raise ValueError(f"ChannelId '{channel}' does not match the ADR-0025 grammar")
-    return hashlib.sha256(TOPIC_KEY_V1_DOMAIN + raw).hexdigest()
+    key = hashlib.sha256(TOPIC_KEY_V1_DOMAIN + raw).hexdigest()
+    # The wire topic is the key's lowercase hex (PUBSUB.md, ruled
+    # 2026-10-09), recomputed like frame_len beside a frame: a stored
+    # string nobody checks is the drift this script exists to catch.
+    # REQUIRED, not optional: the wire string is the contract, and a vector
+    # that dropped it would leave the spelling pinned by nothing here.
+    stated = vector.get("wire_topic")
+    if stated is None:
+        raise ValueError("wire_topic is missing: the wire string is the contract (PUBSUB.md)")
+    if stated != key:
+        raise ValueError(f"wire_topic disagrees: stored {stated}, computed {key}")
+    return key
 
 
 def kad_network_namespace_v1(vector: dict) -> dict[str, str]:
@@ -724,6 +767,9 @@ ALGORITHMS = {
     ),
     "direct-message-v2-frame": (
         direct_message_v2_frame, "frame_hex", True, ("payload_hex", "payload_utf8"),
+    ),
+    "direct-response-v2-frame": (
+        direct_response_v2_frame, "frame_hex", True, (),
     ),
     "endpoint-directory-v1-frame": (
         endpoint_directory_v1_frame, "frame_hex", True, (),
