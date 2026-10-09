@@ -623,6 +623,31 @@ impl ReservationManager {
         Ok(withdrawn)
     }
 
+    /// The network this profile is on GAINED an address: every relay
+    /// backing off is due now, once (`transport/libp2p/CONNECTIVITY.md`
+    /// §14; architect-cto's ruling of 2026-10-09, relay seq 55562).
+    ///
+    /// A relay that failed while this host was offline failed against
+    /// a route that may now work, and a relay-only profile waiting out
+    /// its backoff is unreachable for nothing. So the backoff ends now
+    /// and the next [`Self::tick`] asks it, within the target as ever;
+    /// the failure count is KEPT, so if the ask fails the ladder
+    /// resumes at its next step rather than starting over. Addresses
+    /// and every other state are untouched. Returns how many relays
+    /// were made due.
+    pub fn network_added(&mut self, now_ms: u64) -> usize {
+        let mut due = 0;
+        for candidate in self.candidates.values_mut() {
+            if let ReservationState::Backoff { until_ms, .. } = &mut candidate.state
+                && *until_ms > now_ms
+            {
+                *until_ms = now_ms;
+                due += 1;
+            }
+        }
+        due
+    }
+
     /// Relays that may be asked now, static before learned, then by
     /// identity.
     fn askable(&self, now_ms: u64) -> impl Iterator<Item = TransportIdentity> + '_ {
@@ -943,6 +968,35 @@ mod tests {
             m.state(&ident(R1)),
             Some(ReservationState::Backoff { attempts: 1, .. })
         ));
+    }
+
+    #[test]
+    fn a_network_addition_makes_a_backed_off_relay_due_once_on_its_ladder() {
+        let mut m = with_static(&[R1]);
+        assert_eq!(m.tick(0).len(), 1, "asked");
+        let _ = m.record_failed(&ident(R1), 0, 0).expect("known");
+        // The control: backing off for the ladder's first step.
+        assert!(m.tick(1_000).is_empty(), "waits its backoff");
+        assert_eq!(m.askable_now(1_000), 0);
+
+        assert_eq!(m.network_added(1_000), 1);
+        assert_eq!(m.tick(1_000).len(), 1, "asked at once");
+        // ONCE, on the ladder: the ask fails, and the delay is the
+        // ladder's second step, not its first again.
+        let _ = m.record_failed(&ident(R1), 1_000, 0).expect("known");
+        assert_eq!(
+            m.state(&ident(R1)),
+            Some(&ReservationState::Backoff {
+                until_ms: 1_000 + 2 * DEFAULT_RETRY_MIN_MS,
+                attempts: 2,
+            })
+        );
+        // Nothing backing off: nothing to make due.
+        assert_eq!(
+            with_static(&[R2]).network_added(0),
+            0,
+            "an idle relay is asked by the tick anyway"
+        );
     }
 
     #[test]
