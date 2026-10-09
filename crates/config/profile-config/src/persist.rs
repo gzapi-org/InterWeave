@@ -1766,10 +1766,10 @@ mod tests {
     }
 
     /// Reads made back to back on one service, with no pause between
-    /// them, are all made: each read's guard is cleared before its answer
-    /// reaches the caller, so a caller never finds its own finished read
-    /// still outstanding. Repeated, since the reordering it pins is a
-    /// race the caller usually wins.
+    /// them, are all made, and the gate is free the moment each answer
+    /// reaches the caller: it is given back before the answer is sent,
+    /// so the next read never waits on a finished one. Repeated, since
+    /// the reordering it pins is a race the caller usually wins.
     #[cfg(unix)]
     #[test]
     fn reads_back_to_back_are_both_made() {
@@ -1796,6 +1796,10 @@ mod tests {
                 std::time::Duration::from_secs(2),
             )
             .unwrap_or_else(|e| panic!("read {round}: {e}"));
+            assert!(
+                !names.0.is_busy(),
+                "read {round}: the gate is free once the answer arrives"
+            );
         }
     }
 
