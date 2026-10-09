@@ -289,8 +289,11 @@ impl EmbeddedHost {
     /// wildcard listeners alone, which on Android poll every 10 s and may
     /// see nothing at all; with a view, a hand-over is seen at once.
     ///
-    /// NEVER BLOCKS, from any thread: the latest view replaces one the
-    /// runtime has not yet read. After [`stop`](Self::stop) there is no
+    /// Callable from any thread, and does not wait: it is
+    /// `ComposedRuntime::network_changed`, a snapshot slot where the
+    /// latest view replaces one the runtime has not yet read
+    /// (`the_latest_view_replaces_one_not_yet_read` pins the slot). After
+    /// [`stop`](Self::stop) there is no
     /// host to call it on; while the runtime is stopping, a view goes
     /// nowhere.
     pub fn network_changed(&self, view: NetworkView) {
