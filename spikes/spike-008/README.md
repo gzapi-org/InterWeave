@@ -28,7 +28,7 @@ A dedicated test device, reachable over adb, on which the owner allowed the full
 
 ## The harness
 
-- **[`harness/`](./harness):** the Rust core, the **production human store** (`interweave-human-store`, pinned at d019ac06) over raw JNI. It seeds the three durable states through the store's own API, drives the transitions a client drives, and reports a census by TEST label, including the store's own `backup_eligible_content`. `harness/tests/store.rs` runs the same cycle on the host, with a reopen.
+- **[`harness/`](./harness):** the Rust core, the **production human store** (`interweave-human-store`, pinned at 03434804 since part 6; parts 1 to 5 ran at d019ac06) over raw JNI. It seeds the three durable states through the store's own API, drives the transitions a client drives, and reports a census by TEST label, including the store's own `backup_eligible_content`. `harness/tests/store.rs` runs the same cycle on the host, with a reopen.
 - **[`app/`](./app):**
   - a launcher Activity, the only start path;
   - the recovery Activity, non-exported, in its **own task** (`taskAffinity`, started with `FLAG_ACTIVITY_NEW_TASK`), `excludeFromRecents`, `FLAG_SECURE` set before content;
