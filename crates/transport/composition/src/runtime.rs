@@ -396,7 +396,8 @@ impl ComposedRuntime {
         let (event_tx, events) = mpsc::channel(options.event_capacity.max(1));
         let dropped = Arc::new(AtomicU64::new(0));
         // Taken before the driver takes the substrate: a view is handed
-        // straight to it, never queued behind the driver's work.
+        // straight to the substrate's snapshot slot, not through the
+        // driver's request queue.
         let network = swarm.network_monitor();
         let driver = Driver {
             swarm,
@@ -457,12 +458,14 @@ impl ComposedRuntime {
 
     /// Hand the substrate the platform's view of this host's addresses
     /// (§20 step 5; `transport/libp2p/CONNECTIVITY.md` §14's second
-    /// source): a snapshot, never a delta, empty when offline. NEVER
-    /// BLOCKS: the latest view replaces one not yet read. A view that
-    /// moves the host's known IP set is a network change -- what ran
-    /// from a departed IP closes, and an addition makes the peers held
-    /// off by their dial backoff dialable once; the same addresses again
-    /// are no change.
+    /// source): a snapshot, never a delta, empty when offline. It is
+    /// `NetworkMonitor::report`, a `watch` slot that replaces a view not
+    /// yet read and so does not wait (`tests/connectivity/tests/
+    /// network_change.rs`'s `the_latest_view_replaces_one_not_yet_read`).
+    /// A view that moves the host's known IP set is a network change --
+    /// what ran from a departed IP closes, and an addition makes the
+    /// peers held off by their dial backoff dialable, once per lift floor
+    /// (ADR-0011 A 2026-10-09); the same addresses again are no change.
     pub fn network_changed(&self, view: NetworkView) {
         self.network.report(view);
     }
