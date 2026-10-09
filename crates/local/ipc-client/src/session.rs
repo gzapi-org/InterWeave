@@ -9,7 +9,7 @@ use std::sync::Arc;
 use interweave_ipc_protocol::{
     ChannelParams, ClientInfo, DirectoryResult, EmptyResult, EndpointClaim, FEATURE_KEEPALIVE,
     Hello, HelloResponse, HelloTag, IPC_MAJOR, IPC_MAX_MINOR, IpcVersion, PublishParams,
-    QueryParams, Request, RequestedCapability, SendParams, SendResult,
+    QueryParams, ROUTE_NOTICE_SINCE_MINOR, Request, RequestedCapability, SendParams, SendResult,
 };
 use interweave_local_client_api::{
     DEFAULT_EVENT_QUEUE, DataCapability, DataSessionBinding, DataSessionPort, EndpointLease,
@@ -144,7 +144,7 @@ impl DataSessionBinding for IpcBinding {
     type Session = IpcSession;
 
     async fn open(&self, request: SessionRequest) -> Result<IpcSession, TransportError> {
-        let hello = hello(
+        let mut hello = hello(
             request.client_kind(),
             request.endpoint(),
             request
@@ -157,6 +157,13 @@ impl DataSessionBinding for IpcBinding {
             // refuses a claim without it, and the reader answers pings.
             [FEATURE_KEEPALIVE.to_owned()].into(),
         );
+        // A SESSION THAT DECLINES ROUTE NOTICES asks for the minor below
+        // them, so the server opens it the way it opens any client that
+        // cannot read them -- the request is honoured by negotiation,
+        // not dropped (#245 re-review N5).
+        if !request.route_notices() {
+            hello.ipc_version.minor = hello.ipc_version.minor.min(ROUTE_NOTICE_SINCE_MINOR - 1);
+        }
         let opened = open(&self.paths().data, hello, events_buffer).await?;
         let response = opened.response;
         let lease = match (request.endpoint(), &response.lease) {
