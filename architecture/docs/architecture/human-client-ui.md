@@ -88,14 +88,21 @@ The UI should distinguish `Unread` from `Kept`. Unread is temporary durability f
 
 ## 7. Connectivity display
 
-Ordinary users see normalized status only:
+Ordinary users see normalized status only — five states, no peer
+counts, no addresses:
 
 ```text
-Online — direct reachable
-Online — relay available
-Online — outbound/partial reachability
-Offline / transport stopped
+online, reachable directly
+online, reachable through a relay
+online, partial (some peers may not reach this client)
+offline (the transport reports itself unavailable)
+unknown (no status read yet, or the status connection is down — never shown as offline)
 ```
+
+The states are normative; the words a person reads for each are
+language-culture's: the states are the `Connectivity` enum in
+`crates/human/client-api`, the words its table in
+`crates/human/ui-model/src/labels.rs`, never quoted here (A 2026-10-09).
 
 An established peer route may optionally show `direct` or `relayed`. A DCUtR `PeerPathChanged` updates the route indicator without creating a fake reconnect/new-message event.
 
@@ -167,4 +174,4 @@ When Android is configured with both `availability_mode=stay-reachable` and `key
 
 ## 15. HumanChat reply rendering
 
-An inbound HumanChatV2 `reply_to` may reference an application message that is not present in the current retention/session store. The message is still valid and must render normally; the client may show a neutral `Referenced message unavailable` placeholder and preserve the referenced ID for bounded diagnostics/retention metadata. It must not auto-fetch, create transport traffic, reject the message, or infer tampering solely because the referenced message is absent locally.
+An inbound HumanChatV2 `reply_to` may reference an application message that is not present in the current retention/session store. The message is still valid and must render normally; the client may show a neutral placeholder (its wording language-culture's, in `labels.rs`) and preserve the referenced ID for bounded diagnostics/retention metadata. It must not auto-fetch, create transport traffic, reject the message, or infer tampering solely because the referenced message is absent locally.
