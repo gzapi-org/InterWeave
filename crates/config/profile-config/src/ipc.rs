@@ -306,9 +306,11 @@ mod tests {
     /// client's timer arms on.
     #[test]
     fn the_bound_is_the_protocols_client_silence_timeout() {
+        // Compared as Durations: `as_millis` truncates, so a protocol
+        // bound off by less than a millisecond would have passed.
         assert_eq!(
-            u128::from(CLIENT_SILENCE_TIMEOUT_MS),
-            interweave_ipc_protocol::CLIENT_SILENCE_TIMEOUT.as_millis()
+            std::time::Duration::from_millis(u64::from(CLIENT_SILENCE_TIMEOUT_MS)),
+            interweave_ipc_protocol::CLIENT_SILENCE_TIMEOUT
         );
     }
 
