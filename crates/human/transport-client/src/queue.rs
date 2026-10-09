@@ -234,7 +234,7 @@ mod tests {
                 }),
                 None
             ),
-            "a change since the reconnect, after the disconnection"
+            "the path since the return, after the disconnection"
         );
     }
 
