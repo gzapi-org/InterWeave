@@ -18,6 +18,7 @@
 #![allow(clippy::expect_used, clippy::panic)]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -38,12 +39,15 @@ use interweave_local_client_api::{
 };
 use interweave_transport_api::{
     BroadcastMessageV1, ChannelId, DirectDestination, EndpointDirectoryV1, EndpointId,
-    MAX_PAYLOAD_BYTES, MessageId, Payload, TransportError, TransportIdentity,
+    MAX_PAYLOAD_BYTES, MessageId, Payload, PeerPath, TransportError, TransportIdentity,
 };
 
 mod common;
 
-use common::{Daemon, Home, PATIENCE, example, free_port, human, schema_validator};
+use common::relay::Relay;
+use common::{
+    Daemon, Home, PATIENCE, example, free_port, human, relayed_example, schema_validator,
+};
 
 /// Which way a captured payload arrived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -360,16 +364,16 @@ async fn two_daemons() -> (
     (a, a_daemon, a_peer, b, b_daemon, b_peer)
 }
 
-/// Step both sides until `done` holds, failing with both daemons' logs
+/// Step every side until `done` holds, failing with every daemon's log
 /// when `PATIENCE` runs out. `between` runs each turn, for a sender that
 /// must keep trying.
-async fn pump(
-    sides: &mut [Side; 2],
+async fn pump<const N: usize>(
+    sides: &mut [Side; N],
     clock: Instant,
-    daemons: &[&Daemon; 2],
+    daemons: &[&Daemon; N],
     what: &str,
-    mut between: impl AsyncFnMut(&mut [Side; 2], u64),
-    done: impl Fn(&[Side; 2]) -> bool,
+    mut between: impl AsyncFnMut(&mut [Side; N], u64),
+    done: impl Fn(&[Side; N]) -> bool,
 ) {
     let deadline = Instant::now() + PATIENCE;
     loop {
@@ -381,12 +385,13 @@ async fn pump(
             return;
         }
         between(sides, now).await;
-        assert!(
-            Instant::now() < deadline,
-            "{what} did not happen in time\nA:\n{}\nB:\n{}",
-            daemons[0].log(),
-            daemons[1].log()
-        );
+        if Instant::now() >= deadline {
+            let mut logs = String::new();
+            for (daemon, name) in daemons.iter().zip('A'..) {
+                let _ = writeln!(logs, "{name}:\n{}", daemon.log());
+            }
+            panic!("{what} did not happen in time\n{logs}");
+        }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
@@ -598,6 +603,235 @@ async fn human_chat_crosses_two_daemons_direct_and_broadcast_plain_and_compresse
     }
     assert!(a_daemon.terminate().await.success(), "{}", a_daemon.log());
     assert!(b_daemon.terminate().await.success(), "{}", b_daemon.log());
+}
+
+/// The route indicator `side` would show on its direct conversation with
+/// `peer`: `None` while it has no such conversation or no path is known.
+fn path_to(side: &Side, peer: &TransportIdentity) -> Option<PeerPath> {
+    side.model
+        .conversations()
+        .into_iter()
+        .find(|c| matches!(&c.key, ConversationKey::Direct { peer: p, .. } if p == peer))
+        .and_then(|c| side.model.path(&c.key))
+}
+
+/// Plan §18's carried limit, through the person's client: B's only
+/// route to A is a circuit through a relay, and `HumanChatV2` crosses it
+/// directly both ways, each side's facade, store and model as a person's
+/// client runs them; C, given A's own address, is the direct control in
+/// the same run. Each side's route indicator reads the path its route
+/// began on, relayed between A and B and direct between A and C; and
+/// when B's daemon restarts, A's indicator goes blank with the
+/// connection and reads relayed again when B returns.
+///
+/// What makes the circuit the only route, and what this does not prove,
+/// are `relayed_path.rs`'s module note: the same harness, read there at
+/// the IPC session rather than through the client.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_relayed_peer_reads_relayed_through_the_client_beside_a_direct_control() {
+    let (a, b, c) = (
+        Home::new("human-desktop"),
+        Home::new("human-desktop"),
+        Home::new("human-desktop"),
+    );
+    let (a_peer, b_peer, c_peer) = (a.write_key(), b.write_key(), c.write_key());
+    let relay = Relay::start(&[&a_peer, &b_peer, &c_peer]).await;
+    let loopback = std::net::Ipv4Addr::LOCALHOST;
+    let a_listen = format!("/ip4/127.0.0.1/tcp/{}", free_port(loopback));
+    let direct_to_a = format!("{a_listen}/p2p/{}", a_peer.as_str());
+    a.write_config(&relayed_example(
+        &[&b_peer, &c_peer],
+        &a_listen,
+        &relay,
+        None,
+    ));
+    b.write_config(&relayed_example(
+        &[&a_peer],
+        &format!("/ip4/127.0.0.1/tcp/{}", free_port(loopback)),
+        &relay,
+        Some(&relay.circuit_to(&a_peer)),
+    ));
+    c.write_config(&relayed_example(
+        &[&a_peer],
+        &format!("/ip4/127.0.0.1/tcp/{}", free_port(loopback)),
+        &relay,
+        Some(&direct_to_a),
+    ));
+    let mut a_daemon = a.start(&[]);
+    a_daemon.serving(&a).await;
+    // A's reservation first, so the relay has somewhere to carry B's
+    // circuit when B starts.
+    let deadline = Instant::now() + PATIENCE;
+    while !relay.seen().await.reservations.contains(&pid(&a_peer)) {
+        assert!(
+            Instant::now() < deadline,
+            "A never reserved on the relay:\n{}",
+            a_daemon.log()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let mut b_daemon = b.start(&[]);
+    b_daemon.serving(&b).await;
+    let mut c_daemon = c.start(&[]);
+    c_daemon.serving(&c).await;
+
+    let clock = Instant::now();
+    let mut sides = [
+        Side::new(&a, a_peer.clone(), 0),
+        Side::new(&b, b_peer.clone(), 0),
+        Side::new(&c, c_peer.clone(), 0),
+    ];
+    let names = ["A", "B", "C"];
+    pump(
+        &mut sides,
+        clock,
+        &[&a_daemon, &b_daemon, &c_daemon],
+        "every session ready",
+        async |_, _| {},
+        |s| s.iter().all(Side::is_ready),
+    )
+    .await;
+
+    // B -> A and A -> B over the circuit; C -> A and A -> C direct.
+    let mut sent = Vec::new();
+    for (serial, (from, to)) in (1..).zip([(1, 0), (0, 1), (2, 0), (0, 2)]) {
+        let message = envelope(serial, names[from], false);
+        let destination = Destination::Direct {
+            peer: sides[to].peer.clone(),
+            endpoint: Some(human()),
+        };
+        sides[from].send(destination, &message, 0).await;
+        sent.push((from, to, message.app_message_id));
+    }
+    pump(
+        &mut sides,
+        clock,
+        &[&a_daemon, &b_daemon, &c_daemon],
+        "every direct message accepted and received",
+        async |_, _| {},
+        |s| {
+            sent.iter().all(|(from, to, id)| {
+                s[*to].got(id).is_some()
+                    && matches!(
+                        s[*from].outbound.get(id),
+                        Some(OutboundStatus::Accepted { .. })
+                    )
+            })
+        },
+    )
+    .await;
+
+    // The indicator on each conversation: said once, at the route's
+    // begin, so the first value shown is the one to read.
+    let pairs = [(0, 1), (1, 0), (0, 2), (2, 0)];
+    pump(
+        &mut sides,
+        clock,
+        &[&a_daemon, &b_daemon, &c_daemon],
+        "every route indicator set",
+        async |_, _| {},
+        |s| {
+            pairs
+                .iter()
+                .all(|(of, to)| path_to(&s[*of], &s[*to].peer).is_some())
+        },
+    )
+    .await;
+    for (of, to, want) in [
+        (0, 1, PeerPath::Relayed),
+        (1, 0, PeerPath::Relayed),
+        (0, 2, PeerPath::Direct),
+        (2, 0, PeerPath::Direct),
+    ] {
+        assert_eq!(
+            path_to(&sides[of], &sides[to].peer),
+            Some(want),
+            "{} of {}",
+            names[of],
+            names[to]
+        );
+    }
+    // The relay's record says the same: it carried B's circuit to A and
+    // was asked nothing for C, so the direct reading is not the relay's.
+    let seen = relay.seen().await;
+    assert!(
+        seen.circuits.contains(&(pid(&b_peer), pid(&a_peer))),
+        "the relay carried B's circuit to A: {seen:?}"
+    );
+    let touches_c =
+        |(s, d): &(libp2p::PeerId, libp2p::PeerId)| *s == pid(&c_peer) || *d == pid(&c_peer);
+    assert!(
+        !seen.circuits.iter().any(touches_c) && !seen.denied.iter().any(touches_c),
+        "the control asked the relay for nothing: {seen:?}"
+    );
+
+    // B's daemon restarts: A's indicator for B goes blank with the
+    // connection, and reads relayed again once B is back and writes.
+    let circuits_before = seen.circuits.len();
+    assert!(b_daemon.terminate().await.success(), "{}", b_daemon.log());
+    pump(
+        &mut sides,
+        clock,
+        &[&a_daemon, &b_daemon, &c_daemon],
+        "A's indicator for B blank at the disconnection",
+        async |_, _| {},
+        |s| path_to(&s[0], &s[1].peer).is_none(),
+    )
+    .await;
+    let mut b_daemon = b.start(&[]);
+    b_daemon.serving(&b).await;
+    pump(
+        &mut sides,
+        clock,
+        &[&a_daemon, &b_daemon, &c_daemon],
+        "B's session ready again",
+        async |_, _| {},
+        |s| s[1].is_ready(),
+    )
+    .await;
+    let again = envelope(5, "B", false);
+    let to_a = Destination::Direct {
+        peer: a_peer.clone(),
+        endpoint: Some(human()),
+    };
+    sides[1].send(to_a, &again, 0).await;
+    pump(
+        &mut sides,
+        clock,
+        &[&a_daemon, &b_daemon, &c_daemon],
+        "B's message after its restart, and A's indicator for B set again",
+        async |_, _| {},
+        |s| s[0].got(&again.app_message_id).is_some() && path_to(&s[0], &s[1].peer).is_some(),
+    )
+    .await;
+    assert_eq!(
+        path_to(&sides[0], &b_peer),
+        Some(PeerPath::Relayed),
+        "A of B after B's return"
+    );
+    assert!(
+        relay.seen().await.circuits.len() > circuits_before,
+        "the return took a new circuit"
+    );
+
+    for side in &mut sides {
+        side.client.close().await;
+    }
+    for (daemon, name) in [
+        (&mut a_daemon, "A"),
+        (&mut b_daemon, "B"),
+        (&mut c_daemon, "C"),
+    ] {
+        assert!(
+            daemon.terminate().await.success(),
+            "{name}: {}",
+            daemon.log()
+        );
+    }
+}
+
+fn pid(peer: &TransportIdentity) -> libp2p::PeerId {
+    peer.as_str().parse().expect("a libp2p identity")
 }
 
 /// The flip's evidence (exit gate (b)): every payload a daemon handed
