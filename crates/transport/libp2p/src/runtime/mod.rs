@@ -240,7 +240,10 @@ fn lift_held_off(
 ) {
     let _ = manager.network_added(now);
     if let Some(state) = relay_state {
-        let _ = relay_driver::network_added(state, now);
+        // AFTER the gate's lift, reading what it left standing: a relay
+        // peer the gate still holds off is not asked, or the ask would
+        // be refused and the ladder climb for nothing.
+        let _ = relay_driver::network_added(state, now, |relay| manager.holds_off(relay, now));
     }
 }
 

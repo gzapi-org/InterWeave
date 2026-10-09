@@ -1044,3 +1044,86 @@ async fn coming_online_after_an_offline_start_asks_the_backed_off_relay_at_once(
 
     subject.shutdown().await.expect("shutdown");
 }
+
+/// Whether `subject` reports a failed ask on `relay` within `window`.
+async fn next_failure(
+    subject: &mut SwarmRuntime,
+    relay: &TransportIdentity,
+    window: Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + window;
+    while let Ok(Some(event)) = tokio::time::timeout_at(deadline, subject.next_event()).await {
+        if matches!(&event, SwarmEvent::RelayReservationChanged { relay: r, outcome: RelayReservationOutcome::Failed, .. }
+            if r == relay)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// THE TWO FLOORS MOVE TOGETHER (ADR-0011 A 2026-10-09): the relay stays
+/// down. A first addition lifts the gate and the ladder, and the ask is
+/// made and fails -- the live control -- which puts the relay PEER back
+/// in the gate's backoff for its 30 s floor. A second addition 6 s later
+/// is past the ladder's 5 s floor but inside the gate's: the relay is
+/// not asked, where asking would only be refused at the gate and climb
+/// the ladder a rung.
+#[tokio::test]
+async fn an_addition_inside_the_gates_floor_leaves_the_relay_ladder_alone() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let relay_keys = identity::Keypair::generate_ed25519();
+    let relay_peer = identity_of(&relay_keys);
+    let relay_addr = bound(&mut relay_server(relay_keys)).await;
+    let subject_id = ProfileIdentity::generate();
+    let mut relay_settings = settings(
+        vec![StaticRelay {
+            peer: relay_peer.clone(),
+            address: format!("{relay_addr}/p2p/{}", relay_peer.as_str()),
+        }],
+        false,
+    );
+    relay_settings.reservations.retry_min_ms = 5_000;
+    relay_settings.reservations.retry_max_ms = 600_000;
+    let mut subject = SwarmRuntime::start(
+        &subject_id,
+        SubstrateConfig {
+            relay_client: Some(relay_settings),
+            ..SubstrateConfig::default()
+        },
+        infrastructure_only(&[&relay_peer]),
+    )
+    .expect("the runtime starts");
+    let _private = subject
+        .listen(format!("/ip4/{ip}/tcp/0").parse().expect("valid"))
+        .await
+        .expect("the subject's private listener");
+    assert!(
+        next_failure(&mut subject, &relay_peer, PATIENCE).await,
+        "the first ask fails: the relay is down"
+    );
+
+    // THE FIRST ADDITION: both floors clear, asked, and it fails again.
+    subject.network_changed(NetworkView {
+        addresses: vec![ip.into(), Ipv4Addr::new(10, 255, 0, 1).into()],
+    });
+    assert!(
+        next_failure(&mut subject, &relay_peer, Duration::from_secs(4)).await,
+        "the control: the addition made the relay due and it was asked"
+    );
+
+    // THE SECOND, past the ladder's floor and inside the gate's.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    subject.network_changed(NetworkView {
+        addresses: vec![
+            ip.into(),
+            Ipv4Addr::new(10, 255, 0, 1).into(),
+            Ipv4Addr::new(10, 255, 0, 2).into(),
+        ],
+    });
+    assert!(
+        !next_failure(&mut subject, &relay_peer, Duration::from_secs(3)).await,
+        "inside the gate's floor the relay is not asked"
+    );
+    subject.shutdown().await.expect("shutdown");
+}
