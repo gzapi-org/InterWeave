@@ -246,7 +246,8 @@ cat > "$R/fixtures/gossipsub/g.json" <<'EOF'
       "name": "general",
       "frozen_by": "0047",
       "channel_id": "general",
-      "sha256": "82695daad230a8a8ddb6e43aae1063e4f611ded53d710f48b2ed3d206211c3bc"
+      "sha256": "82695daad230a8a8ddb6e43aae1063e4f611ded53d710f48b2ed3d206211c3bc",
+      "wire_topic": "82695daad230a8a8ddb6e43aae1063e4f611ded53d710f48b2ed3d206211c3bc"
     }
   ]
 }
@@ -394,6 +395,24 @@ out="$(run "$R")"
     && ok "  an over-long integer and a non-UTF-8 file each reported, the run going on" || bad "  not both reported: $out"
 [[ "$out" == *"c-dangling.json: unreadable"* && "$out" == *"d-deep.json: unreadable"* ]] \
     && ok "  a dangling symlink and a too-deep nesting each reported too" || bad "  not reported: $out"
+
+# ── gossipsub topic key: the wire topic is the contract ─────────────────
+TOPIC_KEY="82695daad230a8a8ddb6e43aae1063e4f611ded53d710f48b2ed3d206211c3bc"
+make_topic() {
+    local r="$1" extra="$2"
+    mkdir -p "$r/fixtures/gossipsub" "$r/architecture/adr"
+    : > "$r/architecture/adr/0025-channel-id-topic-mapping.md"
+    printf '{ "algorithm": { "id": "gossipsub-topic-key-v1" }, "adr": ["0025"], "vectors": [ { "name": "general", "channel_id": "general", "sha256": "%s"%s } ] }\n' \
+        "$TOPIC_KEY" "$extra" > "$r/fixtures/gossipsub/topic.json"
+}
+R="$TMP/topic-ok"; make_topic "$R" ", \"wire_topic\": \"$TOPIC_KEY\""
+[ "$(run_code "$R")" = "0" ] && ok "a topic key with its wire_topic recomputes and passes" || bad "the wire topic should pass: $(run "$R")"
+R="$TMP/topic-upper"; make_topic "$R" ", \"wire_topic\": \"$(printf '%s' "$TOPIC_KEY" | tr 'a-f' 'A-F')\""
+out="$(run "$R")"
+[ "$(run_code "$R")" = "1" ] && [[ "$out" == *"wire_topic disagrees"* ]] && ok "an upper-case wire_topic is refused: the spelling is the contract" || bad "upper-case wire_topic should fail: $out"
+R="$TMP/topic-missing"; make_topic "$R" ""
+out="$(run "$R")"
+[ "$(run_code "$R")" = "1" ] && [[ "$out" == *"wire_topic is missing"* ]] && ok "a topic key without wire_topic is refused" || bad "a missing wire_topic should fail: $out"
 
 # ── usage ────────────────────────────────────────────────────────────────
 [ "$(run_code "$TMP/nothing-here")" = "2" ] && ok "a missing fixtures/ exits 2" || bad "missing tree should exit 2"

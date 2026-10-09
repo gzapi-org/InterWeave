@@ -378,8 +378,12 @@ def gossipsub_topic_key_v1(vector: dict) -> str:
     # The wire topic is the key's lowercase hex (PUBSUB.md, ruled
     # 2026-10-09), recomputed like frame_len beside a frame: a stored
     # string nobody checks is the drift this script exists to catch.
+    # REQUIRED, not optional: the wire string is the contract, and a vector
+    # that dropped it would leave the spelling pinned by nothing here.
     stated = vector.get("wire_topic")
-    if stated is not None and stated != key:
+    if stated is None:
+        raise ValueError("wire_topic is missing: the wire string is the contract (PUBSUB.md)")
+    if stated != key:
         raise ValueError(f"wire_topic disagrees: stored {stated}, computed {key}")
     return key
 
