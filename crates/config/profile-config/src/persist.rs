@@ -924,16 +924,19 @@ impl ReadGate {
     }
 
     /// Take the gate, waiting for an outstanding read to end until
-    /// `until`; `false` when it had not ended by then.
-    fn enter(&self, until: std::time::Instant) -> bool {
+    /// `until`: `None` when it had not ended by then, else whether this
+    /// caller had to wait for it.
+    fn enter(&self, until: std::time::Instant) -> Option<bool> {
         let mut busy = self
             .busy
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut waited = false;
         while *busy {
+            waited = true;
             let now = std::time::Instant::now();
             if now >= until {
-                return false;
+                return None;
             }
             busy = self
                 .freed
@@ -942,7 +945,7 @@ impl ReadGate {
                 .0;
         }
         *busy = true;
-        true
+        Some(waited)
     }
 
     /// Give the gate back, and wake whoever waits for it.
@@ -999,12 +1002,22 @@ fn read_names(
     // earlier read and the wait for this one's answer share it.
     let until = std::time::Instant::now() + deadline;
     let gate = names.outstanding();
-    if !gate.enter(until) {
-        return Err(format!(
-            "an earlier name-service read has not returned within {deadline:?}"
-        ));
-    }
+    let earlier = || format!("an earlier name-service read has not returned within {deadline:?}");
+    let Some(waited) = gate.enter(until) else {
+        return Err(earlier());
+    };
     let returned = ReadReturned(gate);
+    // No budget left -- spent waiting for an earlier read, or none to
+    // begin with: refuse without starting a read that could only be
+    // abandoned (`a_read_with_no_budget_left_starts_no_thread`). The
+    // gate goes back as `returned` drops.
+    if std::time::Instant::now() >= until {
+        return Err(if waited {
+            earlier()
+        } else {
+            format!("no time was left to read it within {deadline:?}")
+        });
+    }
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     let names = names.clone();
     std::thread::Builder::new()
@@ -1878,6 +1891,54 @@ mod tests {
                 && took < std::time::Duration::from_millis(1300),
             "the wait and the answer ended at the caller's one deadline: {took:?}"
         );
+    }
+
+    /// A read with no budget left is refused without being made: no
+    /// thread starts, so nothing reads the service, and the gate is free
+    /// afterwards. A zero budget is named as that.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_with_no_budget_left_starts_no_thread() {
+        #[derive(Clone)]
+        struct Counted(
+            &'static ReadGate,
+            std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        );
+        impl NameService for Counted {
+            fn outstanding(&self) -> &'static ReadGate {
+                self.0
+            }
+            fn user_name(&self, _: u32) -> std::io::Result<Option<String>> {
+                self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(Some("alice".to_owned()))
+            }
+            fn group(&self, _: u32) -> std::io::Result<Option<(String, Vec<String>)>> {
+                Ok(Some(("alice".to_owned(), Vec::new())))
+            }
+        }
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let names = Counted(fresh_guard(), std::sync::Arc::clone(&reads));
+        let detail =
+            owners_private_group_within(&names, 1000, 1001, Ok(false), std::time::Duration::ZERO)
+                .expect_err("no budget, no read");
+        assert!(detail.contains("no time was left to read it"), "{detail}");
+        // Long enough for a wrongly started read to have run.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(
+            reads.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no read was made"
+        );
+        assert!(!names.0.is_busy(), "the gate went back");
+        owners_private_group_within(
+            &names,
+            1000,
+            1001,
+            Ok(false),
+            std::time::Duration::from_secs(2),
+        )
+        .expect("the control: with a budget, the read is made");
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// A name service that never answers within the deadline is refused
