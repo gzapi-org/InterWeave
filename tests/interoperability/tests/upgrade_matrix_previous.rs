@@ -56,6 +56,12 @@ use interweave_transport_api::{
 
 const VARIABLE: &str = "INTERWEAVE_PREVIOUS_BUILDS";
 
+/// What a daemon of either build prints when its listen port is taken,
+/// measured on HEAD and on 45ba3928 alike: `transport-daemon: the runtime:
+/// substrate: transport: `. Every refusal starts `transport-daemon:`, so
+/// only this longer text tells a taken port from any other early exit.
+const PORT_TAKEN: &str = "the runtime: substrate: transport:";
+
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -358,7 +364,7 @@ impl Drop for Daemon {
 }
 
 /// Run `command` to completion within `PATIENCE`, killing it if it hangs.
-fn run_bounded(mut command: Command, what: &str) -> Output {
+fn run_bounded(mut command: Command, what: &str, context: &dyn Fn() -> String) -> Output {
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -374,8 +380,9 @@ fn run_bounded(mut command: Command, what: &str) -> Output {
             let _ = child.kill();
             let out = child.wait_with_output().expect("its output");
             panic!(
-                "{what} took more than {PATIENCE:?}:\n{}",
-                String::from_utf8_lossy(&out.stderr)
+                "{what} took more than {PATIENCE:?}:\n{}\n--- the daemon it talked to ---\n{}",
+                String::from_utf8_lossy(&out.stderr),
+                context()
             );
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -498,7 +505,11 @@ async fn each_previous_transportctl_is_served_by_heads_daemon() {
         for args in [&["status"][..], &["endpoints", "list"][..]] {
             let mut command = home.command(&entry.transportctl);
             command.args(args);
-            let out = run_bounded(command, &format!("{}: transportctl {args:?}", entry.label));
+            let out = run_bounded(
+                command,
+                &format!("{}: transportctl {args:?}", entry.label),
+                &|| head.log(),
+            );
             let stdout = String::from_utf8_lossy(&out.stdout);
             assert!(
                 out.status.success(),
@@ -527,8 +538,8 @@ async fn each_previous_transportctl_is_served_by_heads_daemon() {
 
 /// A port free on `ip` now, so an address can be written into the other
 /// side's profile before its daemon starts. Picked, released and bound
-/// later: another process can take it in between, which fails the row
-/// loudly (the daemon refuses to listen), never silently.
+/// later: if another process takes it in between, that daemon exits before
+/// serving with [`PORT_TAKEN`], and the peer row retries on fresh ports.
 fn free_port(ip: Ipv4Addr) -> u16 {
     TcpListener::bind((ip, 0))
         .expect("binds")
@@ -555,9 +566,9 @@ async fn each_previous_daemon_exchanges_with_head_both_ways() {
         // status carries no listen address, in either build, so the other
         // side's profile must name it before the daemon starts. A port
         // taken in between makes that daemon exit before serving with a
-        // transport error ("the runtime: substrate: transport", measured on
-        // 45ba3928), and the attempt is retried on fresh ports. Any other
-        // early exit, or a third taken port in a row, fails the row.
+        // transport error ([`PORT_TAKEN`]), and the attempt is retried on
+        // fresh ports. Any other early exit, or a third taken port in a
+        // row, fails the row.
         let mut attempt = 0;
         let (old_home, old, old_peer, head_home, head) = loop {
             attempt += 1;
@@ -569,7 +580,7 @@ async fn each_previous_daemon_exchanges_with_head_both_ways() {
             };
             let head_listen = format!("/ip4/{ip}/tcp/{head_port}");
             let old_listen = format!("/ip4/{ip}/tcp/{old_port}");
-            let port_taken = |log: &str| attempt < 3 && log.contains("transport");
+            let port_taken = |log: &str| attempt < 3 && log.contains(PORT_TAKEN);
 
             let old_home = Home::new("old");
             old_home.write_config(&profile_yaml(
@@ -690,7 +701,7 @@ async fn each_previous_daemon_exchanges_with_head_both_ways() {
         old.within("a join", at_old.join(channel.clone()))
             .await
             .expect("joins");
-        let ctx = format!("{}\n{}", entry.label, logs());
+        let ctx = || format!("{}\n{}", entry.label, logs());
         broadcast_until_received(&at_head, &at_old, &channel, "head broadcast", &ctx).await;
         broadcast_until_received(&at_old, &at_head, &channel, "old broadcast", &ctx).await;
 
@@ -709,7 +720,7 @@ async fn broadcast_until_received<F, T>(
     to: &T,
     channel: &ChannelId,
     what: &str,
-    ctx: &str,
+    ctx: &dyn Fn() -> String,
 ) where
     F: DataSessionPort,
     T: DataSessionPort,
@@ -734,7 +745,8 @@ async fn broadcast_until_received<F, T>(
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "{what} never arrived: {ctx}"
+            "{what} never arrived: {}",
+            ctx()
         );
     }
 }
