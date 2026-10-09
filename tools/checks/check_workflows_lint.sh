@@ -12,7 +12,10 @@
 #
 # Every workflow passes actionlint (its run: scripts through shellcheck)
 # and zizmor (the workflow security audit), with the release of each
-# pinned HERE, once, for tree checks and for `cargo xtask checks` before a push.
+# pinned ONCE, in agent-fabric's tools/fabric/github/workflows_lint.py at
+# the fabric-ref this repository pins: this script forwards there
+# (runtime/github/check-workflows-lint.sh), for tree checks and for
+# `cargo xtask checks` before a push.
 #
 # WHY ONE SCRIPT. The two tools used to be downloaded inline in
 # the tree-checks job, so a session could learn of a finding only from a
@@ -31,8 +34,9 @@
 # and its reason.
 #
 # THE TOOLS are release binaries, fetched once into the cache
-# (INTERWEAVE_TOOL_CACHE, else $XDG_CACHE_HOME/interweave-tools, else
-# ~/.cache/interweave-tools; CI points it at $RUNNER_TEMP), each checked
+# (AGENT_FABRIC_TOOL_CACHE, else INTERWEAVE_TOOL_CACHE, which this script
+# hands on under the fabric's name, else $XDG_CACHE_HOME/agent-fabric-tools,
+# else ~/.cache/agent-fabric-tools; CI points it at $RUNNER_TEMP), each checked
 # against its sha256 before it is extracted or run. A cached binary is
 # reused only from a directory named for its version and digest, so a
 # pin bump fetches afresh. shellcheck comes from PATH: actionlint skips

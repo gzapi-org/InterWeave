@@ -532,7 +532,8 @@ jobs:
       # Every workflow through actionlint (its run: scripts through the
       # shellcheck pinned above, which is on PATH from here) and zizmor
       # (the workflow security audit). The releases are pinned, and
-      # checked against their sha256, in the guard itself, so
+      # checked against their sha256, in agent-fabric's workflows_lint.py
+      # at .agent-fabric/fabric-ref, which the guard forwards to, so
       # `cargo xtask checks` runs exactly this before a push.
       - name: Every workflow passes actionlint and zizmor
         env:
