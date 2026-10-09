@@ -4803,7 +4803,7 @@ mod tests {
             // one of the existing sites passes -- no count here, because
             // this one has now been restated four times and been wrong
             // twice. Said rather than assumed. Review findings on PR #86.
-            let routes: [(&str, usize); 10] = [
+            let routes: [(&str, usize); 11] = [
                 // `learn_route`, the only direct caller.
                 ("learn_address(", 1),
                 // `settle_failed_dial`'s non-structural arm for the extra
@@ -4837,6 +4837,10 @@ mod tests {
                 ("record_permanent_failure(", 3),
                 ("record_identity_mismatch(", 1),
                 ("record_success(", 1),
+                // The event loop's settlement of a circuit dial that never
+                // reached its relay: learns `ticket.address()`, as
+                // `record_failure` does, and scores nothing.
+                ("record_relay_hop_unreached(", 1),
                 // THE QUARANTINE WRITE ITSELF, expected ZERO in every file
                 // including this one. `ConnectionPolicy::record_address_failure`
                 // is `pub`, `mod.rs` builds a `ConnectionPolicy` in production,
