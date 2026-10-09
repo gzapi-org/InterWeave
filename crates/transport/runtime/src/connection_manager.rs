@@ -1843,7 +1843,7 @@ impl ConnectionManager {
     }
 
     /// The network this profile is on GAINED an address: every peer it
-    /// holds off is dialable now, once
+    /// holds off is dialable now, once per lift floor (below)
     /// (`transport/libp2p/CONNECTIVITY.md` §14; architect-cto's ruling
     /// of 2026-10-09, relay seq 33736).
     ///
@@ -1855,8 +1855,8 @@ impl ConnectionManager {
     /// reconnect both find the peer dialable -- while the retry's
     /// attempt number, which sets the next delay, is KEPT: the dial goes through
     /// the gate like any other, and if it fails the backoff resumes
-    /// from where it stood. One redial per peer per change: the first
-    /// failure after the lift sets the backoff again.
+    /// from where it stood: the first failure after the lift sets the
+    /// backoff again.
     ///
     /// The RETRY is made due for an allowlisted peer (`DataPlaneTrusted`)
     /// only: this scheduler's own dial to an infrastructure peer is
