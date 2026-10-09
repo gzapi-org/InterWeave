@@ -4906,14 +4906,14 @@ Android does not add a localhost daemon/IPC transport just to imitate desktop.
 
 1. wire the Stage 12 in-process `LocalDataSession` / `LocalAdminPort` adapter (§15 (3)) into the Android service — not a second adapter;
 2. Activity/service lifecycle;
-3. foreground service;
+3. foreground service — its first instrumented run on an API 34+ device, the API level recorded, is where ADR-0041's `remoteMessaging` target-SDK condition is met or refused (SPIKE-008 ran on API 30, which accepts the declaration without enforcing it);
 4. notifications;
-5. Android network-change binding;
-6. Android Keystore wrapping of exact Ed25519 secret;
+5. Android network-change binding — every network change, a Wi-Fi reconnect included (SPIKE-008 L7: the same network returns as a new one), is a re-bind of the embedded runtime's listeners and dials;
+6. Android Keystore wrapping of exact Ed25519 secret — the IWK1 v1 envelope adopted by SPIKE-009's Result as the format, written as contract text (an ADR-0042 amendment, `android-key-custody.md`), both documents gaining the note that their "SPIKE-009 validates / must verify" sentences (ADR-0042:31, custody doc §SPIKE-009) are carried to steps 7–8;
 7. secure recovery Activity;
 8. secure mnemonic UI/picker/no-clipboard path;
 9. Android backup/device-transfer exclusions;
-10. package/store metadata.
+10. package/store metadata — the store-listing check quotes the Play policy text with the date read, closing ADR-0041's Play-policy condition that SPIKE-008 left open.
 
 ### Platform tests
 
@@ -4948,9 +4948,9 @@ Carried here from Stage 15 (§18): the trust-audit sink — the embedded host in
 
 ### Exit gate
 
-**State (2026-10-08):** open since 2026-10-06, when Stage 16's closing
+**State (2026-10-09):** open since 2026-10-06, when Stage 16's closing
 record moved the status to `stage-17-android-human-client` (54d1c8b8);
-no Android package is built yet, SPIKE-008 and SPIKE-009 are not closed,
+no Android package is built yet, SPIKE-008 and SPIKE-009 closed PASS on 2026-10-09 within the bounds their Result paragraphs record (SPIKES.md),
 and nothing below is met. This section gained its gate on 2026-10-08
 (fabric-coordinator's observation, after InterWeave #227's thread); the
 closing record will be appended under it, as §18's and §19's were.
@@ -4966,7 +4966,10 @@ Ed25519 secret round-trips through Keystore wrapping with the PeerId
 preserved, and on Keystore invalidation the wrapped secret is refused,
 the app enters recovery and never mints a new key over the profile, the
 PeerId restored from the recovery phrase (SPIKE-009 D6a/D6b: an
-invalidated key never gives a seed back); (b) every step of "Implement in order" has a test named for it in
+invalidated key never gives a seed back) — the spikes closed 2026-10-09 on
+what a harness can measure; the client-side clauses of this sentence
+(enters recovery, never mints, restores from the phrase) are step 7's
+tests, named in the closing record; (b) every step of "Implement in order" has a test named for it in
 the closing record and green — host Rust tests for the session and
 domain logic, instrumented tests on a real device (API level recorded)
 for each line of "Platform tests", process death and restart included;
