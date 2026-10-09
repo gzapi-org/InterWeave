@@ -241,7 +241,12 @@ impl FakeNode {
         let now = wall_ms();
         for queues in state.sessions.values_mut() {
             if !queues.declines_route_notices && queues.routes.contains(peer) {
-                queues.owe_path(peer, None, path, RECONNECTED, now);
+                let class = if queues.unannounced.remove(peer) {
+                    ROUTE_ESTABLISHED
+                } else {
+                    RECONNECTED
+                };
+                queues.owe_path(peer, None, path, class, now);
             }
         }
     }
@@ -326,6 +331,10 @@ struct Queues {
     /// a `previous`, as the runtime's (`Owed::route_notices`); stored as
     /// the refusal so the derived default takes them.
     declines_route_notices: bool,
+    /// Routes begun while the pair was not connected, whose begin is
+    /// announced at the pair's next connection (`route_established`), as
+    /// the runtime's `Owed::unannounced`.
+    unannounced: BTreeSet<TransportIdentity>,
     /// Every `ready` waiting on this session -- it takes `&self`, so
     /// there may be several -- woken by what is queued, and all of them.
     wakers: Vec<Waker>,
@@ -370,8 +379,13 @@ impl Queues {
         if self.routes.contains(&peer) {
             return;
         }
-        if let Some(path) = path.filter(|_| !self.declines_route_notices) {
-            self.owe_path(&peer, None, path, ROUTE_ESTABLISHED, wall_ms());
+        if !self.declines_route_notices {
+            match path {
+                Some(path) => self.owe_path(&peer, None, path, ROUTE_ESTABLISHED, wall_ms()),
+                None => {
+                    self.unannounced.insert(peer.clone());
+                }
+            }
         }
         self.routes.insert(peer);
     }
@@ -1141,6 +1155,7 @@ impl AdminPort for FakeAdmin {
             // new exchange after a re-allow is a new route, owed a new
             // `route_established`.
             queues.routes.remove(&peer);
+            queues.unannounced.remove(&peer);
             queues.paths.remove(&peer);
             if queues.notices.len() >= bound {
                 queues.notices.pop_front();
