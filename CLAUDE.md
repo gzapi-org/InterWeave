@@ -1017,13 +1017,15 @@ watch" line, for a watch that has no script to run. A session in such a
 clone has no fabric context and no inbox; the empty status line and that
 orphaned instruction are the two visible signs. `actions-health.sh` and
 `wait-merged.sh` (to `fabric-pr wait-merged`) forward too. So do five
-tools/checks scripts, each to the fabric's runtime/github implementation
-with InterWeave's root and configuration: `check_actions_pinned_by_sha.sh`,
-`run_suite.sh`, `scan_semantic_collisions.sh`, `check_guards_are_wired.sh`
-and `check_workflows_lint.sh`. They run on the fleet's pinned Python,
-`/usr/local/bin/fabric-python` (`AGENT_FABRIC_PYTHON` overrides it), so
-`cargo xtask checks` needs both, and a host without the Python exits 127
-with the fabric's message on how to install it. Their logic and pins live
+tools/checks scripts: `run_suite.sh`, `scan_semantic_collisions.sh`,
+`check_guards_are_wired.sh` and `check_workflows_lint.sh` to the fabric's
+runtime/github implementations with InterWeave's root and configuration,
+and `check_actions_pinned_by_sha.sh` to its
+`policies/check_actions_pinned_by_sha.py`. All run on the fleet's pinned
+Python, `/usr/local/bin/fabric-python` (`AGENT_FABRIC_PYTHON` overrides
+it), so `cargo xtask checks` needs both. A host without that Python gets
+the fabric's install message and exit 127 from the four runtime/github
+forwarders, and `check_actions_pinned_by_sha.sh`'s own message and exit 2. Their logic and pins live
 in the fabric now: a fix or a pin bump goes there, never into the
 forwarder. In CI the tree-checks and tool-suites jobs check agent-fabric
 out at `.agent-fabric/fabric-ref`. A clone with no
