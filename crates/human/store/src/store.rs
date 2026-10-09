@@ -112,13 +112,49 @@ fn sql_timestamp(field: &'static str, value: u64) -> Result<i64, StoreError> {
     i64::try_from(value).map_err(|_| StoreError::TimestampOutOfRange { field, got: value })
 }
 
+/// The store's file name in the profile's human directory
+/// ([`ProfilePaths::human_dir`](profile_config::ProfilePaths::human_dir)).
+pub const STORE_FILE: &str = "human.sqlite";
+
 impl HumanStore {
-    /// Open (creating if needed) the store at `path`.
+    /// Open (creating if needed) the profile's store: [`STORE_FILE`] in
+    /// its human directory, judged by ADR-0028's walk up to the trust
+    /// boundary the paths carry (A 2026-10-08) -- `/` on the desktop, the
+    /// app's data directory in an embedded layout, which a walk to `/`
+    /// refuses where an ancestor above it fails ADR-0028's rule -- owned by
+    /// another account, as Android's `system` `0771` directories are, or
+    /// writable by others
+    /// (`an_embedded_profiles_store_opens_under_its_boundary_and_not_without_it`).
+    /// The one opener a client composes: the boundary arrives with the
+    /// paths, never as a value of its own.
+    ///
+    /// # Errors
+    /// As [`open`](Self::open).
+    pub fn open_profile(
+        paths: &profile_config::ProfilePaths,
+        options: StoreOptions,
+    ) -> Result<Self, StoreError> {
+        Self::open_within(
+            &paths.human_dir().join(STORE_FILE),
+            paths.boundary(),
+            options,
+        )
+    }
+
+    /// Open (creating if needed) the store at `path`, judged up to `/`.
     ///
     /// # Errors
     /// Returns [`StoreError`] if the file cannot be opened, a migration
     /// fails, or the database contains a table ADR-0044 forbids.
     pub fn open(path: &Path, options: StoreOptions) -> Result<Self, StoreError> {
+        Self::open_within(path, &profile_config::TrustBoundary::root(), options)
+    }
+
+    fn open_within(
+        path: &Path,
+        boundary: &profile_config::TrustBoundary,
+        options: StoreOptions,
+    ) -> Result<Self, StoreError> {
         // Create the parent, owner-only. SQLite will not, and a caller
         // that has to remember to mkdir first is a caller that will
         // eventually not — the peer cache and the config writer both
@@ -142,7 +178,7 @@ impl HumanStore {
         let name = path.file_name().ok_or(StoreError::NotAFile {
             what: "the database path names no file",
         })?;
-        let dir = private_dir(private_parent_of(path))?;
+        let dir = private_dir(private_parent_of(path), boundary)?;
         let resolved = dir.join(name);
         let path = resolved.as_path();
         // CREATE IT OWNER-ONLY OURSELVES. SQLite creates the database with
@@ -1364,7 +1400,7 @@ impl HumanStore {
 /// a directory that account can rename away and replace.
 ///
 /// JUDGED BEFORE ANYTHING IS CREATED, by profile-config's
-/// `create_private_dir` -- the one creation the profile locks and the
+/// `create_private_dir_within` -- the one creation the profile locks and the
 /// private writers use too: a missing directory is made only beneath an
 /// existing ancestor that meets the rule, one component at a time, so a
 /// refusal leaves the tree as it found it
@@ -1380,25 +1416,31 @@ impl HumanStore {
 /// The desktop's `HumanClientLock` judges the same directory first, by
 /// the same walk; this judgement is the store's own, so a caller that
 /// opens it without that lock gets the rule too.
-fn private_dir(dir: &Path) -> Result<std::path::PathBuf, StoreError> {
+///
+/// The walk stops at `boundary` and judges nothing above it.
+fn private_dir(
+    dir: &Path,
+    boundary: &profile_config::TrustBoundary,
+) -> Result<std::path::PathBuf, StoreError> {
     let dir = &beyond_missing(dir)?;
-    match profile_config::create_private_dir(dir) {
+    match profile_config::create_private_dir_within(dir, boundary) {
         Ok(()) => {}
         // Something that is not a directory is already there -- a file, a
-        // dangling link. `create_private_dir` answers that as a bare
+        // dangling link. `create_private_dir_within` answers that as a bare
         // "exists", which reads as a failure worth retrying; the walk
         // names what it is and the rule it breaks
         // (`a_state_directory_that_is_not_a_directory_is_refused_by_name`).
         Err(profile_config::PersistError::Io(e))
             if e.kind() == std::io::ErrorKind::AlreadyExists =>
         {
-            profile_config::resolve_owned_private_dir(dir)
+            profile_config::resolve_owned_private_dir_within(dir, boundary)
                 .map_err(|e| StoreError::from_persist(dir, e))?;
             return Err(StoreError::Io(e));
         }
         Err(e) => return Err(StoreError::from_persist(dir, e)),
     }
-    profile_config::resolve_owned_private_dir(dir).map_err(|e| StoreError::from_persist(dir, e))
+    profile_config::resolve_owned_private_dir_within(dir, boundary)
+        .map_err(|e| StoreError::from_persist(dir, e))
 }
 
 /// `dir` with every `.` and every `..` that follows a MISSING component
@@ -1756,6 +1798,7 @@ fn private_parent_of(path: &std::path::Path) -> &std::path::Path {
 #[cfg(all(test, target_os = "linux"))]
 mod private_dir_tests {
     use super::private_dir;
+    use interweave_profile_config::TrustBoundary;
 
     #[test]
     fn the_store_opens_under_the_directory_as_resolved_not_the_configured_text() {
@@ -1785,7 +1828,11 @@ mod private_dir_tests {
         }
         std::os::unix::fs::symlink(&real, dir.path().join("link")).expect("link");
 
-        let resolved = private_dir(&dir.path().join("link").join("state")).expect("judged sound");
+        let resolved = private_dir(
+            &dir.path().join("link").join("state"),
+            &TrustBoundary::root(),
+        )
+        .expect("judged sound");
         assert_eq!(
             resolved,
             std::fs::canonicalize(real.join("state")).expect("canonical")

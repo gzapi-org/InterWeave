@@ -30,6 +30,16 @@
 # that is the moment the collision exists and the moment it is cheapest
 # to fix.
 #
+# The scan lives in agent-fabric, the control plane checked out beside
+# this working copy: runtime/github/scan-semantic-collisions.sh, the same for every
+# project, run with InterWeave's rules there
+# (projects/interweave/integration/gh/collisions.json), which this file names. InterWeave's own copy lived here until then; its
+# suite, test_scan_semantic_collisions.sh, was the port's oracle. This file prints this
+# help itself, and otherwise only locates the scan, names this working
+# copy as --root (an explicit --root after it wins), and hands over. It
+# refuses with exit 2 when agent-fabric is not beside this working copy
+# — nothing falls back to a stale copy.
+#
 # Options:
 #   --root <dir>   scan this repository instead of the one containing
 #                  this script
@@ -38,79 +48,24 @@
 # Exit codes:
 #   0  no collisions
 #   1  one or more collisions found
-#   2  invocation problem (expected directories missing)
+#   2  invocation problem (expected directories missing; or no agent-fabric)
 # <<< help
 
 set -uo pipefail
-
-SCRIPT_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" && pwd )"
-REPO_ROOT="$( cd -- "$SCRIPT_DIR/../.." && pwd )"
-
-show_help() {
-    sed -n '/^# >>> help$/,/^# <<< help$/p' "$0" | sed -e '1d' -e '$d' -e 's/^# \{0,1\}//'
-}
-
-while [ $# -gt 0 ]; do
-    case "$1" in
-        -h|--help) show_help; exit 0 ;;
-        --root)    [ $# -ge 2 ] || { echo "--root needs a value" >&2; exit 2; }
-                   REPO_ROOT="$2"; shift 2 ;;
-        *)         echo "scan_semantic_collisions: unexpected argument: $1" >&2; exit 2 ;;
-    esac
+for a in "$@"; do
+    case "$a" in -h|--help) sed -n '/^# >>> help$/,/^# <<< help$/p' "$0" | sed -e '1d' -e '$d' -e 's/^# \{0,1\}//'; exit 0 ;; esac
 done
-
-ADR_DIR="$REPO_ROOT/architecture/adr"
-
-if [[ ! -d "$ADR_DIR" ]]; then
-    echo "scan_semantic_collisions: expected path not found: $ADR_DIR" >&2
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=tools/gh/fabric-root.sh
+. "$here/../gh/fabric-root.sh"
+fabric="$(interweave_fabric_root "$here")"
+target="$fabric/runtime/github/scan-semantic-collisions.sh"
+rules="$fabric/projects/interweave/integration/gh/collisions.json"
+[[ -f "$target" && -f "$rules" ]] || {
+    echo "scan_semantic_collisions: agent-fabric not found at $fabric (expected beside this working copy, as projects/agent-fabric, carrying runtime/github/scan-semantic-collisions.sh and InterWeave's collisions.json); set AGENT_FABRIC_ROOT or update it. See CLAUDE.md §9, agent-fabric beside the checkout." >&2
     exit 2
-fi
-
-hits=0
-
-fail() {
-    echo "FAIL: $1"
-    shift
-    local line
-    for line in "$@"; do
-        echo "   $line"
-    done
-    echo
-    hits=$((hits + 1))
 }
-
-# ---------------------------------------------------------------------------
-# 1. ADR file numbers unique. Numbering is NNNN-slug.md.
-# ---------------------------------------------------------------------------
-dups=$(find "$ADR_DIR" -maxdepth 1 -name '[0-9][0-9][0-9][0-9]-*.md' -printf '%f\n' \
-    | grep -oE '^[0-9]{4}' | sort | uniq -d || true)
-if [[ -n "$dups" ]]; then
-    while IFS= read -r prefix; do
-        [[ -z "$prefix" ]] && continue
-        fail "duplicate ADR number ${prefix} — two files claim it." \
-            "$(find "$ADR_DIR" -maxdepth 1 -name "${prefix}-*.md" -printf '%f ')" \
-            "Renumber YOUR document to the next free number and re-propagate the index."
-    done <<< "$dups"
-fi
-
-# ---------------------------------------------------------------------------
-# 2. No identical amendment headings within one ADR.
-# ---------------------------------------------------------------------------
-while IFS= read -r adr_file; do
-    [[ -z "$adr_file" ]] && continue
-    dup_amendments=$(grep -E '^#{2,4} .*[Aa]mendment' "$adr_file" | sort | uniq -d || true)
-    if [[ -n "$dup_amendments" ]]; then
-        fail "identical amendment headings in $(basename "$adr_file") — cross-references are ambiguous." \
-            "$(echo "$dup_amendments" | head -3 | tr '\n' '|')" \
-            "Disambiguate the newer heading; do not rewrite the one that landed first."
-    fi
-done < <(find "$ADR_DIR" -maxdepth 1 -name '[0-9][0-9][0-9][0-9]-*.md')
-
-if (( hits > 0 )); then
-    echo "Semantic collision(s): $hits — a textually-clean merge does NOT clear these."
-    echo "These are parallel-session numbering races (CLAUDE.md §Concurrent sessions):"
-    echo "renumber the entry that has NOT yet reached origin/main; never rewrite landed work."
-    exit 1
-fi
-
-echo "scan_semantic_collisions: OK — no numbering collisions in the merged tree."
+# The rules are named rather than found from the working copy's remote: a
+# test's sandbox has none the fabric knows. An explicit AGENT_FABRIC_COLLISIONS_CONFIG wins.
+export AGENT_FABRIC_COLLISIONS_CONFIG="${AGENT_FABRIC_COLLISIONS_CONFIG:-$rules}"
+exec bash "$target" --root "$(cd -- "$here/../.." && pwd)" "$@"

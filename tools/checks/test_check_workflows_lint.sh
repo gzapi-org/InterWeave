@@ -135,6 +135,35 @@ out="$(env PATH="$SANDBOX/bin:$SANDBOX/noshell" INTERWEAVE_TOOL_CACHE="$SANDBOX/
     || bad "no shellcheck — wanted 2 naming shellcheck, got $got" "$out"
 mv "$SANDBOX/shellcheck.away" "$SANDBOX/bin/shellcheck"
 
+# The hand-over to agent-fabric's check-workflows-lint.sh: every case above ran the
+# real one (CI points AGENT_FABRIC_ROOT at its pinned checkout); these pin
+# what the hand-over itself promises, against a recording stub.
+hcheck() { if eval "$2"; then pass "$1"; else bad "$1" "$hout"; fi; }
+hstub="$(mktemp -d)"
+mkdir -p "$hstub/fabric/runtime/github" "$hstub/fabric/projects/interweave/integration/gh"
+cat > "$hstub/fabric/runtime/github/check-workflows-lint.sh" <<'STUB'
+#!/usr/bin/env bash
+printf 'config=%s cache=%s' "${NONE-<unset>}" "${AGENT_FABRIC_TOOL_CACHE-<unset>}"; printf ' [%s]' "$@"; echo
+exit 3
+STUB
+# shellcheck disable=SC2034 # read in hcheck's eval'd conditions
+hrun() { hout="$(env -u AGENT_FABRIC_NONE -u AGENT_FABRIC_TOOL_CACHE -u INTERWEAVE_TOOL_CACHE AGENT_FABRIC_ROOT="$hstub/fabric" "$@" 2>&1)"; hrc=$?; }
+# shellcheck disable=SC2034 # read in hcheck's eval'd conditions
+hrepo="$( cd -- "$SCRIPT_DIR/../.." && pwd )"
+hrun bash "$UNDER_TEST" --root /elsewhere
+hcheck "the fabric's check-workflows-lint gets this working copy as --root, the caller's arguments after it" '[[ $hrc -eq 3 && "$hout" == *" [--root] [$hrepo] [--root] [/elsewhere]" ]]'
+hrun bash "$UNDER_TEST" --help
+hcheck "--help is this file's own block, not the fabric's" '[[ $hrc -eq 0 && "$hout" != *"[--help]"* && "$hout" == *"agent-fabric"* ]]'
+hrun env INTERWEAVE_TOOL_CACHE=/iw bash "$UNDER_TEST"
+hcheck "INTERWEAVE_TOOL_CACHE is the fabric's cache" '[[ "$hout" == *"cache=/iw "* ]]'
+hrun env INTERWEAVE_TOOL_CACHE=/iw AGENT_FABRIC_TOOL_CACHE=/af bash "$UNDER_TEST"
+hcheck "an explicit AGENT_FABRIC_TOOL_CACHE wins" '[[ "$hout" == *"cache=/af "* ]]'
+hout="$(AGENT_FABRIC_ROOT="$hstub/none" bash "$UNDER_TEST" x 2>&1)"
+# shellcheck disable=SC2034 # read in hcheck's eval'd conditions
+hrc=$?
+hcheck "no agent-fabric: exit 2, naming where it looked" '[[ $hrc -eq 2 && "$hout" == *"agent-fabric not found at $hstub/none"* ]]'
+rm -rf "$hstub"
+
 echo
 if (( fails > 0 )); then
     echo "test_check_workflows_lint: $fails failure(s)" >&2
