@@ -841,7 +841,15 @@ pub(crate) fn host_this_build_cannot_dial(address: &str) -> Option<&'static str>
 /// (`RelayCircuit`), not the grammar's.
 fn validate_address_grammar(address: &str) -> Result<(), &'static str> {
     let components: Vec<&str> = address.split('/').collect();
-    let Some(circuit) = components.iter().position(|c| *c == "p2p-circuit") else {
+    // AT A PROTOCOL POSITION ONLY -- the odd indices after the leading
+    // `/` -- since the grammar is positional: a value slot holding the
+    // text `p2p-circuit`, a DNS host so named, is a direct address
+    // (`a_circuit_route_is_one_shape_and_each_other_is_named`'s control).
+    let Some(circuit) = components
+        .iter()
+        .enumerate()
+        .position(|(i, c)| i % 2 == 1 && *c == "p2p-circuit")
+    else {
         return validate_direct_address(address);
     };
     if circuit + 1 != components.len() {
@@ -4038,7 +4046,14 @@ mod tests {
         let errors = with(format!(
             "/dns4/relay.example/tcp/4001/p2p/{P1}/p2p-circuit/ip4/10.0.0.9/tcp/1/p2p/{P2}"
         ));
-        assert!(!errors.is_empty(), "a foreign destination does not");
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ConfigError::StaticPeerNotPeerQualified { reason, .. }
+                    if reason.contains("follows /p2p-circuit")
+            )),
+            "a foreign destination is refused by name: {errors:?}"
+        );
     }
 
     #[test]
@@ -4104,8 +4119,17 @@ mod tests {
             split_peer_multiaddr(&format!("/p2p/{P1}/p2p-circuit/p2p/{P2}")).is_err(),
             "a circuit with no route to its relay"
         );
-        // The controls: direct entries as before.
+        // The controls: direct entries as before, a host so named among
+        // them -- a value slot is not a protocol.
         assert!(split_peer_multiaddr(&format!("/ip4/10.0.0.1/tcp/4001/p2p/{P1}")).is_ok());
+        assert!(split_peer_multiaddr(&format!("/dns4/p2p-circuit/tcp/4001/p2p/{P1}")).is_ok());
+        assert!(
+            split_peer_multiaddr(&format!(
+                "/dns4/p2p-circuit/tcp/4001/p2p/{P1}/p2p-circuit/p2p/{P2}"
+            ))
+            .is_ok(),
+            "and a relay so named"
+        );
         assert!(split_peer_multiaddr(&format!("/ip4/10.0.0.1/tcp/1/p2p/{P1}/extra")).is_err());
     }
 
