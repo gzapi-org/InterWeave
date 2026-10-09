@@ -27,6 +27,9 @@ members = [
     "crates/transport/libp2p",
     # Stage 12: the composition root, a library every host constructs.
     "crates/transport/composition",
+    # Stage 17 (plan section 20 step 1): the composition hosted in-process
+    # for the Android service, under the platform's trust boundary.
+    "crates/transport/embedded",
     # Stage 13: the desktop IPC server, generic over the neutral binding
     # traits; nothing under crates/transport/* (plan §16 (1)).
     "crates/local/ipc-server",
@@ -589,6 +592,7 @@ planned_members = [
   "crates/transport/runtime",
   "crates/transport/libp2p",
   "crates/transport/composition",
+  "crates/transport/embedded",
   "crates/discovery/cache",
   "crates/discovery/static",
   "crates/discovery/mdns",

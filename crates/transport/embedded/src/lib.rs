@@ -1,0 +1,269 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Andrea Benetton
+//! The transport runtime hosted in-process (plan §20 step 1): what the
+//! Android app's foreground service starts, binds its clients to, and
+//! stops -- the Stage 12 composition and its in-process
+//! `LocalDataSession`/`LocalAdminPort` binding, not a second adapter
+//! (§15 (3)), under the trust boundary the platform supplies (ADR-0028
+//! A 2026-10-08).
+//!
+//! The Service owns the lifecycle and calls in from its own threads:
+//! [`EmbeddedHost::start`], [`EmbeddedHost::wait_shutdown_requested`]
+//! and [`EmbeddedHost::stop`] BLOCK, and must be called off any async
+//! context -- a tokio runtime refuses to be driven from inside one.
+//! What the Service's clients need to run the binding's futures is
+//! [`EmbeddedHost::runtime`], so the process runs one executor, not two.
+//!
+//! ON DISK everything lies under one root the host creates owner-only,
+//! `<app data dir>/interweave` ([`ProfilePaths::resolve_embedded`]), and
+//! [`EmbeddedHost::paths`] carries that root and the boundary to every
+//! caller that opens a private directory -- the human store's opener
+//! included -- so a directory outside the root, the platform's `files/`
+//! among them, is refused whoever asks.
+
+use std::path::PathBuf;
+use std::time::Duration;
+
+use interweave_profile_config::trust_overlay::OverlayError;
+use interweave_profile_config::{
+    LoadError, PersistError, ProfileConfig, ProfileLock, ProfilePaths, TrustBoundary,
+    runtime::Deployment,
+};
+use interweave_profile_identity::ProfileIdentity;
+use interweave_transport_composition::{
+    ComposedRuntime, CompositionError, CompositionOptions, InProcessBinding, ShutdownRequest,
+};
+
+/// What the Service starts a host with.
+pub struct EmbeddedLaunch {
+    /// The app's data directory as the platform reports it -- on Android
+    /// `Context.getDataDir()` -- never a hard-coded path: the trust
+    /// boundary, resolved here once.
+    pub app_data_dir: PathBuf,
+    /// The profile's name; its `config.yaml` must already be in place
+    /// under the host's configuration root, provisioned before the first
+    /// start.
+    pub profile: String,
+    /// The profile's identity, supplied rather than read: on a device it
+    /// is the Keystore-unwrapped key (plan §20 step 6), which never
+    /// rests in a file the host could read.
+    pub identity: ProfileIdentity,
+}
+
+/// Why a host did not start or stop: one variant per cause a person can
+/// act on, closed, so the Service maps each to its own stable message
+/// and a new cause is a compile error there. The text is for the log
+/// only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EmbeddedRefused {
+    /// Another host holds the profile -- in another process, or in this
+    /// one: a second [`EmbeddedHost::start`] while one runs is refused
+    /// here, and the first keeps serving.
+    LockHeld(String),
+    /// The profile's `runtime.deployment` is not `embedded-android`.
+    NotEmbedded,
+    /// `config.yaml` is missing, unreadable or fails validation.
+    ProfileInvalid(String),
+    /// The trust boundary, or a private directory under it, is refused
+    /// by ADR-0028's rules or lies outside the host's root.
+    DirectoryRefused(String),
+    /// The supplied identity carries no transport identity.
+    IdentityRejected,
+    /// The runtime failed to start or to stop.
+    Internal(String),
+}
+
+impl std::fmt::Display for EmbeddedRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LockHeld(detail) => write!(f, "the profile is held by another host: {detail}"),
+            Self::NotEmbedded => f.write_str("the profile's deployment is not embedded-android"),
+            Self::ProfileInvalid(detail) => write!(f, "the profile cannot be used: {detail}"),
+            Self::DirectoryRefused(detail) => write!(f, "a directory is refused: {detail}"),
+            Self::IdentityRejected => f.write_str("the identity has no transport identity"),
+            Self::Internal(detail) => write!(f, "the runtime failed: {detail}"),
+        }
+    }
+}
+
+impl std::error::Error for EmbeddedRefused {}
+
+impl From<PersistError> for EmbeddedRefused {
+    fn from(e: PersistError) -> Self {
+        match e {
+            PersistError::ProfileLocked { .. } => Self::LockHeld(e.to_string()),
+            PersistError::DirectoryNotPrivate { .. }
+            | PersistError::FileNotPrivate { .. }
+            | PersistError::Io(_) => Self::DirectoryRefused(e.to_string()),
+            PersistError::InvalidProfileName { .. } => Self::ProfileInvalid(e.to_string()),
+            _ => Self::Internal(e.to_string()),
+        }
+    }
+}
+
+impl From<LoadError> for EmbeddedRefused {
+    fn from(e: LoadError) -> Self {
+        match e {
+            LoadError::ConfigDirUnguarded(_) | LoadError::ConfigFileUnguarded { .. } => {
+                Self::DirectoryRefused(e.to_string())
+            }
+            _ => Self::ProfileInvalid(e.to_string()),
+        }
+    }
+}
+
+impl From<CompositionError> for EmbeddedRefused {
+    fn from(e: CompositionError) -> Self {
+        match e {
+            CompositionError::InvalidProfile(_) | CompositionError::Unhonoured { .. } => {
+                Self::ProfileInvalid(e.to_string())
+            }
+            CompositionError::TrustOverlay(OverlayError::NotPrivate { .. }) => {
+                Self::DirectoryRefused(e.to_string())
+            }
+            _ => Self::Internal(e.to_string()),
+        }
+    }
+}
+
+/// How long [`EmbeddedHost::start`] waits for the profile lock: not at
+/// all. Two hosts of one profile in one process is the Service starting
+/// twice, which is refused at once; a host that died with its process
+/// left no holder, since the kernel releases the lock with it.
+const LOCK_WAIT: Duration = Duration::ZERO;
+
+/// The executor's worker threads: the host's standing bound, as the
+/// daemon's tests run with (`cargo -j 2`, two test threads).
+const WORKERS: usize = 2;
+
+/// A running embedded transport runtime and what it holds.
+pub struct EmbeddedHost {
+    // DROPPED IN THIS ORDER (`Drop` below, `stop`): the runtime's tasks
+    // first, then the executor, then the lock -- a lock released while
+    // the runtime still writes its state would let a second host write
+    // beside it.
+    composed: Option<ComposedRuntime>,
+    executor: Option<tokio::runtime::Runtime>,
+    handle: tokio::runtime::Handle,
+    sessions: InProcessBinding,
+    paths: ProfilePaths,
+    lock: Option<ProfileLock>,
+}
+
+impl EmbeddedHost {
+    /// Resolve the profile under `launch.app_data_dir`, load and check
+    /// it, take the profile lock, and start the composed runtime on an
+    /// executor of the host's own.
+    ///
+    /// BLOCKS; call it off any async context.
+    ///
+    /// # Errors
+    /// [`EmbeddedRefused`], naming the cause; nothing is left running.
+    pub fn start(launch: EmbeddedLaunch) -> Result<Self, EmbeddedRefused> {
+        let EmbeddedLaunch {
+            app_data_dir,
+            profile,
+            identity,
+        } = launch;
+        identity
+            .transport_identity()
+            .map_err(|_| EmbeddedRefused::IdentityRejected)?;
+        let boundary = TrustBoundary::new(&app_data_dir)?;
+        let paths = ProfilePaths::resolve_embedded(&profile, boundary)?;
+        let config = ProfileConfig::load(&paths)?;
+        if config.runtime.deployment != Deployment::EmbeddedAndroid {
+            return Err(EmbeddedRefused::NotEmbedded);
+        }
+        let lock = ProfileLock::acquire(&paths, LOCK_WAIT)?;
+        let executor = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(WORKERS)
+            .thread_name("interweave-embedded")
+            .enable_all()
+            .build()
+            .map_err(|e| EmbeddedRefused::Internal(e.to_string()))?;
+        let composed = executor.block_on(ComposedRuntime::start(
+            &identity,
+            &config,
+            CompositionOptions::from_profile(&config, &paths),
+        ))?;
+        Ok(Self {
+            sessions: composed.sessions(),
+            composed: Some(composed),
+            handle: executor.handle().clone(),
+            executor: Some(executor),
+            paths,
+            lock: Some(lock),
+        })
+    }
+
+    /// The in-process binding: `LocalDataSession` and `LocalAdminPort`,
+    /// what the app's clients open their sessions on.
+    #[must_use]
+    pub fn binding(&self) -> InProcessBinding {
+        self.sessions.clone()
+    }
+
+    /// The executor the binding's futures are driven on.
+    #[must_use]
+    pub fn runtime(&self) -> tokio::runtime::Handle {
+        self.handle.clone()
+    }
+
+    /// The profile's paths: the boundary and the root every private
+    /// directory of this host must lie under -- for the human store's
+    /// opener, which opens under them.
+    #[must_use]
+    pub fn paths(&self) -> &ProfilePaths {
+        &self.paths
+    }
+
+    /// Wait for an admin port to ask the runtime's owner to stop
+    /// (`AdminPort::shutdown`): the runtime never stops itself, so the
+    /// Service answers by calling [`stop`](Self::stop) with the grace
+    /// asked for. `None` only if nothing remains that could ask.
+    ///
+    /// BLOCKS; call it off any async context.
+    #[must_use]
+    pub fn wait_shutdown_requested(&self) -> Option<ShutdownRequest> {
+        let (executor, composed) = (self.executor.as_ref()?, self.composed.as_ref()?);
+        executor.block_on(composed.shutdown_requested())
+    }
+
+    /// Stop the runtime, letting exchanges in flight settle for `grace`,
+    /// then release the profile lock. Answers the neutral events the
+    /// runtime dropped over its whole life, its shutdown backlog
+    /// included: a diagnostic count, nothing a person acts on.
+    ///
+    /// BLOCKS; call it off any async context.
+    ///
+    /// # Errors
+    /// [`EmbeddedRefused::Internal`] if the runtime's driver failed; the
+    /// lock is released all the same.
+    pub fn stop(mut self, grace: Duration) -> Result<u64, EmbeddedRefused> {
+        let stopped = match (self.executor.as_ref(), self.composed.take()) {
+            (Some(executor), Some(composed)) => executor
+                .block_on(composed.stop_within(grace))
+                .map_err(|e| EmbeddedRefused::Internal(format!("{e:?}"))),
+            _ => Ok(0),
+        };
+        drop(self.executor.take());
+        drop(self.lock.take());
+        stopped
+    }
+}
+
+impl Drop for EmbeddedHost {
+    /// Dropped without [`stop`](EmbeddedHost::stop): the runtime's tasks
+    /// are cancelled WITHOUT WAITING -- a drop may happen anywhere, inside
+    /// an async context included, where blocking would panic -- and the
+    /// lock released after. A worker mid-write when the drop came may
+    /// finish that write after the release, so the Service stops a host
+    /// with `stop`, which waits, and a drop is the fallback.
+    fn drop(&mut self) {
+        drop(self.composed.take());
+        if let Some(executor) = self.executor.take() {
+            executor.shutdown_background();
+        }
+        drop(self.lock.take());
+    }
+}

@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# Stage 17 (plan §20 step 1): the transport runtime composed for an
+# in-process host -- the Android app's foreground service -- with the
+# trust boundary its platform supplies. The Stage 12 composition and its
+# in-process LocalDataSession/LocalAdminPort binding, not a second
+# adapter (§15 (3)); no Android, JNI or UI type, so it builds for the
+# host and the device alike and its tests run on the host. The Service,
+# its lifecycle and the JNI side are rust-ui-dev's (architect-cto seq
+# 32946; the seams agreed in rust-ui-dev's seq 33010).
+[package]
+name = "interweave-transport-embedded"
+version = "0.0.0"
+publish = false
+description = "The InterWeave transport runtime hosted in-process under a platform-supplied trust boundary."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+interweave-profile-config = { path = "../../config/profile-config" }
+interweave-profile-identity = { path = "../../identity/profile-identity" }
+interweave-transport-composition = { path = "../composition" }
+# The host's own runtime: the Service thread is not async, and the
+# binding's futures need an executor the Service can drive them on.
+tokio = { workspace = true }
+
+[dev-dependencies]
+interweave-local-client-api = { path = "../../api/local-client-api" }
+tempfile = { workspace = true }
