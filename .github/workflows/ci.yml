@@ -234,6 +234,42 @@ jobs:
         # commit does not carry.
         run: git diff --exit-code -- Cargo.lock
 
+  android-check:
+    # CONTEXT NAME: `android check (aarch64-linux-android)`. Advisory, not in
+    # the ruleset: Stage 17 §20 step 1 cites it as the record that the
+    # phone's crates build for their target (architect-cto-01, relay
+    # 01a12048). No account on develop-qzapp has an Android std, so this
+    # job is the only place they are compiled for aarch64-linux-android.
+    # Every version is tools/host/android/android-toolchain.pins' — the
+    # script reads them there; this job only installs what it names.
+    name: android check (aarch64-linux-android)
+    runs-on: ubuntu-latest
+    # Not yet measured: a cold `cargo check` of profile-config's closure
+    # plus an NDK install. The cap is for a hang.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned toolchain and the Android target
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          target="$(awk -F= '$1=="RUST_ANDROID_TARGET"{print $2}' tools/host/android/android-toolchain.pins)"
+          rustup target add "$target"
+
+      # The runner image carries an SDK with sdkmanager; the NDK the host
+      # pins is installed into it, so the clang the check uses is the
+      # host's, not whatever NDK the image happens to ship.
+      - name: Install the pinned NDK
+        run: |
+          ndk="$(grep -oE '^PKG_[0-9]+=ndk;[0-9.]+@' tools/host/android/android-toolchain.pins | head -n1 | sed 's/.*ndk;//; s/@$//')"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$ndk" >/dev/null
+          test -d "$ANDROID_HOME/ndk/$ndk"
+
+      - name: cargo check for aarch64-linux-android
+        run: bash tools/ci/check_android_target.sh
+
   tree-checks:
     name: tree checks
     runs-on: ubuntu-latest

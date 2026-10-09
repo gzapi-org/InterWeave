@@ -770,6 +770,8 @@ read `.claude/settings.json`.
 
 >  **CI exists and gates `main`** — `.github/workflows/ci.yml` runs fmt, clippy, the workspace tests, every tree check, and every self-test on `pull_request`, `merge_group`, and pushes to `main`. It reports three contexts, which are the job `name:` values verbatim: **`rust`**, **`tree checks`**, and **`tool self-tests`**. All three are in the ruleset's `required_status_checks`, so the queue gates correctness and not merely ordering. `tools/checks/check_required_contexts.sh` keeps this paragraph and the workflow in agreement; the ruleset itself needs admin API access and is checked by hand. The policy is **non-strict**: a branch need not be up to date with `main` to merge, which is why folding `origin/main` in and re-testing locally (Phase 3) is still on you rather than on the platform.
 >
+> CI also reports one **advisory context the ruleset does not require**: **`android check (aarch64-linux-android)`**, `cargo check` of the phone's crates for their target with the NDK the host pins (`tools/ci/check_android_target.sh`), which Stage 17 §20 step 1 cites as its build record. It joins `required_status_checks` once those crates are on `main` and the job has run green there; until then a red run is reported, not blocking.
+>
 > A job's `name:` *is* its required-check context, so renaming a job silently un-gates `main` — the ruleset goes on requiring a context nothing reports, and the queue waits forever. Rename a job only together with the ruleset.
 >
 > `merge_group` in that workflow is equally load-bearing: the queue builds its own ref, so a workflow that triggers only on `pull_request` never reports for that build and the queue hangs on a check that will never arrive.
