@@ -1546,10 +1546,13 @@ mod tests {
     }
 
     /// A name service that never answers within the deadline is refused
-    /// AT the deadline, naming it -- not after the read returns -- and
-    /// one that answers within it gives the unchanged verdict (ADR-0028,
-    /// "The name-service read is bounded"). Staged with a 50 ms deadline
-    /// and a read that takes 2 s.
+    /// AT the deadline, naming it -- not after the read returns -- staged
+    /// with a 50 ms deadline and a read that takes 2 s; one that answers
+    /// within its deadline (2 s, so scheduling cannot pass for a timeout)
+    /// gives the unchanged verdict; and a read that ends without answering
+    /// (it panics) is refused when it ends, under a 5 s deadline, named as
+    /// that and not as a timeout (ADR-0028, "The name-service read is
+    /// bounded").
     #[cfg(unix)]
     #[test]
     fn a_name_service_that_does_not_answer_is_refused_at_the_deadline() {
@@ -1622,8 +1625,8 @@ mod tests {
             "{ended}"
         );
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(1),
-            "refused when the read ended, not at the deadline"
+            started.elapsed() < std::time::Duration::from_secs(4),
+            "refused when the read ended, not at the 5 s deadline"
         );
     }
 
