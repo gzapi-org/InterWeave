@@ -21,19 +21,19 @@
 //!    ([`RuntimeConfig::validate_into`]).
 //! 4. `embedded-android` runs no AutoNAT or relay server and Kademlia
 //!    only as a client -- checked.
-//!
-//! And one the schema gained after the six (architect-cto's ruling of
-//! 2026-10-09, relay seq 33736, §20 step 5): `embedded-android` listens
-//! on WILDCARD addresses only (`/ip4/0.0.0.0`, `/ip6/::`). A listener
-//! on one address dies with it and nothing issues it again, and Android
-//! names no address that stays; a wildcard listener follows the
-//! interfaces as they come and go. Checked
-//! ([`RuntimeConfig::validate_into`]); a daemon may name a specific one.
 //! 5. `stay-reachable` means `foreground_service_type = remoteMessaging`
 //!    -- held by the TYPE: the field is `literal[remoteMessaging]`, so no
 //!    other value parses whatever the availability mode.
 //! 6. `stay-reachable` with `user-presence` derives a diagnostic, not a
 //!    refusal -- [`AndroidRuntimeConfig::background_restart_requires_user_authentication`].
+//!
+//! And a seventh the schema gained after the six (architect-cto's
+//! ruling of 2026-10-09, relay seq 33736, §20 step 5): `embedded-android`
+//! listens on WILDCARD addresses only (`/ip4/0.0.0.0`, `/ip6/::`). A
+//! listener on one address dies with it and nothing issues it again,
+//! and Android names no address that stays; a wildcard listener follows
+//! the interfaces as they come and go. Checked
+//! ([`RuntimeConfig::validate_into`]); a daemon may name a specific one.
 
 use interweave_transport_api::EndpointId;
 use serde::{Deserialize, Serialize};
@@ -164,7 +164,8 @@ pub(crate) struct RuntimeContext<'a> {
 }
 
 impl RuntimeConfig {
-    /// Rules 1 to 4 (see the module note for all six).
+    /// Rules 1 to 4 and the seventh, the wildcard listeners (see the
+    /// module note for all seven).
     pub(crate) fn validate_into(
         &self,
         context: &RuntimeContext<'_>,
