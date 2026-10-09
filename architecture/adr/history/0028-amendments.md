@@ -397,9 +397,8 @@ returned", so a hung service costs one leaked thread, not one per write. Those
 refusals last until the abandoned read returns — the guard clears when
 the thread does, so a recovered service is read on the next operation —
 or the process restarts; while they last, an `admin.trust.set` is
-refused and not persisted, which the refusal names, so an operator
-restarts the daemon rather than waiting on a read that may never
-return. The deadline wraps the `NameService` trait calls inside
+refused and not persisted, so an operator restarts the daemon rather
+than waiting on a read that may never return. The deadline wraps the `NameService` trait calls inside
 the predicate, not the real `HostNames`, so a unit test with a blocking
 fake proves it: a name service that sleeps past the deadline yields the
 refusal naming the deadline; one that answers in time leaves every
@@ -416,8 +415,8 @@ the user name in one call): one call fewer, the same hang.
 `owners_private_group`, the constant, the blocking-fake test are on
 #236 at 6cb59136, and the one-outstanding-read guard
 (`NSS_READ_OUTSTANDING`, cleared by a `Drop` when the thread returns,
-each test with its own guard) at f8b8aa33, with the second-read test. Until it lands, a hung name service blocks
-the start and every overlay write on main: a defect at writing,
+each test with its own guard) at f8b8aa33, with the second-read test. Until #236 lands on main, a hung name service blocks
+the start and every overlay write there: a defect at writing,
 affecting no host here. Under the deadline, a host
 whose directory service is down refuses to start InterWeave for a
 user-private-group account until it answers; the refusal says so.
@@ -425,4 +424,5 @@ user-private-group account until it answers; the refusal says so.
 **Propagation.** The body's predicate clause (Security implications),
 this note, the log row, the digest bullet and `resource-limits.md`'s
 table row; IDENTITY.md, the threat row and configuration.md carry the
-predicate by reference and do not change.
+predicate by reference and change only in the term — "the owner's
+private group" where they said "the daemon user's".
