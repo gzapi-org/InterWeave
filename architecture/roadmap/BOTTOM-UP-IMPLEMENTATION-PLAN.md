@@ -4950,7 +4950,7 @@ Carried here from Stage 15 (§18): the trust-audit sink — the embedded host in
 
 **State (2026-10-08):** open since 2026-10-06, when Stage 16's closing
 record moved the status to `stage-17-android-human-client` (54d1c8b8);
-no Android package is built yet, SPIKE-008 and SPIKE-009 are not closed,
+no Android package is built yet, SPIKE-008 and SPIKE-009 closed PASS on 2026-10-09 within the bounds their Result paragraphs record (SPIKES.md),
 and nothing below is met. This section gained its gate on 2026-10-08
 (fabric-coordinator's observation, after InterWeave #227's thread); the
 closing record will be appended under it, as §18's and §19's were.
@@ -4966,7 +4966,10 @@ Ed25519 secret round-trips through Keystore wrapping with the PeerId
 preserved, and on Keystore invalidation the wrapped secret is refused,
 the app enters recovery and never mints a new key over the profile, the
 PeerId restored from the recovery phrase (SPIKE-009 D6a/D6b: an
-invalidated key never gives a seed back); (b) every step of "Implement in order" has a test named for it in
+invalidated key never gives a seed back) — the spikes closed 2026-10-09 on
+what a harness can measure; the client-side clauses of this sentence
+(enters recovery, never mints, restores from the phrase) are step 7's
+tests, named in the closing record; (b) every step of "Implement in order" has a test named for it in
 the closing record and green — host Rust tests for the session and
 domain logic, instrumented tests on a real device (API level recorded)
 for each line of "Platform tests", process death and restart included;

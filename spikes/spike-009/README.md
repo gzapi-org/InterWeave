@@ -4,7 +4,7 @@ Android Keystore wrapping, invalidation and background/user-presence behavior.
 
 Do not treat experiments placed here as production implementation. Evidence and final decision must be recorded against [`architecture/roadmap/SPIKES.md`](../../architecture/roadmap/SPIKES.md); the verdict is architect-cto's to write there, not this file's.
 
-**Status: the HOST HALF has run (2026-10-06); the DEVICE HALF has run (2026-10-06: D1–D7, four recorded parts; D6b repeated in part 4 with an addition only), with D5's restart diagnostic not produced and D7's picker not exercised (below).** No verdict is recorded; the verdict is architect-cto's.
+**Status: CLOSED PASS (2026-10-09) for what a spike can measure, the client-side clauses of §20's gate carried to step 7's tests — [`SPIKES.md`](../../architecture/roadmap/SPIKES.md#spike-009--android-exact-key-custody). The HOST HALF has run (2026-10-06); the DEVICE HALF has run (2026-10-06: D1–D7, four recorded parts; D6b repeated in part 4 with an addition only), with D5's restart diagnostic not produced and D7's picker not exercised (below).** No verdict is recorded; the verdict is architect-cto's.
 
 ## The host half: what was established
 

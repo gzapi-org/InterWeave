@@ -4,7 +4,7 @@ Android foreground-service/lifecycle/backup/recovery-screen platform behavior.
 
 Do not treat experiments placed here as production implementation. Evidence and final decision must be recorded against [`architecture/roadmap/SPIKES.md`](../../architecture/roadmap/SPIKES.md); the verdict is architect-cto's to write there, not this file's.
 
-**Status: RUN (2026-10-06/07, six recorded parts).** Parts 3 and 4: duplicate suppression across a restart, a full store, the network in forced Doze, the store's own directory, and a released message's bytes in the database files. Part 1: L1, L3, L4, L5, S1, E1, R1–R3, B1, B3. Part 2: P1, L2, L6, L7, L8, L9, and S1 across a reboot. Not run: B2 (the owner's decision), B4 and B5 (a second device). No verdict is recorded; the verdict is architect-cto's.
+**Status: CLOSED PASS (2026-10-09), within the bounds recorded in [`SPIKES.md`](../../architecture/roadmap/SPIKES.md#spike-008--android-execution--store-policy-viability). Run 2026-10-06/07, six recorded parts.** Parts 3 and 4: duplicate suppression across a restart, a full store, the network in forced Doze, the store's own directory, and a released message's bytes in the database files. Part 1: L1, L3, L4, L5, S1, E1, R1–R3, B1, B3. Part 2: P1, L2, L6, L7, L8, L9, and S1 across a reboot. Not run: B2 (the owner's decision), B4 and B5 (a second device). No verdict is recorded; the verdict is architect-cto's.
 
 ## The device
 
