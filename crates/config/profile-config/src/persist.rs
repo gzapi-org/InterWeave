@@ -1020,6 +1020,11 @@ fn walk_judged(
         }
     }
     let mut hops = 0;
+    // Whether the walk has stood at or below the boundary: a link met
+    // outside it after that is no platform link ABOVE it, and is judged
+    // as under `/` (`a_link_met_outside_after_entering_the_boundary_is_judged`).
+    let mut entered = false;
+    let root = TrustBoundary::root();
     while let Some(name) = pending.pop_front() {
         if name == ".." {
             resolved.pop();
@@ -1035,7 +1040,7 @@ fn walk_judged(
             // that cannot be inspected is an error to report, not a rule
             // broken.
             Err(e) => match boundary {
-                Some(boundary) if boundary.covers(&next) => {
+                Some(boundary) if entered || boundary.covers(&next) => {
                     return judge_ancestor(&next, Err(e), uid)
                         .map_err(|refused| boundary.name(&next, refused))
                         .map(|()| next);
@@ -1044,6 +1049,7 @@ fn walk_judged(
             },
         };
         if !meta.file_type().is_symlink() {
+            entered |= boundary.is_some_and(|boundary| boundary.covers(&next));
             resolved = next;
             continue;
         }
@@ -1057,11 +1063,18 @@ fn walk_judged(
         // A link above the boundary is the platform's and is followed
         // unjudged (`a_link_above_the_boundary_is_followed_unjudged`); one
         // at or below it is judged with the directories holding it.
-        if let Some(boundary) = boundary
-            && boundary.covers(&next)
-        {
-            judge_link(&next, meta.uid(), meta.permissions().mode(), uid)?;
-            judge_ancestors(&resolved, uid, boundary)?;
+        if let Some(boundary) = boundary {
+            let judged_under = if boundary.covers(&next) {
+                Some(boundary)
+            } else if entered {
+                Some(&root)
+            } else {
+                None
+            };
+            if let Some(judged_under) = judged_under {
+                judge_link(&next, meta.uid(), meta.permissions().mode(), uid)?;
+                judge_ancestors(&resolved, uid, judged_under)?;
+            }
         }
         let target = fs::read_link(&next).map_err(PersistError::Io)?;
         if target.is_absolute() {
@@ -3186,5 +3199,42 @@ mod tests {
         refused_at(resolve_private_dir(&through), &open);
         refused_at(resolve_private_dir_within(&through, &boundary), &open);
         refused_at(resolve_guarded_dir_within(&through, &boundary), &open);
+    }
+
+    /// #241 re-review, part 1 F2's last bullet: once a path has entered
+    /// the boundary, a link it then meets outside the boundary is no
+    /// platform link above it, and is judged with the directories holding
+    /// it as under `/` -- here a link in a directory another account can
+    /// write, between a link under the root and the root again. The
+    /// control: the same detour through a private directory resolves.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_link_met_outside_after_entering_the_boundary_is_judged() {
+        let (root_dir, open, b) = boundary_under_a_refused_ancestor();
+        let confined = TrustBoundary::new(&b)
+            .expect("a boundary")
+            .with_runtime_root("interweave");
+        let root = b.join("interweave");
+        fs::create_dir(&root).expect("mkdir");
+        chmod(&root, 0o700);
+        let real = private_under(&root, &["real"], 0o700);
+        std::os::unix::fs::symlink(real.parent().expect("parent"), open.join("back"))
+            .expect("symlink");
+        std::os::unix::fs::symlink(open.join("back"), root.join("x")).expect("symlink");
+        refused_at(
+            resolve_private_dir_within(&root.join("x").join("p"), &confined),
+            &open,
+        );
+
+        let quiet = private_under(root_dir.path(), &["quiet"], 0o700);
+        let quiet = quiet.parent().expect("quiet");
+        std::os::unix::fs::symlink(real.parent().expect("parent"), quiet.join("back"))
+            .expect("symlink");
+        std::os::unix::fs::symlink(quiet.join("back"), root.join("y")).expect("symlink");
+        assert_eq!(
+            resolve_private_dir_within(&root.join("y").join("p"), &confined)
+                .expect("the control: a detour through a private directory"),
+            real
+        );
     }
 }
