@@ -330,9 +330,9 @@ impl Peer {
 
 /// The app's store file under `home`'s profile.
 pub(crate) fn app_store(home: &Home) -> PathBuf {
-    // The app's `startup::STORE_FILE`; named, not imported, so this suite
-    // does not build the window's graph. A rename fails `rows` and `ids`.
-    home.paths.human_dir().join("human.sqlite")
+    home.paths
+        .human_dir()
+        .join(interweave_human_store::STORE_FILE)
 }
 
 /// Rows of `table` in the app's store, read-only, while the app may be
