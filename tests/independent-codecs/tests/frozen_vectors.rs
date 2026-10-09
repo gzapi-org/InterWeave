@@ -285,9 +285,16 @@ fn endpoint_directory_frames_decode_to_their_fields_and_reencode_byte_equal() {
 
 #[test]
 fn gossipsub_topic_keys_match_every_vector() {
-    use interweave_independent_codecs::gossipsub::topic_key_v1;
+    use interweave_independent_codecs::gossipsub::{topic_key_v1, wire_topic_v1};
     for v in vectors("gossipsub/gossipsub-topic-key-v1.json") {
         let name = v["name"].as_str().unwrap();
+        let wire = wire_topic_v1(v["channel_id"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            Some(wire.as_str()),
+            v["wire_topic"].as_str(),
+            "{name}: the wire topic"
+        );
+        assert_eq!(wire.len(), 64, "{name}");
         let got = topic_key_v1(v["channel_id"].as_str().unwrap())
             .unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(got.to_vec(), hex(v["sha256"].as_str().unwrap()), "{name}");

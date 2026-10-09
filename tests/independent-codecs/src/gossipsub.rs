@@ -10,11 +10,12 @@
 //!                        where source = PeerId::to_bytes()
 //! ```
 //!
-//! The topic KEY is fixed by the text. The topic's WIRE STRING, the
-//! encoding peers subscribe by, is left to the implementation at the time
-//! of writing (PUBSUB.md line 11). That gap is raised with architect-cto
-//! (01a11e67), so no wire string is produced here until the encoding is
-//! ruled.
+//! The topic's WIRE STRING, the one peers subscribe and publish by, is
+//! the key's lowercase hex: 64 characters from `[0-9a-f]`, with no prefix
+//! and no separator. Architect-cto ruled it the contract on 2026-10-09
+//! (01a11e68). Before that, PUBSUB.md left the encoding to the
+//! implementation, and two conforming peers could have spelled one key
+//! differently and never met.
 //!
 //! `PeerId::to_bytes()` is the multihash the `PeerId`'s base58btc text
 //! spells, so the source bytes are that text decoded. The decoder is here
@@ -60,6 +61,19 @@ pub fn topic_key_v1(channel: &str) -> Result<[u8; 32], DecodeError> {
     h.update(TOPIC_DOMAIN);
     h.update(channel.as_bytes());
     Ok(h.finalize().into())
+}
+
+/// The wire topic for a channel: the key's lowercase hex.
+///
+/// # Errors
+/// As [`topic_key_v1`].
+pub fn wire_topic_v1(channel: &str) -> Result<String, DecodeError> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    Ok(topic_key_v1(channel)?
+        .iter()
+        .flat_map(|b| [HEX[usize::from(b >> 4)], HEX[usize::from(b & 0x0f)]])
+        .map(char::from)
+        .collect())
 }
 
 /// The mesh message id for a source `PeerId` (its text) and a sequence
