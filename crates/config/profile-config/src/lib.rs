@@ -869,6 +869,17 @@ fn validate_address_grammar(address: &str) -> Result<(), &'static str> {
     validate_direct_address(&route.join("/"))
 }
 
+/// Whether an address half (as [`split_peer_multiaddr`] leaves it) is a
+/// circuit route: the `p2p-circuit` marker at a protocol position, as
+/// [`validate_address_grammar`] reads it. For a role that takes the
+/// direct form only (ADR-0052 rule 9, A 2026-10-09).
+pub(crate) fn is_circuit_route(address: &str) -> bool {
+    address
+        .split('/')
+        .enumerate()
+        .any(|(i, c)| i % 2 == 1 && c == "p2p-circuit")
+}
+
 /// `/<host>/<value>/<transport>/<port>` against the documented set.
 fn validate_direct_address(address: &str) -> Result<(), &'static str> {
     if !address.starts_with('/') {
