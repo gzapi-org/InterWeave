@@ -51,11 +51,12 @@ pub fn text(body: &str) -> Payload {
     .expect("within the ceiling")
 }
 
-/// One `events` call, with the runtime's state set aside. The state is
-/// owed at open and on every change, so any read may carry one; the
-/// helpers below are about what was sent and admitted, and item 10
-/// (`the_runtimes_state_is_owed_once_at_open`) reads the state
-/// on its own.
+/// One `events` call, with the runtime's state and the path notices set
+/// aside. The state is owed at open and on every change, and a path
+/// notice at every route's begin (A 2026-10-09), so any read may carry
+/// either; the helpers below are about what was sent and admitted, and
+/// items 10 and 12 (`the_runtimes_state_is_owed_once_at_open`,
+/// `a_route_begin_is_owed_the_peers_path`) read them on their own.
 async fn take_all<S: DataSessionPort>(session: &S) -> Vec<SessionEvent> {
     session
         .events(usize::MAX)
@@ -65,7 +66,10 @@ async fn take_all<S: DataSessionPort>(session: &S) -> Vec<SessionEvent> {
         .filter(|e| {
             !matches!(
                 e,
-                SessionEvent::Local(LocalSessionEvent::ServerState { .. })
+                SessionEvent::Local(
+                    LocalSessionEvent::ServerState { .. }
+                        | LocalSessionEvent::PeerPathChanged { .. }
+                )
             )
         })
         .collect()
@@ -436,6 +440,115 @@ pub async fn the_source_endpoint_is_the_senders_lease<B: DataSessionBinding>(
     unleased.close().await.expect("closes");
 }
 
+/// Item 10's route begin (A 2026-10-09; item 12 is its relayed case,
+/// proved between daemons by `tests/desktop-e2e`): a session whose route to a peer
+/// BEGINS -- the sender at its send's acceptance, the receiver at its
+/// take -- is owed one `PeerPathChanged` with no `previous`, `current` the
+/// path the binding has to the peer (`path`), reason `route_established`;
+/// a second exchange begins nothing and is owed nothing; and a session
+/// that exchanged nothing is owed nothing (the control).
+pub async fn a_route_begin_is_owed_the_peers_path<B: DataSessionBinding>(
+    sender: &B,
+    receiver: &B,
+    sender_peer: &TransportIdentity,
+    receiver_peer: &TransportIdentity,
+    source: &EndpointId,
+    endpoint: &EndpointId,
+    path: interweave_transport_api::PeerPath,
+) {
+    let from = sender.open(full(Some(source))).await.expect("leases");
+    let to = receiver.open(full(Some(endpoint))).await.expect("leases");
+    let bystander = receiver.open(full(None)).await.expect("opens");
+    let send = |n: u8| {
+        from.send_direct(
+            DirectDestination {
+                peer: receiver_peer.clone(),
+                endpoint: Some(endpoint.clone()),
+            },
+            MessageId::from_bytes([n; 16]),
+            text("a route"),
+        )
+    };
+    let paths = |events: Vec<SessionEvent>| -> Vec<(TransportIdentity, Option<_>, _, String)> {
+        events
+            .into_iter()
+            .filter_map(|e| match e {
+                SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
+                    peer,
+                    previous,
+                    current,
+                    reason_class,
+                    ..
+                }) => Some((peer, previous, current, reason_class)),
+                _ => None,
+            })
+            .collect()
+    };
+    let begun = |peer: &TransportIdentity| {
+        vec![(
+            peer.clone(),
+            None,
+            path,
+            interweave_local_client_api::ROUTE_ESTABLISHED.to_owned(),
+        )]
+    };
+
+    // Raw reads throughout: `take_all` sets path notices aside, so a
+    // check built on it would pass whatever was owed.
+    let raw_within = async |session: &B::Session, window: Duration| {
+        let deadline = tokio::time::Instant::now() + window;
+        let mut got = Vec::new();
+        while tokio::time::Instant::now() < deadline {
+            got.extend(session.events(usize::MAX).await.expect("events"));
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        got
+    };
+    // The receiver's notice comes in the call that takes the message,
+    // after it: read until the message, then a settle for anything owed
+    // late.
+    let raw_until_direct = async |session: &B::Session| {
+        let deadline = tokio::time::Instant::now() + PATIENCE;
+        let mut got = Vec::new();
+        while !got.iter().any(|e| matches!(e, SessionEvent::Direct(_))) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the message never arrived"
+            );
+            got.extend(session.events(usize::MAX).await.expect("events"));
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        got.extend(raw_within(session, SETTLE).await);
+        got
+    };
+
+    send(1).await.expect("accepted");
+    assert_eq!(
+        paths(raw_until_direct(&to).await),
+        begun(sender_peer),
+        "the receiver's route began at the take"
+    );
+    assert_eq!(
+        paths(raw_within(&from, SETTLE).await),
+        begun(receiver_peer),
+        "the sender's route began at the acceptance"
+    );
+
+    send(2).await.expect("accepted");
+    assert!(
+        paths(raw_until_direct(&to).await).is_empty()
+            && paths(raw_within(&from, SETTLE).await).is_empty(),
+        "a route that already holds begins nothing"
+    );
+    assert!(
+        paths(raw_within(&bystander, SETTLE).await).is_empty(),
+        "no exchange, no route, nothing owed"
+    );
+    from.close().await.expect("closes");
+    to.close().await.expect("closes");
+    bystander.close().await.expect("closes");
+}
+
 /// Items 2 and 5: one live owner per endpoint, and closing a session
 /// releases its lease at once -- the next claim succeeds, with a fresh
 /// epoch.
@@ -651,13 +764,16 @@ pub async fn a_bounded_take_leaves_the_rest_queued_in_order<B: DataSessionBindin
         );
     }
 
-    // The runtime's state, owed at open and on any change, is a notice
-    // the take may hold too: taken and counted under `max` like any
-    // event, then set aside, since this item is about the messages.
+    // The runtime's state, owed at open and on any change, and the
+    // path notice a route's begin owes (A 2026-10-09) are notices the
+    // take may hold too: taken and counted under `max` like any event,
+    // then set aside, since this item is about the messages.
     let id_of = |event: &SessionEvent| match event {
         SessionEvent::Direct(message) => Some(message.message_id),
         SessionEvent::Broadcast(message) => Some(message.message_id),
-        SessionEvent::Local(LocalSessionEvent::ServerState { .. }) => None,
+        SessionEvent::Local(
+            LocalSessionEvent::ServerState { .. } | LocalSessionEvent::PeerPathChanged { .. },
+        ) => None,
         other @ SessionEvent::Local(_) => panic!("a message: {other:?}"),
     };
     assert!(

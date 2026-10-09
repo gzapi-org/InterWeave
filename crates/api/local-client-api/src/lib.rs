@@ -489,6 +489,18 @@ impl From<LeaseRefusal> for TransportError {
     }
 }
 
+/// `PeerPathChanged`'s `reason_class` when a session's route to a peer
+/// BEGINS and the peer is connected: `previous` is absent and `current`
+/// the path at the take or the acceptance (`LOCAL-CLIENT.md` §2, A
+/// 2026-10-09).
+pub const ROUTE_ESTABLISHED: &str = "route_established";
+
+/// `PeerPathChanged`'s `reason_class` when a peer the session already has
+/// a route to connects again after a disconnect: `previous` is absent,
+/// since the disconnect withdrew what was pending and the client cleared
+/// what it showed (A 2026-10-09).
+pub const RECONNECTED: &str = "reconnected";
+
 /// A normalized event delivered to exactly one local session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "event")]
@@ -523,16 +535,23 @@ pub enum LocalSessionEvent {
     },
     /// A peer this session has a route to -- a direct message exchanged
     /// with it, or a broadcast received from it on one of its joins --
-    /// changed path. Coalesced per peer to one pending: a newer change
-    /// keeps the pending one's `previous` and takes the newer `current`,
-    /// `reason_class` and `observed_at`, and one whose `previous` equals
-    /// its `current` is withdrawn. In the ordinary lane, taken after the
-    /// messages (`LOCAL-CLIENT.md` §2, A 2026-10-03).
+    /// changed path; or the route BEGAN, or the routed peer connected
+    /// again after a disconnect, when `previous` is `None` and `current`
+    /// is the path then (`route_established`, `reconnected`; A
+    /// 2026-10-09). Coalesced per peer to one pending: a newer change
+    /// keeps the pending one's `previous` -- an absent one stays absent --
+    /// and takes the newer `current`, `reason_class` and `observed_at`,
+    /// and one whose `previous` equals its `current` is withdrawn. In the
+    /// ordinary lane, taken after the messages (`LOCAL-CLIENT.md` §2, A
+    /// 2026-10-03).
     PeerPathChanged {
         /// The peer.
         peer: TransportIdentity,
-        /// The path before.
-        previous: PeerPath,
+        /// The path before; `None` when nothing was shown before it --
+        /// absent from the serialization, never `null`, as the IPC shape
+        /// is (`ipc.path-changed` 1.1.0).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        previous: Option<PeerPath>,
         /// The path now.
         current: PeerPath,
         /// Why, as the runtime names it (`direct_established`, `dcutr`,

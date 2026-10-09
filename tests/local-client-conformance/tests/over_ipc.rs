@@ -138,6 +138,23 @@ impl IpcPair {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn item_10_a_route_begin_is_owed_the_peers_path() {
+    let pair = IpcPair::start().await;
+    let (a, b) = pair.bindings();
+    suite::a_route_begin_is_owed_the_peers_path(
+        &a,
+        &b,
+        &pair.a_peer,
+        &pair.b_peer,
+        &agent(),
+        &human(),
+        interweave_transport_api::PeerPath::Direct,
+    )
+    .await;
+    pair.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn item_1_the_source_endpoint_is_the_senders_lease() {
     let pair = IpcPair::start().await;
     let (a, b) = pair.bindings();

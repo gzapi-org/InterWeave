@@ -45,7 +45,8 @@ pub mod version;
 pub use catalogue::{Method, MethodEntry};
 pub use event::{
     BroadcastMode, BroadcastReceived, DirectMode, DirectReceived, Event, EventFrame, EventTag,
-    EventType, LeaseChanged, MAX_REASON_CLASS_CHARS, PeerDisconnected,
+    EventType, LeaseChanged, MAX_REASON_CLASS_CHARS, PeerDisconnected, ROUTE_NOTICE_SINCE_MINOR,
+    available_to,
 };
 pub use frame::{
     CLIENT_SILENCE_TIMEOUT, Cancel, Close, Frame, GrantedLease, HELLO_TIMEOUT, HelloResponse,

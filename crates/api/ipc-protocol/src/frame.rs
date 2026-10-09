@@ -652,7 +652,7 @@ impl Ping {
 }
 
 /// A field that may be absent but never `null`.
-fn absent_or<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+pub(crate) fn absent_or<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de>,

@@ -435,6 +435,22 @@ fn item_9_a_message_waiting_at_the_end_goes_with_the_host() {
 }
 
 #[test]
+fn item_10_a_route_begin_is_owed_the_peers_path() {
+    let pair = EmbeddedPair::start();
+    let (a, b) = pair.bindings();
+    pair.run(suite::a_route_begin_is_owed_the_peers_path(
+        &a,
+        &b,
+        &pair.a_peer,
+        &pair.b_peer,
+        &agent(),
+        &human(),
+        interweave_transport_api::PeerPath::Direct,
+    ));
+    pair.stop();
+}
+
+#[test]
 fn item_10_the_runtimes_state_is_owed_once_at_open() {
     let pair = EmbeddedPair::start();
     let (_, b) = pair.bindings();

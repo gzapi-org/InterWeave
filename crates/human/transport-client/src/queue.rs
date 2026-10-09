@@ -54,8 +54,8 @@ impl EventQueue {
     /// connection that has gone, so the disconnection drops it
     /// (`a_disconnection_drops_the_peers_queued_path`). The runtime
     /// withdraws its own pending notice at a disconnection
-    /// (`LOCAL-CLIENT.md` §2), so a path taken after one is a change since
-    /// a reconnect and is queued behind it
+    /// (`LOCAL-CLIENT.md` §2), so a path taken after one is the path since
+    /// the peer's return and is queued behind it
     /// (`a_path_behind_a_queued_disconnection_is_the_path`).
     pub(crate) fn push(&mut self, event: ClientEvent) {
         let key = Key::of(&event);
@@ -234,7 +234,7 @@ mod tests {
                 }),
                 None
             ),
-            "a change since the reconnect, after the disconnection"
+            "the path since the return, after the disconnection"
         );
     }
 

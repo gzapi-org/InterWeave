@@ -733,6 +733,7 @@ impl Driver {
                 self.outcomes
                     .record(&self.trust, &peer, LastOutcome::Connected);
                 self.paths.insert(peer.clone(), path);
+                self.notices.connected(&peer, path, observed_at);
                 self.emit(TransportEvent::PeerConnected {
                     peer,
                     path,

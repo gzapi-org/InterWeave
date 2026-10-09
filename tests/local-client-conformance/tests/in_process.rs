@@ -24,6 +24,23 @@ mod common;
 use common::{Pair, agent, human};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn item_10_a_route_begin_is_owed_the_peers_path() {
+    let pair = Pair::start().await;
+    let (a, b) = pair.bindings();
+    suite::a_route_begin_is_owed_the_peers_path(
+        &a,
+        &b,
+        &pair.a_peer,
+        &pair.b_peer,
+        &agent(),
+        &human(),
+        interweave_transport_api::PeerPath::Direct,
+    )
+    .await;
+    pair.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn item_1_the_source_endpoint_is_the_senders_lease() {
     let pair = Pair::start().await;
     let (a, b) = pair.bindings();
@@ -722,7 +739,12 @@ async fn a_drained_message_is_a_route_and_a_path_change_follows_it() {
     };
     assert_eq!(
         (peer, *previous, *current, reason_class.as_str()),
-        (&pair.a_peer, PeerPath::Relayed, PeerPath::Direct, "dcutr")
+        (
+            &pair.a_peer,
+            Some(PeerPath::Relayed),
+            PeerPath::Direct,
+            "dcutr"
+        )
     );
     assert!(
         !stranger
@@ -742,6 +764,83 @@ async fn a_drained_message_is_a_route_and_a_path_change_follows_it() {
         "an accepted send is a route too"
     );
     drop((from, to, stranger));
+    pair.stop().await;
+}
+
+/// A session opened `without_route_notices` -- what the IPC server opens
+/// for a connection below 2.4 -- is owed a change that follows its
+/// route's begin with its `previous`, through the in-process binding's
+/// own wiring; the control, a session that takes route notices, is owed
+/// the change merged into the begin. The window is held open the way
+/// pressure holds it: the message taken alone (`events(1)`), the begin's
+/// notice still pending when the change arrives (#245 re-review N2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_without_route_notices_is_owed_the_change_with_its_previous() {
+    use interweave_local_client_api::LocalSessionEvent;
+    use interweave_transport_api::PeerPath;
+    let pair = Pair::start().await;
+    let (a, b) = pair.bindings();
+    let from = a.open(suite::full(Some(&agent()))).await.expect("leases");
+    for (n, declines) in [(1_u8, true), (2, false)] {
+        let request = if declines {
+            suite::full(Some(&human())).without_route_notices()
+        } else {
+            suite::full(Some(&human()))
+        };
+        let to = b.open(request).await.expect("leases");
+        let _ = to.events(usize::MAX).await.expect("the open-time state");
+        from.send_direct(
+            DirectDestination {
+                peer: pair.b_peer.clone(),
+                endpoint: Some(human()),
+            },
+            MessageId::from_bytes([n; 16]),
+            suite::text("a route"),
+        )
+        .await
+        .expect("accepted");
+        // The message alone: anything else taken one at a time first.
+        let deadline = tokio::time::Instant::now() + suite::PATIENCE;
+        loop {
+            let one = to.events(1).await.expect("events");
+            if matches!(one.as_slice(), [SessionEvent::Direct(_)]) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the message never came"
+            );
+            if one.is_empty() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+        pair.b
+            .inject_path_change(pair.a_peer.clone(), PeerPath::Relayed, PeerPath::Direct)
+            .await
+            .expect("posted");
+        let paths: Vec<_> = to
+            .events(usize::MAX)
+            .await
+            .expect("events")
+            .into_iter()
+            .filter_map(|e| match e {
+                SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
+                    previous,
+                    current,
+                    ..
+                }) => Some((previous, current)),
+                _ => None,
+            })
+            .collect();
+        let expected = if declines {
+            (Some(PeerPath::Relayed), PeerPath::Direct)
+        } else {
+            (None, PeerPath::Direct)
+        };
+        assert_eq!(paths, [expected], "declines route notices: {declines}");
+        to.close().await.expect("closes");
+    }
+    drop(from);
     pair.stop().await;
 }
 
