@@ -12,6 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use libp2p::core::transport::{ListenerId, TransportError};
+use libp2p::multiaddr::Protocol;
 use libp2p::swarm::DialError;
 use libp2p::swarm::SwarmEvent as Libp2pSwarmEvent;
 use libp2p::{Multiaddr, PeerId, identify};
@@ -608,6 +609,35 @@ pub(super) fn settle_failed_dial(
     }
 }
 
+/// The relay a failed `RelayCircuit` dial went through, when this node
+/// holds NO direct connection to it: the circuit then failed at the
+/// relay hop, before the destination was asked anything. `None` for any
+/// other dial, for a circuit whose relay is connected -- a failure past
+/// the hop is the destination's or the relay's answer about it, scored
+/// as before -- and for an address with no relay `/p2p` before its
+/// `/p2p-circuit`.
+pub(super) fn unreached_relay(
+    ticket: &DialTicket,
+    open: &HashMap<libp2p::swarm::ConnectionId, OpenConnection>,
+) -> Option<TransportIdentity> {
+    if ticket.origin() != DialOrigin::RelayCircuit {
+        return None;
+    }
+    let address: Multiaddr = ticket.address().parse().ok()?;
+    let parts: Vec<Protocol<'_>> = address.iter().collect();
+    let at = parts
+        .iter()
+        .position(|p| matches!(p, Protocol::P2pCircuit))?;
+    let Some(Protocol::P2p(relay)) = at.checked_sub(1).and_then(|i| parts.get(i)) else {
+        return None;
+    };
+    let relay = to_transport_identity(relay).ok()?;
+    let reached = open
+        .values()
+        .any(|c| c.peer == relay && c.path == PeerPath::Direct);
+    (!reached).then_some(relay)
+}
+
 /// Whether ONE transport attempt is structural: this process's own
 /// stack refusing the address's shape, which no retry changes.
 fn attempt_is_structural(address: &Multiaddr, error: &TransportError<std::io::Error>) -> bool {
@@ -923,6 +953,13 @@ pub(super) fn settle_outcome(
                 refuse.push(*connection_id);
                 return Announce::Suppress;
             };
+            // A DIRECT connection to a peer may be a relay some circuit
+            // retry waits on: due now. A no-op for any other peer, and
+            // asked before retention because a retry made due early only
+            // dials sooner -- the gate still judges it.
+            if path == PeerPath::Direct {
+                manager.relay_reached(&peer, now_ms);
+            }
             #[expect(
                 clippy::single_match_else,
                 reason = "each arm carries the comment naming its case"
@@ -1063,7 +1100,14 @@ pub(super) fn settle_outcome(
             ..
         } => {
             if let Some(ticket) = in_flight.settle(*connection_id) {
-                settle_failed_dial(manager, ticket, error, now_ms);
+                // A CIRCUIT THAT NEVER REACHED ITS RELAY says nothing
+                // about the destination (`record_relay_hop_unreached`).
+                match unreached_relay(&ticket, open) {
+                    Some(relay) => {
+                        let _ = manager.record_relay_hop_unreached(ticket, &relay, now_ms);
+                    }
+                    None => settle_failed_dial(manager, ticket, error, now_ms),
+                }
             }
         }
         // ADVISORY, and bounded. These are addresses the peer asserted
