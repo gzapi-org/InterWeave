@@ -17,9 +17,11 @@ pub const IPC_MAJOR: u64 = 2;
 
 /// The highest IPC minor this build speaks: the first production build
 /// spoke 2.0, Stage 15's R1 brought 2.1 (`peer.path_changed`),
-/// `admin.peers.list` brought 2.2 (A 2026-10-06), and the persisted
-/// trust row brought 2.3 (ADR-0017 A 2026-10-07).
-pub const IPC_MAX_MINOR: u64 = 3;
+/// `admin.peers.list` brought 2.2 (A 2026-10-06), the persisted
+/// trust row brought 2.3 (ADR-0017 A 2026-10-07), and the path notice at
+/// a route's begin or a routed peer's reconnect brought 2.4
+/// ([`crate::event::ROUTE_NOTICE_SINCE_MINOR`], A 2026-10-09).
+pub const IPC_MAX_MINOR: u64 = 4;
 
 /// A version pair as it crosses the wire.
 ///
@@ -141,7 +143,8 @@ mod tests {
             (1, 1),
             (2, 2),
             (3, 3),
-            (4, 3),
+            (4, 4),
+            (5, 4),
             (u64::MAX, IPC_MAX_MINOR),
         ] {
             assert_eq!(

@@ -295,12 +295,28 @@ fn the_prose_event_table_is_the_event_schemas_binding() {
     let doc = schema("ipc/event.schema.json");
     for row in rows {
         let kind = EventType::parse(first_code(&row[0])).unwrap_or_else(|| panic!("{row:?}"));
+        // The type's minor leads the cell; a SHAPE added later is named
+        // after it -- `peer.path_changed`'s notice with no `previous`
+        // (2.4) -- and no other type carries one.
+        let (since, later) = row[3]
+            .split_once(' ')
+            .map_or((row[3].as_str(), None), |(a, b)| (a, Some(b)));
         assert_eq!(
-            row[3],
+            since,
             format!("2.{}", kind.since_minor()),
             "{} since",
             kind.as_str()
         );
+        if kind == EventType::PathChanged {
+            let shape = format!("2.{}", interweave_ipc_protocol::ROUTE_NOTICE_SINCE_MINOR);
+            assert!(
+                later.is_some_and(|l| l.contains(&shape)),
+                "the route notice's minor named: {}",
+                row[3]
+            );
+        } else {
+            assert_eq!(later, None, "{}: no later shape", kind.as_str());
+        }
         let alt = doc["oneOf"]
             .as_array()
             .expect("oneOf")
@@ -1192,6 +1208,91 @@ fn every_event_validates_against_its_catalogue_entry_and_body_schema() {
             assert_valid(path, &data);
         }
     }
+}
+
+/// `ipc.path-changed` 1.1.0's optional member (A 2026-10-09): the schema
+/// no longer requires `previous`, the Rust shape holds it as an `Option`,
+/// and a notice with none -- a route's begin, a routed peer's reconnect --
+/// serializes WITHOUT the member, never as `null`, and validates; read
+/// back, it is the same notice. The control: one with `previous`
+/// carries it, and a `null` is refused by the schema.
+#[test]
+fn a_path_notice_without_previous_omits_it_and_validates() {
+    let schema = "architecture/contracts/schemas/ipc/path-changed.schema.json";
+    let doc: Value =
+        serde_json::from_str(&std::fs::read_to_string(root().join(schema)).expect("the schema"))
+            .expect("json");
+    let required = string_set(&doc["required"]);
+    assert!(!required.contains("previous"), "previous is optional");
+    for field in ["peer", "current", "reason_class", "observed_at"] {
+        assert!(required.contains(field), "{field} stays required");
+    }
+    for (previous, class) in [
+        (None, interweave_local_client_api::ROUTE_ESTABLISHED),
+        (None, interweave_local_client_api::RECONNECTED),
+        (
+            Some(interweave_transport_api::PeerPath::Relayed),
+            "direct_established",
+        ),
+    ] {
+        let session = SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
+            peer: peer(),
+            previous,
+            current: interweave_transport_api::PeerPath::Direct,
+            reason_class: class.into(),
+            observed_at: 4,
+        });
+        let event = Event::from_session(session.clone())
+            .expect("maps")
+            .expect("an event");
+        let frame = event.into_frame(0);
+        let data: Value =
+            serde_json::from_str(frame.data.as_deref().expect("data").get()).expect("json");
+        assert_eq!(
+            data.get("previous").is_some(),
+            previous.is_some(),
+            "{class}: absent exactly when there is none: {data}"
+        );
+        assert_valid(schema, &data);
+        let read = Event::decode(
+            &frame.event_type,
+            frame.data.as_deref(),
+            interweave_ipc_protocol::IpcVersion {
+                major: 2,
+                minor: interweave_ipc_protocol::ROUTE_NOTICE_SINCE_MINOR,
+            },
+        )
+        .expect("decodes at 2.4");
+        assert_eq!(read.into_session(), session, "{class}: round trip");
+    }
+    let mut with_null = serde_json::json!({
+        "peer": peer().as_str(), "current": "direct",
+        "reason_class": "route_established", "observed_at": 1
+    });
+    with_null["previous"] = Value::Null;
+    assert!(
+        !validator(schema).is_valid(&with_null),
+        "null is not absent"
+    );
+}
+
+/// The decode half of the 2.4 gate: a notice without `previous` on a
+/// connection below `ROUTE_NOTICE_SINCE_MINOR` is the server's protocol
+/// violation, as a type above the minor is; at the minor it decodes.
+#[test]
+fn a_path_notice_without_previous_below_2_4_is_the_servers_violation() {
+    let data = serde_json::value::to_raw_value(&serde_json::json!({
+        "peer": peer().as_str(), "current": "relayed",
+        "reason_class": "route_established", "observed_at": 1
+    }))
+    .expect("raw");
+    let at = |minor| interweave_ipc_protocol::IpcVersion { major: 2, minor };
+    let since = interweave_ipc_protocol::ROUTE_NOTICE_SINCE_MINOR;
+    assert_eq!(
+        Event::decode("peer.path_changed", Some(&data), at(since - 1)).err(),
+        Some(interweave_transport_api::TransportError::ProtocolViolation)
+    );
+    assert!(Event::decode("peer.path_changed", Some(&data), at(since)).is_ok());
 }
 
 #[test]
