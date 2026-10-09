@@ -412,6 +412,28 @@ fn item_9_an_ended_session_answers_events_with_its_end() {
     pair.b.stop();
 }
 
+/// The case with something waiting at the end, degenerate in process
+/// as the in-process runner's: the queues are the runtime's, and go
+/// with its host's stop -- here the executor too, the session then
+/// polled on the other host's.
+#[test]
+fn item_9_a_message_waiting_at_the_end_goes_with_the_host() {
+    let mut pair = EmbeddedPair::start();
+    let (a, b) = pair.bindings();
+    let (session, _sender) = pair.run(suite::a_session_to_end_with_a_message_waiting(
+        &b,
+        &a,
+        &pair.a_peer,
+        &agent(),
+        &human(),
+    ));
+    pair.a.stop();
+    pair.run(suite::an_ended_session_answers_events_with_its_end(
+        &session,
+    ));
+    pair.b.stop();
+}
+
 #[test]
 fn item_10_the_runtimes_state_is_owed_once_at_open() {
     let pair = EmbeddedPair::start();
