@@ -209,6 +209,59 @@ connection exists, inbound or through an operator route. The hook is
 correction on the same PR rather than preceding it, which rule 8 asks
 for and the record says plainly.
 
+### Amendment 2026-10-09 — The profile door admits a circuit route
+
+**Trigger.** Stage 17's relay pair (p2p-network-dev-02, GZCoord
+01a1208f): the dialer daemon exited at start because profile-config's
+address grammar takes exactly `/<host>/<value>/<transport>/<port>[/p2p/<id>]`
+and refused a static-bootstrap entry of the form
+`/ip4/…/tcp/…/p2p/<relay>/p2p-circuit/p2p/<peer>`. With discovery, the
+Kademlia stash and mDNS refusing every circuit by rule 8, and the
+operator's `AddAddress` command reachable by no IPC verb, a relay-only
+peer could be dialled only if IT dialled first: two NATed peers sharing
+a static relay both reserve and neither can ever open the conversation.
+
+**Decision.** Rule 9 names profile configuration as an operator door for
+an address, and rule 8's discovery row sends a relay-only peer's circuit
+"through an operator route"; a grammar that refuses the one form such a
+route has contradicts both. `multiaddr-with-peer-id` — one grammar, the
+definition `start` seeds the operator set from — is either the
+four-component literal with `/p2p/<id>` or a circuit route
+`<relay route>/p2p/<relay>/p2p-circuit/p2p/<peer>`, the relay route the
+same four-component grammar with the same host set, under the two shape
+conditions rule 8's Identify clause already imposes: the prefix ends in
+the relay's `/p2p/<relay>`, and exactly `/p2p/<peer>` follows
+`/p2p-circuit`; a foreign destination or a second `/p2p-circuit` is
+refused by the grammar as a shape error that names it. Whether this
+node may dial THROUGH the relay stays the gate's question at dial time
+(`RelayCircuit`, ADR-0036's infrastructure class), never the grammar's.
+The runtime needs nothing for the static bootstrap case: the operator
+set admits an operator circuit and `Dial` / `DialPeer` classify it
+(relayed_paths.rs pins that path through the command). The two
+infrastructure lists are the exception, found by p2p-network-dev-01's
+review of the grammar: `static_relays` and `static_servers` take the
+direct form only and refuse a circuit route at validation by role —
+`RelayClientSettings::from_profile` refuses a relay reached through a
+circuit ("not a relay") and `AutonatClientSettings::from_profile` keys
+the server on the first `/p2p/`, so an admitted circuit would validate
+and then fail at start, or probe the relay as if it were the server
+with the refusal surfacing nowhere (SPIKE-004). One grammar, two roles
+restricting it; the role rule is tested beside the shape rules.
+
+**Alternatives rejected.** An IPC verb reaching `AddAddress`: a
+convenience for a running daemon, not the door a deployment configures;
+it may come later and does not change this rule. Leaving the grammar and
+seeding circuits in tests only: ships a relay infrastructure no two
+deployed peers behind NATs can use.
+
+**Consequences.** Code: profile-config's `validate_address_grammar` and
+its tests (the circuit accepted; a foreign destination, a double circuit
+and a circuit without the relay id refused by name; a `dns` relay host
+admitted as an operator name) — p2p-network-dev-01's crate, landing with
+the relay-pair batch that first consumes it. `config.schema.yaml` states
+the two forms at the type's first use. Until it lands, a daemon cannot
+be configured to reach a relay-only peer: the recorded gap.
+
 ### Amendment 2026-10-09 — Rule 3's own listener is one on an IP the host is known to hold
 
 Stage 17 step 5 gave the network-change detector a second source, the platform's view (CONNECTIVITY.md §14, A 2026-10-09), and with it a state the listener set alone never had: a listener still BOUND on an IP the view has said departed, until the listener poll catches up. The offer sites stopped offering such a listener (`NetworkSet::holds`, de611722), and the punch's own-listener test (`HolePunchScope::within_boundary`) reads the offered set, so at that commit the punch already counts bound ∩ known — except the `NewListenAddr` offer, which is not yet filtered. The other instances of the same test — the discovery and advertised doors' `own_listeners` (the root funnel's, Kademlia's, the relay state's) — still read the bound set, so a departed LAN's listener keeps admitting private candidates there for the poll's lag. Ruled on p2p-network-dev's question: rule 3's "holds" means bound and on an IP the host is known to hold, at every instance of the test; nothing else in the rule changes (family and range, the per-instance decision, the dial-back's refusal). The gap at this note: the unfiltered `NewListenAddr` offer and the doors' bound-set `own_listeners`, p2p-network-dev's on `feat/network-change-binding`.

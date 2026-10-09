@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use interweave_ipc_protocol::{
     AuthorityDomain, Close, FEATURE_KEEPALIVE, Frame, GrantedLease, HELLO_TIMEOUT,
-    HandshakeOutcome, HelloResponse, IpcVersion, negotiate,
+    HandshakeOutcome, HelloResponse, IpcVersion, ROUTE_NOTICE_SINCE_MINOR, negotiate,
 };
 use interweave_local_client_api::{
     AdminBinding, DataSessionBinding, DataSessionPort as _, SessionRequest,
@@ -192,6 +192,17 @@ where
                 outcome.granted_data.iter().copied(),
             ) else {
                 return close(TransportError::InvalidArgument);
+            };
+            // BELOW 2.4 THE SESSION TAKES NO ROUTE NOTICE AT ALL, rather
+            // than taking one and having the send loop drop it: a change
+            // merged into a route-begin notice would go with it, and a
+            // client below 2.4 lost a path change it was owed before
+            // (#245 review F1). The send loop's `available_to` stays the
+            // backstop for the shape.
+            let request = if version.minor < ROUTE_NOTICE_SINCE_MINOR {
+                request.without_route_notices()
+            } else {
+                request
             };
             let session = match DataSessionBinding::open(binding, request).await {
                 Ok(session) => session,

@@ -602,6 +602,12 @@ impl DialTicket {
         }
     }
 
+    /// When this permission was granted, on the manager's clock.
+    #[must_use]
+    pub const fn admitted_at_ms(&self) -> u64 {
+        self.admitted_at_ms
+    }
+
     /// The peer this permission was granted for, if one was named.
     #[must_use]
     pub const fn peer(&self) -> Option<&TransportIdentity> {
@@ -756,7 +762,7 @@ pub const ADMIT_RELOAD_ATTEMPTS: usize = 3;
 pub const DEFAULT_MAX_RETRY_ENTRIES: usize = 1_024;
 
 /// One peer's scheduled reconnection attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Retry {
     due_at_ms: u64,
     attempts: u32,
@@ -765,6 +771,12 @@ struct Retry {
     /// returned by [`ConnectionManager::take_due_retries`] again, which
     /// is what stops the same slow dial from being started twice.
     claimed: bool,
+    /// The relay whose hop the last circuit dial never reached
+    /// ([`ConnectionManager::record_relay_hop_unreached`]): the retry is
+    /// also due the moment a direct connection to it establishes
+    /// ([`ConnectionManager::relay_reached`]), rather than only at its
+    /// delay.
+    waits_on: Option<TransportIdentity>,
 }
 
 /// Default ceiling on addresses remembered for one peer.
@@ -1487,6 +1499,107 @@ impl ConnectionManager {
         scheduled
     }
 
+    /// Settle a circuit dial that never reached its RELAY, scoring
+    /// nothing against the destination.
+    ///
+    /// A `/p2p-circuit` dial goes through the relay first, and when this
+    /// node holds no connection to the relay the relay client opens one
+    /// and parks the circuit on it. If that hop is refused or fails --
+    /// at start-up the client's own reservation dial to the same relay
+    /// is still in flight, and the hop's dial is refused on the Swarm's
+    /// peer condition -- the parked circuit is dropped and the transport
+    /// reports the CIRCUIT as failed. Nothing about the destination was
+    /// learnt: it was never asked. Scored by [`Self::record_failure`],
+    /// the circuit address was the peer's only route, so the peer went
+    /// into punitive backoff and every `DialPeer` for the next thirty
+    /// seconds was refused, while the relay connected milliseconds later
+    /// (rust-ui-dev-01's measurement on j6, 2026-10-09).
+    ///
+    /// So the PEER is not scored -- no backoff -- while the address is
+    /// ranked down (`score_address_failure`), so a second circuit to the
+    /// same peer through a relay that is up sorts ahead of it; the route
+    /// is kept (learnt, as [`Self::record_failure`] learns an attempted address),
+    /// and the reconnect is scheduled at the peer's ordinary delay AND
+    /// marked as waiting on `relay`: the first direct connection to the
+    /// relay makes it due at once ([`Self::relay_reached`]). A relay
+    /// that stays down therefore costs the ordinary cadence, never a
+    /// tight loop. `None` when the ticket was not issued here.
+    ///
+    /// `relay_came_up`: a direct connection to `relay` established AFTER
+    /// this dial was admitted -- the restart race, where the client asked
+    /// for the hop a moment before that connection was up. The relay has
+    /// been reached already, so the retry is due now rather than waiting
+    /// on an establishment that has happened (#247 review F1). Once per
+    /// failure: a later failure with the relay already up when it was
+    /// admitted takes the ordinary delay, so a cancel that persists with
+    /// the relay connected cannot loop.
+    pub fn record_relay_hop_unreached(
+        &mut self,
+        ticket: DialTicket,
+        relay: &TransportIdentity,
+        relay_came_up: bool,
+        now_ms: u64,
+    ) -> Option<RetryScheduled> {
+        let now_ms = ticket.settled_at(now_ms);
+        self.observe(now_ms);
+        if !self.issued_here(&ticket) {
+            return None;
+        }
+        let mut scheduled = None;
+        if let Some(peer) = ticket.peer().cloned() {
+            if !ticket.address().is_empty() {
+                // THE ROUTE IS RANKED DOWN, the peer is not backed off: a
+                // circuit through a relay that stays down must not keep
+                // sorting ahead of a circuit through one that is up, or
+                // every dial picks it again (#245 review F2).
+                self.policy
+                    .score_address_failure(&peer, ticket.address(), now_ms);
+                self.learn_address(&peer, ticket.address(), now_ms);
+            }
+            let delay = self.retry_delay_ms(&peer);
+            let held_by_another = !ticket.owns_scheduler_claim()
+                && self.retries.get(&peer).is_some_and(|entry| entry.claimed);
+            let attempt = self.schedule_retry(peer.clone(), now_ms, delay, held_by_another);
+            if let Some(entry) = self.retries.get_mut(&peer) {
+                if relay_came_up {
+                    entry.due_at_ms = now_ms;
+                } else {
+                    entry.waits_on = Some(relay.clone());
+                }
+            }
+            let retry = RetryScheduled {
+                attempt,
+                // Due now when the relay came up: report the delay that
+                // applies, not the one the cadence would have used (#247
+                // re-review N3).
+                delay_ms: if relay_came_up { 0 } else { delay },
+                peer_backoff: false,
+            };
+            self.note(GateNote::RetryScheduled {
+                peer,
+                origin: ticket.origin(),
+                retry,
+            });
+            scheduled = Some(retry);
+        }
+        self.settle(ticket);
+        self.publish();
+        scheduled
+    }
+
+    /// A direct connection to `relay` is established: every retry
+    /// waiting on it ([`Self::record_relay_hop_unreached`]) is due now.
+    /// A claimed entry is left alone -- its attempt is under way.
+    pub fn relay_reached(&mut self, relay: &TransportIdentity, now_ms: u64) {
+        self.observe(now_ms);
+        for entry in self.retries.values_mut() {
+            if !entry.claimed && entry.waits_on.as_ref() == Some(relay) {
+                entry.due_at_ms = entry.due_at_ms.min(now_ms);
+                entry.waits_on = None;
+            }
+        }
+    }
+
     /// Score an address-scoped failure with no ticket and no admission.
     ///
     /// SPIKE-003 F15: settling a multi-address `DialError::Transport`
@@ -2195,6 +2308,7 @@ impl ConnectionManager {
                 due_at_ms: now_ms.saturating_add(delay),
                 attempts: attempt,
                 claimed,
+                waits_on: None,
             },
         );
         attempt
@@ -2813,6 +2927,150 @@ mod tests {
         assert!(
             m.policy().peer(&p).is_some_and(|b| !b.is_clear_at(1)),
             "the peer is in backoff"
+        );
+    }
+
+    /// A circuit dial that never reached its relay scores nothing against
+    /// the destination: no peer backoff, so the next `DialPeer` is
+    /// admitted; the route is kept; the reconnect is scheduled and made
+    /// due by the relay's connection, not by its delay. A connection to
+    /// another peer makes nothing due. THE CONTROL: the same failure
+    /// through `record_failure` backs the peer off.
+    #[test]
+    fn a_circuit_that_never_reached_its_relay_backs_off_nothing_and_waits_on_the_relay() {
+        let circuit = format!("/ip4/10.0.0.9/tcp/4001/p2p/{P2}/p2p-circuit");
+        let p = peer(P1);
+        let relay = peer(P2);
+        let mut m = manager(4);
+        let ticket = m
+            .handle()
+            .admit(&request_at(P1, &circuit, DialOrigin::RelayCircuit), 0)
+            .expect("a circuit toward a data-plane peer is admitted");
+        let scheduled = m
+            .record_relay_hop_unreached(ticket, &relay, false, 0)
+            .expect("a retry is scheduled");
+        assert!(!scheduled.peer_backoff, "reported without peer backoff");
+        assert!(
+            m.policy().peer(&p).is_none_or(|b| b.is_clear_at(1)),
+            "the peer is not in backoff"
+        );
+        assert_eq!(m.known_addresses(&p), 1, "the circuit route is kept");
+        assert_eq!(m.handle().load().pending_dials(), 0, "the slot is settled");
+        assert!(
+            m.handle()
+                .admit(&request_at(P1, &circuit, DialOrigin::RelayCircuit), 1)
+                .is_ok(),
+            "the next circuit dial is admitted at once"
+        );
+        assert!(m.take_due_retries(1, 8).is_empty(), "not due yet");
+        m.relay_reached(&peer(P1), 2);
+        assert!(
+            m.take_due_retries(2, 8).is_empty(),
+            "another peer's connection is not the relay"
+        );
+        m.relay_reached(&relay, 3);
+        assert_eq!(
+            m.take_due_retries(3, 8),
+            std::slice::from_ref(&p),
+            "due the moment the relay connects"
+        );
+
+        let mut m = manager(4);
+        let ticket = m
+            .handle()
+            .admit(&request_at(P1, &circuit, DialOrigin::RelayCircuit), 0)
+            .expect("admitted");
+        m.record_failure(ticket, 0);
+        assert!(
+            m.policy().peer(&p).is_some_and(|b| !b.is_clear_at(1)),
+            "the control: scored as the peer's failure, it backs the peer off"
+        );
+    }
+
+    /// A circuit that failed at its relay hop is RANKED DOWN, so a second
+    /// circuit to the same peer through another relay is the next
+    /// candidate rather than shadowed by it (#245 review F2). The control:
+    /// before the failure the first circuit sorts first.
+    #[test]
+    fn a_circuit_that_never_reached_its_relay_sorts_behind_one_through_another_relay() {
+        const R2: &str = "12D3KooWA9hFCGwGCpCbWWfLmYSpqPzXgLmPvbBrgWGNvNGSDVpS";
+        let through_r1 = format!("/ip4/10.0.0.1/tcp/4001/p2p/{P2}/p2p-circuit");
+        let through_r2 = format!("/ip4/10.0.0.2/tcp/4001/p2p/{R2}/p2p-circuit");
+        let p = peer(P1);
+        let mut m = manager(4);
+        m.learn_address(&p, &through_r1, 0);
+        m.learn_address(&p, &through_r2, 0);
+        assert_eq!(
+            m.dial_candidates(&p, 0).first(),
+            Some(&through_r1),
+            "the control: the first circuit sorts first"
+        );
+        let ticket = m
+            .handle()
+            .admit(&request_at(P1, &through_r1, DialOrigin::RelayCircuit), 0)
+            .expect("admitted");
+        let _ = m.record_relay_hop_unreached(ticket, &peer(P2), false, 0);
+        assert_eq!(
+            m.dial_candidates(&p, 1).first(),
+            Some(&through_r2),
+            "the circuit through the relay that is up is tried next"
+        );
+        assert!(
+            m.policy().peer(&p).is_none_or(|b| b.is_clear_at(1)),
+            "and the peer is still not backed off"
+        );
+    }
+
+    /// A relay that came up DURING the dial -- the restart race -- makes
+    /// the retry due at once, with nothing left waiting; and a relay that
+    /// stays down costs the ordinary cadence, never a tight loop: two hop
+    /// failures in a row escalate the delay (#247 review F1, F3).
+    #[test]
+    fn a_relay_that_came_up_makes_the_retry_due_and_a_down_one_escalates() {
+        let circuit = format!("/ip4/10.0.0.9/tcp/4001/p2p/{P2}/p2p-circuit");
+        let p = peer(P1);
+        let relay = peer(P2);
+        let mut m = manager(4);
+        let admit = |m: &mut ConnectionManager, at: u64| {
+            m.handle()
+                .admit(&request_at(P1, &circuit, DialOrigin::RelayCircuit), at)
+                .expect("admitted")
+        };
+        let ticket = admit(&mut m, 0);
+        let now = m
+            .record_relay_hop_unreached(ticket, &relay, true, 1)
+            .expect("scheduled");
+        assert_eq!(now.delay_ms, 0, "reported as the delay that applies");
+        assert_eq!(
+            m.take_due_retries(1, 8),
+            std::slice::from_ref(&p),
+            "due at once"
+        );
+
+        let mut m = manager(4);
+        let ticket = admit(&mut m, 0);
+        let first = m
+            .record_relay_hop_unreached(ticket, &relay, false, 0)
+            .expect("scheduled");
+        assert!(
+            m.take_due_retries(1, 8).is_empty(),
+            "the control: waits on the relay"
+        );
+        let due = first.delay_ms;
+        assert_eq!(
+            m.take_due_retries(due, 8),
+            std::slice::from_ref(&p),
+            "or its delay"
+        );
+        let ticket = admit(&mut m, due);
+        let second = m
+            .record_relay_hop_unreached(ticket, &relay, false, due)
+            .expect("scheduled");
+        assert!(
+            second.delay_ms > first.delay_ms,
+            "a relay that stays down escalates: {} then {}",
+            first.delay_ms,
+            second.delay_ms
         );
     }
 
@@ -5484,8 +5742,14 @@ mod tests {
         production.push_str(rest);
 
         for (pattern, expected) in [
-            // The declaration plus the two internal callers.
-            ("learn_address(", 3usize),
+            // The declaration plus the three internal callers:
+            // `record_failure`, `record_address_failure_unadmitted`, and
+            // `record_relay_hop_unreached`, which learns `ticket.address()`
+            // as `record_failure` does.
+            ("learn_address(", 4usize),
+            // Declaration only, ticket-carried like `record_failure`; a
+            // second occurrence is a new transitive route.
+            ("record_relay_hop_unreached(", 1),
             // Declarations only; each reaches `learn_address` internally, so
             // a second occurrence is a new transitive route.
             ("record_failure(", 1),
@@ -5504,6 +5768,9 @@ mod tests {
             // The quarantine write itself, not only its two enclosing
             // declarations. Counted directly so a third caller fails.
             ("record_address_failure(", 2),
+            // Its address half alone, which keys the same table: the
+            // relay-hop settlement's one call (#245 review F2).
+            ("score_address_failure(", 1),
             // THE BOOK, so that "keyed in exactly three places" is a
             // mechanism rather than a sentence. `.book` and not `self.policy.book`,
             // because rustfmt wraps a long chain between the receiver and

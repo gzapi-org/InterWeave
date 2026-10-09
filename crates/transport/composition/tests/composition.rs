@@ -63,6 +63,29 @@ fn id() -> (ProfileIdentity, TransportIdentity) {
     (identity, peer)
 }
 
+/// A circuit route configured as a static bootstrap peer (ADR-0052 rule
+/// 9, A 2026-10-09) is the operator's whole: seeded into the operator set
+/// as written, relay and destination both, and accepted by the
+/// substrate's own validation of that set.
+#[test]
+fn a_circuit_route_seed_enters_the_operator_set_whole() {
+    let (_, local) = id();
+    let (_, relay) = id();
+    let (_, other) = id();
+    let seed = format!(
+        "/ip4/203.0.113.7/tcp/4001/p2p/{}/p2p-circuit/p2p/{}",
+        relay.as_str(),
+        other.as_str()
+    );
+    let composed = translate(
+        &profile(&[&other], std::slice::from_ref(&seed), ""),
+        &local,
+        256,
+    )
+    .expect("a circuit route translates");
+    assert_eq!(composed.substrate.operator_addresses, vec![seed]);
+}
+
 #[test]
 fn translation_switches_on_what_the_blocks_enable_and_nothing_else() {
     let (_, local) = id();

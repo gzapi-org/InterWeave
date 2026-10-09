@@ -380,7 +380,15 @@ impl SwarmRuntime {
         peer: TransportIdentity,
         address: Multiaddr,
     ) -> Result<bool, SubstrateError> {
-        let _ = self.operator.insert(&address);
+        // A circuit is recorded as the route TO `peer`, the one form every
+        // door asks about (`operator_set::probe_for`, #246 review F1).
+        // A peer the libp2p grammar refuses cannot name a circuit's
+        // destination; its address is recorded as written, as before.
+        let record = peer.as_str().parse::<libp2p::PeerId>().map_or_else(
+            |_| address.clone(),
+            |owner| crate::operator_set::probe_for(&address, &owner),
+        );
+        let _ = self.operator.insert(&record);
         let (reply, answer) = oneshot::channel();
         self.commands
             .send(SwarmCommand::AddAddress {
@@ -475,7 +483,10 @@ impl SwarmRuntime {
     /// An address this answers `true` for is admitted at every learn
     /// site and at the root funnel whatever its class; anything else
     /// meets the floor. Judged on the route, so a trailing `/p2p/`
-    /// suffix on either side does not change the answer.
+    /// suffix on either side does not change the answer -- EXCEPT for a
+    /// circuit, which is judged with its destination: ask about
+    /// `<relay route>/p2p/R/p2p-circuit/p2p/<peer>`; a bare circuit names
+    /// no route and matches nothing (#246 re-review N2).
     #[must_use]
     pub fn is_operator_address(&self, address: &Multiaddr) -> bool {
         self.operator.contains(address)

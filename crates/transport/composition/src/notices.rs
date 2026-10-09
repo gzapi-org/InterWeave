@@ -14,11 +14,13 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use interweave_local_client_api::LocalSessionEvent;
+use interweave_local_client_api::{LocalSessionEvent, RECONNECTED, ROUTE_ESTABLISHED};
 use interweave_transport_api::{
     ConnectivitySummary, DisconnectReason, EndpointId, Health, PeerPath, TransportIdentity,
 };
 use tokio::sync::Notify;
+
+use crate::runtime::wall_ms;
 
 /// The most peer notices one session is owed. A notice for a peer
 /// already owed one replaces it, so a session that reads holds at most
@@ -43,7 +45,9 @@ pub const MAX_ROUTED_PEERS: usize = interweave_trust_api::PeerTrustPolicy::MAX_A
 /// One pending path notice, before it is taken.
 #[derive(Clone)]
 struct PathNotice {
-    previous: PeerPath,
+    /// `None` for a notice owed with nothing shown before it: a route's
+    /// begin, or a routed peer's return after a disconnect.
+    previous: Option<PeerPath>,
     current: PeerPath,
     reason_class: String,
     observed_at: u64,
@@ -63,6 +67,20 @@ struct Owed {
     /// One pending path notice per routed peer, merged
     /// (`a_path_change_is_coalesced_per_peer_and_a_round_trip_withdrawn`).
     paths: BTreeMap<TransportIdentity, PathNotice>,
+    /// Whether the session takes a notice with no `previous` -- a
+    /// route's begin, a routed peer's return. A session opened without
+    /// them (`SessionRequest::without_route_notices`, an IPC connection
+    /// below 2.4) is owed none, so no change is ever merged into one
+    /// that its binding would then have to drop: it is owed every change
+    /// as it was before them, `previous` included (#245 review F1).
+    route_notices: bool,
+    /// Routes that began before this registry saw their peer connected --
+    /// the session and the driver are separate tasks, so a send can be
+    /// accepted, or a message taken, a moment before the driver records
+    /// the connection it rode: their begin is announced at that
+    /// connection, as `route_established` and not as a return. A subset
+    /// of `routes`, so bounded by it.
+    unannounced: BTreeSet<TransportIdentity>,
     wake: Arc<Notify>,
 }
 
@@ -81,6 +99,11 @@ struct Registry {
     sessions: BTreeMap<String, Owed>,
     /// The state last published, owed to a session as it registers.
     current: Option<(Health, Option<ConnectivitySummary>)>,
+    /// Each connected peer's path now, as the runtime last reported it:
+    /// what a route that begins, or a routed peer that connects again,
+    /// is told (A 2026-10-09). An entry lives from the peer's connect to
+    /// its disconnect, so the runtime's connection ceiling bounds it.
+    connected: BTreeMap<TransportIdentity, PeerPath>,
     /// The driver has ended: every session's wait is over.
     ended: bool,
 }
@@ -159,6 +182,8 @@ impl SessionNotices {
                 endpoint,
                 routes: BTreeSet::new(),
                 paths: BTreeMap::new(),
+                route_notices: true,
+                unannounced: BTreeSet::new(),
                 wake: Arc::new(Notify::new()),
             });
         if state.is_some() {
@@ -166,6 +191,13 @@ impl SessionNotices {
             owed.wake();
         }
         Arc::clone(&owed.wake)
+    }
+
+    /// `session` takes no notice without a `previous` (`Owed::route_notices`).
+    pub(crate) fn decline_route_notices(&self, session: &str) {
+        if let Some(owed) = self.registry().sessions.get_mut(session) {
+            owed.route_notices = false;
+        }
     }
 
     /// A session that has gone is owed nothing, and holds nothing.
@@ -180,6 +212,7 @@ impl SessionNotices {
     pub(crate) fn revoked(&self, peer: &TransportIdentity) {
         for owed in self.registry().sessions.values_mut() {
             owed.routes.remove(peer);
+            owed.unannounced.remove(peer);
             if owed.paths.remove(peer).is_some() {
                 self.paths_replaced.fetch_add(1, Ordering::Relaxed);
             }
@@ -193,7 +226,9 @@ impl SessionNotices {
     /// (rust-ui-dev, #191's review). The route is kept, so a change after
     /// a reconnect is owed (`a_disconnect_withdraws_a_pending_path_and_keeps_the_route`).
     pub(crate) fn disconnected(&self, peer: &TransportIdentity, reason: DisconnectReason) {
-        for owed in self.registry().sessions.values_mut() {
+        let mut registry = self.registry();
+        registry.connected.remove(peer);
+        for owed in registry.sessions.values_mut() {
             if owed.paths.remove(peer).is_some() {
                 self.paths_replaced.fetch_add(1, Ordering::Relaxed);
             }
@@ -238,8 +273,19 @@ impl SessionNotices {
         true
     }
 
-    /// Hold that `owed` has a route to `peer`, within the bound.
-    fn route(&self, owed: &mut Owed, peer: &TransportIdentity) {
+    /// Hold that `owed` has a route to `peer`, within the bound; a route
+    /// that BEGINS here, toward a peer connected now, is owed the peer's
+    /// path with nothing before it (`route_established`, A 2026-10-09) --
+    /// one notice per begin. A route begun while this registry has not
+    /// seen the peer connected is owed nothing yet -- a path unknown is
+    /// not reported -- and its begin is announced at the connection
+    /// ([`Self::connected`], `Owed::unannounced`).
+    fn route(
+        &self,
+        owed: &mut Owed,
+        connected: &BTreeMap<TransportIdentity, PeerPath>,
+        peer: &TransportIdentity,
+    ) {
         if owed.routes.contains(peer) {
             return;
         }
@@ -248,6 +294,71 @@ impl SessionNotices {
             return;
         }
         owed.routes.insert(peer.clone());
+        if !owed.route_notices {
+            return;
+        }
+        if let Some(path) = connected.get(peer) {
+            self.owe_path(owed, peer, None, *path, ROUTE_ESTABLISHED, wall_ms());
+        } else {
+            owed.unannounced.insert(peer.clone());
+        }
+    }
+
+    /// Merge one path notice into `owed`'s pending one for `peer`: the
+    /// pending `previous` kept -- an absent one stays absent, so a client
+    /// never sees a `previous` it was not shown -- and the newer `current`,
+    /// class and time taken; one that comes back to its `previous`
+    /// announces no change and is withdrawn, which an absent `previous`
+    /// never does. Each merge is counted.
+    fn owe_path(
+        &self,
+        owed: &mut Owed,
+        peer: &TransportIdentity,
+        previous: Option<PeerPath>,
+        current: PeerPath,
+        reason_class: &str,
+        observed_at: u64,
+    ) {
+        let merged = match owed.paths.remove(peer) {
+            Some(pending) => {
+                self.paths_replaced.fetch_add(1, Ordering::Relaxed);
+                pending.previous
+            }
+            None => previous,
+        };
+        if merged != Some(current) {
+            owed.paths.insert(
+                peer.clone(),
+                PathNotice {
+                    previous: merged,
+                    current,
+                    reason_class: reason_class.to_owned(),
+                    observed_at,
+                },
+            );
+        }
+        owed.wake();
+    }
+
+    /// `peer` has a usable connection again, on `path`: each session that
+    /// already holds a route to it is owed that path with nothing before
+    /// it (`reconnected`, A 2026-10-09) -- its disconnect withdrew the
+    /// pending notice and the client cleared what it showed -- or, for a
+    /// route whose begin was not yet announced, `route_established`. A
+    /// session with no route yet is owed it when the route begins.
+    pub(crate) fn connected(&self, peer: &TransportIdentity, path: PeerPath, observed_at: u64) {
+        let mut registry = self.registry();
+        registry.connected.insert(peer.clone(), path);
+        for owed in registry.sessions.values_mut() {
+            if owed.route_notices && owed.routes.contains(peer) {
+                let class = if owed.unannounced.remove(peer) {
+                    ROUTE_ESTABLISHED
+                } else {
+                    RECONNECTED
+                };
+                self.owe_path(owed, peer, None, path, class, observed_at);
+            }
+        }
     }
 
     /// Wake the sessions whose lease names `endpoint`: a message was
@@ -274,9 +385,15 @@ impl SessionNotices {
         session: &str,
         peers: impl IntoIterator<Item = &'a TransportIdentity>,
     ) {
-        if let Some(owed) = self.registry().sessions.get_mut(session) {
+        let mut registry = self.registry();
+        let Registry {
+            sessions,
+            connected,
+            ..
+        } = &mut *registry;
+        if let Some(owed) = sessions.get_mut(session) {
             for peer in peers {
-                self.route(owed, peer);
+                self.route(owed, connected, peer);
             }
         }
     }
@@ -285,8 +402,14 @@ impl SessionNotices {
     /// has a route to `peer` (LOCAL-CLIENT.md §2, A 2026-10-04: a sent
     /// direct message is a route at its acceptance).
     pub(crate) fn sent_to(&self, session: &str, peer: &TransportIdentity) {
-        if let Some(owed) = self.registry().sessions.get_mut(session) {
-            self.route(owed, peer);
+        let mut registry = self.registry();
+        let Registry {
+            sessions,
+            connected,
+            ..
+        } = &mut *registry;
+        if let Some(owed) = sessions.get_mut(session) {
+            self.route(owed, connected, peer);
         }
     }
 
@@ -298,10 +421,7 @@ impl SessionNotices {
     }
 
     /// `peer`'s path changed: owed to every session with a route to it,
-    /// merged into its pending notice -- the pending `previous` kept, the
-    /// newer `current`, class and time taken; one that comes back to its
-    /// `previous` announces no change and is withdrawn. Each merge is
-    /// counted.
+    /// merged into its pending notice ([`Self::owe_path`]).
     pub(crate) fn path_changed(
         &self,
         peer: &TransportIdentity,
@@ -311,29 +431,18 @@ impl SessionNotices {
         observed_at: u64,
     ) {
         let mut registry = self.registry();
+        registry.connected.insert(peer.clone(), current);
         for owed in registry.sessions.values_mut() {
-            if !owed.routes.contains(peer) {
-                continue;
-            }
-            let merged = match owed.paths.remove(peer) {
-                Some(pending) => {
-                    self.paths_replaced.fetch_add(1, Ordering::Relaxed);
-                    pending.previous
-                }
-                None => previous,
-            };
-            if merged != current {
-                owed.paths.insert(
-                    peer.clone(),
-                    PathNotice {
-                        previous: merged,
-                        current,
-                        reason_class: reason_class.to_owned(),
-                        observed_at,
-                    },
+            if owed.routes.contains(peer) {
+                self.owe_path(
+                    owed,
+                    peer,
+                    Some(previous),
+                    current,
+                    reason_class,
+                    observed_at,
                 );
             }
-            owed.wake();
         }
     }
 
@@ -640,7 +749,7 @@ mod tests {
         assert!(poll(b.as_mut()), "and so does the second");
     }
 
-    fn paths(events: &[LocalSessionEvent]) -> Vec<(PeerPath, PeerPath, String, u64)> {
+    fn paths(events: &[LocalSessionEvent]) -> Vec<(Option<PeerPath>, PeerPath, String, u64)> {
         events
             .iter()
             .map(|e| match e {
@@ -688,7 +797,7 @@ mod tests {
         );
         assert_eq!(
             paths(&notices.take_paths("routed", usize::MAX)),
-            [(Relayed, Direct, "dcutr".to_owned(), 4)],
+            [(Some(Relayed), Direct, "dcutr".to_owned(), 4)],
             "the first previous, the newest current, class and time"
         );
         assert_eq!(notices.diagnostics().paths_replaced_total, 2);
@@ -807,14 +916,267 @@ mod tests {
         );
         assert_eq!(
             paths(&notices.take_paths("s", usize::MAX)),
-            [(PeerPath::Relayed, PeerPath::Direct, "dcutr".to_owned(), 2)],
+            [(
+                Some(PeerPath::Relayed),
+                PeerPath::Direct,
+                "dcutr".to_owned(),
+                2
+            )],
             "the control: the other peer's notice stays; the gone peer's is withdrawn"
         );
         notices.path_changed(&gone, PeerPath::Relayed, PeerPath::Direct, "dcutr", 3);
         assert_eq!(
             paths(&notices.take_paths("s", usize::MAX)),
-            [(PeerPath::Relayed, PeerPath::Direct, "dcutr".to_owned(), 3)],
+            [(
+                Some(PeerPath::Relayed),
+                PeerPath::Direct,
+                "dcutr".to_owned(),
+                3
+            )],
             "the route stands: a change after the reconnect is owed"
+        );
+    }
+
+    /// A route that BEGINS toward a connected peer is owed the peer's path
+    /// with no `previous` (`route_established`), at the acceptance and at
+    /// the take alike; a route already held begins nothing; a session that
+    /// exchanged nothing is owed nothing; and a route begun while the peer
+    /// is not connected is owed nothing until it connects -- then as its
+    /// begin, `route_established`, and a later reconnect as a return (A
+    /// 2026-10-09).
+    #[test]
+    fn a_route_begin_is_owed_the_peers_path_with_no_previous() {
+        use PeerPath::Relayed;
+        let notices = SessionNotices::default();
+        let human = EndpointId::parse("human").expect("endpoint");
+        notices.register("sender", None);
+        notices.register("reader", Some(human));
+        notices.register("stranger", None);
+        let (p, q) = (peer(), peer());
+        notices.connected(&p, Relayed, 1);
+
+        notices.sent_to("sender", &p);
+        notices.drained_from("reader", [&p]);
+        for session in ["sender", "reader"] {
+            let begun = paths(&notices.take_paths(session, usize::MAX));
+            assert!(
+                matches!(begun.as_slice(), [(None, Relayed, class, _)] if class == "route_established"),
+                "{session}: {begun:?}"
+            );
+        }
+        notices.sent_to("sender", &p);
+        notices.drained_from("reader", [&p]);
+        assert!(
+            !notices.ready("sender") && !notices.ready("reader"),
+            "a route already held begins nothing"
+        );
+        assert!(!notices.ready("stranger"), "no exchange, nothing owed");
+
+        // q is not yet seen connected -- the driver records the
+        // connection after the session's send was accepted: the route
+        // begins with nothing owed, and the connection announces its BEGIN,
+        // not a return; a later reconnect is a return.
+        notices.sent_to("sender", &q);
+        assert!(!notices.ready("sender"), "a path unknown is not reported");
+        notices.connected(&q, Relayed, 7);
+        assert_eq!(
+            paths(&notices.take_paths("sender", usize::MAX)),
+            [(None, Relayed, "route_established".to_owned(), 7)]
+        );
+        notices.disconnected(&q, DisconnectReason::Closed);
+        notices.connected(&q, Relayed, 8);
+        assert_eq!(
+            paths(&notices.take_paths("sender", usize::MAX)),
+            [(None, Relayed, "reconnected".to_owned(), 8)]
+        );
+    }
+
+    /// A routed peer that disconnects and connects again is owed its path
+    /// with no `previous` (`reconnected`): the disconnect withdrew the
+    /// pending notice and the client cleared what it showed. The control:
+    /// the notice pending at the disconnect is NOT what is taken after it.
+    #[test]
+    fn a_routed_peer_connecting_again_is_owed_its_path_with_no_previous() {
+        use PeerPath::{Direct, Relayed};
+        let notices = SessionNotices::default();
+        notices.register("s", None);
+        notices.register("stranger", None);
+        let p = peer();
+        notices.connected(&p, Direct, 1);
+        notices.sent_to("s", &p);
+        assert_eq!(
+            notices.take_paths("s", usize::MAX).len(),
+            1,
+            "the route's begin"
+        );
+        notices.path_changed(&p, Direct, Relayed, "direct_lost", 2);
+        notices.disconnected(&p, DisconnectReason::Closed);
+        notices.connected(&p, Relayed, 3);
+        let taken = notices.take("s", usize::MAX);
+        assert!(
+            matches!(
+                taken.as_slice(),
+                [LocalSessionEvent::PeerDisconnected { .. }]
+            ),
+            "{taken:?}"
+        );
+        assert_eq!(
+            paths(&notices.take_paths("s", usize::MAX)),
+            [(None, Relayed, "reconnected".to_owned(), 3)],
+            "no previous: the pending direct_lost went with the disconnect"
+        );
+        let stranger = notices.take("stranger", usize::MAX);
+        assert!(
+            matches!(
+                stranger.as_slice(),
+                [LocalSessionEvent::PeerDisconnected { .. }]
+            ) && notices.take_paths("stranger", usize::MAX).is_empty(),
+            "no route: the disconnect only"
+        );
+    }
+
+    /// A pending notice with no `previous` keeps it absent through later
+    /// changes -- the client never sees a `previous` it was not shown --
+    /// and is never withdrawn as a round trip; a revocation ends the route,
+    /// and the next exchange begins a new one, owed a new notice.
+    #[test]
+    fn an_absent_previous_stays_absent_and_a_new_route_owes_a_new_notice() {
+        use PeerPath::{Direct, Relayed};
+        let notices = SessionNotices::default();
+        notices.register("s", None);
+        let p = peer();
+        notices.connected(&p, Relayed, 1);
+        notices.sent_to("s", &p);
+        notices.path_changed(&p, Relayed, Direct, "direct_established", 2);
+        notices.path_changed(&p, Direct, Relayed, "direct_lost", 3);
+        assert_eq!(
+            paths(&notices.take_paths("s", usize::MAX)),
+            [(None, Relayed, "direct_lost".to_owned(), 3)],
+            "absent stays absent, and a return to the first path is not withdrawn"
+        );
+        notices.revoked(&p);
+        notices.sent_to("s", &p);
+        // The route-begin's time is the wall clock's, so the shape alone.
+        let renewed = paths(&notices.take_paths("s", usize::MAX));
+        assert!(
+            matches!(renewed.as_slice(), [(None, Relayed, class, _)] if class == "route_established"),
+            "a new route after a revocation: {renewed:?}"
+        );
+    }
+
+    /// A session that declined route notices (an IPC connection below
+    /// 2.4) is owed no notice without a `previous` -- at a route's begin
+    /// or a routed peer's return -- so a later real change reaches it as
+    /// it did before them, `previous` included, instead of merging into a
+    /// notice its binding would drop (#245 review F1). The control: a
+    /// session that takes them is owed the merged notice with no
+    /// `previous`.
+    #[test]
+    fn a_session_without_route_notices_is_owed_every_change_with_its_previous() {
+        use PeerPath::{Direct, Relayed};
+        let notices = SessionNotices::default();
+        notices.register("old", None);
+        notices.decline_route_notices("old");
+        notices.register("new", None);
+        let p = peer();
+        notices.connected(&p, Relayed, 1);
+        notices.sent_to("old", &p);
+        notices.sent_to("new", &p);
+        assert!(
+            !notices.ready("old"),
+            "no route-begin notice for the old session"
+        );
+        notices.path_changed(&p, Relayed, Direct, "direct_established", 2);
+        assert_eq!(
+            paths(&notices.take_paths("old", usize::MAX)),
+            [(Some(Relayed), Direct, "direct_established".to_owned(), 2)],
+            "the change, previous included"
+        );
+        assert_eq!(
+            paths(&notices.take_paths("new", usize::MAX)),
+            [(None, Direct, "direct_established".to_owned(), 2)],
+            "the control: merged into the route's begin"
+        );
+        // And the return: nothing owed to the old session at a reconnect.
+        notices.disconnected(&p, DisconnectReason::Closed);
+        notices.connected(&p, Relayed, 3);
+        assert!(
+            notices.take_paths("old", usize::MAX).is_empty(),
+            "no return notice"
+        );
+        assert_eq!(
+            notices.take_paths("new", usize::MAX).len(),
+            1,
+            "the control's return"
+        );
+    }
+
+    /// `unannounced` stays a subset of the routes, so bounded by them: a
+    /// revocation drops a route's unannounced begin with the route, and a
+    /// route begun again while connected is announced at once -- its
+    /// later return is `reconnected`, not a stale begin (#245 re-review
+    /// N4). The control is the begin that WAS unannounced at first.
+    #[test]
+    fn a_revoked_routes_unannounced_begin_goes_with_it() {
+        use PeerPath::Relayed;
+        let notices = SessionNotices::default();
+        notices.register("s", None);
+        let p = peer();
+        notices.sent_to("s", &p);
+        assert!(!notices.ready("s"), "begun before the connection was seen");
+        notices.revoked(&p);
+        notices.connected(&p, Relayed, 1);
+        assert!(
+            notices.take_paths("s", usize::MAX).is_empty(),
+            "no route, nothing owed"
+        );
+        notices.sent_to("s", &p);
+        let begun = paths(&notices.take_paths("s", usize::MAX));
+        assert!(
+            matches!(begun.as_slice(), [(None, Relayed, class, _)] if class == "route_established"),
+            "the new route, announced at once: {begun:?}"
+        );
+        notices.disconnected(&p, DisconnectReason::Closed);
+        notices.connected(&p, Relayed, 2);
+        assert_eq!(
+            paths(&notices.take_paths("s", usize::MAX)),
+            [(None, Relayed, "reconnected".to_owned(), 2)],
+            "a return, not the revoked route's begin"
+        );
+    }
+
+    /// The `connected` map follows the runtime's path and its disconnect,
+    /// and a route that begins is told the path NOW: after a change, the
+    /// new path; after a disconnect, nothing until the peer connects again
+    /// (#248 review F4 -- the two lines that keep the map, pinned).
+    #[test]
+    fn a_route_begin_is_told_the_path_now_and_nothing_while_disconnected() {
+        use PeerPath::{Direct, Relayed};
+        let notices = SessionNotices::default();
+        notices.register("after_change", None);
+        notices.register("after_disconnect", None);
+        let p = peer();
+        notices.connected(&p, Relayed, 1);
+        notices.path_changed(&p, Relayed, Direct, "direct_established", 2);
+        notices.sent_to("after_change", &p);
+        let told = paths(&notices.take_paths("after_change", usize::MAX));
+        assert!(
+            matches!(told.as_slice(), [(None, Direct, class, _)] if class == "route_established"),
+            "the path now, not the first one: {told:?}"
+        );
+        notices.disconnected(&p, DisconnectReason::Closed);
+        notices.sent_to("after_disconnect", &p);
+        assert!(
+            notices
+                .take_paths("after_disconnect", usize::MAX)
+                .is_empty(),
+            "disconnected: no path to tell"
+        );
+        notices.connected(&p, Relayed, 3);
+        assert_eq!(
+            paths(&notices.take_paths("after_disconnect", usize::MAX)),
+            [(None, Relayed, "route_established".to_owned(), 3)],
+            "announced at the connection as its begin"
         );
     }
 }

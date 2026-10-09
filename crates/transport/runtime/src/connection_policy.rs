@@ -870,32 +870,7 @@ impl ConnectionPolicy {
         now_ms: u64,
         backoff_ms: u64,
     ) -> bool {
-        let key = (peer.clone(), address.to_owned());
-        // A failure that cannot be recorded is worse than one that can:
-        // it is the entry that would have shaped the next retry. Prune
-        // first, then evict a benign entry to hold it.
-        //
-        // But when there is nothing evictable the answer is to NOT
-        // record it. Inserting anyway — which is what discarding this
-        // result did — grows a map whose whole purpose is being bounded.
-        // Nothing evictable now means every entry is a LIVE QUARANTINE,
-        // which ordinary failures do not create; a table in that state
-        // describes a hostile peer set, not a busy one. The peer branch
-        // below already refuses on the same terms; this one only looked
-        // like it did.
-        // A book entry's record is bounded by the book, not by the
-        // table, so it takes no room from outside it (ADR-0011, amendment
-        // 2026-09-28; `a_book_entrys_first_record_takes_no_room_from_outside_it`).
-        let room = self.addresses.contains_key(&key) || in_book(&self.book, &key.0, &key.1) || {
-            self.prune(now_ms);
-            self.make_room_for_address(now_ms)
-        };
-        if room {
-            let entry = self.addresses.entry(key).or_default();
-            entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
-            entry.last_touched_ms = now_ms;
-        }
-
+        self.score_address_failure(peer, address, now_ms);
         // Scoped to THIS peer. A global scan would let any unrelated
         // peer's past success spare this one from backoff indefinitely,
         // removing retry protection exactly where it is needed.
@@ -921,6 +896,40 @@ impl ConnectionPolicy {
         b.until_ms = Some(now_ms.saturating_add(backoff_ms));
         b.last_touched_ms = now_ms;
         true
+    }
+
+    /// Score an address-scoped failure on `address` ALONE, never the
+    /// peer: the half of [`Self::record_address_failure`] that ranks the
+    /// route behind the peer's others (`preferred_addresses` orders by
+    /// failures), for a failure that is evidence about the route and not
+    /// about the peer -- a circuit dial that never reached its relay
+    /// (`ConnectionManager::record_relay_hop_unreached`, #245 review F2).
+    pub fn score_address_failure(&mut self, peer: &TransportIdentity, address: &str, now_ms: u64) {
+        let key = (peer.clone(), address.to_owned());
+        // A failure that cannot be recorded is worse than one that can:
+        // it is the entry that would have shaped the next retry. Prune
+        // first, then evict a benign entry to hold it.
+        //
+        // But when there is nothing evictable the answer is to NOT
+        // record it. Inserting anyway — which is what discarding this
+        // result did — grows a map whose whole purpose is being bounded.
+        // Nothing evictable now means every entry is a LIVE QUARANTINE,
+        // which ordinary failures do not create; a table in that state
+        // describes a hostile peer set, not a busy one. The peer branch
+        // in `record_address_failure` refuses on the same terms; this one
+        // only looked like it did.
+        // A book entry's record is bounded by the book, not by the
+        // table, so it takes no room from outside it (ADR-0011, amendment
+        // 2026-09-28; `a_book_entrys_first_record_takes_no_room_from_outside_it`).
+        let room = self.addresses.contains_key(&key) || in_book(&self.book, &key.0, &key.1) || {
+            self.prune(now_ms);
+            self.make_room_for_address(now_ms)
+        };
+        if room {
+            let entry = self.addresses.entry(key).or_default();
+            entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
+            entry.last_touched_ms = now_ms;
+        }
     }
 
     /// Record that an address authenticated a **different** `PeerId`.

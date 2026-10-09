@@ -504,10 +504,14 @@ impl KademliaState {
     /// version of this comment said the operator's inputs "do not come
     /// this way"; they do, and the floor as first built refused the
     /// operator's own `/dns4` seed here (#111 re-review).
-    fn admits_offer(&mut self, address: &str) -> bool {
+    fn admits_offer(&mut self, address: &str, peer: &PeerId) -> bool {
         let listeners = self.own_listeners.iter().map(String::as_str);
         let verdict = match address.parse::<libp2p::Multiaddr>() {
-            Ok(parsed) => self.operator.admits(&parsed, listeners),
+            // A circuit is asked about as the route to `peer`, the form the
+            // operator's entry is held in (#246 re-review N1).
+            Ok(parsed) => self
+                .operator
+                .admits(&crate::operator_set::probe_for(&parsed, peer), listeners),
             // Not an address at all: refused as `not_literal`, by the
             // same predicate the parsed path reaches.
             Err(_) => is_advertised_address(address, listeners),
@@ -750,7 +754,7 @@ pub(super) fn handle_command(
                 .iter()
                 .filter_map(|offered| {
                     state
-                        .admits_offer(offered.as_str())
+                        .admits_offer(offered.as_str(), &pid)
                         .then(|| suffix_checked_str(offered.as_str(), &pid))
                         .flatten()
                 })
@@ -1639,7 +1643,9 @@ fn candidate_addresses(
         if !stores.judge(
             crate::store_refusals::store::QUERY_CANDIDATES,
             operator,
-            &bare,
+            // The circuit asked about as the route to the result's peer
+            // (#246 re-review N1).
+            &crate::operator_set::probe_for(&bare, &info.peer_id),
             own_listeners.iter().map(String::as_str),
         ) {
             continue;
@@ -1712,7 +1718,7 @@ fn remember_advertisement(
         .iter()
         .filter_map(|addr| {
             state
-                .admits_offer(&addr.to_string())
+                .admits_offer(&addr.to_string(), &pid)
                 .then(|| suffix_checked(addr, &pid))
                 .flatten()
         })
@@ -2476,6 +2482,49 @@ mod tests {
     /// The control is the first half -- refused before the operator's
     /// door has seen it -- so the admission after is the set's doing,
     /// not a boundary that stopped refusing names.
+    /// The operator's circuit route to P is admitted at the routing
+    /// stash when it is offered bare for P -- the form the static provider
+    /// hands over -- and the same relay's circuit offered for another peer
+    /// is refused as a peer's (#246 re-review N1). The control is the
+    /// fresh state, which refuses both.
+    #[test]
+    fn the_operators_circuit_reaches_the_routing_stash_for_its_own_peer_only() {
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 20,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let (relay, p, x) = (PeerId::random(), PeerId::random(), PeerId::random());
+        let bare = format!("/ip4/203.0.113.7/tcp/4001/p2p/{relay}/p2p-circuit");
+
+        let mut state = KademliaState::new(&settings);
+        state.set_own_listeners(Vec::new());
+        assert!(
+            !state.admits_offer(&bare, &p),
+            "the control: no operator seed, refused"
+        );
+
+        let operator = crate::operator_set::OperatorSet::new();
+        assert!(operator.insert(&format!("{bare}/p2p/{p}").parse().expect("valid")));
+        let mut state = KademliaState::new(&settings);
+        state.set_own_listeners(Vec::new());
+        state.set_boundary(operator, crate::store_refusals::StoreRefusals::new());
+        assert!(
+            state.admits_offer(&bare, &p),
+            "the operator's route to P, offered for P"
+        );
+        assert!(
+            !state.admits_offer(&bare, &x),
+            "the same relay's circuit for X is a peer's"
+        );
+    }
+
     #[test]
     fn the_operators_named_seed_reaches_the_routing_stash_and_a_peers_does_not() {
         let settings = KademliaSettings {

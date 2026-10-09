@@ -229,11 +229,11 @@ Each client event queue defaults to 256. When full:
 4. increment drop/rejection counters;
 5. never spill into an unbounded disk queue.
 
-A `peer.path_changed` notice (2.1, A 2026-10-03) is in the ORDINARY lane
+A `peer.path_changed` notice (2.1, A 2026-10-03; from 2.4 also sent when the route BEGINS, with `previous` absent and `reason_class` `route_established`, and when a routed peer connects again after a `peer.disconnected`, `previous` absent and `reason_class` `reconnected`, A 2026-10-09 — a connection below 2.4 is sent nothing at route begin or at a reconnect — its session declines route notices and is owed every change with its `previous`, today's behaviour) is in the ORDINARY lane
 with a rule of its own: per peer at most one is pending; a newer one
-replaces it, keeping the pending one's `previous` and taking the newer
+replaces it, keeping the pending one's `previous` (an absent one stays absent) and taking the newer
 `current` and `observed_at` (so a client never sees a `previous` it was not shown), and the replacement is counted; a merge whose `previous` equals its `current`
-announces no change and is withdrawn, counted as a replacement; under
+announces no change and is withdrawn, counted as a replacement (never a route_established notice, whose `previous` is absent); under
 pressure a pending notice WAITS — it is taken after every message, under
 what is left of the pump's room — and is never dropped, so a route
 indicator stays stale until it is taken (A 2026-10-04, correcting A
@@ -411,7 +411,7 @@ Every `event` frame's `event_type` binds its `data` to a shape
 | `message.broadcast` | `ipc:broadcast-received` | every connection with `events` holding a join reference for the channel | 2.0 |
 | `endpoint.lease_changed` | `ipc:lease-changed` | the connection whose lease was revoked | 2.0 |
 | `peer.disconnected` | `{peer, reason_class}` | every connection with `events` | 2.0 |
-| `peer.path_changed` | `ipc:path-changed` | every connection with `events` that has a route to the peer: a direct message exchanged with it, or a broadcast received from it on one of its joins — a received message counting from the moment the daemon took it from the session for the connection (the IPC projection of LOCAL-CLIENT.md §2's take, A 2026-10-04), a sent one from its acceptance, until a revocation ends the route (A 2026-10-05) | 2.1 |
+| `peer.path_changed` | `ipc:path-changed` | every connection with `events` that has a route to the peer: a direct message exchanged with it, or a broadcast received from it on one of its joins — a received message counting from the moment the daemon took it from the session for the connection (the IPC projection of LOCAL-CLIENT.md §2's take, A 2026-10-04), a sent one from its acceptance, until a revocation ends the route (A 2026-10-05); from 2.4 also when the route begins (`reason_class` `route_established`) and when a routed peer connects again after a `peer.disconnected` (`reconnected`), `previous` absent in both (`ipc/path-changed` 1.1.0, A 2026-10-09) | 2.1 (route begin, reconnect: 2.4) |
 
 A lease GRANT is learned from `hello_response`, not from an event;
 `endpoint.lease_changed` carries revocation only: it is the IPC
@@ -438,7 +438,7 @@ the implementing batch and its mirror, as above.
 `hello.ipc_version.major` accepts any positive integer, so an unsupported
 major is a well-formed hello: the server answers
 `close{code: VersionIncompatible, supported: [{major: 2, minor: IPC_MAX_MINOR}]}`
-— the server's highest minor, 3 since the trust overlay (A 2026-10-07),
+— the server's highest minor, 4 since the route-begin notices (A 2026-10-09; 3 since the trust overlay, A 2026-10-07),
 never a literal older than the server — and closes. For major 2 the server selects `minor = min(client, server)` and
 returns it in `hello_response`. The client holds the server to that
 rule: a `hello_response` whose minor is above the minor the client
@@ -480,11 +480,19 @@ negotiated that minor or later, the shape served below it stays
 byte-identical to the schema's earlier description, the schema names the
 minor each shape applies from, and the old shape is served on every
 supported minor below the new one; first use `ipc/trust-list` 1.1.0 behind
-2.3.
+2.3. The exception covers a closed EVENT data shape as it covers a result
+shape, and on either a REQUIRED member may become OPTIONAL when every
+instance that omits it is itself new behind the minor, so below the minor
+no instance lacks it — and, the shape being an event's, the bound holds on
+the stream: the emitter takes no new-only instance for a connection below
+the minor, so none can absorb a change the old rule owed; the serialiser's
+filter is the backstop (ADR-0017 A 2026-10-09); first use `ipc/path-changed`
+1.1.0 behind 2.4, `previous` absent at route begin and reconnect, a
+connection below 2.4 opened as a session that declines route notices.
 The first production build spoke 2.0; Stage 15's R1 batch, which
 brought `peer.path_changed`, spoke 2.1, and R2 added `admin.trust.*` to
 it; `admin.peers.list` brought 2.2 (A 2026-10-06); the persisted trust
-row brought 2.3 (A 2026-10-07, #215).
+row brought 2.3 (A 2026-10-07, #215); the route-begin and reconnect `peer.path_changed` (`previous` absent, `reason_class` `route_established` or `reconnected`; `ipc/path-changed` 1.1.0) bring 2.4 (A 2026-10-09, Stage 17's relay pair) — below 2.4 nothing is sent when a route begins or a routed peer reconnects.
 
 Phases and directions, which JSON Schema cannot express and
 `tests/ipc-v2` asserts: `hello` is the client's first frame and only its

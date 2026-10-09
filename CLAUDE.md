@@ -771,9 +771,9 @@ read `.claude/settings.json`.
 
 `main` is protected by the `main protection` ruleset: pull request required, direct pushes and force-pushes blocked, branch deletion blocked, **merge commits only** (squash and rebase disabled), and a **merge queue** (`ALLGREEN`, merge method `MERGE`). Required approving reviews are 0 and unresolved review threads do not block — so **the merge is not evidence that anything was reviewed**.
 
->  **CI exists and gates `main`** — `.github/workflows/ci.yml` runs fmt, clippy, the workspace tests, every tree check, and every self-test on `pull_request`, `merge_group`, and pushes to `main`. It reports three contexts, which are the job `name:` values verbatim: **`rust`**, **`tree checks`**, and **`tool self-tests`**. All three are in the ruleset's `required_status_checks`, so the queue gates correctness and not merely ordering. `tools/checks/check_required_contexts.sh` keeps this paragraph and the workflow in agreement; the ruleset itself needs admin API access and is checked by hand. The policy is **non-strict**: a branch need not be up to date with `main` to merge, which is why folding `origin/main` in and re-testing locally (Phase 3) is still on you rather than on the platform.
+>  **CI exists and gates `main`** — `.github/workflows/ci.yml` runs fmt, clippy, the workspace tests, every tree check, and every self-test on `pull_request`, `merge_group`, and pushes to `main`. It reports four contexts, which are the job `name:` values verbatim: **`rust`**, **`tree checks`**, **`tool self-tests`**, and **`android check (aarch64-linux-android)`** (`cargo check` of the phone's crates for their target with the NDK the host pins, `tools/ci/check_android_target.sh`; Stage 17 §20 step 1 cites it as its build record). All four are in the ruleset's `required_status_checks`, so the queue gates correctness and not merely ordering. `tools/checks/check_required_contexts.sh` keeps this paragraph and the workflow in agreement; the ruleset itself needs admin API access and is checked by hand. The policy is **non-strict**: a branch need not be up to date with `main` to merge, which is why folding `origin/main` in and re-testing locally (Phase 3) is still on you rather than on the platform.
 >
-> CI also reports one **advisory context the ruleset does not require**: **`android check (aarch64-linux-android)`**, `cargo check` of the phone's crates for their target with the NDK the host pins (`tools/ci/check_android_target.sh`), which Stage 17 §20 step 1 cites as its build record. It joins `required_status_checks` once those crates are on `main` and the job has run green there; until then a red run is reported, not blocking.
+> A job can instead be an **advisory context the ruleset does not require**, named in a sentence of that wording here, while its subject is not yet on `main`; `check_required_contexts.sh` holds every job to exactly one of the two lists. There is none today.
 >
 > A job's `name:` *is* its required-check context, so renaming a job silently un-gates `main` — the ruleset goes on requiring a context nothing reports, and the queue waits forever. Rename a job only together with the ruleset.
 >
@@ -1020,13 +1020,15 @@ watch" line, for a watch that has no script to run. A session in such a
 clone has no fabric context and no inbox; the empty status line and that
 orphaned instruction are the two visible signs. `actions-health.sh` and
 `wait-merged.sh` (to `fabric-pr wait-merged`) forward too. So do five
-tools/checks scripts, each to the fabric's runtime/github implementation
-with InterWeave's root and configuration: `check_actions_pinned_by_sha.sh`,
-`run_suite.sh`, `scan_semantic_collisions.sh`, `check_guards_are_wired.sh`
-and `check_workflows_lint.sh`. They run on the fleet's pinned Python,
-`/usr/local/bin/fabric-python` (`AGENT_FABRIC_PYTHON` overrides it), so
-`cargo xtask checks` needs both, and a host without the Python exits 127
-with the fabric's message on how to install it. Their logic and pins live
+tools/checks scripts: `run_suite.sh`, `scan_semantic_collisions.sh`,
+`check_guards_are_wired.sh` and `check_workflows_lint.sh` to the fabric's
+runtime/github implementations with InterWeave's root and configuration,
+and `check_actions_pinned_by_sha.sh` to its
+`policies/check_actions_pinned_by_sha.py`. All run on the fleet's pinned
+Python, `/usr/local/bin/fabric-python` (`AGENT_FABRIC_PYTHON` overrides
+it), so `cargo xtask checks` needs both. A host without that Python gets
+the fabric's install message and exit 127 from the four runtime/github
+forwarders, and `check_actions_pinned_by_sha.sh`'s own message and exit 2. Their logic and pins live
 in the fabric now: a fix or a pin bump goes there, never into the
 forwarder. In CI the tree-checks and tool-suites jobs check agent-fabric
 out at `.agent-fabric/fabric-ref`. A clone with no

@@ -229,7 +229,12 @@ impl<B> RootFunnel<B> {
 
     /// The extension with every refused address removed, and whether
     /// anything was.
-    fn prune(&self, extended: Vec<Multiaddr>) -> (Vec<Multiaddr>, bool) {
+    ///
+    /// A circuit is asked about as the route to `peer`, the form the
+    /// operator's entry is held in (`operator_set::probe_for`): the
+    /// operator's circuit to P passes, a circuit to anyone else meets the
+    /// floor (#246 re-review N1).
+    fn prune(&self, extended: Vec<Multiaddr>, peer: Option<PeerId>) -> (Vec<Multiaddr>, bool) {
         // RULE 3 COUNTS ONLY WHAT THE HOST HOLDS: a listener still bound
         // on an IP the platform's view said departed is no listener of
         // its family here.
@@ -244,9 +249,13 @@ impl<B> RootFunnel<B> {
         let kept = extended
             .into_iter()
             .filter(|address| {
+                let probe = peer.map_or_else(
+                    || address.clone(),
+                    |peer| crate::operator_set::probe_for(address, &peer),
+                );
                 match self
                     .operator
-                    .admits(address, listeners.iter().map(String::as_str))
+                    .admits(&probe, listeners.iter().map(String::as_str))
                 {
                     Ok(()) => {
                         counts.passed += 1;
@@ -326,7 +335,7 @@ impl<B: NetworkBehaviour> NetworkBehaviour for RootFunnel<B> {
         let extended = self
             .inner
             .handle_pending_outbound_connection(id, peer, addresses, role)?;
-        let (kept, removed_any) = self.prune(extended);
+        let (kept, removed_any) = self.prune(extended, peer);
         if removed_any && kept.is_empty() && addresses.is_empty() {
             self.counters.lock().dials_denied += 1;
             return Err(ConnectionDenied::new(NothingDialable));
