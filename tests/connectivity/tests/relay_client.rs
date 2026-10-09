@@ -1121,6 +1121,25 @@ async fn an_addition_inside_the_gates_floor_leaves_the_relay_ladder_alone() {
             Ipv4Addr::new(10, 255, 0, 2).into(),
         ],
     });
+    // THE WINDOW OPENS WHEN THE VIEW IS READ -- its change is the proof --
+    // not when it is sent; a failure seen before that counts too. It
+    // closes well short of the ladder's own next step (10 s and up after
+    // the second failure), so only an ask the addition made can fail in it.
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let event = tokio::time::timeout_at(deadline, subject.next_event())
+            .await
+            .expect("the second view's change within the patience")
+            .expect("the runtime is alive");
+        assert!(
+            !matches!(&event, SwarmEvent::RelayReservationChanged { relay, outcome: RelayReservationOutcome::Failed, .. }
+                if *relay == relay_peer),
+            "inside the gate's floor the relay is not asked"
+        );
+        if matches!(event, SwarmEvent::NetworkChanged { .. }) {
+            break;
+        }
+    }
     assert!(
         !next_failure(&mut subject, &relay_peer, Duration::from_secs(3)).await,
         "inside the gate's floor the relay is not asked"

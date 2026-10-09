@@ -559,6 +559,21 @@ async fn the_latest_view_replaces_one_not_yet_read() {
     subject.runtime.shutdown().await.expect("shutdown");
 }
 
+/// Read `runtime`'s events until it reports a network change whose
+/// removed IPs satisfy `removed`.
+async fn until_changed(runtime: &mut SwarmRuntime, removed: impl Fn(&[std::net::IpAddr]) -> bool) {
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let event = tokio::time::timeout_at(deadline, runtime.next_event())
+            .await
+            .expect("the network change within the patience")
+            .expect("the runtime is alive");
+        if matches!(&event, SwarmEvent::NetworkChanged { removed: r, .. } if removed(r)) {
+            return;
+        }
+    }
+}
+
 /// ADR-0052 rule 3 (A 2026-10-09) at a runtime learn site: a peer's
 /// private candidate is admitted beside a private listener on an IP the
 /// host holds -- the control -- and refused once the platform's view
@@ -574,9 +589,14 @@ async fn a_departed_ips_listener_admits_no_private_candidate() {
         .listen(format!("/ip4/{ip}/tcp/0").parse().expect("valid"))
         .await
         .expect("the subject's private listener");
+    // The first view must be READ before the second is sent -- the latest
+    // view replaces one not yet read, and a first view removes nothing it
+    // never named -- so it names an address the listeners do not, and its
+    // reading is the change it reports.
     subject.runtime.network_changed(NetworkView {
-        addresses: vec![ip.into()],
+        addresses: vec![ip.into(), std::net::Ipv4Addr::new(10, 255, 0, 4).into()],
     });
+    until_changed(&mut subject.runtime, |_| true).await;
     let admitted = subject
         .runtime
         .learn(far_peer.clone(), ["/ip4/10.1.2.3/tcp/4001".to_owned()])
@@ -589,17 +609,7 @@ async fn a_departed_ips_listener_admits_no_private_candidate() {
     // the removal the view makes -- the proof it was read -- before
     // asking; a timed settle lost that race under a loaded suite.
     let removal = std::net::IpAddr::from(ip);
-    let deadline = tokio::time::Instant::now() + PATIENCE;
-    loop {
-        let event = tokio::time::timeout_at(deadline, subject.runtime.next_event())
-            .await
-            .expect("the view's removal within the patience")
-            .expect("the subject is alive");
-        if matches!(&event, SwarmEvent::NetworkChanged { removed, .. } if removed.contains(&removal))
-        {
-            break;
-        }
-    }
+    until_changed(&mut subject.runtime, |removed| removed.contains(&removal)).await;
     let admitted = subject
         .runtime
         .learn(far_peer.clone(), ["/ip4/10.1.2.4/tcp/4001".to_owned()])
