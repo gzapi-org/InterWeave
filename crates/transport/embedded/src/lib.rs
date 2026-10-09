@@ -209,6 +209,17 @@ impl EmbeddedHost {
         self.handle.clone()
     }
 
+    /// The addresses the runtime bound at start, as the substrate
+    /// reported them: for the Service's diagnostics, and for a peer
+    /// that must be told where this one listens.
+    #[must_use]
+    pub fn listening(&self) -> Vec<String> {
+        self.composed
+            .as_ref()
+            .map(|composed| composed.listening().to_vec())
+            .unwrap_or_default()
+    }
+
     /// The profile's paths: the boundary and the root every private
     /// directory of this host must lie under -- for the human store's
     /// opener, which opens under them.

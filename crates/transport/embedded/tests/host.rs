@@ -116,6 +116,16 @@ fn the_host_serves_under_its_root() {
     let port = admin(&host);
     let status = host.runtime().block_on(port.status()).expect("status");
     assert_eq!(status.peer, peer);
+    let listening = host.listening();
+    assert_eq!(listening.len(), 1, "{listening:?}");
+    assert!(
+        listening[0].starts_with("/ip4/127.0.0.1/tcp/"),
+        "{listening:?}"
+    );
+    assert!(
+        !listening[0].ends_with("/tcp/0"),
+        "the bound port: {listening:?}"
+    );
 
     let root = app.dir.join("interweave");
     assert_eq!(
