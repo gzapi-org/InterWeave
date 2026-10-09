@@ -811,6 +811,12 @@ pub(crate) trait NameService: Clone + Send + 'static {
     fn user_name(&self, uid: u32) -> std::io::Result<Option<String>>;
     /// The name and listed members of the group `gid`.
     fn group(&self, gid: u32) -> std::io::Result<Option<(String, Vec<String>)>>;
+    /// The flag marking this service's read as outstanding: the
+    /// process's own for the host's name service, a test's own for a
+    /// test's. Required, with no default, so no test service can fall
+    /// back on the process's flag and refuse another test running beside
+    /// it.
+    fn outstanding(&self) -> &'static std::sync::atomic::AtomicBool;
 }
 
 /// The host's name service: `getpwuid_r` and `getgrgid_r`, so NSS
@@ -847,6 +853,10 @@ impl NameService for HostNames {
             Err(std::io::ErrorKind::Unsupported.into())
         }
     }
+
+    fn outstanding(&self) -> &'static std::sync::atomic::AtomicBool {
+        &NSS_READ_OUTSTANDING
+    }
 }
 
 /// ADR-0028 A 2026-10-08, "a group of one is the owner's own" (#231): a
@@ -879,14 +889,7 @@ pub(crate) fn owners_private_group(
     gid: u32,
     acl: std::io::Result<bool>,
 ) -> Result<(), String> {
-    owners_private_group_within(
-        names,
-        euid,
-        gid,
-        acl,
-        NSS_READ_DEADLINE,
-        &NSS_READ_OUTSTANDING,
-    )
+    owners_private_group_within(names, euid, gid, acl, NSS_READ_DEADLINE)
 }
 
 /// How long the private-group predicate waits for the name service
@@ -927,15 +930,15 @@ type NameReads = (
 /// a thread limit is not reported as a slow name service: the deadline
 /// passed (the thread is then left to finish or leak, one per refusal),
 /// the read ended without answering (it panicked), or no thread could be
-/// started -- or, while an earlier read has not returned (`outstanding`),
-/// nothing is started at all.
+/// started -- or, while an earlier read of the same service has not
+/// returned ([`NameService::outstanding`]), nothing is started at all.
 fn read_names(
     names: &impl NameService,
     euid: u32,
     gid: u32,
     deadline: std::time::Duration,
-    outstanding: &'static std::sync::atomic::AtomicBool,
 ) -> Result<NameReads, String> {
+    let outstanding = names.outstanding();
     if outstanding.swap(true, std::sync::atomic::Ordering::AcqRel) {
         return Err("an earlier name-service read has not returned".to_owned());
     }
@@ -946,6 +949,10 @@ fn read_names(
         .name("nss-read".to_owned())
         .spawn(move || {
             let reads = (names.user_name(euid), names.group(gid));
+            // Cleared BEFORE the answer is sent: a caller holding its
+            // answer may read again at once, and must not find its own
+            // finished read still marked outstanding
+            // (`reads_back_to_back_are_both_made`).
             drop(returned);
             let _ = tx.send(reads);
         })
@@ -971,7 +978,6 @@ fn owners_private_group_within(
     gid: u32,
     acl: std::io::Result<bool>,
     deadline: std::time::Duration,
-    outstanding: &'static std::sync::atomic::AtomicBool,
 ) -> Result<(), String> {
     match acl {
         Ok(false) => {}
@@ -993,8 +999,7 @@ fn owners_private_group_within(
             "group-writable; whether group {gid} is the owner's private group could not be read: {why}"
         )
     };
-    let (user_read, group_read) =
-        read_names(names, euid, gid, deadline, outstanding).map_err(unread)?;
+    let (user_read, group_read) = read_names(names, euid, gid, deadline).map_err(unread)?;
     let user = match user_read {
         Ok(Some(user)) => user,
         Ok(None) => return Err(unread(format!("uid {euid} has no account entry"))),
@@ -1356,6 +1361,7 @@ mod tests {
     #[cfg(unix)]
     #[derive(Clone)]
     struct FakeNames {
+        guard: &'static std::sync::atomic::AtomicBool,
         users: Vec<(u32, &'static str)>,
         groups: Vec<(u32, &'static str, Vec<&'static str>)>,
         fails: bool,
@@ -1389,6 +1395,9 @@ mod tests {
                     )
                 }))
         }
+        fn outstanding(&self) -> &'static std::sync::atomic::AtomicBool {
+            self.guard
+        }
     }
 
     /// ADR-0028 A 2026-10-08, "a group of one is the owner's own" (#231),
@@ -1405,6 +1414,7 @@ mod tests {
     fn a_group_writable_ancestor_needs_the_owners_private_group() {
         let path = Path::new("/home/alice");
         let names = FakeNames {
+            guard: fresh_guard(),
             users: vec![(1000, "alice"), (0, "root")],
             groups: vec![
                 (0, "root", vec![]),
@@ -1602,8 +1612,14 @@ mod tests {
     #[test]
     fn a_read_asked_for_while_one_is_outstanding_refuses_at_once() {
         #[derive(Clone)]
-        struct Held(std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>);
+        struct Held(
+            std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>,
+            &'static std::sync::atomic::AtomicBool,
+        );
         impl NameService for Held {
+            fn outstanding(&self) -> &'static std::sync::atomic::AtomicBool {
+                self.1
+            }
             fn user_name(&self, _: u32) -> std::io::Result<Option<String>> {
                 let _ = self.0.lock().expect("the release").recv();
                 Ok(Some("alice".to_owned()))
@@ -1613,8 +1629,11 @@ mod tests {
             }
         }
         #[derive(Clone)]
-        struct Answers;
+        struct Answers(&'static std::sync::atomic::AtomicBool);
         impl NameService for Answers {
+            fn outstanding(&self) -> &'static std::sync::atomic::AtomicBool {
+                self.0
+            }
             fn user_name(&self, _: u32) -> std::io::Result<Option<String>> {
                 Ok(Some("alice".to_owned()))
             }
@@ -1624,20 +1643,19 @@ mod tests {
         }
         let guard = fresh_guard();
         let (release, held) = std::sync::mpsc::channel();
-        let held = Held(std::sync::Arc::new(std::sync::Mutex::new(held)));
+        let held = Held(std::sync::Arc::new(std::sync::Mutex::new(held)), guard);
         let short = std::time::Duration::from_millis(50);
-        let first = owners_private_group_within(&held, 1000, 1001, Ok(false), short, guard)
+        let first = owners_private_group_within(&held, 1000, 1001, Ok(false), short)
             .expect_err("the first read is held past the deadline");
         assert!(first.contains("did not answer within 50ms"), "{first}");
 
         let started = std::time::Instant::now();
         let second = owners_private_group_within(
-            &Answers,
+            &Answers(guard),
             1000,
             1001,
             Ok(false),
             std::time::Duration::from_secs(5),
-            guard,
         )
         .expect_err("refused while the first read is outstanding");
         assert!(
@@ -1659,14 +1677,47 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         owners_private_group_within(
-            &Answers,
+            &Answers(guard),
             1000,
             1001,
             Ok(false),
             std::time::Duration::from_secs(5),
-            guard,
         )
         .expect("a recovered name service is read again");
+    }
+
+    /// Reads made back to back on one service, with no pause between
+    /// them, are all made: each read's guard is cleared before its answer
+    /// reaches the caller, so a caller never finds its own finished read
+    /// still outstanding. Repeated, since the reordering it pins is a
+    /// race the caller usually wins.
+    #[cfg(unix)]
+    #[test]
+    fn reads_back_to_back_are_both_made() {
+        #[derive(Clone)]
+        struct Answers(&'static std::sync::atomic::AtomicBool);
+        impl NameService for Answers {
+            fn outstanding(&self) -> &'static std::sync::atomic::AtomicBool {
+                self.0
+            }
+            fn user_name(&self, _: u32) -> std::io::Result<Option<String>> {
+                Ok(Some("alice".to_owned()))
+            }
+            fn group(&self, _: u32) -> std::io::Result<Option<(String, Vec<String>)>> {
+                Ok(Some(("alice".to_owned(), Vec::new())))
+            }
+        }
+        let names = Answers(fresh_guard());
+        for round in 0..500 {
+            owners_private_group_within(
+                &names,
+                1000,
+                1001,
+                Ok(false),
+                std::time::Duration::from_secs(2),
+            )
+            .unwrap_or_else(|e| panic!("read {round}: {e}"));
+        }
     }
 
     /// A name service that never answers within the deadline is refused
@@ -1681,8 +1732,11 @@ mod tests {
     #[test]
     fn a_name_service_that_does_not_answer_is_refused_at_the_deadline() {
         #[derive(Clone)]
-        struct Slow(std::time::Duration);
+        struct Slow(std::time::Duration, &'static std::sync::atomic::AtomicBool);
         impl NameService for Slow {
+            fn outstanding(&self) -> &'static std::sync::atomic::AtomicBool {
+                self.1
+            }
             fn user_name(&self, _: u32) -> std::io::Result<Option<String>> {
                 std::thread::sleep(self.0);
                 Ok(Some("alice".to_owned()))
@@ -1692,8 +1746,11 @@ mod tests {
             }
         }
         #[derive(Clone)]
-        struct Panics;
+        struct Panics(&'static std::sync::atomic::AtomicBool);
         impl NameService for Panics {
+            fn outstanding(&self) -> &'static std::sync::atomic::AtomicBool {
+                self.0
+            }
             fn user_name(&self, _: u32) -> std::io::Result<Option<String>> {
                 panic!("a name service module that panics")
             }
@@ -1705,12 +1762,11 @@ mod tests {
         let deadline = std::time::Duration::from_millis(50);
         let started = std::time::Instant::now();
         let detail = owners_private_group_within(
-            &Slow(std::time::Duration::from_secs(2)),
+            &Slow(std::time::Duration::from_secs(2), fresh_guard()),
             1000,
             1001,
             Ok(false),
             deadline,
-            fresh_guard(),
         )
         .expect_err("a read past the deadline refuses");
         assert!(
@@ -1726,12 +1782,11 @@ mod tests {
         // The control waits long enough that a loaded machine's thread
         // start and scheduling cannot pass for a timeout.
         owners_private_group_within(
-            &Slow(std::time::Duration::ZERO),
+            &Slow(std::time::Duration::ZERO, fresh_guard()),
             1000,
             1001,
             Ok(false),
             std::time::Duration::from_secs(2),
-            fresh_guard(),
         )
         .expect("the control: an answer in time, the private group");
 
@@ -1740,12 +1795,11 @@ mod tests {
         let after_panic = fresh_guard();
         let started = std::time::Instant::now();
         let ended = owners_private_group_within(
-            &Panics,
+            &Panics(after_panic),
             1000,
             1001,
             Ok(false),
             std::time::Duration::from_secs(5),
-            after_panic,
         )
         .expect_err("a read that ended refuses");
         assert!(
