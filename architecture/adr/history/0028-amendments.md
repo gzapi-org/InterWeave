@@ -391,9 +391,16 @@ daemon, `transportctl`, the human client's lock and store, every
 the trust overlay's `admin.trust.set` in a running daemon among them
 (the review of this note) — so "once per start" was false; each such
 operation is refused within the deadline, and at most one read is
-outstanding per process: a read requested while an earlier one has not
-returned refuses at once with "an earlier name-service read has not
-returned", so a hung service costs one leaked thread, not one per write. Those
+outstanding per process: a caller that finds an earlier read outstanding
+does not spawn a second but waits for it, up to the deadline measured
+from its own request, then refuses with "an earlier name-service read
+has not returned within 5s" — a healthy concurrent read (the human
+client's store beside a private write; callers nobody has enumerated,
+so no "they never overlap" is promised) succeeds after the first
+returns, a hung one costs one leaked thread and every caller refuses
+within the deadline (p2p-network-dev-01's observation 01a11e77: a
+refuse-at-once rule made two healthy parallel tests refuse each other,
+257 runs of 300). Those
 refusals last until the abandoned read returns — the guard clears when
 the thread does, so a recovered service is read on the next operation —
 or the process restarts; while they last, an `admin.trust.set` is
@@ -414,8 +421,11 @@ the user name in one call): one call fewer, the same hang.
 **Consequences.** Code: p2p-network-dev's — the deadline in
 `owners_private_group`, the constant, the blocking-fake test are on
 #236 at 6cb59136, and the one-outstanding-read guard
-(`NSS_READ_OUTSTANDING`, cleared by a `Drop` when the thread returns,
-each test with its own guard) at f8b8aa33, with the second-read test. Until #236 lands on main, a hung name service blocks
+(`NSS_READ_OUTSTANDING` behind `NameService::outstanding()`, cleared by
+a `Drop` when the thread returns, each test service with its own flag)
+at f8b8aa33 and d44111e4; the wait-then-refuse form of this paragraph
+is the one piece still to land there, with the test that a second call
+during a hold released within the deadline succeeds. Until #236 lands on main, a hung name service blocks
 the start and every overlay write there: a defect at writing,
 affecting no host here. Under the deadline, a host
 whose directory service is down refuses to start InterWeave for a
