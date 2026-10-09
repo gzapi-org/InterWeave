@@ -75,7 +75,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> ExitCode {
         Err(e @ PersistError::UnsupportedPlatform) => return refuse(EX_UNAVAILABLE, &e),
         Err(e) => return refuse(EX_IOERR, &e),
     };
-    let store = match open_store(&profile.store_path(), launch.store_options()) {
+    let store = match open_store(&profile, launch.store_options()) {
         Opened::Ready(store) => store,
         Opened::Blocked(blocked) => {
             let code = match blocked {
