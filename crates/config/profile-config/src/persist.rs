@@ -895,15 +895,17 @@ type NameReads = (
 );
 
 /// The two reads the predicate makes, on a helper thread under
-/// `deadline`: `Err(())` when they did not finish in time -- the thread
-/// is then left to finish or leak, one per refusal -- or could not be
+/// `deadline`, or why they gave no answer -- each cause named apart, so
+/// a thread limit is not reported as a slow name service: the deadline
+/// passed (the thread is then left to finish or leak, one per refusal),
+/// the read ended without answering (it panicked), or no thread could be
 /// started.
 fn read_names(
     names: &impl NameService,
     euid: u32,
     gid: u32,
     deadline: std::time::Duration,
-) -> Result<NameReads, ()> {
+) -> Result<NameReads, String> {
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     let names = names.clone();
     std::thread::Builder::new()
@@ -911,8 +913,15 @@ fn read_names(
         .spawn(move || {
             let _ = tx.send((names.user_name(euid), names.group(gid)));
         })
-        .map_err(drop)?;
-    rx.recv_timeout(deadline).map_err(drop)
+        .map_err(|e| format!("no thread could be started to read it: {e}"))?;
+    rx.recv_timeout(deadline).map_err(|e| match e {
+        std::sync::mpsc::RecvTimeoutError::Timeout => {
+            format!("the name service did not answer within {deadline:?}")
+        }
+        std::sync::mpsc::RecvTimeoutError::Disconnected => {
+            "the read ended without an answer".to_owned()
+        }
+    })
 }
 
 /// [`owners_private_group`] under `deadline`, apart so a test can wait
@@ -945,11 +954,7 @@ fn owners_private_group_within(
             "group-writable; whether group {gid} is the owner's private group could not be read: {why}"
         )
     };
-    let Ok((user_read, group_read)) = read_names(names, euid, gid, deadline) else {
-        return Err(unread(format!(
-            "the name service did not answer within {deadline:?}"
-        )));
-    };
+    let (user_read, group_read) = read_names(names, euid, gid, deadline).map_err(unread)?;
     let user = match user_read {
         Ok(Some(user)) => user,
         Ok(None) => return Err(unread(format!("uid {euid} has no account entry"))),
@@ -1431,7 +1436,7 @@ mod tests {
             0o40775,
             &FakeNames {
                 users: vec![],
-                ..names_clone(&names)
+                ..names.clone()
             },
         ));
         assert!(
@@ -1443,7 +1448,7 @@ mod tests {
             0o40775,
             &FakeNames {
                 fails: true,
-                ..names_clone(&names)
+                ..names.clone()
             },
         ));
         assert!(
@@ -1455,7 +1460,7 @@ mod tests {
             0o40775,
             &FakeNames {
                 group_fails: true,
-                ..names_clone(&names)
+                ..names.clone()
             },
         ));
         assert!(
@@ -1480,7 +1485,7 @@ mod tests {
                 0o40775,
                 &FakeNames {
                     users: vec![],
-                    ..names_clone(&names)
+                    ..names.clone()
                 },
             )),
             refused(judge(
@@ -1488,7 +1493,7 @@ mod tests {
                 0o40775,
                 &FakeNames {
                     fails: true,
-                    ..names_clone(&names)
+                    ..names.clone()
                 },
             )),
         ] {
@@ -1559,6 +1564,16 @@ mod tests {
                 Ok(Some(("alice".to_owned(), Vec::new())))
             }
         }
+        #[derive(Clone)]
+        struct Panics;
+        impl NameService for Panics {
+            fn user_name(&self, _: u32) -> std::io::Result<Option<String>> {
+                panic!("a name service module that panics")
+            }
+            fn group(&self, _: u32) -> std::io::Result<Option<(String, Vec<String>)>> {
+                Ok(None)
+            }
+        }
         assert_eq!(NSS_READ_DEADLINE, std::time::Duration::from_secs(5));
         let deadline = std::time::Duration::from_millis(50);
         let started = std::time::Instant::now();
@@ -1580,24 +1595,36 @@ mod tests {
             detail.contains("the name service did not answer within 50ms"),
             "{detail}"
         );
+        // The control waits long enough that a loaded machine's thread
+        // start and scheduling cannot pass for a timeout.
         owners_private_group_within(
             &Slow(std::time::Duration::ZERO),
             1000,
             1001,
             Ok(false),
-            deadline,
+            std::time::Duration::from_secs(2),
         )
         .expect("the control: an answer in time, the private group");
-    }
 
-    #[cfg(unix)]
-    fn names_clone(names: &FakeNames) -> FakeNames {
-        FakeNames {
-            users: names.users.clone(),
-            groups: names.groups.clone(),
-            fails: names.fails,
-            group_fails: names.group_fails,
-        }
+        // A read that ends without answering is named as that, not as a
+        // timeout: the thread panicked, and nothing was waited for.
+        let started = std::time::Instant::now();
+        let ended = owners_private_group_within(
+            &Panics,
+            1000,
+            1001,
+            Ok(false),
+            std::time::Duration::from_secs(5),
+        )
+        .expect_err("a read that ended refuses");
+        assert!(
+            ended.contains("the read ended without an answer"),
+            "{ended}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "refused when the read ended, not at the deadline"
+        );
     }
 
     /// The host's name service reads the entries `id` reports: this
