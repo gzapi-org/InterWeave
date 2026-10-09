@@ -89,14 +89,27 @@ if [ -z "$claimed" ]; then
     exit 1
 fi
 
+# ADVISORY contexts: jobs CI runs that the ruleset does not require (a
+# check whose subject is not on main yet, say). CLAUDE.md names them in a
+# sentence of their own, so the required list stays exactly what gates
+# main; a job must be in one list or the other, never neither.
+adv_line="$(grep -n 'advisory contexts* the ruleset does not require' "$CONTRACT" | head -1)"
+advisory="$(printf '%s' "$adv_line" | grep -o '\*\*`[^`]*`\*\*' | tr -d '*`' | sort -u)"
+both="$(printf '%s\n' "$claimed" "$advisory" | sed '/^$/d' | sort | uniq -d)"
+if [ -n "$both" ]; then
+    echo "check_required_contexts: CLAUDE.md names $(printf '%s' "$both" | tr '\n' ' ')as both required and advisory" >&2
+    exit 1
+fi
+claimed="$(printf '%s\n' "$claimed" "$advisory" | sed '/^$/d' | sort -u)"
+
 if [ "$jobs" != "$claimed" ]; then
     {
         echo "check_required_contexts: the workflow and CLAUDE.md disagree."
         echo
         echo "  ci.yml job names:"
-        printf '    %s\n' $jobs
-        echo "  CLAUDE.md says CI reports:"
-        printf '    %s\n' $claimed
+        printf '%s\n' "$jobs" | sed 's/^/    /'
+        echo "  CLAUDE.md says CI reports (required and advisory):"
+        printf '%s\n' "$claimed" | sed 's/^/    /'
         echo
         echo "A job's name IS its required-check context. Renaming a job without"
         echo "updating the ruleset leaves main gated on a context nothing reports,"

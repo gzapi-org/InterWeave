@@ -104,6 +104,33 @@ R="$TMP/empty"; mkdir -p "$R"
     || bad "missing workflow should exit 2"
 
 echo "check_required_contexts: --help works and says nothing about the tree"
+
+echo "check_required_contexts: an advisory context is a job too, listed apart"
+advisory() { printf '\nCI also reports one advisory context the ruleset does not require: **`%s`**.\n' "$2" >> "$1/CLAUDE.md"; }
+R="$TMP/advisory"; mkdir -p "$R"
+workflow "$R" "rust" "tree checks" "android check (aarch64-linux-android)"
+contract "$R" "rust" "tree checks"
+advisory "$R" "android check (aarch64-linux-android)"
+[ "$(run_code "$R")" = "0" ] && ok "a job in the advisory sentence passes" || bad "should pass: $(run "$R")"
+R="$TMP/advisory-missing"; mkdir -p "$R"
+workflow "$R" "rust" "tree checks" "android check (aarch64-linux-android)"
+contract "$R" "rust" "tree checks"
+out="$(run "$R")"
+[ "$(run_code "$R")" = "1" ] && ok "a job in neither list fails" || bad "should exit 1: $out"
+case "$out" in *"android check (aarch64-linux-android)"*) ok "  and names it whole, spaces and all" ;;
+               *) bad "  must name it: $out" ;; esac
+R="$TMP/advisory-both"; mkdir -p "$R"
+workflow "$R" "rust" "tree checks"
+contract "$R" "rust" "tree checks"
+advisory "$R" "rust"
+out="$(run "$R")"
+[ "$(run_code "$R")" = "1" ] && ok "a context named both required and advisory fails" || bad "should exit 1: $out"
+case "$out" in *"both required and advisory"*) ok "  and says so" ;; *) bad "  must say so: $out" ;; esac
+R="$TMP/advisory-stale"; mkdir -p "$R"
+workflow "$R" "rust" "tree checks"
+contract "$R" "rust" "tree checks"
+advisory "$R" "android check (aarch64-linux-android)"
+[ "$(run_code "$R")" = "1" ] && ok "an advisory context no job reports fails" || bad "should exit 1: $(run "$R")"
 bash "$GUARD" --help >/dev/null 2>&1 && ok "--help exits 0" || bad "--help should exit 0"
 
 echo
