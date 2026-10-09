@@ -623,15 +623,19 @@ pub(super) fn settle_failed_dial(
 ///   dial was refused on the Swarm's peer condition (measured on #245
 ///   after a daemon restart, rust-ui-dev-01's 01a1217f).
 ///
-/// `None` for any other dial, for a failure the relay or the destination
-/// answered -- scored as before -- and for an address with no relay `/p2p`
-/// before its `/p2p-circuit`.
+/// `None` for any other dial, for any error that is not a transport
+/// failure -- a `WrongPeerId` keeps its quarantine whatever the table
+/// says (#247 review R3) -- for a failure the relay or the destination
+/// answered, scored as before, and for an address with no relay `/p2p`
+/// before its `/p2p-circuit`. With the relay, whether a direct connection
+/// to it came up AFTER this dial was admitted: the hop has been reached
+/// since, and the retry is due now (`record_relay_hop_unreached`).
 pub(super) fn unreached_relay(
     ticket: &DialTicket,
     open: &HashMap<libp2p::swarm::ConnectionId, OpenConnection>,
     error: &DialError,
-) -> Option<TransportIdentity> {
-    if ticket.origin() != DialOrigin::RelayCircuit {
+) -> Option<(TransportIdentity, bool)> {
+    if ticket.origin() != DialOrigin::RelayCircuit || !matches!(error, DialError::Transport(_)) {
         return None;
     }
     let address: Multiaddr = ticket.address().parse().ok()?;
@@ -643,10 +647,13 @@ pub(super) fn unreached_relay(
         return None;
     };
     let relay = to_transport_identity(relay).ok()?;
-    let reached = open
-        .values()
-        .any(|c| c.peer == relay && c.path == PeerPath::Direct);
-    (!reached || hop_canceled(error)).then_some(relay)
+    let direct = || {
+        open.values()
+            .filter(|c| c.peer == relay && c.path == PeerPath::Direct)
+    };
+    let reached = direct().next().is_some();
+    let came_up = direct().any(|c| c.since_ms >= ticket.admitted_at_ms());
+    (!reached || hop_canceled(error)).then_some((relay, came_up))
 }
 
 /// What `libp2p-relay`'s client transport says when the behaviour drops a
@@ -1133,8 +1140,8 @@ pub(super) fn settle_outcome(
                 // A CIRCUIT THAT NEVER REACHED ITS RELAY says nothing
                 // about the destination (`record_relay_hop_unreached`).
                 match unreached_relay(&ticket, open, error) {
-                    Some(relay) => {
-                        let _ = manager.record_relay_hop_unreached(ticket, &relay, now_ms);
+                    Some((relay, came_up)) => {
+                        let _ = manager.record_relay_hop_unreached(ticket, &relay, came_up, now_ms);
                     }
                     None => settle_failed_dial(manager, ticket, error, now_ms),
                 }
@@ -1865,7 +1872,7 @@ mod tests {
                     address: circuit.clone(),
                     origin: DialOrigin::RelayCircuit,
                 },
-                0,
+                5,
             )
             .expect("a circuit to a data-plane peer is admitted");
         let address: Multiaddr = circuit.parse().expect("valid");
@@ -1888,17 +1895,33 @@ mod tests {
         let mut open = HashMap::new();
         assert_eq!(
             super::unreached_relay(&ticket, &open, &answered()),
-            Some(ident(RELAY)),
+            Some((ident(RELAY), false)),
             "not connected to the relay: the hop's, whatever the error"
         );
+        // Connected at 0, before the dial was admitted at 5.
         open.insert(
             ConnectionId::new_unchecked(1),
             open_to(&ident(RELAY), &mut m),
         );
         assert_eq!(
             super::unreached_relay(&ticket, &open, &canceled()),
-            Some(ident(RELAY)),
-            "connected, but the request was dropped unsent: the hop's"
+            Some((ident(RELAY), false)),
+            "connected, but the request was dropped unsent: the hop's, nothing new"
+        );
+        // A second connection to the relay established at 10, after the
+        // dial: the restart race, the retry due now (#247 review F1).
+        let mut fresh = open_to(&ident(RELAY), &mut m);
+        fresh.since_ms = 10;
+        open.insert(ConnectionId::new_unchecked(2), fresh);
+        assert_eq!(
+            super::unreached_relay(&ticket, &open, &canceled()),
+            Some((ident(RELAY), true)),
+            "the relay came up during the dial"
+        );
+        assert_eq!(
+            super::unreached_relay(&ticket, &open, &DialError::Aborted),
+            None,
+            "not a transport failure: settled as before (R3)"
         );
         assert_eq!(
             super::unreached_relay(&ticket, &open, &answered()),
