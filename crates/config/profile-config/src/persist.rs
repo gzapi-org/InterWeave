@@ -992,7 +992,8 @@ type NameReads = (
 /// started -- or nothing was started at all, because an earlier read of
 /// the same service ([`NameService::outstanding`]) did not end within
 /// `deadline`, counted from this request, or ended leaving none of it,
-/// or because the budget was zero from the start ("no time was left").
+/// or because the budget ran out before any wait -- a zero budget, or
+/// one too short for the time it takes to start ("no time was left").
 fn read_names(
     names: &impl NameService,
     euid: u32,
