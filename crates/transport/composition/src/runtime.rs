@@ -27,7 +27,9 @@ use interweave_transport_api::{
     PeerPath, PeerSummary, TransportCapabilities, TransportError, TransportEvent,
     TransportIdentity, TransportRuntime,
 };
-use interweave_transport_libp2p::{PathChange, RuntimeStatus, SwarmEvent, SwarmRuntime};
+use interweave_transport_libp2p::{
+    NetworkMonitor, NetworkView, PathChange, RuntimeStatus, SwarmEvent, SwarmRuntime,
+};
 use interweave_transport_runtime::TrustSources;
 use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -216,6 +218,7 @@ pub struct ComposedRuntime {
     dropped: Arc<AtomicU64>,
     sessions: InProcessBinding,
     shutdown_requests: watch::Receiver<Option<ShutdownRequest>>,
+    network: NetworkMonitor,
 }
 
 /// Discovery's clock: wall-clock milliseconds read once, at start, then
@@ -392,6 +395,9 @@ impl ComposedRuntime {
         );
         let (event_tx, events) = mpsc::channel(options.event_capacity.max(1));
         let dropped = Arc::new(AtomicU64::new(0));
+        // Taken before the driver takes the substrate: a view is handed
+        // straight to it, never queued behind the driver's work.
+        let network = swarm.network_monitor();
         let driver = Driver {
             swarm,
             notices,
@@ -431,6 +437,7 @@ impl ComposedRuntime {
             task: Some(task),
             dropped,
             shutdown_requests,
+            network,
         })
     }
 
@@ -446,6 +453,18 @@ impl ComposedRuntime {
     #[must_use]
     pub fn listening(&self) -> &[String] {
         &self.listening
+    }
+
+    /// Hand the substrate the platform's view of this host's addresses
+    /// (§20 step 5; `transport/libp2p/CONNECTIVITY.md` §14's second
+    /// source): a snapshot, never a delta, empty when offline. NEVER
+    /// BLOCKS: the latest view replaces one not yet read. A view that
+    /// moves the host's known IP set is a network change -- what ran
+    /// from a departed IP closes, and an addition makes the peers held
+    /// off by their dial backoff dialable once; the same addresses again
+    /// are no change.
+    pub fn network_changed(&self, view: NetworkView) {
+        self.network.report(view);
     }
 
     /// Neutral events dropped so far because the consumer's queue was
