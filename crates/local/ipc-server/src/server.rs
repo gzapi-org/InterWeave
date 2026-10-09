@@ -1125,6 +1125,70 @@ mod tests {
         }
     }
 
+    /// A path notice with no `previous` -- a route's begin, a routed
+    /// peer's reconnect -- is a 2.4 SHAPE of a 2.1 type: a connection at
+    /// 2.3 is sent none and sees no gap, while one at 2.4 is sent it,
+    /// numbered, `previous` absent from the data rather than `null`. The
+    /// control: a change WITH `previous` reaches the 2.3 connection.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_route_notice_goes_only_to_a_2_4_connection_and_leaves_no_gap_below() {
+        let notice = |previous| {
+            SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
+                peer: peer(),
+                previous,
+                current: interweave_transport_api::PeerPath::Relayed,
+                reason_class: interweave_local_client_api::ROUTE_ESTABLISHED.into(),
+                observed_at: 1,
+            })
+        };
+        let gone = || {
+            SessionEvent::Local(LocalSessionEvent::PeerDisconnected {
+                peer: peer(),
+                reason_class: "policy".into(),
+            })
+        };
+        let at = |minor: u64| DATA.replace(r#""minor":0"#, &format!(r#""minor":{minor}"#));
+        let (data_2_3, data_2_4) = (at(3), at(4));
+        for (hello, expected) in [
+            (
+                data_2_3.as_str(),
+                vec![("changed", 0), ("peer.disconnected", 1)],
+            ),
+            (
+                data_2_4.as_str(),
+                vec![("begun", 0), ("changed", 1), ("peer.disconnected", 2)],
+            ),
+        ] {
+            let fake = Fake::default();
+            let harness = Harness::start(&fake, config());
+            let mut client = Client::connect(&harness.paths.data).await;
+            client.hello(hello).await;
+            fake.script().events.extend([
+                notice(None),
+                notice(Some(interweave_transport_api::PeerPath::Direct)),
+                gone(),
+            ]);
+            let mut seen = Vec::new();
+            while !seen.iter().any(|(t, _)| *t == "peer.disconnected") {
+                if let Some(Frame::Event(event)) = client.next_reply().await {
+                    let data = event.data.as_deref().map(|d| d.get().to_owned());
+                    let kind = match (event.event_type.as_str(), &data) {
+                        ("peer.path_changed", Some(d)) if d.contains(r#""previous""#) => "changed",
+                        ("peer.path_changed", Some(d)) => {
+                            assert!(!d.contains("null"), "absent, never null: {d}");
+                            "begun"
+                        }
+                        _ => "peer.disconnected",
+                    };
+                    seen.push((kind, event.sequence));
+                }
+            }
+            assert_eq!(seen, expected, "{hello}");
+            drop(client);
+            harness.stop().await;
+        }
+    }
+
     /// A 2.1 event the protocol would refuse -- a path change whose class
     /// is out of bounds -- still takes no number on a 2.0 connection: the
     /// minor is judged before the shape, so that client sees no gap for a
