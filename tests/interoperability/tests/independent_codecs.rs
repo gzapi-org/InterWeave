@@ -443,3 +443,126 @@ fn direct_responses_agree_in_both_directions_and_under_mutation() {
 fn hex(b: &[u8]) -> String {
     interweave_test_support::hex::encode(b)
 }
+
+/// Production's verdict on a directory response: its decoder, then, for a
+/// list, `validate_response`, which holds the count and duplicate rules
+/// (`endpoints_codec.rs` keeps them out of the bytes layer by design). The
+/// independent codec holds both in one place, so the comparison is against
+/// the two together.
+fn production_directory(bytes: &[u8]) -> Result<ind::endpoints_v1::DirectoryResponseV1, String> {
+    use interweave_transport_libp2p::endpoints_codec::{DirectoryResponse, decode_response};
+    let reason = |r: interweave_transport_api::DirectoryRefusal| match r {
+        interweave_transport_api::DirectoryRefusal::Overloaded => "overloaded",
+        interweave_transport_api::DirectoryRefusal::Unauthorized => "unauthorized",
+        interweave_transport_api::DirectoryRefusal::Unavailable => "unavailable",
+    };
+    match decode_response(bytes).map_err(str::to_owned)? {
+        DirectoryResponse::Directory(raw) => {
+            interweave_transport_runtime::validate_response(&raw).map_err(|e| format!("{e:?}"))?;
+            Ok(ind::endpoints_v1::DirectoryResponseV1::Directory {
+                generated_at_ms: raw.generated_at_ms,
+                ttl_ms: raw.ttl_ms,
+                endpoints: raw
+                    .endpoints
+                    .iter()
+                    .map(|e| e.as_str().to_owned())
+                    .collect(),
+            })
+        }
+        DirectoryResponse::Refused(r) => {
+            Ok(ind::endpoints_v1::DirectoryResponseV1::Refused { reason: reason(r) })
+        }
+    }
+}
+
+#[test]
+fn endpoint_directories_agree_in_both_directions_and_under_mutation() {
+    use ind::endpoints_v1::{DirectoryResponseV1, REASONS};
+    use interweave_transport_api::{DirectoryRefusal, EndpointDirectoryV1};
+    use interweave_transport_libp2p::endpoints_codec::{DirectoryResponse, encode_response};
+    let mut rng = Rng(0x94D0_49BB_1331_11EB);
+    let mut cases: Vec<DirectoryResponseV1> = REASONS
+        .iter()
+        .map(|reason| DirectoryResponseV1::Refused { reason })
+        .collect();
+    for _ in 0..300 {
+        let n = match rng.below(4) {
+            0 => 0,
+            1 => 32,
+            _ => rng.below(33),
+        };
+        let mut endpoints: Vec<String> = Vec::new();
+        while endpoints.len() < n {
+            let e = endpoint(&mut rng);
+            if !endpoints.contains(&e) {
+                endpoints.push(e);
+            }
+        }
+        cases.push(DirectoryResponseV1::Directory {
+            generated_at_ms: sent_at(&mut rng),
+            ttl_ms: u32::try_from(rng.next() >> 32).unwrap(),
+            endpoints,
+        });
+    }
+    let to_prod = |c: &DirectoryResponseV1| match c {
+        DirectoryResponseV1::Directory {
+            generated_at_ms,
+            ttl_ms,
+            endpoints,
+        } => DirectoryResponse::Directory(EndpointDirectoryV1 {
+            generated_at_ms: *generated_at_ms,
+            ttl_ms: *ttl_ms,
+            endpoints: endpoints
+                .iter()
+                .map(|e| EndpointId::parse(e.clone()).expect("legal"))
+                .collect(),
+        }),
+        DirectoryResponseV1::Refused { reason } => DirectoryResponse::Refused(match *reason {
+            "overloaded" => DirectoryRefusal::Overloaded,
+            "unauthorized" => DirectoryRefusal::Unauthorized,
+            _ => DirectoryRefusal::Unavailable,
+        }),
+    };
+    for (n, case) in cases.iter().enumerate() {
+        let ours = case.encode().expect("legal");
+        assert_eq!(ours, encode_response(&to_prod(case)), "case {n}");
+        assert_eq!(production_directory(&ours).as_ref(), Ok(case), "case {n}");
+        assert_eq!(
+            DirectoryResponseV1::decode(&ours).as_ref(),
+            Ok(case),
+            "case {n}"
+        );
+        if ours.len() > 40 {
+            continue;
+        }
+        for at in 0..ours.len() {
+            for v in [
+                0x00u8, 0x01, 0x02, 0x03, 0x04, 0x20, 0x21, 0x2D, 0x41, 0x61, 0x7A, 0x7F, 0xFF,
+            ] {
+                let mut mutated = ours.clone();
+                mutated[at] = v;
+                match (
+                    DirectoryResponseV1::decode(&mutated),
+                    production_directory(&mutated),
+                ) {
+                    (Ok(a), Ok(b)) => assert_eq!(a, b, "case {n} byte {at} = {v:#04x}"),
+                    (Err(_), Err(_)) => {}
+                    (a, b) => panic!(
+                        "case {n} byte {at} = {v:#04x} of {}: independent {a:?}, production {b:?}",
+                        hex(&ours)
+                    ),
+                }
+            }
+        }
+        for cut in 0..ours.len() {
+            assert!(
+                DirectoryResponseV1::decode(&ours[..cut]).is_err(),
+                "case {n} cut {cut}"
+            );
+            assert!(
+                production_directory(&ours[..cut]).is_err(),
+                "case {n} cut {cut}"
+            );
+        }
+    }
+}
