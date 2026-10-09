@@ -390,7 +390,7 @@ daemon, `transportctl`, the human client's lock and store, every
 `ProfileConfig::load`) and on every later private write —
 the trust overlay's `admin.trust.set` in a running daemon among them
 (the review of this note) — so "once per start" was false; each such
-operation is refused within the deadline, and at most one read is
+operation is refused, and at most one read is
 outstanding per process: a caller that finds an earlier read outstanding
 does not spawn a second but waits for it, up to the deadline measured
 from its own request, then refuses with "an earlier name-service read
@@ -402,7 +402,7 @@ healthy concurrent read (the human
 client's store beside a private write; callers nobody has enumerated,
 so no "they never overlap" is promised) succeeds after the first
 returns, a hung one costs one leaked thread and every caller refuses
-within the deadline (p2p-network-dev-01's observation 01a11e77: a
+within its own deadline (p2p-network-dev-01's observation 01a11e77: a
 refuse-at-once rule made two healthy parallel tests refuse each other,
 257 runs of 300). Those
 refusals last until the abandoned read returns — the guard clears when
@@ -414,6 +414,22 @@ the predicate, not the real `HostNames`, so a unit test with a blocking
 fake proves it: a name service that sleeps past the deadline yields the
 refusal naming the deadline; one that answers in time leaves every
 verdict as before.
+
+**What the deadline bounds** (the retired reviewer's thread on #239,
+judged real): each READ, not the operation. The walk calls the predicate
+once per group-writable, non-sticky directory it judges — the resolved
+path's depth up to the boundary, re-judged at each traversed link (at
+most 40) — and `ProfileConfig::load` once more for a group-writable
+`config.yaml`; every call starts its own budget, nothing is reused, and
+the operation stops at its first refusal. So an operation whose earlier
+reads answer slowly before one hangs may take a multiple of 5 s: a
+three-deep group-writable home with two answers at 4.9 s and a third
+hang refuses near 15 s. The promise is the finite bound, closed and
+named, never "within 5 s" for the operation; carrying one deadline
+through the operation would change six signatures for a case a hung
+service rarely produces (two slow answers, then a hang), and an
+implementation MAY instead reuse one answer for the same (euid, gid)
+within a walk, which makes the common one-group path one read.
 
 **Alternatives rejected.** Accepting the hang as the host's ("a hung
 name service hangs logins too"): true, and it restates the amendment's
