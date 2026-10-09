@@ -229,3 +229,42 @@ still refuses a peer in backoff, except once for a non-empty address
 with no record — the retry schedule and the gate's peer backoff are two
 tables, and both had to yield. The limit of "once" was then measured (01a0f6d9): a peer in dial-failure backoff, two Manual admissions of one untried address before either settles, both admitted — the snapshot the gate decides against carries no in-flight marker. Ruled as a recorded limit, not a defect: the pending-dial ceiling bounds what is in flight (`connection_manager.rs::the_pending_ceiling_holds_against_concurrent_admissions`), dials already admitted are not recalled, the first failure to settle writes the record that refuses later admissions (a success clears the backoff), and marking the attempt in the snapshot is a design change not ruled; the body reads "once per settled attempt". The code and its tests are p2p-network-dev's, in
 the composition-hardening pull request this note lands on.
+
+### Amendment 2026-10-09 — A network addition lifts the per-peer backoff, once per lift floor
+
+**Trigger.** Stage 17 step 5 (plan §20), the network-change binding
+p2p-network-dev-01 built on `feat/network-change-binding`: on an
+addition to the host's known IP set, the relay reservation ladder was
+ruled due (CONNECTIVITY.md §14, A 2026-10-09), and the measurement
+showed it was not enough — the offline failure had also put the relay
+PEER in the dial gate's backoff, so the ask failed at once. The lift of
+that backoff for every classified peer (90af0da5) is the same per-peer
+backoff this ADR's A 2026-10-01 lifts for a new peer address, with an
+abuse bound recorded there; the blind review (F2) found this lift
+recorded only in CONNECTIVITY.md, with no bound and no record here.
+
+**Decision.** A new address of this host lifts the per-peer dial
+backoff as a new address of the peer does: for every classified peer
+(unauthorized peers lifted nothing), with the scheduler's retry made due
+for data-plane peers only and the relay ladder made due, attempt counts
+kept. The bound is a LIFT FLOOR: one lift per peer per cadence first
+step (30 s for a peer's schedule, `retry_min` for the relay ladder),
+measured from that peer's previous lift, so repeated additions — IPv6
+prefixes announced by a LAN router, a flapping VPN or Wi-Fi, the two
+detector sources lagging — redial a held-off peer at most once per
+floor, under the existing dial ceilings. The first fill of an empty
+known set runs the lift though it is reported as no change (R1: an
+Android Service started offline fails its first dials before any
+address exists; coming online would otherwise lift nothing).
+
+**Alternatives rejected.** No floor, the rate following the addition
+rate: bounded globally by the scheduler's and discovery's take, but
+every held-off peer redialled per addition, which a noisy LAN produces
+for free. Narrowing the lift to relay candidates: the staleness of the
+host's failures is not a property of the peer's role.
+
+**Consequences.** Code: p2p-network-dev-01's, on the same branch — the
+floor beside the lift (a test: two additions inside the floor lift
+once; one after it lifts again) and the first-fill lift (a subject
+starting with no non-loopback address, failing a relay ask, then a view
+with one address: the ask is due; the control without a view waits).
