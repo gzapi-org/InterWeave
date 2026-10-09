@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Andrea Benetton
 #
-# The workflow's job names and CLAUDE.md's list of required contexts
-# must be the same set.
+# The workflow's job names and CLAUDE.md's contexts must be the same set:
+# each job is in exactly one of CLAUDE.md's REQUIRED list (what the ruleset
+# gates main on) or its ADVISORY sentence (reported, not required) — never
+# both, never neither, and no name a job does not report.
 #
 # WHY THIS EXISTS
 #
@@ -30,15 +32,15 @@
 # papered over: agreement here does not prove `main` is gated.
 #
 # Exit codes:
-#   0  the workflow's job names and CLAUDE.md's list agree
-#   1  they do not
+#   0  every job is in exactly one of CLAUDE.md's required or advisory lists
+#   1  a job in neither, a name in both, or a listed name no job reports
 #   2  invocation error
 
 set -uo pipefail
 
 usage() {
     cat <<'USAGE'
-check_required_contexts.sh — CI job names must match CLAUDE.md's list
+check_required_contexts.sh — each CI job name is in exactly one of CLAUDE.md's required or advisory lists
 
 Usage:
   bash tools/checks/check_required_contexts.sh [--root DIR]
