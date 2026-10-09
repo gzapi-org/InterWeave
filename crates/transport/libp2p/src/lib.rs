@@ -106,6 +106,7 @@ mod class_gate;
 pub mod direct_codec;
 pub mod endpoints_codec;
 pub mod gated_swarm;
+pub mod held_listeners;
 pub mod hole_punch;
 pub mod hop_gate;
 pub mod mdns_scope;

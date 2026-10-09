@@ -103,6 +103,9 @@ pub(super) struct NetworkSet {
     filled_once: bool,
     /// The first fill happened and its lift has not been taken.
     filled_untaken: bool,
+    /// Where the bound IPs the host no longer holds are published, for
+    /// rule 3 at the root funnel ([`crate::held_listeners`]).
+    published: crate::held_listeners::HeldListeners,
 }
 
 /// What changed: the IPs that left the known set and those that joined
@@ -173,6 +176,27 @@ impl NetworkSet {
         self.apply(&before, &now, &BTreeSet::new())
     }
 
+    /// A detector that publishes the bound IPs the host no longer holds
+    /// to `held` after every observation.
+    pub(super) fn publishing_to(held: crate::held_listeners::HeldListeners) -> Self {
+        Self {
+            published: held,
+            ..Self::default()
+        }
+    }
+
+    /// The own listeners rule 3 counts (ADR-0052 A 2026-10-09): those of
+    /// `bound` this host [`holds`](Self::holds), as strings.
+    pub(super) fn own_listeners<'a>(
+        &self,
+        bound: impl Iterator<Item = &'a Multiaddr>,
+    ) -> Vec<String> {
+        bound
+            .filter(|a| self.holds(a))
+            .map(ToString::to_string)
+            .collect()
+    }
+
     /// Whether the first fill of the known set has happened since this
     /// was last asked: the runtime runs an addition's lift for it,
     /// though it reported no change. `true` once.
@@ -214,6 +238,8 @@ impl NetworkSet {
             self.filled_once = true;
             self.filled_untaken = true;
         }
+        self.published
+            .set_unheld(self.listeners.difference(&self.known).copied().collect());
         change
     }
 }
@@ -549,6 +575,33 @@ mod tests {
         ] {
             assert!(set.holds(&always.parse().expect("valid")), "{always}");
         }
+    }
+
+    #[test]
+    fn the_detector_publishes_the_bound_ips_it_no_longer_holds() {
+        let held = crate::held_listeners::HeldListeners::new();
+        let mut set = NetworkSet::publishing_to(held.clone());
+        let x: Multiaddr = "/ip4/192.168.1.5/tcp/4001".parse().expect("valid");
+        let loopback: Multiaddr = "/ip4/127.0.0.1/tcp/4001".parse().expect("valid");
+        let bound = [x.clone(), loopback.clone()];
+        let _ = set.observe_listeners(bound.iter());
+        let _ = set.observe_view(&[ip("192.168.1.5")]);
+        assert!(held.holds(&x), "the control: held");
+        assert_eq!(
+            set.own_listeners(bound.iter()),
+            vec![x.to_string(), loopback.to_string()]
+        );
+        // The view says X departed; its listener is still bound.
+        let _ = set.observe_view(&[]);
+        assert!(!held.holds(&x), "published as no longer held");
+        assert_eq!(
+            set.own_listeners(bound.iter()),
+            vec![loopback.to_string()],
+            "and not this node's for rule 3"
+        );
+        // The poll catches up: X is no longer bound, nothing is unheld.
+        let _ = set.observe_listeners(std::iter::once(&loopback));
+        assert!(held.holds(&x), "unheld means bound and not held");
     }
 
     #[test]

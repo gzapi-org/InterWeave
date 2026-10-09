@@ -755,13 +755,16 @@ fn mdns_tick<P: libp2p::mdns::Provider>(
     >,
     build: impl FnOnce() -> std::io::Result<crate::mdns_scope::MdnsScope<libp2p::mdns::Behaviour<P>>>,
     listening: &[(libp2p::core::transport::ListenerId, libp2p::Multiaddr)],
+    own: &[String],
     counts: &mdns_driver::DropCountsCell,
     at: std::time::Instant,
     now_ms: u64,
     outbox: &mut VecDeque<SwarmEvent>,
     event_capacity: usize,
 ) {
-    let own: Vec<String> = listening.iter().map(|(_, a)| a.to_string()).collect();
+    // `own` is rule 3's -- the bound listeners on an IP the host still
+    // holds (ADR-0052 A 2026-10-09); `listening` is every bound one, which
+    // a rebuilt behaviour must be told of whatever the host holds.
     if let Some(mdns) = field.as_ref() {
         let records: Vec<(PeerId, libp2p::Multiaddr, std::time::Instant)> = mdns
             .inner()
@@ -1329,6 +1332,10 @@ impl SwarmRuntime {
         };
         let preauth = config.preauth;
         let funnel_operator = operator.clone();
+        // Which bound listeners are on an IP the host still holds (ADR-0052
+        // rule 3, A 2026-10-09): written by the detector, read by the funnel.
+        let held_listeners = crate::held_listeners::HeldListeners::new();
+        let funnel_held = held_listeners.clone();
         let make_behaviour =
             move |key: &libp2p::identity::Keypair, relay_client: relay_driver::ClientField| {
                 SubstrateBehaviour::new(
@@ -1355,7 +1362,11 @@ impl SwarmRuntime {
                 // only from what the root returns, and the root is this.
                 // `tests/root_funnel.rs` measured that on real sockets.
                 .map(|behaviour| {
-                    crate::root_funnel::RootFunnel::new(behaviour, funnel_operator.clone())
+                    crate::root_funnel::RootFunnel::new(
+                        behaviour,
+                        funnel_operator.clone(),
+                        funnel_held.clone(),
+                    )
                 })
                 .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
             };
@@ -1471,7 +1482,7 @@ impl SwarmRuntime {
         let mut held_sends = held_sends::HeldSends::default();
         // The IP set this host is known to hold, for section 14's
         // network change (step 10): the listeners' and the platform's.
-        let mut network = network_change::NetworkSet::default();
+        let mut network = network_change::NetworkSet::publishing_to(held_listeners);
         let head_start_ms = config
             .relay_client
             .as_ref()
@@ -1835,6 +1846,7 @@ impl SwarmRuntime {
                                 swarm.mdns_mut(),
                                 || mdns_driver::build_behaviour(settings, local_pid),
                                 &listening,
+                                &network.own_listeners(active.values().flatten()),
                                 counts,
                                 std::time::Instant::now(),
                                 now_ms(started),
@@ -2424,6 +2436,7 @@ impl SwarmRuntime {
                                     &task_operator,
                                     &task_stores,
                                     &mut held_sends,
+                                    &network,
                                     command,
                                 );
                                 // A revocation names connections; this
@@ -2555,7 +2568,7 @@ impl SwarmRuntime {
                             // through this dispatch. See
                             // `KademliaState::own_listeners`.
                             state.set_own_listeners(
-                                active.values().flatten().map(ToString::to_string),
+                                network.own_listeners(active.values().flatten()),
                             );
                             let handled = kademlia_driver::handle_kademlia(
                                 event,
@@ -2601,7 +2614,7 @@ impl SwarmRuntime {
                             // Rule 3 at the learned-server hook asks
                             // what this node listens on NOW.
                             state.set_own_listeners(
-                                active.values().flatten().map(ToString::to_string),
+                                network.own_listeners(active.values().flatten()),
                             );
                             let handled = autonat_driver::handle_autonat(
                                 event,
@@ -2640,7 +2653,7 @@ impl SwarmRuntime {
                             // Rule 3 at the learned-relay hook asks
                             // what this node listens on NOW.
                             state.set_own_listeners(
-                                active.values().flatten().map(ToString::to_string),
+                                network.own_listeners(active.values().flatten()),
                             );
                             let handled = relay_driver::handle_relay(
                                 event,
@@ -2706,8 +2719,7 @@ impl SwarmRuntime {
                         ) = event
                         {
                             if let Some(state) = mdns_state.as_mut() {
-                                let own: Vec<String> =
-                                    active.values().flatten().map(ToString::to_string).collect();
+                                let own: Vec<String> = network.own_listeners(active.values().flatten());
                                 deliver_mdns(
                                     state,
                                     heard,
@@ -2786,8 +2798,7 @@ impl SwarmRuntime {
                         // binds a private interface between two Identify
                         // messages must judge the second against the
                         // listeners it has then.
-                        let own_listeners: Vec<String> =
-                            active.values().flatten().map(ToString::to_string).collect();
+                        let own_listeners: Vec<String> = network.own_listeners(active.values().flatten());
                         let mut advertised = dialing::AdvertisedBoundary {
                             own_listeners: &own_listeners,
                             stores: &task_stores,
@@ -3961,6 +3972,7 @@ mod backpressure_tests {
             &mut field,
             || panic!("built with no rebuild due"),
             &[],
+            &[],
             &cell,
             std::time::Instant::now(),
             0,
@@ -3992,6 +4004,7 @@ mod backpressure_tests {
             &mut field,
             || Ok(fresh),
             &[],
+            &[],
             &cell,
             std::time::Instant::now(),
             0,
@@ -4021,6 +4034,7 @@ mod backpressure_tests {
             &mut field,
             || panic!("rebuilt twice"),
             &[],
+            &[],
             &cell,
             std::time::Instant::now(),
             0,
@@ -4047,6 +4061,7 @@ mod backpressure_tests {
                 &mut state,
                 &mut field,
                 || Err(std::io::Error::other("no netlink")),
+                &[],
                 &[],
                 &cell,
                 std::time::Instant::now(),

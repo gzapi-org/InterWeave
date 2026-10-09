@@ -558,3 +558,44 @@ async fn the_latest_view_replaces_one_not_yet_read() {
     );
     subject.runtime.shutdown().await.expect("shutdown");
 }
+
+/// ADR-0052 rule 3 (A 2026-10-09) at a runtime learn site: a peer's
+/// private candidate is admitted beside a private listener on an IP the
+/// host holds -- the control -- and refused once the platform's view
+/// says that IP departed, though its listener is still bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_departed_ips_listener_admits_no_private_candidate() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let (subject_id, far_id) = (ProfileIdentity::generate(), ProfileIdentity::generate());
+    let far_peer = far_id.transport_identity().expect("peer id");
+    let mut subject = node(&[&far_peer], &subject_id);
+    let _private = subject
+        .runtime
+        .listen(format!("/ip4/{ip}/tcp/0").parse().expect("valid"))
+        .await
+        .expect("the subject's private listener");
+    subject.runtime.network_changed(NetworkView {
+        addresses: vec![ip.into()],
+    });
+    let admitted = subject
+        .runtime
+        .learn(far_peer.clone(), ["/ip4/10.1.2.3/tcp/4001".to_owned()])
+        .await
+        .expect("reaches the task");
+    assert_eq!(admitted, 1, "the control: beside a held private listener");
+
+    subject.runtime.network_changed(NetworkView::default());
+    // The view is read on the task's next turn; a short settle lets it.
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+    while let Ok(Some(_)) = tokio::time::timeout_at(deadline, subject.runtime.next_event()).await {}
+    let admitted = subject
+        .runtime
+        .learn(far_peer.clone(), ["/ip4/10.1.2.4/tcp/4001".to_owned()])
+        .await
+        .expect("reaches the task");
+    assert_eq!(
+        admitted, 0,
+        "the listener's IP departed: no private listener of the family is held"
+    );
+    subject.runtime.shutdown().await.expect("shutdown");
+}
