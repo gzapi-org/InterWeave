@@ -2,11 +2,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:interweave:schemas:ipc:path-changed",
   "title": "IPC peer path changed",
-  "description": "The data of a `peer.path_changed` event (2.1): a peer the connection has a route to -- a direct message exchanged with it, or a broadcast received from it on one of its joins -- changed path, `direct | relayed` either way. Coalesced per peer to one pending: a newer change keeps the pending one's `previous` and takes the newer `current`, `reason_class` and `observed_at`; one whose `previous` equals its `current` is withdrawn. The IPC projection of `LocalSessionEvent::PeerPathChanged` and of TRANSPORT.md's `PeerPathChanged`.",
+  "description": "The data of a `peer.path_changed` event (2.1): a peer the connection has a route to -- a direct message exchanged with it, or a broadcast received from it on one of its joins -- changed path, `direct | relayed` either way — or, from IPC 2.4 (1.1.0, A 2026-10-09), the route BEGAN: `previous` absent, `current` the peer's path at that moment, `reason_class` `route_established`. Coalesced per peer to one pending: a newer change keeps the pending one's `previous` and takes the newer `current`, `reason_class` and `observed_at`; one whose `previous` equals its `current` is withdrawn. The IPC projection of `LocalSessionEvent::PeerPathChanged` and of TRANSPORT.md's `PeerPathChanged`.",
   "type": "object",
   "required": [
     "peer",
-    "previous",
     "current",
     "reason_class",
     "observed_at"
@@ -20,7 +19,8 @@
       "enum": [
         "direct",
         "relayed"
-      ]
+      ],
+      "description": "The path before the change. ABSENT when the route begins (1.1.0, IPC 2.4): the notice then carries the peer's current path with `reason_class` `route_established`; a connection below 2.4 is never sent a notice without `previous`."
     },
     "current": {
       "enum": [
@@ -31,7 +31,8 @@
     "reason_class": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 128
+      "maxLength": 128,
+      "description": "Why the path changed: the runtime's reason classes (`direct_established`, `direct_lost`, ...), and `route_established` for the route-begin notice (1.1.0)."
     },
     "observed_at": {
       "type": "integer",
@@ -41,7 +42,7 @@
   "x-contract": {
     "name": "ipc.path-changed",
     "status": "active",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "adr": [
       "0017",
       "0036"

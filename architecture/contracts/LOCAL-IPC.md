@@ -229,11 +229,11 @@ Each client event queue defaults to 256. When full:
 4. increment drop/rejection counters;
 5. never spill into an unbounded disk queue.
 
-A `peer.path_changed` notice (2.1, A 2026-10-03) is in the ORDINARY lane
+A `peer.path_changed` notice (2.1, A 2026-10-03; from 2.4 also sent when the route BEGINS, with `previous` absent and `reason_class` `route_established`, A 2026-10-09 — a connection below 2.4 is sent nothing at route begin, today's behaviour) is in the ORDINARY lane
 with a rule of its own: per peer at most one is pending; a newer one
-replaces it, keeping the pending one's `previous` and taking the newer
+replaces it, keeping the pending one's `previous` (an absent one stays absent) and taking the newer
 `current` and `observed_at` (so a client never sees a `previous` it was not shown), and the replacement is counted; a merge whose `previous` equals its `current`
-announces no change and is withdrawn, counted as a replacement; under
+announces no change and is withdrawn, counted as a replacement (never a route_established notice, whose `previous` is absent); under
 pressure a pending notice WAITS — it is taken after every message, under
 what is left of the pump's room — and is never dropped, so a route
 indicator stays stale until it is taken (A 2026-10-04, correcting A
@@ -411,7 +411,7 @@ Every `event` frame's `event_type` binds its `data` to a shape
 | `message.broadcast` | `ipc:broadcast-received` | every connection with `events` holding a join reference for the channel | 2.0 |
 | `endpoint.lease_changed` | `ipc:lease-changed` | the connection whose lease was revoked | 2.0 |
 | `peer.disconnected` | `{peer, reason_class}` | every connection with `events` | 2.0 |
-| `peer.path_changed` | `ipc:path-changed` | every connection with `events` that has a route to the peer: a direct message exchanged with it, or a broadcast received from it on one of its joins — a received message counting from the moment the daemon took it from the session for the connection (the IPC projection of LOCAL-CLIENT.md §2's take, A 2026-10-04), a sent one from its acceptance, until a revocation ends the route (A 2026-10-05) | 2.1 |
+| `peer.path_changed` | `ipc:path-changed` | every connection with `events` that has a route to the peer: a direct message exchanged with it, or a broadcast received from it on one of its joins — a received message counting from the moment the daemon took it from the session for the connection (the IPC projection of LOCAL-CLIENT.md §2's take, A 2026-10-04), a sent one from its acceptance, until a revocation ends the route (A 2026-10-05); from 2.4 also when the route begins, `previous` absent, `reason_class` `route_established` (`ipc/path-changed` 1.1.0, A 2026-10-09) | 2.1 (route begin: 2.4) |
 
 A lease GRANT is learned from `hello_response`, not from an event;
 `endpoint.lease_changed` carries revocation only: it is the IPC
@@ -484,7 +484,7 @@ supported minor below the new one; first use `ipc/trust-list` 1.1.0 behind
 The first production build spoke 2.0; Stage 15's R1 batch, which
 brought `peer.path_changed`, spoke 2.1, and R2 added `admin.trust.*` to
 it; `admin.peers.list` brought 2.2 (A 2026-10-06); the persisted trust
-row brought 2.3 (A 2026-10-07, #215).
+row brought 2.3 (A 2026-10-07, #215); the route-begin `peer.path_changed` (`previous` absent, `reason_class` `route_established`; `ipc/path-changed` 1.1.0) brings 2.4 (A 2026-10-09, Stage 17's relay pair) — below 2.4 nothing is sent when a route begins.
 
 Phases and directions, which JSON Schema cannot express and
 `tests/ipc-v2` asserts: `hello` is the client's first frame and only its
