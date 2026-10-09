@@ -441,6 +441,7 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used, clippy::panic)]
     fn a_group_writable_document_is_judged_for_this_process() {
+        #[derive(Clone)]
         struct Names;
         impl crate::persist::NameService for Names {
             fn user_name(&self, uid: u32) -> std::io::Result<Option<String>> {
@@ -480,6 +481,7 @@ mod tests {
     #[allow(clippy::expect_used, clippy::panic)]
     fn a_group_writable_document_needs_the_owners_private_group() {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        #[derive(Clone)]
         struct Names(Option<&'static str>);
         impl crate::persist::NameService for Names {
             fn user_name(&self, _: u32) -> std::io::Result<Option<String>> {

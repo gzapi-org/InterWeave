@@ -803,8 +803,10 @@ fn judge_ancestor_with(
 
 /// What the name service answers, as [`owners_private_group`] reads it:
 /// a user's name, and a group's name with its listed members. `Ok(None)`
-/// is "no such entry".
-pub(crate) trait NameService {
+/// is "no such entry". `Clone + Send + 'static` because the predicate
+/// reads it on a helper thread it may have to abandon
+/// ([`NSS_READ_DEADLINE`]).
+pub(crate) trait NameService: Clone + Send + 'static {
     /// The name of the account `uid`.
     fn user_name(&self, uid: u32) -> std::io::Result<Option<String>>;
     /// The name and listed members of the group `gid`.
@@ -814,6 +816,7 @@ pub(crate) trait NameService {
 /// The host's name service: `getpwuid_r` and `getgrgid_r`, so NSS
 /// sources answer as well as `/etc/passwd` and `/etc/group`. Off Linux
 /// nothing is read, and the predicate refuses as unreadable.
+#[derive(Clone, Copy)]
 pub(crate) struct HostNames;
 
 impl NameService for HostNames {
@@ -876,6 +879,52 @@ pub(crate) fn owners_private_group(
     gid: u32,
     acl: std::io::Result<bool>,
 ) -> Result<(), String> {
+    owners_private_group_within(names, euid, gid, acl, NSS_READ_DEADLINE)
+}
+
+/// How long the private-group predicate waits for the name service
+/// (ADR-0028, "The name-service read is bounded"): a source answers in
+/// milliseconds or is broken, and a read that never completes must
+/// refuse rather than hold the start. Not a configuration knob.
+pub const NSS_READ_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The predicate's two reads: the user's name, then the group.
+type NameReads = (
+    std::io::Result<Option<String>>,
+    std::io::Result<Option<(String, Vec<String>)>>,
+);
+
+/// The two reads the predicate makes, on a helper thread under
+/// `deadline`: `Err(())` when they did not finish in time -- the thread
+/// is then left to finish or leak, one per refusal -- or could not be
+/// started.
+fn read_names(
+    names: &impl NameService,
+    euid: u32,
+    gid: u32,
+    deadline: std::time::Duration,
+) -> Result<NameReads, ()> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let names = names.clone();
+    std::thread::Builder::new()
+        .name("nss-read".to_owned())
+        .spawn(move || {
+            let _ = tx.send((names.user_name(euid), names.group(gid)));
+        })
+        .map_err(drop)?;
+    rx.recv_timeout(deadline).map_err(drop)
+}
+
+/// [`owners_private_group`] under `deadline`, apart so a test can wait
+/// for milliseconds rather than [`NSS_READ_DEADLINE`]
+/// (`a_name_service_that_does_not_answer_is_refused_at_the_deadline`).
+fn owners_private_group_within(
+    names: &impl NameService,
+    euid: u32,
+    gid: u32,
+    acl: std::io::Result<bool>,
+    deadline: std::time::Duration,
+) -> Result<(), String> {
     match acl {
         Ok(false) => {}
         Ok(true) => {
@@ -896,12 +945,17 @@ pub(crate) fn owners_private_group(
             "group-writable; whether group {gid} is the owner's private group could not be read: {why}"
         )
     };
-    let user = match names.user_name(euid) {
+    let Ok((user_read, group_read)) = read_names(names, euid, gid, deadline) else {
+        return Err(unread(format!(
+            "the name service did not answer within {deadline:?}"
+        )));
+    };
+    let user = match user_read {
         Ok(Some(user)) => user,
         Ok(None) => return Err(unread(format!("uid {euid} has no account entry"))),
         Err(e) => return Err(unread(format!("the account of uid {euid}: {e}"))),
     };
-    let (group, members) = match names.group(gid) {
+    let (group, members) = match group_read {
         Ok(Some(group)) => group,
         Ok(None) => {
             return Err(unread(format!(
@@ -1255,6 +1309,7 @@ mod tests {
     /// A name service a test stages: users and groups by id, or a read
     /// that fails -- every read, or the group read alone.
     #[cfg(unix)]
+    #[derive(Clone)]
     struct FakeNames {
         users: Vec<(u32, &'static str)>,
         groups: Vec<(u32, &'static str, Vec<&'static str>)>,
@@ -1483,6 +1538,56 @@ mod tests {
         );
         setfacl(&["-m", "u:nobody:rw"], &file);
         assert!(access_acl_of(&opened()).expect("read"), "an access ACL");
+    }
+
+    /// A name service that never answers within the deadline is refused
+    /// AT the deadline, naming it -- not after the read returns -- and
+    /// one that answers within it gives the unchanged verdict (ADR-0028,
+    /// "The name-service read is bounded"). Staged with a 50 ms deadline
+    /// and a read that takes 2 s.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_service_that_does_not_answer_is_refused_at_the_deadline() {
+        #[derive(Clone)]
+        struct Slow(std::time::Duration);
+        impl NameService for Slow {
+            fn user_name(&self, _: u32) -> std::io::Result<Option<String>> {
+                std::thread::sleep(self.0);
+                Ok(Some("alice".to_owned()))
+            }
+            fn group(&self, _: u32) -> std::io::Result<Option<(String, Vec<String>)>> {
+                Ok(Some(("alice".to_owned(), Vec::new())))
+            }
+        }
+        assert_eq!(NSS_READ_DEADLINE, std::time::Duration::from_secs(5));
+        let deadline = std::time::Duration::from_millis(50);
+        let started = std::time::Instant::now();
+        let detail = owners_private_group_within(
+            &Slow(std::time::Duration::from_secs(2)),
+            1000,
+            1001,
+            Ok(false),
+            deadline,
+        )
+        .expect_err("a read past the deadline refuses");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "refused at the deadline, not when the read returned: {:?}",
+            started.elapsed()
+        );
+        assert!(detail.contains("whether group 1001 is"), "{detail}");
+        assert!(
+            detail.contains("the name service did not answer within 50ms"),
+            "{detail}"
+        );
+        owners_private_group_within(
+            &Slow(std::time::Duration::ZERO),
+            1000,
+            1001,
+            Ok(false),
+            deadline,
+        )
+        .expect("the control: an answer in time, the private group");
     }
 
     #[cfg(unix)]
