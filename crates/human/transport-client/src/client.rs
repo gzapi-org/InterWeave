@@ -835,7 +835,9 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
                     }
                 }
                 // The route indicator's (`human-client-ui.md` §7): the
-                // path now, never a reconnect or a message.
+                // path now, never a message. A notice with no `previous`
+                // -- the route's begin or the routed peer's return -- sets
+                // it just as a change does.
                 SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
                     peer, current, ..
                 }) => {

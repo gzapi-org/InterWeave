@@ -1380,6 +1380,52 @@ async fn a_path_change_is_the_peers_newest_path_and_nothing_else() {
     );
 }
 
+/// A route that begins over a relay is said at once, with nothing before
+/// it (`route_established`), and a routed peer's return after a
+/// disconnection is said again (`reconnected`): the indicator is set from
+/// the first message and comes back with the peer, behind its
+/// disconnection.
+#[tokio::test]
+async fn a_route_begun_or_returned_with_no_previous_path_is_the_peers_path() {
+    use interweave_transport_api::PeerPath;
+    let (a, b) = FakeNetwork::pair(node_config(), node_config());
+    let mut sender = client(&a, agent(), memory());
+    let mut receiver = client(&b, human(), memory());
+    ready(&mut sender, 0).await;
+    ready(&mut receiver, 0).await;
+    b.connected(a.peer(), PeerPath::Relayed);
+    let _ = events(&mut receiver);
+    sender
+        .send(to(b.peer()), &envelope("the first message"), 0)
+        .await
+        .expect("sent");
+    assert_eq!(receiver.drain(16, 1).await.len(), 1, "the route begins");
+    assert_eq!(
+        events(&mut receiver),
+        [ClientEvent::PeerPath {
+            peer: a.peer().clone(),
+            path: PeerPath::Relayed,
+        }],
+        "the path the route began on"
+    );
+    b.disconnected(a.peer());
+    b.connected(a.peer(), PeerPath::Relayed);
+    assert!(receiver.drain(16, 2).await.is_empty(), "no message");
+    assert_eq!(
+        events(&mut receiver),
+        [
+            ClientEvent::PeerDisconnected {
+                peer: a.peer().clone(),
+            },
+            ClientEvent::PeerPath {
+                peer: a.peer().clone(),
+                path: PeerPath::Relayed,
+            },
+        ],
+        "the return, behind the disconnection"
+    );
+}
+
 /// An admin binding over a fake node that records the capabilities each
 /// connection asked for: what a trust call holds, said by the port it
 /// opened rather than by the facade's word.
