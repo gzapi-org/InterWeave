@@ -952,7 +952,7 @@ async fn a_path_change_reads_back_as_the_sessions_notice() {
         matches!(
             taken.as_slice(),
             [SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
-                previous: PeerPath::Relayed,
+                previous: Some(PeerPath::Relayed),
                 current: PeerPath::Direct,
                 observed_at: 7,
                 reason_class,

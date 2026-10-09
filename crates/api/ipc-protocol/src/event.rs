@@ -230,7 +230,10 @@ pub struct PathChanged {
     /// Which peer.
     pub peer: TransportIdentity,
     /// The path before: the pending notice's, when one was replaced.
-    pub previous: PeerPath,
+    /// ABSENT, never `null`, when nothing was shown before it
+    /// (`ipc.path-changed` 1.1.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous: Option<PeerPath>,
     /// The path now.
     pub current: PeerPath,
     /// The runtime's class for the change, 1..=128 characters.
@@ -504,7 +507,7 @@ mod tests {
             }),
             SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
                 peer: peer(),
-                previous: interweave_transport_api::PeerPath::Relayed,
+                previous: Some(interweave_transport_api::PeerPath::Relayed),
                 current: interweave_transport_api::PeerPath::Direct,
                 reason_class: "dcutr".into(),
                 observed_at: 9,

@@ -210,8 +210,8 @@ impl FakeNode {
             let merged = queues
                 .paths
                 .remove(peer)
-                .map_or(previous, |(pending, ..)| pending);
-            if merged != current {
+                .map_or(Some(previous), |(pending, ..)| pending);
+            if merged != Some(current) {
                 queues.paths.insert(
                     peer.clone(),
                     (merged, current, reason_class.to_owned(), observed_at),
@@ -296,7 +296,7 @@ struct Queues {
     routes: BTreeSet<TransportIdentity>,
     /// One pending path notice per routed peer, merged as the runtime
     /// merges them; the merges are not counted here.
-    paths: BTreeMap<TransportIdentity, (PeerPath, PeerPath, String, u64)>,
+    paths: BTreeMap<TransportIdentity, (Option<PeerPath>, PeerPath, String, u64)>,
     /// Every `ready` waiting on this session -- it takes `&self`, so
     /// there may be several -- woken by what is queued, and all of them.
     wakers: Vec<Waker>,

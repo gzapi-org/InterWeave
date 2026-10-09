@@ -531,8 +531,11 @@ pub enum LocalSessionEvent {
     PeerPathChanged {
         /// The peer.
         peer: TransportIdentity,
-        /// The path before.
-        previous: PeerPath,
+        /// The path before; `None` when nothing was shown before it --
+        /// absent from the serialization, never `null`, as the IPC shape
+        /// is (`ipc.path-changed` 1.1.0).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        previous: Option<PeerPath>,
         /// The path now.
         current: PeerPath,
         /// Why, as the runtime names it (`direct_established`, `dcutr`,

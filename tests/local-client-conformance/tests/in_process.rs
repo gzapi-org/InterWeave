@@ -722,7 +722,7 @@ async fn a_drained_message_is_a_route_and_a_path_change_follows_it() {
     };
     assert_eq!(
         (peer, *previous, *current, reason_class.as_str()),
-        (&pair.a_peer, PeerPath::Relayed, PeerPath::Direct, "dcutr")
+        (&pair.a_peer, Some(PeerPath::Relayed), PeerPath::Direct, "dcutr")
     );
     assert!(
         !stranger
