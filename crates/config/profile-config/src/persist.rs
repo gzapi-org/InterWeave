@@ -1181,10 +1181,11 @@ mod tests {
     }
 
     /// The uid a test passes as "another account's" over objects this
-    /// process made. Valid only off root: as root those objects are
-    /// root's, which every rule here accepts by design, so the test would
-    /// fail for a reason that is not the one it names -- refused here
-    /// with that reason instead.
+    /// process made, for a test of the ancestor or link rule. Those rules
+    /// accept root's objects by design, so as root the test would fail
+    /// for a reason that is not the one it names -- refused here with
+    /// that reason instead. A test of the exact-owner rule needs no such
+    /// guard: it refuses root's object for any other uid.
     #[cfg(target_os = "linux")]
     fn another_uid(uid: u32) -> u32 {
         assert_ne!(
