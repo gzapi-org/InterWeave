@@ -322,7 +322,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          repository: gzapi-org/agent-fabric
+          repository: BlueTeam-OU/agent-fabric
           ref: ${{ steps.fabric-ref.outputs.ref }}
           path: _agent-fabric
       # The fleet's pinned Python (agent-fabric ADR-040): the fabric's
@@ -682,7 +682,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          repository: gzapi-org/agent-fabric
+          repository: BlueTeam-OU/agent-fabric
           ref: ${{ steps.fabric-ref.outputs.ref }}
           path: _agent-fabric
       - name: agent-fabric — moved out of the workspace, and its pinned Python installed
