@@ -602,6 +602,12 @@ impl DialTicket {
         }
     }
 
+    /// When this permission was granted, on the manager's clock.
+    #[must_use]
+    pub const fn admitted_at_ms(&self) -> u64 {
+        self.admitted_at_ms
+    }
+
     /// The peer this permission was granted for, if one was named.
     #[must_use]
     pub const fn peer(&self) -> Option<&TransportIdentity> {
@@ -1511,10 +1517,20 @@ impl ConnectionManager {
     /// relay makes it due at once ([`Self::relay_reached`]). A relay
     /// that stays down therefore costs the ordinary cadence, never a
     /// tight loop. `None` when the ticket was not issued here.
+    ///
+    /// `relay_came_up`: a direct connection to `relay` established AFTER
+    /// this dial was admitted -- the restart race, where the client asked
+    /// for the hop a moment before that connection was up. The relay has
+    /// been reached already, so the retry is due now rather than waiting
+    /// on an establishment that has happened (#247 review F1). Once per
+    /// failure: a later failure with the relay already up when it was
+    /// admitted takes the ordinary delay, so a cancel that persists with
+    /// the relay connected cannot loop.
     pub fn record_relay_hop_unreached(
         &mut self,
         ticket: DialTicket,
         relay: &TransportIdentity,
+        relay_came_up: bool,
         now_ms: u64,
     ) -> Option<RetryScheduled> {
         let now_ms = ticket.settled_at(now_ms);
@@ -1538,7 +1554,11 @@ impl ConnectionManager {
                 && self.retries.get(&peer).is_some_and(|entry| entry.claimed);
             let attempt = self.schedule_retry(peer.clone(), now_ms, delay, held_by_another);
             if let Some(entry) = self.retries.get_mut(&peer) {
-                entry.waits_on = Some(relay.clone());
+                if relay_came_up {
+                    entry.due_at_ms = now_ms;
+                } else {
+                    entry.waits_on = Some(relay.clone());
+                }
             }
             let retry = RetryScheduled {
                 attempt,
@@ -2832,7 +2852,7 @@ mod tests {
             .admit(&request_at(P1, &circuit, DialOrigin::RelayCircuit), 0)
             .expect("a circuit toward a data-plane peer is admitted");
         let scheduled = m
-            .record_relay_hop_unreached(ticket, &relay, 0)
+            .record_relay_hop_unreached(ticket, &relay, false, 0)
             .expect("a retry is scheduled");
         assert!(!scheduled.peer_backoff, "reported without peer backoff");
         assert!(
@@ -2894,7 +2914,7 @@ mod tests {
             .handle()
             .admit(&request_at(P1, &through_r1, DialOrigin::RelayCircuit), 0)
             .expect("admitted");
-        let _ = m.record_relay_hop_unreached(ticket, &peer(P2), 0);
+        let _ = m.record_relay_hop_unreached(ticket, &peer(P2), false, 0);
         assert_eq!(
             m.dial_candidates(&p, 1).first(),
             Some(&through_r2),
@@ -2903,6 +2923,56 @@ mod tests {
         assert!(
             m.policy().peer(&p).is_none_or(|b| b.is_clear_at(1)),
             "and the peer is still not backed off"
+        );
+    }
+
+    /// A relay that came up DURING the dial -- the restart race -- makes
+    /// the retry due at once, with nothing left waiting; and a relay that
+    /// stays down costs the ordinary cadence, never a tight loop: two hop
+    /// failures in a row escalate the delay (#247 review F1, F3).
+    #[test]
+    fn a_relay_that_came_up_makes_the_retry_due_and_a_down_one_escalates() {
+        let circuit = format!("/ip4/10.0.0.9/tcp/4001/p2p/{P2}/p2p-circuit");
+        let p = peer(P1);
+        let relay = peer(P2);
+        let mut m = manager(4);
+        let admit = |m: &mut ConnectionManager, at: u64| {
+            m.handle()
+                .admit(&request_at(P1, &circuit, DialOrigin::RelayCircuit), at)
+                .expect("admitted")
+        };
+        let ticket = admit(&mut m, 0);
+        let _ = m.record_relay_hop_unreached(ticket, &relay, true, 1);
+        assert_eq!(
+            m.take_due_retries(1, 8),
+            std::slice::from_ref(&p),
+            "due at once"
+        );
+
+        let mut m = manager(4);
+        let ticket = admit(&mut m, 0);
+        let first = m
+            .record_relay_hop_unreached(ticket, &relay, false, 0)
+            .expect("scheduled");
+        assert!(
+            m.take_due_retries(1, 8).is_empty(),
+            "the control: waits on the relay"
+        );
+        let due = first.delay_ms;
+        assert_eq!(
+            m.take_due_retries(due, 8),
+            std::slice::from_ref(&p),
+            "or its delay"
+        );
+        let ticket = admit(&mut m, due);
+        let second = m
+            .record_relay_hop_unreached(ticket, &relay, false, due)
+            .expect("scheduled");
+        assert!(
+            second.delay_ms > first.delay_ms,
+            "a relay that stays down escalates: {} then {}",
+            first.delay_ms,
+            second.delay_ms
         );
     }
 
