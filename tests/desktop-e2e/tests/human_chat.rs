@@ -10,9 +10,18 @@
 //! payload a daemon handed a client, captured as delivered, validates
 //! against `human-chat/envelope.schema.json`.
 //!
+//! A second case puts a relay between daemons on loopback (plan §18's
+//! carried limit): B's only route to A is a circuit, `HumanChatV2`
+//! crosses it directly both ways through each side's client, and the
+//! route indicator reads relayed, beside a direct control C reading
+//! direct; B's daemon then restarts, and A's indicator for B goes blank
+//! and reads relayed again. What makes the circuit the only route, and
+//! what that case does not prove, are `relayed_path.rs`'s module note.
+//!
 //! What this does not prove: anything about a network other than one
-//! host's private address; a restart (Stage 15's process kill); or the
-//! `AcceptedV2` -> unread-commit window, which is carried, not closed.
+//! host's private address and loopback; a client restart (Stage 15's
+//! process kill); or the `AcceptedV2` -> unread-commit window, which is
+//! carried, not closed.
 
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::panic)]
@@ -752,7 +761,7 @@ async fn a_relayed_peer_reads_relayed_through_the_client_beside_a_direct_control
         );
     }
     // The relay's record says the same: it carried B's circuit to A and
-    // was asked nothing for C, so the direct reading is not the relay's.
+    // no circuit to or from C, so the direct reading is not the relay's.
     let seen = relay.seen().await;
     assert!(
         seen.circuits.contains(&(pid(&b_peer), pid(&a_peer))),
@@ -762,7 +771,7 @@ async fn a_relayed_peer_reads_relayed_through_the_client_beside_a_direct_control
         |(s, d): &(libp2p::PeerId, libp2p::PeerId)| *s == pid(&c_peer) || *d == pid(&c_peer);
     assert!(
         !seen.circuits.iter().any(touches_c) && !seen.denied.iter().any(touches_c),
-        "the control asked the relay for nothing: {seen:?}"
+        "no circuit to or from the control, asked or denied: {seen:?}"
     );
 
     // B's daemon restarts: A's indicator for B goes blank with the
