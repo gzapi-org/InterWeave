@@ -4803,7 +4803,7 @@ mod tests {
             // one of the existing sites passes -- no count here, because
             // this one has now been restated four times and been wrong
             // twice. Said rather than assumed. Review findings on PR #86.
-            let routes: [(&str, usize); 11] = [
+            let routes: [(&str, usize); 12] = [
                 // `learn_route`, the only direct caller.
                 ("learn_address(", 1),
                 // `settle_failed_dial`'s non-structural arm for the extra
@@ -4838,8 +4838,8 @@ mod tests {
                 ("record_identity_mismatch(", 1),
                 ("record_success(", 1),
                 // The event loop's settlement of a circuit dial that never
-                // reached its relay: learns `ticket.address()`, as
-                // `record_failure` does, and scores nothing.
+                // reached its relay: learns `ticket.address()` and ranks it
+                // down, as `record_failure` does, and backs off no peer.
                 ("record_relay_hop_unreached(", 1),
                 // THE QUARANTINE WRITE ITSELF, expected ZERO in every file
                 // including this one. `ConnectionPolicy::record_address_failure`
@@ -4873,6 +4873,9 @@ mod tests {
                 // separates it from `record_address_failure_unadmitted(`.
                 // Review finding on PR #86.
                 ("record_address_failure(", 0),
+                // Its address half, `pub` on the same policy: zero here too,
+                // for the same reason (#245 review F2 added it).
+                ("score_address_failure(", 0),
             ];
             for (pattern, in_dialing) in routes {
                 let calls = production.matches(pattern).count();
