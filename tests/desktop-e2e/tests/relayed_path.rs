@@ -52,15 +52,17 @@ fn payload(text: &str) -> Payload {
     .expect("a payload")
 }
 
-/// Send until the route exists, failing with both daemons' logs.
+/// Send until the route exists, within `within`, failing with both
+/// daemons' logs.
 async fn send_until_routed(
     from: &IpcSession,
     to: &TransportIdentity,
     id: u8,
     text: &str,
     daemons: [&Daemon; 2],
+    within: Duration,
 ) {
-    let deadline = tokio::time::Instant::now() + PATIENCE;
+    let deadline = tokio::time::Instant::now() + within;
     loop {
         let sent = from
             .send_direct(
@@ -85,6 +87,13 @@ async fn send_until_routed(
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
+
+/// How soon after B serves its first circuit to A must carry a message:
+/// well under the thirty-second peer backoff a circuit dial lost to the
+/// relay hop used to cost (`ConnectionManager::record_relay_hop_unreached`),
+/// so a daemon that backs A off for losing that race fails here rather
+/// than passing on the margin of `PATIENCE`.
+const PROMPT: Duration = Duration::from_secs(10);
 
 /// What one session has been told so far, kept across reads.
 #[derive(Default)]
@@ -252,13 +261,37 @@ async fn a_direct_message_crosses_a_real_circuit_both_ways_beside_a_direct_contr
     let (mut a_told, mut b_told, mut c_told) = (Told::default(), Told::default(), Told::default());
 
     // B -> A over the circuit, then A -> B back over it.
-    send_until_routed(&b_session, &a_peer, 1, "b to a", [&b_daemon, &a_daemon]).await;
+    send_until_routed(
+        &b_session,
+        &a_peer,
+        1,
+        "b to a",
+        [&b_daemon, &a_daemon],
+        PROMPT,
+    )
+    .await;
     a_told.take_message(&a_session, &b_peer, "b to a").await;
-    send_until_routed(&a_session, &b_peer, 2, "a to b", [&a_daemon, &b_daemon]).await;
+    send_until_routed(
+        &a_session,
+        &b_peer,
+        2,
+        "a to b",
+        [&a_daemon, &b_daemon],
+        PATIENCE,
+    )
+    .await;
     b_told.take_message(&b_session, &a_peer, "a to b").await;
 
     // C -> A over A's own address: the control.
-    send_until_routed(&c_session, &a_peer, 3, "c to a", [&c_daemon, &a_daemon]).await;
+    send_until_routed(
+        &c_session,
+        &a_peer,
+        3,
+        "c to a",
+        [&c_daemon, &a_daemon],
+        PATIENCE,
+    )
+    .await;
     a_told.take_message(&a_session, &c_peer, "c to a").await;
 
     // The route indicator's source: each route began on the path the
@@ -303,7 +336,7 @@ async fn a_direct_message_crosses_a_real_circuit_both_ways_beside_a_direct_contr
         |(s, d): &(libp2p::PeerId, libp2p::PeerId)| *s == pid(&c_peer) || *d == pid(&c_peer);
     assert!(
         !seen.circuits.iter().any(touches_c) && !seen.denied.iter().any(touches_c),
-        "the control asked the relay for nothing: {seen:?}"
+        "no circuit to or from the control, asked or denied: {seen:?}"
     );
 
     // What the client-api says of each path: B's one peer is relayed,
@@ -337,7 +370,15 @@ async fn a_direct_message_crosses_a_real_circuit_both_ways_beside_a_direct_contr
         .open(lease_request())
         .await
         .expect("B leases again");
-    send_until_routed(&b_session, &a_peer, 4, "b again", [&b_daemon, &a_daemon]).await;
+    send_until_routed(
+        &b_session,
+        &a_peer,
+        4,
+        "b again",
+        [&b_daemon, &a_daemon],
+        PROMPT,
+    )
+    .await;
     a_told.take_message(&a_session, &b_peer, "b again").await;
     assert_eq!(
         a_told.path_notice(&a_session, &b_peer, RECONNECTED).await,
