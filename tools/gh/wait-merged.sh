@@ -16,8 +16,9 @@
 #   3  closed WITHOUT merging     6  stalled for a cause outside the PR
 #
 # wait-merged lives in agent-fabric, the control plane checked out beside
-# this working copy: runtime/github/wait-merged.sh, the same for every
-# project. InterWeave's own copy lived here until then. This file only
+# this working copy: `bin/fabric-pr wait-merged`, the same for every
+# project (its runtime/github/wait-merged.sh shim is deprecated and says so
+# on every call). InterWeave's own copy lived here until then. This file only
 # locates it and hands it the arguments untouched, naming InterWeave's
 # arm.json (the arm command its lines suggest) and passing
 # INTERWEAVE_ACTIONS_INCLUDED_MINUTES on as the fabric's
@@ -37,14 +38,14 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tools/gh/fabric-root.sh
 . "$here/fabric-root.sh"
 fabric="$(interweave_fabric_root "$here")"
-target="$fabric/runtime/github/wait-merged.sh"
+target="$fabric/bin/fabric-pr"
 rules="$fabric/projects/interweave/integration/gh/arm.json"
 [[ -f "$target" && -f "$rules" ]] || {
-    echo "wait-merged: agent-fabric not found at $fabric (expected beside this working copy, as projects/agent-fabric, carrying runtime/github/wait-merged.sh and InterWeave's arm.json); set AGENT_FABRIC_ROOT or update it. See CLAUDE.md §9, agent-fabric beside the checkout." >&2
+    echo "wait-merged: agent-fabric not found at $fabric (expected beside this working copy, as projects/agent-fabric, carrying bin/fabric-pr and InterWeave's arm.json); set AGENT_FABRIC_ROOT or update it. See CLAUDE.md §9, agent-fabric beside the checkout." >&2
     exit 2
 }
 export AGENT_FABRIC_ARM_CONFIG="${AGENT_FABRIC_ARM_CONFIG:-$rules}"
 [[ -z "${AGENT_FABRIC_ACTIONS_INCLUDED_MINUTES:-}" && -n "${INTERWEAVE_ACTIONS_INCLUDED_MINUTES:-}" ]] \
     && export AGENT_FABRIC_ACTIONS_INCLUDED_MINUTES="$INTERWEAVE_ACTIONS_INCLUDED_MINUTES"
 export AGENT_FABRIC_ACTIONS_INCLUDED_SETTING="${AGENT_FABRIC_ACTIONS_INCLUDED_SETTING:-INTERWEAVE_ACTIONS_INCLUDED_MINUTES}"
-exec bash "$target" "$@"
+exec bash "$target" wait-merged "$@"

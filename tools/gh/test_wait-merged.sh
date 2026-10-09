@@ -4,7 +4,7 @@
 # tools/gh/test_wait-merged.sh
 #
 # Behavioural tests for wait-merged.sh — the hand-off to agent-fabric's
-# runtime/github/wait-merged.sh. Every verdict, and how GitHub is read
+# `bin/fabric-pr wait-merged`. Every verdict, and how GitHub is read
 # for it, is the fabric's and is tested there (tests/test_wait_merged.py,
 # which this file's former cases were the oracle for); what this file
 # promises is:
@@ -44,10 +44,13 @@ trap 'rm -rf "$SANDBOX"' EXIT
 
 FABRIC="$SANDBOX/agent-fabric"
 RULES="$FABRIC/projects/interweave/integration/gh/arm.json"
-mkdir -p "$FABRIC/runtime/github" "${RULES%/*}"
+mkdir -p "$FABRIC/bin" "${RULES%/*}"
 printf '{}' > "$RULES"
-cat > "$FABRIC/runtime/github/wait-merged.sh" <<'STUB'
+cat > "$FABRIC/bin/fabric-pr" <<'STUB'
 #!/usr/bin/env bash
+# The fabric's one command: the forwarder must name the verb first.
+[[ "$1" == wait-merged ]] || { echo "stub fabric-pr: verb '$1', not wait-merged" >&2; exit 99; }
+shift
 printf '%s\0' "$@" > "$RECORD.argv"
 for v in AGENT_FABRIC_ARM_CONFIG AGENT_FABRIC_ACTIONS_INCLUDED_MINUTES AGENT_FABRIC_ACTIONS_INCLUDED_SETTING AGENT_FABRIC_IDLE_READS_BEFORE_STALL; do
     printf '%s=%s\n' "$v" "${!v-<unset>}"
@@ -98,17 +101,17 @@ out="$(env "${CLEAN_ENV[@]}" RECORD="$SANDBOX/r5" AGENT_FABRIC_ROOT="$FABRIC" ba
     || fail "not exec'd" "stub parent $(cat "$SANDBOX/r5.ppid"), caller $out"
 
 echo "resolution: AGENT_FABRIC_ROOT wins; otherwise the sibling of this working copy"
-SIB="$SANDBOX/projects"; mkdir -p "$SIB/interweave/tools/gh" "$SIB/agent-fabric/runtime/github" "$SIB/agent-fabric/projects/interweave/integration/gh"
+SIB="$SANDBOX/projects"; mkdir -p "$SIB/interweave/tools/gh" "$SIB/agent-fabric/bin" "$SIB/agent-fabric/projects/interweave/integration/gh"
 cp "$UNDER_TEST" "$SCRIPT_DIR/fabric-root.sh" "$SIB/interweave/tools/gh/"
 git -C "$SIB/interweave" init -q 2>/dev/null
 printf '{}' > "$SIB/agent-fabric/projects/interweave/integration/gh/arm.json"
-printf '#!/usr/bin/env bash\necho "sibling copy"\n' > "$SIB/agent-fabric/runtime/github/wait-merged.sh"
+printf '#!/usr/bin/env bash\necho "sibling copy"\n' > "$SIB/agent-fabric/bin/fabric-pr"
 out="$(cd "$SIB/interweave" && env -u AGENT_FABRIC_ROOT bash tools/gh/wait-merged.sh 1 2>&1)"
 [[ "$out" == "sibling copy" ]] && pass "with no AGENT_FABRIC_ROOT, ../agent-fabric beside the working copy is used" || fail "sibling default" "$out"
 
 echo "refusal: no agent-fabric, one without wait-merged, or without InterWeave's arm.json, is exit 2"
-mkdir -p "$SANDBOX/old-fabric/runtime/github" "$SANDBOX/no-rules/runtime/github"
-cp "$FABRIC/runtime/github/wait-merged.sh" "$SANDBOX/no-rules/runtime/github/"
+mkdir -p "$SANDBOX/old-fabric/runtime/github" "$SANDBOX/no-rules/bin"
+cp "$FABRIC/bin/fabric-pr" "$SANDBOX/no-rules/bin/"
 for where in "$SANDBOX/nowhere" "$SANDBOX/old-fabric" "$SANDBOX/no-rules"; do
     out="$(AGENT_FABRIC_ROOT="$where" bash "$UNDER_TEST" 1 2>&1 </dev/null)"; rc=$?
     [[ $rc -eq 2 ]] && pass "$(basename "$where"): exit 2" || fail "$(basename "$where"): exit code" "rc=$rc"
