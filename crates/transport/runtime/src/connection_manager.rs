@@ -5369,8 +5369,14 @@ mod tests {
         production.push_str(rest);
 
         for (pattern, expected) in [
-            // The declaration plus the two internal callers.
-            ("learn_address(", 3usize),
+            // The declaration plus the three internal callers:
+            // `record_failure`, `record_address_failure_unadmitted`, and
+            // `record_relay_hop_unreached`, which learns `ticket.address()`
+            // as `record_failure` does.
+            ("learn_address(", 4usize),
+            // Declaration only, ticket-carried like `record_failure`; a
+            // second occurrence is a new transitive route.
+            ("record_relay_hop_unreached(", 1),
             // Declarations only; each reaches `learn_address` internally, so
             // a second occurrence is a new transitive route.
             ("record_failure(", 1),
