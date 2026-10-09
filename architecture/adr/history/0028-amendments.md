@@ -357,3 +357,50 @@ ruling). Until the code lands, a user-private-group account under umask
 IDENTITY.md, the threat row, configuration.md) and the `config.yaml`
 file clause carry the predicate by reference; the predicate is stated
 once, in Security implications.
+
+### Amendment 2026-10-08 — The name-service read is bounded
+
+**Trigger.** p2p-network-dev-01's question (GZCoord 01a11e60) after the
+review of #228 raised it as a risk: since "A group of one is the owner's
+own", a group-writable ancestor or `config.yaml` makes profile-config
+call `getpwuid_r` and `getgrgid_r` through NSS. With an sssd or LDAP
+source that hangs, those calls block the daemon's start — and the human
+client's lock — with no bound. Under umask 002 on a user-private-group
+host the predicate runs on every start, so the exposure is the normal
+layout, not an edge. The amendment had promised that "a read that
+cannot be completed refuses"; a read that never completes and never
+refuses is fail-stuck, not fail-closed.
+
+**Decision.** The predicate's two name-service reads run on a helper
+thread under one deadline, `NSS_READ_DEADLINE` = 5 s — a constant in
+profile-config beside `DAEMON_LOCK_WAIT`, not a configuration knob: a
+name service answers in milliseconds or is broken, the common NSS
+clients' own timeouts sit near 10 s, and the service manager's start
+budget far above. On expiry the predicate REFUSES with the existing
+detail and the cause, "group-writable; whether group <gid> is the
+daemon user's private group could not be read: the name service did not
+answer within 5 s"; the helper thread is left to finish or leak, at most
+one per start. The deadline wraps the `NameService` trait calls inside
+the predicate, not the real `HostNames`, so a unit test with a blocking
+fake proves it: a name service that sleeps past the deadline yields the
+refusal naming the deadline; one that answers in time leaves every
+verdict as before.
+
+**Alternatives rejected.** Accepting the hang as the host's ("a hung
+name service hangs logins too"): true, and it restates the amendment's
+promise as fail-stuck; an operator reading a daemon that never starts
+learns nothing, where a refusal names the directory service. Deciding
+from a cheaper fact first (the passwd entry gives the primary gid and
+the user name in one call): one call fewer, the same hang.
+
+**Consequences.** Code: p2p-network-dev's, on their next batch — the
+deadline in `owners_private_group`, the constant, the blocking-fake
+test. Until it lands, a hung name service blocks the start on main: a
+defect at writing, affecting no host here. Under the deadline, a host
+whose directory service is down refuses to start InterWeave for a
+user-private-group account until it answers; the refusal says so.
+
+**Propagation.** The body's predicate clause (Security implications),
+this note, the log row, the digest bullet and `resource-limits.md`'s
+table row; IDENTITY.md, the threat row and configuration.md carry the
+predicate by reference and do not change.
