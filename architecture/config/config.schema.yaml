@@ -319,6 +319,7 @@ observability:
 #   runtime.deployment=embedded-android => ipc.enabled=false
 #   runtime.deployment=embedded-android => runtime.android.endpoint references an enabled configured EndpointId
 #   runtime.deployment=embedded-android => connectivity AutoNAT/relay server roles are false and Kademlia mode is client
+#   runtime.deployment=embedded-android => every listen address is a wildcard (0.0.0.0 / ::), ConfigError::AndroidListenerNotWildcard otherwise (CONNECTIVITY.md section 14, A 2026-10-09)
 #   runtime.android.availability_mode=stay-reachable => foreground_service_type=remoteMessaging
 #   stay-reachable + key_unlock_policy=user-presence => derived diagnostic background_restart_requires_user_authentication=true
 # Android system backup/device-transfer exclusions are packaging policy, not operator configuration.

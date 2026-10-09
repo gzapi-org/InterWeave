@@ -201,7 +201,8 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
      AutoNAT verdict to `unknown` with a jittered re-test, and --
      since 2026-09-26 -- closes every connection that ran from an IP
      the change took off the host and nothing else
-     (`network_change::departed_ips`; two listeners on one IP losing
+     (the detector's removed IP set in `network_change`, fed by the
+     listeners and the platform's view; two listeners on one IP losing
      one close nothing), while relay control connections carry a
      keepalive whose missed ping closes them too (`relay_keepalive`).
      What stands between a punch
