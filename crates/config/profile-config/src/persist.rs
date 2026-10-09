@@ -38,6 +38,168 @@ pub const OWNER_ONLY_FILE: u32 = 0o600;
 /// them replace the key outright.
 pub const OWNER_ONLY_DIR: u32 = 0o700;
 
+/// Where the ancestor walk stops (ADR-0028 A 2026-10-08, "The ancestor
+/// walk stops at the trust boundary the binding supplies").
+///
+/// A platform can own the directories above an application's own:
+/// Android's `/data` and `/data/data` are `0771` and `system`'s, so a walk
+/// to `/` refuses every app-private directory. The binding names the
+/// directory the platform gives it -- the app's data directory -- and the
+/// walk from a directory at or below it judges the boundary and what
+/// lies under it as before, and nothing above it: neither those
+/// ancestors nor a link sitting above it on the path.
+///
+/// CANONICALISED ONCE, when built: Android reports `/data/user/0/<pkg>`,
+/// a path through a link to `/data/data/<pkg>`, and the walk compares
+/// the resolved components it holds against this path, so a boundary
+/// kept as given would never match and the walk would run to `/` again.
+///
+/// A directory NOT under the boundary is judged to `/` as it always was
+/// (`a_directory_outside_the_boundary_is_walked_to_the_root`): the
+/// boundary narrows the walk only for what it covers, so a wrong one
+/// refuses rather than excuses.
+///
+/// THE RUNTIME ROOT, where the binding has one (architect-cto's ruling
+/// of 2026-10-09 on gate (d) of plan §20): the directory every private
+/// directory of an embedded runtime lies under, `<boundary>/interweave`.
+/// The walk cannot keep a private directory out of a platform directory
+/// that passes ADR-0028's rule -- Android's `files/` is `0771` with the
+/// app's own group, the group-of-one case the rule accepts -- so every
+/// `_within` function refuses a directory outside the root before it
+/// walks, and a path that resolves outside it after, naming the root
+/// (`a_private_dir_outside_the_runtime_root_is_refused_naming_it`).
+/// Only [`ProfilePaths::resolve_embedded`](crate::ProfilePaths::resolve_embedded)
+/// sets one; the desktop's boundary has none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustBoundary {
+    path: PathBuf,
+    runtime_root: Option<PathBuf>,
+}
+
+impl TrustBoundary {
+    /// `/`: every ancestor judged -- the boundary of the daemon,
+    /// `transportctl`, the channel bridge and the desktop client, and of
+    /// every function here without `_within` in its name.
+    #[must_use]
+    pub fn root() -> Self {
+        Self {
+            path: PathBuf::from("/"),
+            runtime_root: None,
+        }
+    }
+
+    /// `dir`, as the platform reports it, resolved on disk now.
+    ///
+    /// # Errors
+    /// [`PersistError::Io`] if it cannot be resolved (absent among
+    /// them); [`PersistError::DirectoryNotPrivate`] naming it if it is
+    /// not a directory.
+    pub fn new(dir: &Path) -> Result<Self, PersistError> {
+        let canonical = fs::canonicalize(dir).map_err(PersistError::Io)?;
+        if !fs::metadata(&canonical).map_err(PersistError::Io)?.is_dir() {
+            return Err(PersistError::DirectoryNotPrivate {
+                path: dir.to_path_buf(),
+                detail: "the trust boundary is not a directory".to_owned(),
+            });
+        }
+        Ok(Self {
+            path: canonical,
+            runtime_root: None,
+        })
+    }
+
+    /// This boundary with `<boundary>/<name>` as its runtime root: `name`
+    /// one plain component, so the root lies directly under the boundary.
+    pub(crate) fn with_runtime_root(self, name: &str) -> Self {
+        debug_assert!(
+            matches!(
+                Path::new(name).components().collect::<Vec<_>>().as_slice(),
+                [std::path::Component::Normal(_)]
+            ),
+            "a runtime root is one component under the boundary"
+        );
+        let runtime_root = Some(self.path.join(name));
+        Self {
+            path: self.path,
+            runtime_root,
+        }
+    }
+
+    /// The boundary as resolved.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The runtime root every private directory must lie under, where
+    /// the binding has one.
+    #[must_use]
+    pub fn runtime_root(&self) -> Option<&Path> {
+        self.runtime_root.as_deref()
+    }
+
+    /// Whether the walk judges `dir`: the boundary itself or below it,
+    /// by whole components.
+    fn covers(&self, dir: &Path) -> bool {
+        dir.starts_with(&self.path)
+    }
+
+    /// Refuse `dir` outside the runtime root, by its text: absolute,
+    /// no `..`, at or under the root by whole components. Asked of what
+    /// a caller names, before any walk; [`Self::confine_resolved`]
+    /// asks it again of where the path led.
+    fn confine(&self, dir: &Path) -> Result<(), PersistError> {
+        let Some(root) = &self.runtime_root else {
+            return Ok(());
+        };
+        let inside = dir.is_absolute()
+            && !dir
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+            && dir.starts_with(root);
+        if inside {
+            Ok(())
+        } else {
+            Err(PersistError::DirectoryNotPrivate {
+                path: dir.to_path_buf(),
+                detail: format!("outside the runtime root {}", root.display()),
+            })
+        }
+    }
+
+    /// [`Self::confine`] of a resolved path: a link under the root that
+    /// leads out of it is refused there, `dir` named.
+    fn confine_resolved(&self, dir: &Path, resolved: PathBuf) -> Result<PathBuf, PersistError> {
+        match self.confine(&resolved) {
+            Ok(()) => Ok(resolved),
+            Err(PersistError::DirectoryNotPrivate { detail, .. }) => {
+                Err(PersistError::DirectoryNotPrivate {
+                    path: dir.to_path_buf(),
+                    detail: format!("it resolves to {}, {detail}", resolved.display()),
+                })
+            }
+            Err(other) => Err(other),
+        }
+    }
+
+    /// `refused` at `at`, saying so when `at` is the boundary itself, so
+    /// a refusal of the platform's directory reads as that and not as an
+    /// arbitrary ancestor (the ruling's last clause).
+    fn name(&self, at: &Path, refused: PersistError) -> PersistError {
+        match refused {
+            PersistError::DirectoryNotPrivate { path, detail }
+                if at == self.path.as_path() && self.path.as_path() != Path::new("/") =>
+            {
+                PersistError::DirectoryNotPrivate {
+                    path,
+                    detail: format!("the trust boundary: {detail}"),
+                }
+            }
+            other => other,
+        }
+    }
+}
+
 /// Create `dir` and every missing parent, owner-only.
 ///
 /// JUDGED BEFORE ANYTHING IS CREATED: the nearest directory on `dir`'s
@@ -57,9 +219,18 @@ pub const OWNER_ONLY_DIR: u32 = 0o700;
 /// link or appeared component that breaks the rule; [`PersistError::Io`]
 /// if creation fails, or a missing part of the path is `..`;
 /// [`PersistError::UnsupportedPlatform`] where owner-only permissions
-/// cannot be enforced -- every target but Linux, the uid being read from
-/// `/proc`.
+/// cannot be enforced -- every target but Linux and Android, the uid
+/// being read from `/proc`.
 pub fn create_private_dir(dir: &Path) -> Result<(), PersistError> {
+    create_private_dir_within(dir, &TrustBoundary::root())
+}
+
+/// [`create_private_dir`], the walk stopping at `boundary`.
+///
+/// # Errors
+/// As [`create_private_dir`].
+pub fn create_private_dir_within(dir: &Path, boundary: &TrustBoundary) -> Result<(), PersistError> {
+    boundary.confine(dir)?;
     #[cfg(unix)]
     {
         let uid = effective_uid()?;
@@ -91,18 +262,23 @@ pub fn create_private_dir(dir: &Path) -> Result<(), PersistError> {
         })?;
         if missing.as_os_str().is_empty() {
             // Followed, as `create_dir_all`'s `is_dir` follows: a link is
-            // the caller's to judge, and every caller judges links.
+            // the caller's to judge, and every caller judges links -- but
+            // not out of a runtime root, which the creator's own contract
+            // answers (#241 review F1).
+            if boundary.runtime_root().is_some() {
+                resolve_judged_as(probe, uid, boundary)?;
+            }
             return match fs::metadata(probe) {
                 Ok(meta) if meta.is_dir() => Ok(()),
                 _ => Err(PersistError::Io(std::io::ErrorKind::AlreadyExists.into())),
             };
         }
-        let base = resolve_guarded_dir_as(probe, uid)?;
-        create_each_as(&base, missing, uid)
+        let base = resolve_guarded_dir_in(probe, uid, boundary)?;
+        create_each_as(&base, missing, uid, boundary)
     }
     #[cfg(not(unix))]
     {
-        let _ = dir;
+        let _ = (dir, boundary);
         Err(PersistError::UnsupportedPlatform)
     }
 }
@@ -118,7 +294,12 @@ pub fn create_private_dir(dir: &Path) -> Result<(), PersistError> {
 /// (`a_component_that_appears_unprivate_is_refused_before_anything_is_made_in_it`,
 /// `a_component_another_uid_owns_is_refused_before_anything_is_made_in_it`).
 #[cfg(unix)]
-fn create_each_as(base: &Path, missing: &Path, uid: u32) -> Result<(), PersistError> {
+fn create_each_as(
+    base: &Path,
+    missing: &Path,
+    uid: u32,
+    boundary: &TrustBoundary,
+) -> Result<(), PersistError> {
     use std::os::unix::fs::DirBuilderExt as _;
     use std::path::Component;
     // Every name checked before the first is made: `..` under a
@@ -143,7 +324,7 @@ fn create_each_as(base: &Path, missing: &Path, uid: u32) -> Result<(), PersistEr
         match fs::DirBuilder::new().mode(OWNER_ONLY_DIR).create(&at) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                at = resolve_owned_private_dir_as(&at, uid)?;
+                at = resolve_owned_private_dir_in(&at, uid, boundary)?;
             }
             Err(e) => return Err(PersistError::Io(e)),
         }
@@ -165,7 +346,19 @@ fn create_each_as(base: &Path, missing: &Path, uid: u32) -> Result<(), PersistEr
 /// place and its NAME may not survive a crash — a different fact, and the
 /// reason it is reported rather than swallowed.
 pub fn write_private_atomic(path: &Path, contents: &[u8]) -> Result<(), PersistError> {
-    write_atomic_with_mode(path, contents, Some(OWNER_ONLY_FILE))
+    write_private_atomic_within(path, contents, &TrustBoundary::root())
+}
+
+/// [`write_private_atomic`], its parent's walk stopping at `boundary`.
+///
+/// # Errors
+/// As [`write_private_atomic`].
+pub fn write_private_atomic_within(
+    path: &Path,
+    contents: &[u8],
+    boundary: &TrustBoundary,
+) -> Result<(), PersistError> {
+    write_atomic_with_mode(path, contents, Some(OWNER_ONLY_FILE), boundary)
 }
 
 /// Write `contents` to `path` atomically with default permissions.
@@ -176,13 +369,14 @@ pub fn write_private_atomic(path: &Path, contents: &[u8]) -> Result<(), PersistE
 /// # Errors
 /// Returns [`PersistError::Io`] if any step fails.
 pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), PersistError> {
-    write_atomic_with_mode(path, contents, None)
+    write_atomic_with_mode(path, contents, None, &TrustBoundary::root())
 }
 
 fn write_atomic_with_mode(
     path: &Path,
     contents: &[u8],
     mode: Option<u32>,
+    boundary: &TrustBoundary,
 ) -> Result<(), PersistError> {
     // PRIVATE MATERIAL GETS A PRIVATE PARENT, created as one and then
     // checked. `create_dir_all` produces a `0755` directory when the
@@ -192,8 +386,8 @@ fn write_atomic_with_mode(
     // after happens under the parent AS RESOLVED by that check
     // (ADR-0028 A 2026-10-08).
     let (parent, path) = if mode.is_some() {
-        create_private_dir(parent_dir(path))?;
-        let parent = resolve_private_dir(parent_dir(path))?;
+        create_private_dir_within(parent_dir(path), boundary)?;
+        let parent = resolve_private_dir_within(parent_dir(path), boundary)?;
         let path = parent.join(file_name(path)?);
         (parent, path)
     } else {
@@ -294,9 +488,22 @@ impl Drop for Unpublished<'_> {
 /// link is published: that error means `path` EXISTS and its name may
 /// not survive a crash.
 pub fn create_private_exclusive(path: &Path, contents: &[u8]) -> Result<(), PersistError> {
-    create_private_dir(parent_dir(path))?;
+    create_private_exclusive_within(path, contents, &TrustBoundary::root())
+}
+
+/// [`create_private_exclusive`], its parent's walk stopping at
+/// `boundary`.
+///
+/// # Errors
+/// As [`create_private_exclusive`].
+pub fn create_private_exclusive_within(
+    path: &Path,
+    contents: &[u8],
+    boundary: &TrustBoundary,
+) -> Result<(), PersistError> {
+    create_private_dir_within(parent_dir(path), boundary)?;
     // Under the parent as resolved, as `write_atomic_with_mode` works.
-    let parent = resolve_private_dir(parent_dir(path))?;
+    let parent = resolve_private_dir_within(parent_dir(path), boundary)?;
     let path = parent.join(file_name(path)?);
     let (parent, path) = (parent.as_path(), path.as_path());
 
@@ -459,9 +666,23 @@ fn temp_beside(path: &Path) -> std::path::PathBuf {
 /// ancestor or link that broke a rule and which; [`PersistError::Io`] if
 /// the directory itself cannot be inspected (`NotFound` among them), or
 /// [`PersistError::UnsupportedPlatform`] where this cannot be checked --
-/// every target but Linux, the uid being read from `/proc`.
+/// every target but Linux and Android, the uid being read from
+/// `/proc`.
 pub fn resolve_private_dir(dir: &Path) -> Result<PathBuf, PersistError> {
-    resolve_private_dir_as(dir, effective_uid()?)
+    resolve_private_dir_within(dir, &TrustBoundary::root())
+}
+
+/// [`resolve_private_dir`], the walk stopping at `boundary`.
+///
+/// # Errors
+/// As [`resolve_private_dir`].
+pub fn resolve_private_dir_within(
+    dir: &Path,
+    boundary: &TrustBoundary,
+) -> Result<PathBuf, PersistError> {
+    boundary.confine(dir)?;
+    let resolved = resolve_private_dir_in(dir, effective_uid()?, boundary)?;
+    boundary.confine_resolved(dir, resolved)
 }
 
 /// [`resolve_private_dir`] for `uid` -- apart so a test can name a uid
@@ -471,6 +692,15 @@ pub fn resolve_private_dir(dir: &Path) -> Result<PathBuf, PersistError> {
 /// # Errors
 /// As [`resolve_private_dir`].
 pub fn resolve_private_dir_as(dir: &Path, uid: u32) -> Result<PathBuf, PersistError> {
+    resolve_private_dir_in(dir, uid, &TrustBoundary::root())
+}
+
+/// [`resolve_private_dir_as`] under `boundary`.
+pub(crate) fn resolve_private_dir_in(
+    dir: &Path,
+    uid: u32,
+    boundary: &TrustBoundary,
+) -> Result<PathBuf, PersistError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -499,15 +729,20 @@ pub fn resolve_private_dir_as(dir: &Path, uid: u32) -> Result<PathBuf, PersistEr
                 detail: format!("mode is {mode:04o}, wider than {OWNER_ONLY_DIR:04o}"),
             });
         }
-        let resolved = resolve_judged_as(dir, uid)?;
-        if let Some(parent) = resolved.parent() {
-            judge_ancestors(parent, uid)?;
+        let resolved = resolve_judged_as(dir, uid, boundary)?;
+        // The boundary itself has nothing above it to judge: its parent
+        // is outside what it covers, and walked from there would be
+        // judged to `/` (`the_boundary_itself_is_a_private_dir_with_nothing_above_judged`).
+        if resolved != boundary.path()
+            && let Some(parent) = resolved.parent()
+        {
+            judge_ancestors(parent, uid, boundary)?;
         }
         Ok(resolved)
     }
     #[cfg(not(unix))]
     {
-        let (_, _) = (dir, uid);
+        let (_, _, _) = (dir, uid, boundary);
         Err(PersistError::UnsupportedPlatform)
     }
 }
@@ -526,7 +761,7 @@ pub fn require_private_dir(dir: &Path) -> Result<(), PersistError> {
 /// caller holding no file of its own to compare against -- the profile
 /// lock before it creates one, and the identity loader, which only reads.
 ///
-/// LINUX ONLY: the uid is read from `/proc/self/status`
+/// LINUX AND ANDROID ONLY: the uid is read from `/proc/self/status`
 /// ([`effective_uid`]), so every other target answers
 /// [`PersistError::UnsupportedPlatform`] -- as the profile lock already
 /// does there.
@@ -538,7 +773,20 @@ pub fn require_private_dir(dir: &Path) -> Result<(), PersistError> {
 /// inspected; [`PersistError::UnsupportedPlatform`] where the uid cannot
 /// be read.
 pub fn resolve_owned_private_dir(dir: &Path) -> Result<PathBuf, PersistError> {
-    resolve_owned_private_dir_as(dir, effective_uid()?)
+    resolve_owned_private_dir_within(dir, &TrustBoundary::root())
+}
+
+/// [`resolve_owned_private_dir`], the walk stopping at `boundary`.
+///
+/// # Errors
+/// As [`resolve_owned_private_dir`].
+pub fn resolve_owned_private_dir_within(
+    dir: &Path,
+    boundary: &TrustBoundary,
+) -> Result<PathBuf, PersistError> {
+    boundary.confine(dir)?;
+    let resolved = resolve_owned_private_dir_in(dir, effective_uid()?, boundary)?;
+    boundary.confine_resolved(dir, resolved)
 }
 
 /// [`resolve_owned_private_dir`] for `uid`, apart so a test can name a
@@ -549,10 +797,19 @@ pub fn resolve_owned_private_dir(dir: &Path) -> Result<PathBuf, PersistError> {
 /// # Errors
 /// As [`resolve_owned_private_dir`].
 pub fn resolve_owned_private_dir_as(dir: &Path, uid: u32) -> Result<PathBuf, PersistError> {
+    resolve_owned_private_dir_in(dir, uid, &TrustBoundary::root())
+}
+
+/// [`resolve_owned_private_dir_as`] under `boundary`.
+pub(crate) fn resolve_owned_private_dir_in(
+    dir: &Path,
+    uid: u32,
+    boundary: &TrustBoundary,
+) -> Result<PathBuf, PersistError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
-        let resolved = resolve_private_dir_as(dir, uid)?;
+        let resolved = resolve_private_dir_in(dir, uid, boundary)?;
         let owner = std::fs::symlink_metadata(&resolved)
             .map_err(PersistError::Io)?
             .uid();
@@ -566,7 +823,7 @@ pub fn resolve_owned_private_dir_as(dir: &Path, uid: u32) -> Result<PathBuf, Per
     }
     #[cfg(not(unix))]
     {
-        let (_, _) = (dir, uid);
+        let (_, _, _) = (dir, uid, boundary);
         Err(PersistError::UnsupportedPlatform)
     }
 }
@@ -577,6 +834,17 @@ pub fn resolve_owned_private_dir_as(dir: &Path, uid: u32) -> Result<PathBuf, Per
 /// As [`resolve_owned_private_dir`].
 pub fn require_owned_private_dir(dir: &Path) -> Result<(), PersistError> {
     resolve_owned_private_dir(dir).map(drop)
+}
+
+/// [`require_owned_private_dir`], the walk stopping at `boundary`.
+///
+/// # Errors
+/// As [`resolve_owned_private_dir`].
+pub fn require_owned_private_dir_within(
+    dir: &Path,
+    boundary: &TrustBoundary,
+) -> Result<(), PersistError> {
+    resolve_owned_private_dir_within(dir, boundary).map(drop)
 }
 
 /// [`require_owned_private_dir`] for `uid`.
@@ -599,7 +867,20 @@ pub fn require_owned_private_dir_as(dir: &Path, uid: u32) -> Result<(), PersistE
 /// [`PersistError::Io`] if the directory cannot be inspected;
 /// [`PersistError::UnsupportedPlatform`] where the uid cannot be read.
 pub fn resolve_guarded_dir(dir: &Path) -> Result<PathBuf, PersistError> {
-    resolve_guarded_dir_as(dir, effective_uid()?)
+    resolve_guarded_dir_within(dir, &TrustBoundary::root())
+}
+
+/// [`resolve_guarded_dir`], the walk stopping at `boundary`.
+///
+/// # Errors
+/// As [`resolve_guarded_dir`].
+pub fn resolve_guarded_dir_within(
+    dir: &Path,
+    boundary: &TrustBoundary,
+) -> Result<PathBuf, PersistError> {
+    boundary.confine(dir)?;
+    let resolved = resolve_guarded_dir_in(dir, effective_uid()?, boundary)?;
+    boundary.confine_resolved(dir, resolved)
 }
 
 /// [`resolve_guarded_dir`] for `uid`.
@@ -607,11 +888,20 @@ pub fn resolve_guarded_dir(dir: &Path) -> Result<PathBuf, PersistError> {
 /// # Errors
 /// As [`resolve_guarded_dir`].
 pub fn resolve_guarded_dir_as(dir: &Path, uid: u32) -> Result<PathBuf, PersistError> {
+    resolve_guarded_dir_in(dir, uid, &TrustBoundary::root())
+}
+
+/// [`resolve_guarded_dir_as`] under `boundary`.
+pub(crate) fn resolve_guarded_dir_in(
+    dir: &Path,
+    uid: u32,
+    boundary: &TrustBoundary,
+) -> Result<PathBuf, PersistError> {
     #[cfg(unix)]
     {
         fs::symlink_metadata(dir).map_err(PersistError::Io)?;
-        let resolved = resolve_judged_as(dir, uid)?;
-        judge_ancestors(&resolved, uid)?;
+        let resolved = resolve_judged_as(dir, uid, boundary)?;
+        judge_ancestors(&resolved, uid, boundary)?;
         // Asked of the resolved path, which holds no link: a file passed
         // as the directory, and the open under it failed later as
         // `ENOTDIR` (`a_guarded_directory_that_is_a_file_is_refused`).
@@ -628,7 +918,7 @@ pub fn resolve_guarded_dir_as(dir: &Path, uid: u32) -> Result<PathBuf, PersistEr
     }
     #[cfg(not(unix))]
     {
-        let (_, _) = (dir, uid);
+        let (_, _, _) = (dir, uid, boundary);
         Err(PersistError::UnsupportedPlatform)
     }
 }
@@ -657,8 +947,60 @@ const MAX_LINK_HOPS: u32 = 40;
 /// callers read as "not there yet"); [`PersistError::DirectoryNotPrivate`]
 /// for a link or an ancestor that breaks the rule, cannot be inspected,
 /// or past [`MAX_LINK_HOPS`].
+///
+/// THE BOUNDARY NARROWS THE WALK ONLY FOR A PATH THAT ENDS UNDER IT
+/// (#241 review F2): the path is first resolved judging nothing, to
+/// learn where it ends; a path ending outside the boundary is judged to
+/// `/`, every link on it included, as before the boundary existed
+/// (`links_on_an_outside_directorys_path_are_still_judged`). A path that
+/// ends under it in the first resolution and outside it in the judged
+/// one -- moved between the two -- is judged to `/` as well.
+///
+/// AND A PATH NAMED UNDER THE RUNTIME ROOT MUST END UNDER IT (#241
+/// review F1): refused naming the root otherwise, here, where every
+/// resolution passes -- the creator's probe and its adopted components
+/// as much as the resolvers -- while a path named above the root, the
+/// creator judging the boundary itself, is not asked
+/// (`the_creator_follows_no_link_out_of_the_runtime_root`).
 #[cfg(unix)]
-fn resolve_judged_as(dir: &Path, uid: u32) -> Result<PathBuf, PersistError> {
+fn resolve_judged_as(
+    dir: &Path,
+    uid: u32,
+    boundary: &TrustBoundary,
+) -> Result<PathBuf, PersistError> {
+    let root = TrustBoundary::root();
+    let resolved = if boundary.path == root.path {
+        walk_judged(dir, uid, Some(&root))?
+    } else {
+        let ends_under = walk_judged(dir, uid, None).is_ok_and(|end| boundary.covers(&end));
+        let narrowed = if ends_under { boundary } else { &root };
+        match walk_judged(dir, uid, Some(narrowed))? {
+            moved if ends_under && !boundary.covers(&moved) => walk_judged(dir, uid, Some(&root))?,
+            resolved => resolved,
+        }
+    };
+    if let Some(runtime_root) = &boundary.runtime_root {
+        let named = if dir.is_absolute() {
+            dir.to_path_buf()
+        } else {
+            std::env::current_dir().map_err(PersistError::Io)?.join(dir)
+        };
+        if named.starts_with(runtime_root) {
+            return boundary.confine_resolved(dir, resolved);
+        }
+    }
+    Ok(resolved)
+}
+
+/// [`resolve_judged_as`]'s resolution: judging links and the directories
+/// holding them up to `boundary` -- or nothing at all, for `None`, which
+/// only learns where the path ends.
+#[cfg(unix)]
+fn walk_judged(
+    dir: &Path,
+    uid: u32,
+    boundary: Option<&TrustBoundary>,
+) -> Result<PathBuf, PersistError> {
     use std::collections::VecDeque;
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
     use std::path::Component;
@@ -678,6 +1020,11 @@ fn resolve_judged_as(dir: &Path, uid: u32) -> Result<PathBuf, PersistError> {
         }
     }
     let mut hops = 0;
+    // Whether the walk has stood at or below the boundary: a link met
+    // outside it after that is no platform link ABOVE it, and is judged
+    // as under `/` (`a_link_met_outside_after_entering_the_boundary_is_judged`).
+    let mut entered = false;
+    let root = TrustBoundary::root();
     while let Some(name) = pending.pop_front() {
         if name == ".." {
             resolved.pop();
@@ -689,9 +1036,20 @@ fn resolve_judged_as(dir: &Path, uid: u32) -> Result<PathBuf, PersistError> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Err(PersistError::Io(e));
             }
-            Err(e) => return judge_ancestor(&next, Err(e), uid).map(|()| next),
+            // Above the boundary nothing is judged, so a component there
+            // that cannot be inspected is an error to report, not a rule
+            // broken.
+            Err(e) => match boundary {
+                Some(boundary) if entered || boundary.covers(&next) => {
+                    return judge_ancestor(&next, Err(e), uid)
+                        .map_err(|refused| boundary.name(&next, refused))
+                        .map(|()| next);
+                }
+                _ => return Err(PersistError::Io(e)),
+            },
         };
         if !meta.file_type().is_symlink() {
+            entered |= boundary.is_some_and(|boundary| boundary.covers(&next));
             resolved = next;
             continue;
         }
@@ -702,8 +1060,22 @@ fn resolve_judged_as(dir: &Path, uid: u32) -> Result<PathBuf, PersistError> {
                 detail: format!("more than {MAX_LINK_HOPS} symbolic links on its path"),
             });
         }
-        judge_link(&next, meta.uid(), meta.permissions().mode(), uid)?;
-        judge_ancestors(&resolved, uid)?;
+        // A link above the boundary is the platform's and is followed
+        // unjudged (`a_link_above_the_boundary_is_followed_unjudged`); one
+        // at or below it is judged with the directories holding it.
+        if let Some(boundary) = boundary {
+            let judged_under = if boundary.covers(&next) {
+                Some(boundary)
+            } else if entered {
+                Some(&root)
+            } else {
+                None
+            };
+            if let Some(judged_under) = judged_under {
+                judge_link(&next, meta.uid(), meta.permissions().mode(), uid)?;
+                judge_ancestors(&resolved, uid, judged_under)?;
+            }
+        }
         let target = fs::read_link(&next).map_err(PersistError::Io)?;
         if target.is_absolute() {
             resolved = PathBuf::from("/");
@@ -723,15 +1095,20 @@ fn resolve_judged_as(dir: &Path, uid: u32) -> Result<PathBuf, PersistError> {
     Ok(resolved)
 }
 
-/// `dir` and every directory above it, up to and including `/`, each
-/// meeting [`judge_ancestor`]'s rule.
+/// `dir` and every directory above it, each meeting [`judge_ancestor`]'s
+/// rule: up to and including `boundary` when `dir` is at or below it,
+/// and up to and including `/` when it is not.
 #[cfg(unix)]
-fn judge_ancestors(dir: &Path, uid: u32) -> Result<(), PersistError> {
+fn judge_ancestors(dir: &Path, uid: u32, boundary: &TrustBoundary) -> Result<(), PersistError> {
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    let within = boundary.covers(dir);
     for ancestor in dir.ancestors() {
+        if within && !boundary.covers(ancestor) {
+            break;
+        }
         let seen =
             fs::symlink_metadata(ancestor).map(|m| (m.uid(), m.gid(), m.permissions().mode()));
-        judge_ancestor(ancestor, seen, uid)?;
+        judge_ancestor(ancestor, seen, uid).map_err(|refused| boundary.name(ancestor, refused))?;
     }
     Ok(())
 }
@@ -820,20 +1197,20 @@ pub(crate) trait NameService: Clone + Send + 'static {
 }
 
 /// The host's name service: `getpwuid_r` and `getgrgid_r`, so NSS
-/// sources answer as well as `/etc/passwd` and `/etc/group`. Off Linux
-/// nothing is read, and the predicate refuses as unreadable.
+/// sources answer as well as `/etc/passwd` and `/etc/group` (bionic's own
+/// answers on Android). Off Linux and Android nothing is read, and the predicate refuses as unreadable.
 #[derive(Clone, Copy)]
 pub(crate) struct HostNames;
 
 impl NameService for HostNames {
     fn user_name(&self, uid: u32) -> std::io::Result<Option<String>> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))
                 .map(|user| user.map(|user| user.name))
                 .map_err(std::io::Error::from)
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
         {
             let _ = uid;
             Err(std::io::ErrorKind::Unsupported.into())
@@ -841,13 +1218,13 @@ impl NameService for HostNames {
     }
 
     fn group(&self, gid: u32) -> std::io::Result<Option<(String, Vec<String>)>> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             nix::unistd::Group::from_gid(nix::unistd::Gid::from_raw(gid))
                 .map(|group| group.map(|group| (group.name, group.mem)))
                 .map_err(std::io::Error::from)
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
         {
             let _ = gid;
             Err(std::io::ErrorKind::Unsupported.into())
@@ -924,16 +1301,19 @@ impl ReadGate {
     }
 
     /// Take the gate, waiting for an outstanding read to end until
-    /// `until`; `false` when it had not ended by then.
-    fn enter(&self, until: std::time::Instant) -> bool {
+    /// `until`: `None` when it had not ended by then, else whether this
+    /// caller had to wait for it.
+    fn enter(&self, until: std::time::Instant) -> Option<bool> {
         let mut busy = self
             .busy
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut waited = false;
         while *busy {
+            waited = true;
             let now = std::time::Instant::now();
             if now >= until {
-                return false;
+                return None;
             }
             busy = self
                 .freed
@@ -942,7 +1322,7 @@ impl ReadGate {
                 .0;
         }
         *busy = true;
-        true
+        Some(waited)
     }
 
     /// Give the gate back, and wake whoever waits for it.
@@ -986,9 +1366,11 @@ type NameReads = (
 /// a thread limit is not reported as a slow name service: the deadline
 /// passed (the thread is then left to finish or leak, one per refusal),
 /// the read ended without answering (it panicked), or no thread could be
-/// started -- or an earlier read of the same service
-/// ([`NameService::outstanding`]) did not end within `deadline`, counted
-/// from this request, and nothing was started.
+/// started -- or nothing was started at all, because an earlier read of
+/// the same service ([`NameService::outstanding`]) did not end within
+/// `deadline`, counted from this request, or ended leaving none of it,
+/// or because the budget ran out before any wait -- a zero budget, or
+/// one too short for the time it takes to start ("no time was left").
 fn read_names(
     names: &impl NameService,
     euid: u32,
@@ -999,12 +1381,22 @@ fn read_names(
     // earlier read and the wait for this one's answer share it.
     let until = std::time::Instant::now() + deadline;
     let gate = names.outstanding();
-    if !gate.enter(until) {
-        return Err(format!(
-            "an earlier name-service read has not returned within {deadline:?}"
-        ));
-    }
+    let earlier = || format!("an earlier name-service read has not returned within {deadline:?}");
+    let Some(waited) = gate.enter(until) else {
+        return Err(earlier());
+    };
     let returned = ReadReturned(gate);
+    // No budget left -- spent waiting for an earlier read, or spent
+    // before any wait: refuse without starting a read that could only be
+    // abandoned (`a_read_with_no_budget_left_starts_no_thread`). The
+    // gate goes back as `returned` drops.
+    if std::time::Instant::now() >= until {
+        return Err(if waited {
+            earlier()
+        } else {
+            format!("no time was left to read it within {deadline:?}")
+        });
+    }
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     let names = names.clone();
     std::thread::Builder::new()
@@ -1096,11 +1488,11 @@ const ACCESS_ACL: &str = "system.posix_acl_access";
 /// Whether `path` itself -- not a link's target -- carries an access ACL.
 /// A filesystem without extended attributes carries none.
 pub(crate) fn access_acl_at(path: &Path) -> std::io::Result<bool> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         acl_answer(rustix::fs::lgetxattr(path, ACCESS_ACL, &mut [0u8; 0][..]))
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
         let _ = path;
         Err(std::io::ErrorKind::Unsupported.into())
@@ -1110,11 +1502,11 @@ pub(crate) fn access_acl_at(path: &Path) -> std::io::Result<bool> {
 /// Whether the opened `file` carries an access ACL, asked of the handle
 /// so the file judged is the file read.
 pub(crate) fn access_acl_of(file: &fs::File) -> std::io::Result<bool> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         acl_answer(rustix::fs::fgetxattr(file, ACCESS_ACL, &mut [0u8; 0][..]))
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
         let _ = file;
         Err(std::io::ErrorKind::Unsupported.into())
@@ -1123,7 +1515,7 @@ pub(crate) fn access_acl_of(file: &fs::File) -> std::io::Result<bool> {
 
 /// A size query's answer read as presence: a size is an ACL, no such
 /// attribute or no attribute support is none, anything else is an error.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn acl_answer(answer: rustix::io::Result<usize>) -> std::io::Result<bool> {
     match answer {
         Ok(_) => Ok(true),
@@ -1169,7 +1561,7 @@ pub fn effective_uid() -> Result<u32, PersistError> {
 ///
 /// The obvious spelling is `geteuid()`, an unsafe call, and this crate
 /// is `forbid(unsafe_code)` -- so the effective uid is not reachable
-/// through a call (it is read from `/proc` on Linux by
+/// through a call (it is read from `/proc` on Linux and Android by
 /// [`effective_uid`], where no file of ours exists yet). It
 /// does not need to be here: `ours` was
 /// created by this process moments ago, so its owner IS the identity
@@ -1880,6 +2272,59 @@ mod tests {
         );
     }
 
+    /// A read with no budget left is refused without being made: no
+    /// thread starts, so nothing reads the service, and the gate is free
+    /// afterwards. A zero budget is named as that. NOT reached here: the
+    /// branch where the budget went on waiting for an earlier read that
+    /// ended exactly as it ran out, which takes that read to end at the
+    /// caller's deadline itself -- a timing no test schedules without a
+    /// clock seam; that branch reuses the "earlier read" text the
+    /// gate-timeout refusal already pins.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_with_no_budget_left_starts_no_thread() {
+        #[derive(Clone)]
+        struct Counted(
+            &'static ReadGate,
+            std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        );
+        impl NameService for Counted {
+            fn outstanding(&self) -> &'static ReadGate {
+                self.0
+            }
+            fn user_name(&self, _: u32) -> std::io::Result<Option<String>> {
+                self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(Some("alice".to_owned()))
+            }
+            fn group(&self, _: u32) -> std::io::Result<Option<(String, Vec<String>)>> {
+                Ok(Some(("alice".to_owned(), Vec::new())))
+            }
+        }
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let names = Counted(fresh_guard(), std::sync::Arc::clone(&reads));
+        let detail =
+            owners_private_group_within(&names, 1000, 1001, Ok(false), std::time::Duration::ZERO)
+                .expect_err("no budget, no read");
+        assert!(detail.contains("no time was left to read it"), "{detail}");
+        // Long enough for a wrongly started read to have run.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(
+            reads.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no read was made"
+        );
+        assert!(!names.0.is_busy(), "the gate went back");
+        owners_private_group_within(
+            &names,
+            1000,
+            1001,
+            Ok(false),
+            std::time::Duration::from_secs(2),
+        )
+        .expect("the control: with a budget, the read is made");
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     /// A name service that never answers within the deadline is refused
     /// AT the deadline, naming it -- not after the read returns -- staged
     /// with a 50 ms deadline and a read that takes 2 s; one that answers
@@ -2245,13 +2690,15 @@ mod tests {
         fs::create_dir(&appeared).expect("mkdir");
         chmod(&appeared, 0o755);
         refused_at(
-            create_each_as(root.path(), Path::new("a/b"), uid).map(|()| appeared.clone()),
+            create_each_as(root.path(), Path::new("a/b"), uid, &TrustBoundary::root())
+                .map(|()| appeared.clone()),
             &appeared,
         );
         assert!(entries(&appeared).is_empty(), "nothing made inside it");
 
         chmod(&appeared, 0o700);
-        create_each_as(root.path(), Path::new("a/b"), uid).expect("adopted: ours, owner-only");
+        create_each_as(root.path(), Path::new("a/b"), uid, &TrustBoundary::root())
+            .expect("adopted: ours, owner-only");
         assert!(appeared.join("b").is_dir());
     }
 
@@ -2268,8 +2715,13 @@ mod tests {
         let missing = Path::new(name).join("b");
         let uid = effective_uid().expect("readable");
         let detail = refused_at(
-            create_each_as(Path::new("/tmp"), &missing, uid.wrapping_add(1))
-                .map(|()| appeared.path().to_path_buf()),
+            create_each_as(
+                Path::new("/tmp"),
+                &missing,
+                uid.wrapping_add(1),
+                &TrustBoundary::root(),
+            )
+            .map(|()| appeared.path().to_path_buf()),
             appeared.path(),
         );
         assert!(detail.starts_with("owned by uid"), "{detail}");
@@ -2278,7 +2730,8 @@ mod tests {
             "nothing made inside it"
         );
 
-        create_each_as(Path::new("/tmp"), &missing, uid).expect("the control: ours");
+        create_each_as(Path::new("/tmp"), &missing, uid, &TrustBoundary::root())
+            .expect("the control: ours");
         assert!(appeared.path().join("b").is_dir());
     }
 
@@ -2442,5 +2895,346 @@ mod tests {
             );
             assert_ne!(t.as_path(), target, "and is never the target itself");
         }
+    }
+
+    /// `T/open/b`: a boundary `b` (`0700`, ours) under `T/open`, an
+    /// ancestor the walk refuses -- other-writable and not sticky, as
+    /// Android's `0771` `system` directories are refused for another
+    /// reason. Answers `(T, open, b)`.
+    #[cfg(target_os = "linux")]
+    fn boundary_under_a_refused_ancestor() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let root = owned_private_dir_under_tmp();
+        let open = root.path().join("open");
+        fs::create_dir(&open).expect("mkdir");
+        chmod(&open, 0o777);
+        let b = open.join("b");
+        fs::create_dir(&b).expect("mkdir");
+        chmod(&b, 0o700);
+        (root, open, b)
+    }
+
+    /// The walk stops at the boundary: a private directory under it is
+    /// accepted although an ancestor ABOVE the boundary breaks the rule,
+    /// and the same directory judged under the root boundary -- the
+    /// control, and every desktop caller -- is refused at that ancestor.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_walk_stops_at_the_trust_boundary() {
+        let (_root, open, b) = boundary_under_a_refused_ancestor();
+        let private = b.join("p");
+        fs::create_dir(&private).expect("mkdir");
+        chmod(&private, 0o700);
+        refused_at(resolve_private_dir(&private), &open);
+        let boundary = TrustBoundary::new(&b).expect("a boundary");
+        assert_eq!(
+            resolve_private_dir_within(&private, &boundary).expect("judged up to the boundary"),
+            private
+        );
+        resolve_owned_private_dir_within(&private, &boundary).expect("ours, up to the boundary");
+        resolve_guarded_dir_within(&private, &boundary).expect("guarded, up to the boundary");
+    }
+
+    /// A directory NOT under the boundary is walked to `/` as before: a
+    /// boundary narrows the walk only for what it covers, so naming the
+    /// wrong one refuses rather than excuses. The control is the sibling
+    /// under the boundary, accepted.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_directory_outside_the_boundary_is_walked_to_the_root() {
+        let (_root, open, b) = boundary_under_a_refused_ancestor();
+        let boundary = TrustBoundary::new(&b).expect("a boundary");
+        let inside = b.join("p");
+        let outside = open.join("elsewhere");
+        for dir in [&inside, &outside] {
+            fs::create_dir(dir).expect("mkdir");
+            chmod(dir, 0o700);
+        }
+        resolve_private_dir_within(&inside, &boundary).expect("the control: under the boundary");
+        refused_at(resolve_private_dir_within(&outside, &boundary), &open);
+        // A sibling whose name extends the boundary's is not under it:
+        // the comparison is by whole components. One level down, so its
+        // parent would pass a comparison by text and stop the walk there.
+        let lookalike = private_under(&open, &["bb"], 0o700);
+        refused_at(resolve_private_dir_within(&lookalike, &boundary), &open);
+    }
+
+    /// The boundary itself is judged, and a refusal there says it is the
+    /// boundary: other-writable, and -- asked as another uid -- not ours.
+    /// The control is the same boundary at `0700`, asked as ourselves.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_refused_boundary_is_named_as_the_boundary() {
+        let (_root, _open, b) = boundary_under_a_refused_ancestor();
+        let private = b.join("p");
+        fs::create_dir(&private).expect("mkdir");
+        chmod(&private, 0o700);
+        let boundary = TrustBoundary::new(&b).expect("a boundary");
+        let uid = effective_uid().expect("uid");
+        resolve_private_dir_in(&private, uid, &boundary).expect("the control");
+        let detail = refused_at(
+            resolve_private_dir_in(&private, another_uid(uid), &boundary),
+            &b,
+        );
+        assert!(detail.starts_with("the trust boundary: "), "{detail}");
+        chmod(&b, 0o757);
+        let detail = refused_at(resolve_private_dir_within(&private, &boundary), &b);
+        assert!(detail.starts_with("the trust boundary: "), "{detail}");
+        assert!(detail.contains("other-writable"), "{detail}");
+        chmod(&b, 0o700);
+    }
+
+    /// The boundary may itself be the private directory, and nothing
+    /// above it is judged then either; under the root boundary it is
+    /// refused at the ancestor above (the control).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_boundary_itself_is_a_private_dir_with_nothing_above_judged() {
+        let (_root, open, b) = boundary_under_a_refused_ancestor();
+        let boundary = TrustBoundary::new(&b).expect("a boundary");
+        refused_at(resolve_private_dir(&b), &open);
+        assert_eq!(
+            resolve_private_dir_within(&b, &boundary).expect("the boundary itself"),
+            b
+        );
+    }
+
+    /// A link above the boundary is the platform's -- Android's
+    /// `/data/user/0` -- and is followed unjudged, the boundary resolved
+    /// through it once; one at or below the boundary is judged as ever:
+    /// a link in an other-writable directory under the boundary is
+    /// refused there. Controls: the path through the upper link refused
+    /// under the root boundary, and the lower link's twin in a private
+    /// directory accepted.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_link_above_the_boundary_is_followed_unjudged() {
+        let (_root, open, b) = boundary_under_a_refused_ancestor();
+        let link = open.join("user0");
+        std::os::unix::fs::symlink(&open, &link).expect("symlink");
+        let private = b.join("p");
+        fs::create_dir(&private).expect("mkdir");
+        chmod(&private, 0o700);
+        let through = link.join("b").join("p");
+        let boundary = TrustBoundary::new(&link.join("b")).expect("a boundary");
+        assert_eq!(boundary.path(), b, "canonicalised once, through the link");
+        refused_at(resolve_private_dir(&through), &open);
+        assert_eq!(
+            resolve_private_dir_within(&through, &boundary).expect("the upper link unjudged"),
+            private
+        );
+
+        let wide = b.join("wide");
+        fs::create_dir(&wide).expect("mkdir");
+        chmod(&wide, 0o777);
+        std::os::unix::fs::symlink(&b, wide.join("l")).expect("symlink");
+        refused_at(
+            resolve_private_dir_within(&wide.join("l").join("p"), &boundary),
+            &wide,
+        );
+        let narrow = b.join("narrow");
+        fs::create_dir(&narrow).expect("mkdir");
+        chmod(&narrow, 0o700);
+        std::os::unix::fs::symlink(&b, narrow.join("l")).expect("symlink");
+        assert_eq!(
+            resolve_private_dir_within(&narrow.join("l").join("p"), &boundary)
+                .expect("the control"),
+            private
+        );
+    }
+
+    /// The private writers and the creator take the boundary too: a tree
+    /// is made and a file written under it, an ancestor above it refused
+    /// all the while; under the root boundary nothing is made (the
+    /// control, which is also the desktop's behaviour).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_writers_create_under_the_boundary() {
+        let (_root, open, b) = boundary_under_a_refused_ancestor();
+        let boundary = TrustBoundary::new(&b).expect("a boundary");
+        let deep = b.join("interweave").join("state");
+        refused_at(create_private_dir(&deep).map(|()| deep.clone()), &open);
+        assert!(!b.join("interweave").exists(), "the control made nothing");
+        create_private_dir_within(&deep, &boundary).expect("made under the boundary");
+        assert!(is_owner_only(&b.join("interweave")).expect("mode"));
+        write_private_atomic_within(&deep.join("f"), b"x", &boundary).expect("written");
+        create_private_exclusive_within(&deep.join("k"), b"k", &boundary).expect("created");
+        assert!(write_private_atomic(&deep.join("g"), b"x").is_err());
+    }
+
+    /// A boundary is a directory that exists: one that is absent, or a
+    /// file, is refused when it is built.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_boundary_is_an_existing_directory() {
+        let root = owned_private_dir_under_tmp();
+        assert!(matches!(
+            TrustBoundary::new(&root.path().join("absent")),
+            Err(PersistError::Io(_))
+        ));
+        let file = root.path().join("file");
+        fs::write(&file, b"").expect("write");
+        refused_at(
+            TrustBoundary::new(&file).map(|b| b.path().to_path_buf()),
+            &file,
+        );
+        TrustBoundary::new(root.path()).expect("the control");
+    }
+
+    /// The runtime root (gate (d) of plan §20, architect-cto 2026-10-09):
+    /// every `_within` function refuses a directory outside it, by its
+    /// text before any walk -- under the root's sibling, or climbing out
+    /// with `..` -- and by where it resolves after, a link under the
+    /// root leading out; each refusal names the root. The controls: the
+    /// same directory accepted by the boundary without a root, and one
+    /// under the root accepted with it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_private_dir_outside_the_runtime_root_is_refused_naming_it() {
+        let (_root, _open, b) = boundary_under_a_refused_ancestor();
+        let walk_alone = TrustBoundary::new(&b).expect("a boundary");
+        let confined = walk_alone.clone().with_runtime_root("interweave");
+        let root = b.join("interweave");
+        fs::create_dir(&root).expect("mkdir");
+        chmod(&root, 0o700);
+        let inside = private_under(&root, &[], 0o700);
+        let outside = private_under(&b, &["files"], 0o711);
+        let named = |result: Result<PathBuf, PersistError>, at: &Path| {
+            let detail = refused_at(result, at);
+            assert!(
+                detail.contains(&format!("outside the runtime root {}", root.display())),
+                "{detail}"
+            );
+        };
+
+        resolve_private_dir_within(&outside, &walk_alone).expect("the control: the walk alone");
+        resolve_private_dir_within(&inside, &confined).expect("the control: under the root");
+        named(resolve_private_dir_within(&outside, &confined), &outside);
+        named(
+            resolve_owned_private_dir_within(&outside, &confined),
+            &outside,
+        );
+        named(resolve_guarded_dir_within(&outside, &confined), &outside);
+        let climbing = root.join("..").join("files").join("p");
+        named(resolve_private_dir_within(&climbing, &confined), &climbing);
+        // Created through `..`, the nearest existing directory would be
+        // `files/` as the kernel resolves it, and the new one made there:
+        // the text is what refuses it.
+        let climbing_new = root.join("..").join("files").join("r");
+        named(
+            create_private_dir_within(&climbing_new, &confined).map(|()| PathBuf::new()),
+            &climbing_new,
+        );
+        assert!(!b.join("files").join("r").exists(), "nothing created");
+        named(
+            create_private_dir_within(&b.join("files").join("q"), &confined)
+                .map(|()| PathBuf::new()),
+            &b.join("files").join("q"),
+        );
+        assert!(!b.join("files").join("q").exists(), "nothing created");
+        named(
+            write_private_atomic_within(&outside.join("f"), b"x", &confined)
+                .map(|()| PathBuf::new()),
+            &outside,
+        );
+
+        let out = root.join("out");
+        std::os::unix::fs::symlink(b.join("files"), &out).expect("symlink");
+        let through = out.join("p");
+        let detail = refused_at(resolve_private_dir_within(&through, &confined), &through);
+        assert!(detail.contains("outside the runtime root"), "{detail}");
+    }
+
+    /// #241 review F1: the creator does not follow a link under the
+    /// runtime root out of it -- not for a tree it would make beyond the
+    /// link, nor for a directory that already exists through one -- and
+    /// nothing is made outside. The control: the same link pointing at a
+    /// directory under the root is followed and the tree made there.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_creator_follows_no_link_out_of_the_runtime_root() {
+        let (_root, _open, b) = boundary_under_a_refused_ancestor();
+        let confined = TrustBoundary::new(&b)
+            .expect("a boundary")
+            .with_runtime_root("interweave");
+        let root = b.join("interweave");
+        let files = private_under(&b, &["files"], 0o711);
+        fs::create_dir(&root).expect("mkdir");
+        chmod(&root, 0o700);
+        std::os::unix::fs::symlink(&files, root.join("state")).expect("symlink");
+        let beyond = root.join("state").join("profiles").join("work");
+        // Named at the link, the component that leads out.
+        let detail = refused_at(
+            create_private_dir_within(&beyond, &confined).map(|()| PathBuf::new()),
+            &root.join("state"),
+        );
+        assert!(detail.contains("outside the runtime root"), "{detail}");
+        assert!(!files.join("profiles").exists(), "nothing made outside");
+        let existing = root.join("state");
+        let detail = refused_at(
+            create_private_dir_within(&existing, &confined).map(|()| PathBuf::new()),
+            &existing,
+        );
+        assert!(detail.contains("outside the runtime root"), "{detail}");
+
+        let inner = private_under(&root, &["inner"], 0o700);
+        std::os::unix::fs::symlink(&inner, root.join("ok")).expect("symlink");
+        create_private_dir_within(&root.join("ok").join("deep"), &confined)
+            .expect("the control: a link inside the root is followed");
+        assert!(inner.join("deep").is_dir());
+    }
+
+    /// #241 review F2: a directory outside the boundary is walked to `/`
+    /// as before, links on its path included -- a link in a directory
+    /// another account can write is refused there, as it is under the
+    /// root boundary (the control).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn links_on_an_outside_directorys_path_are_still_judged() {
+        let (root, open, b) = boundary_under_a_refused_ancestor();
+        let boundary = TrustBoundary::new(&b).expect("a boundary");
+        let real = private_under(root.path(), &["real"], 0o700);
+        std::os::unix::fs::symlink(real.parent().expect("parent"), open.join("l"))
+            .expect("symlink");
+        let through = open.join("l").join("p");
+        refused_at(resolve_private_dir(&through), &open);
+        refused_at(resolve_private_dir_within(&through, &boundary), &open);
+        refused_at(resolve_guarded_dir_within(&through, &boundary), &open);
+    }
+
+    /// #241 re-review, part 1 F2's last bullet: once a path has entered
+    /// the boundary, a link it then meets outside the boundary is no
+    /// platform link above it, and is judged with the directories holding
+    /// it as under `/` -- here a link in a directory another account can
+    /// write, between a link under the root and the root again. The
+    /// control: the same detour through a private directory resolves.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_link_met_outside_after_entering_the_boundary_is_judged() {
+        let (root_dir, open, b) = boundary_under_a_refused_ancestor();
+        let confined = TrustBoundary::new(&b)
+            .expect("a boundary")
+            .with_runtime_root("interweave");
+        let root = b.join("interweave");
+        fs::create_dir(&root).expect("mkdir");
+        chmod(&root, 0o700);
+        let real = private_under(&root, &["real"], 0o700);
+        std::os::unix::fs::symlink(real.parent().expect("parent"), open.join("back"))
+            .expect("symlink");
+        std::os::unix::fs::symlink(open.join("back"), root.join("x")).expect("symlink");
+        refused_at(
+            resolve_private_dir_within(&root.join("x").join("p"), &confined),
+            &open,
+        );
+
+        let quiet = private_under(root_dir.path(), &["quiet"], 0o700);
+        let quiet = quiet.parent().expect("quiet");
+        std::os::unix::fs::symlink(real.parent().expect("parent"), quiet.join("back"))
+            .expect("symlink");
+        std::os::unix::fs::symlink(quiet.join("back"), root.join("y")).expect("symlink");
+        assert_eq!(
+            resolve_private_dir_within(&root.join("y").join("p"), &confined)
+                .expect("the control: a detour through a private directory"),
+            real
+        );
     }
 }

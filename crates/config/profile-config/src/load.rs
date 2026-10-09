@@ -123,7 +123,7 @@ fn open_guarded_as(
         path: path.to_path_buf(),
         detail,
     };
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
         // O_NONBLOCK so a FIFO in its place opens at once and is refused
@@ -155,7 +155,7 @@ fn open_guarded_as(
         .map_err(refuse)?;
         Ok(file)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
         let _ = (refuse, uid, names);
         Err(LoadError::ConfigDirUnguarded(
@@ -286,7 +286,7 @@ impl ProfileConfig {
         // The directory judged for who can change it, and the file read
         // under it as resolved (ADR-0028 A 2026-10-08): an absent one is
         // still a read failure.
-        let dir = match crate::resolve_guarded_dir(paths.config_dir()) {
+        let dir = match crate::resolve_guarded_dir_within(paths.config_dir(), paths.boundary()) {
             Ok(dir) => dir,
             Err(crate::PersistError::Io(e)) => return Err(LoadError::Read(e)),
             Err(e) => return Err(LoadError::ConfigDirUnguarded(e)),

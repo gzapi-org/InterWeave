@@ -20,7 +20,7 @@ use interweave_local_client_api::{Generation, TrustAdminView, TrustSource, Trust
 #[cfg(feature = "test-hooks")]
 use interweave_profile_config::PersistError;
 use interweave_profile_config::trust_overlay::{OverlayError, TrustOverlay};
-use interweave_profile_config::{ProfileConfig, ProfilePaths};
+use interweave_profile_config::{ProfileConfig, ProfilePaths, TrustBoundary};
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::{
     Component, ComponentHealth, ConnectivitySummary, HealthReport, LocalIdentity, PathChangeReason,
@@ -58,6 +58,11 @@ pub struct CompositionOptions {
     /// -- a test construction -- a set lasts until the runtime stops and
     /// every row reads `persisted: false` (`LOCAL-CLIENT.md` §7 item 11).
     pub trust_overlay_file: Option<PathBuf>,
+    /// Where the overlay file's directory walk stops (ADR-0028 A
+    /// 2026-10-08): the profile paths' boundary -- `/` on the desktop,
+    /// the app's data directory with its runtime root for an embedded
+    /// runtime, whose overlay is kept under it (ADR-0028 A 2026-10-07).
+    pub trust_boundary: TrustBoundary,
     /// Each endpoint's and each channel's delivery queue bound
     /// (`TRANSPORT.md` §Backpressure: 256 per client).
     pub queue_bound: usize,
@@ -77,6 +82,7 @@ impl CompositionOptions {
             listen: profile.transport.listen.addresses.clone(),
             peer_cache_file: Some(paths.peer_cache_file()),
             trust_overlay_file: Some(TrustOverlay::path_for(paths)),
+            trust_boundary: paths.boundary().clone(),
             queue_bound: usize::try_from(profile.ipc.client_event_queue).unwrap_or(usize::MAX),
             ..Self::default()
         }
@@ -89,6 +95,7 @@ impl Default for CompositionOptions {
             listen: Vec::new(),
             peer_cache_file: None,
             trust_overlay_file: None,
+            trust_boundary: TrustBoundary::root(),
             queue_bound: 256,
             event_capacity: 1024,
             discovery_interval: Duration::from_secs(1),
@@ -296,8 +303,10 @@ impl ComposedRuntime {
             .cloned()
             .collect();
         let (overlay, allowed) = match &options.trust_overlay_file {
-            Some(path) => TrustOverlay::load(path, &configured_peers)
-                .map_err(CompositionError::TrustOverlay)?,
+            Some(path) => {
+                TrustOverlay::load_within(path, &configured_peers, &options.trust_boundary)
+                    .map_err(CompositionError::TrustOverlay)?
+            }
             None => (TrustOverlay::default(), configured_peers.clone()),
         };
         let composition = translate(profile, &local, options.queue_bound)?
@@ -398,6 +407,7 @@ impl ComposedRuntime {
             configured: configured_peers,
             overlay,
             overlay_file: options.trust_overlay_file.clone(),
+            trust_boundary: options.trust_boundary.clone(),
             #[cfg(feature = "test-hooks")]
             overlay_faults: std::collections::VecDeque::new(),
             #[cfg(feature = "test-hooks")]
@@ -611,6 +621,8 @@ struct Driver {
     overlay: TrustOverlay,
     /// Where the overlay is kept; `None` in a test construction.
     overlay_file: Option<PathBuf>,
+    /// Where `overlay_file`'s directory walk stops.
+    trust_boundary: TrustBoundary,
     /// The failures the next overlay writes meet, in order (test builds).
     #[cfg(feature = "test-hooks")]
     overlay_faults: std::collections::VecDeque<OverlayFault>,
@@ -996,14 +1008,14 @@ impl Driver {
                     std::io::Error::other("an injected failure before the rename"),
                 ))),
                 OverlayFault::AfterRename => {
-                    overlay.write(path)?;
+                    overlay.write_within(path, &self.trust_boundary)?;
                     Err(OverlayError::Write(PersistError::Unsynced(
                         std::io::Error::other("an injected failure to sync the directory"),
                     )))
                 }
             };
         }
-        overlay.write(path)
+        overlay.write_within(path, &self.trust_boundary)
     }
 
     /// Allow `peer` or revoke it, and publish the result to the substrate

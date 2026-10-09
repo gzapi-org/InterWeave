@@ -51,11 +51,13 @@ pub use lock::{DAEMON_LOCK_WAIT, HUMAN_CLIENT_LOCK_FILE, HumanClientLock, LOCK_F
 pub use paths::{HUMAN_DIR, NAMESPACE, PROFILES, ProfilePaths, XdgRoots, absolute_or_none};
 pub use persist::NSS_READ_DEADLINE;
 pub use persist::{
-    OWNER_ONLY_DIR, OWNER_ONLY_FILE, create_private_dir, create_private_exclusive, effective_uid,
-    is_owner_only, require_owned_private_dir, require_owned_private_dir_as, require_private_dir,
-    resolve_guarded_dir, resolve_guarded_dir_as, resolve_owned_private_dir,
-    resolve_owned_private_dir_as, resolve_private_dir, resolve_private_dir_as, write_atomic,
-    write_private_atomic,
+    OWNER_ONLY_DIR, OWNER_ONLY_FILE, TrustBoundary, create_private_dir, create_private_dir_within,
+    create_private_exclusive, create_private_exclusive_within, effective_uid, is_owner_only,
+    require_owned_private_dir, require_owned_private_dir_as, require_owned_private_dir_within,
+    require_private_dir, resolve_guarded_dir, resolve_guarded_dir_as, resolve_guarded_dir_within,
+    resolve_owned_private_dir, resolve_owned_private_dir_as, resolve_owned_private_dir_within,
+    resolve_private_dir, resolve_private_dir_as, resolve_private_dir_within, write_atomic,
+    write_private_atomic, write_private_atomic_within,
 };
 
 /// Which provider a `discovery.providers` entry configures.

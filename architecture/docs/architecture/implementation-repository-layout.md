@@ -57,7 +57,8 @@ crates/
 ├── transport/
 │   ├── runtime/
 │   ├── libp2p/
-│   └── composition/   # TransportRuntime: composes the backend, discovery and profile-config behind transport-api (Stage 12)
+│   ├── composition/   # TransportRuntime: composes the backend, discovery and profile-config behind transport-api (Stage 12)
+│   └── embedded/      # the runtime hosted in-process under a platform-supplied trust boundary — the Android Service's host (Stage 17 §20 step 1)
 ├── discovery/
 │   ├── cache/
 │   ├── static/
@@ -91,6 +92,7 @@ crates/
 - `human/app-core` is the headless application root (plan §18, A 2026-10-03): the Command/Update protocol between the views and the model, the facade side and the model side wired together — no tokio, no Slint, no platform code, no `rusqlite` directly (the store is reached through `human/transport-client`) — so `apps/human-desktop` and the Android binding each add only a loop and a toolkit. `ViewEvent`, the vocabulary a view sends up, moves from `human/ui-slint` to `human/ui-model` in plan §18's batch 1; a view's vocabulary is `ui-model`'s.
 - `human/ui-slint` and `human/android-platform` depend inward on human/domain contracts; transport/domain code never depends outward on UI/platform crates.
 - `local/ipc-client` and `local/ipc-server` are desktop bindings. Android implements the same local-client API in-process without pretending to be IPC.
+- `transport/embedded` (plan §20 step 1, A 2026-10-09) composes `TransportRuntime` for an in-process host: the Stage 12 composition and its in-process `LocalDataSession` / `LocalAdminPort` binding (§15 (3)), never a second adapter; its own executor; the `ProfileIdentity` injected (the Keystore-unwrapped key is step 6's, a generated one the tests'); the trust boundary and the runtime root the binding supplies (ADR-0028 A 2026-10-08), every private directory under that root. It depends inward only — `transport/composition`, `config/profile-config`, `identity/profile-identity`, and `api/local-client-api` (the neutral binding types; the host's shutdown request opens an admin port on its own binding) — and names no Android, JNI or UI type, so it builds for the host and the device alike and its tests run on the host; the Service, its lifecycle and the JNI side are `human/android-platform`'s.
 
 Do not create one crate for every internal module. Concrete modules such as connection manager, dial admission, direct manager, endpoint registry, relay manager, and dedup stay inside the owning runtime/backend crate until a real independent substitution/build boundary appears.
 
