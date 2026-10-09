@@ -161,6 +161,66 @@ fn s13_3_a_path_change_creates_no_duplicate_conversation_or_message_event_at_the
     }
 }
 
+/// One turn of the facade into the model, in app-core's order: what it
+/// received, then its events.
+async fn turn(side: &mut TransportClient<FakeNode, FakeNode>, model: &mut UiModel, now: u64) {
+    side.tick(now).await;
+    for received in side.drain(16, now).await {
+        model.received(received);
+    }
+    while let Some(event) = side.next_event() {
+        model.client_event(event);
+    }
+}
+
+#[tokio::test]
+async fn a_peer_relayed_from_its_first_message_shows_the_relay_and_again_on_its_return() {
+    // The runtime says a route's path when it begins and when the routed
+    // peer returns, with nothing before it: the indicator reads relayed
+    // from the first message, goes blank at the disconnection and reads
+    // relayed again at the return -- through the facade, with no item
+    // or conversation added.
+    let (a, b) = FakeNetwork::pair(
+        node(vec![FakeEndpoint::open(endpoint("human"), false)]),
+        node(vec![FakeEndpoint::open(endpoint("human"), false)]),
+    );
+    let mut a_side = facade(
+        &a,
+        HumanStore::open_in_memory(StoreOptions::default()).expect("a"),
+    );
+    let mut b_side = facade(
+        &b,
+        HumanStore::open_in_memory(StoreOptions::default()).expect("b"),
+    );
+    a_side.tick(0).await;
+    b_side.tick(0).await;
+    a.connected(b.peer(), PeerPath::Relayed);
+    let mut model = UiModel::new();
+    turn(&mut a_side, &mut model, 1).await;
+    b_side
+        .send(
+            Destination::Direct {
+                peer: a.peer().clone(),
+                endpoint: None,
+            },
+            &envelope(1, "over the relay"),
+            1,
+        )
+        .await
+        .expect("sent");
+    turn(&mut a_side, &mut model, 2).await;
+    let key = model.conversations()[0].key.clone();
+    assert_eq!(model.path(&key), Some(PeerPath::Relayed), "from the first");
+    let before = (model.conversations(), model.len());
+    a.disconnected(b.peer());
+    turn(&mut a_side, &mut model, 3).await;
+    assert_eq!(model.path(&key), None, "gone with the connection");
+    a.connected(b.peer(), PeerPath::Relayed);
+    turn(&mut a_side, &mut model, 4).await;
+    assert_eq!(model.path(&key), Some(PeerPath::Relayed), "on the return");
+    assert_eq!((model.conversations(), model.len()), before);
+}
+
 #[test]
 fn a_session_event_clears_every_path() {
     // A route is a session's, so a path said in one session is not the
