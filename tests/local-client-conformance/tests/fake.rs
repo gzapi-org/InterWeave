@@ -653,6 +653,129 @@ async fn a_routed_peer_connecting_again_is_owed_its_path_with_no_previous() {
     );
 }
 
+/// The fake honours a session that declines route notices: no notice
+/// without `previous` at its route's begin, and a change after it owed
+/// with its `previous`; the control, a session that takes them, is owed
+/// the begin (#245 re-review N3).
+#[tokio::test]
+async fn a_session_declining_route_notices_is_owed_changes_with_their_previous() {
+    use interweave_local_client_api::{
+        DataSessionBinding as _, DataSessionPort as _, LocalSessionEvent, SessionEvent,
+    };
+    use interweave_transport_api::{DirectDestination, MessageId, PeerPath};
+    let paths = |events: Vec<SessionEvent>| -> Vec<(Option<PeerPath>, PeerPath)> {
+        events
+            .into_iter()
+            .filter_map(|e| match e {
+                SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
+                    previous,
+                    current,
+                    ..
+                }) => Some((previous, current)),
+                _ => None,
+            })
+            .collect()
+    };
+    for (n, declines) in [(1_u8, true), (2, false)] {
+        let p = pair();
+        let from = p.a.open(suite::full(Some(&agent()))).await.expect("leases");
+        let request = if declines {
+            suite::full(Some(&human())).without_route_notices()
+        } else {
+            suite::full(Some(&human()))
+        };
+        let to = p.b.open(request).await.expect("leases");
+        from.send_direct(
+            DirectDestination {
+                peer: p.b_peer.clone(),
+                endpoint: Some(human()),
+            },
+            MessageId::from_bytes([n; 16]),
+            suite::text("a route"),
+        )
+        .await
+        .expect("accepted");
+        let begun = paths(to.events(usize::MAX).await.expect("events"));
+        if declines {
+            assert!(
+                begun.is_empty(),
+                "no begin for a declining session: {begun:?}"
+            );
+        } else {
+            assert_eq!(begun, [(None, PeerPath::Direct)], "the control's begin");
+        }
+        p.b.path_changed(
+            &p.a_peer,
+            PeerPath::Direct,
+            PeerPath::Relayed,
+            "direct_lost",
+            3,
+        );
+        assert_eq!(
+            paths(to.events(usize::MAX).await.expect("events")),
+            [(Some(PeerPath::Direct), PeerPath::Relayed)],
+            "the change, previous included (declines: {declines})"
+        );
+    }
+}
+
+/// A route begun while the fake's pair is disconnected is announced at
+/// the pair's next connection as its BEGIN, `route_established`; a later
+/// return is `reconnected` (#245 re-review N3, the runtime's
+/// `Owed::unannounced`).
+#[tokio::test]
+async fn a_route_begun_while_disconnected_is_announced_as_its_begin_at_the_connection() {
+    use interweave_local_client_api::{
+        DataSessionBinding as _, DataSessionPort as _, LocalSessionEvent, RECONNECTED,
+        ROUTE_ESTABLISHED, SessionEvent,
+    };
+    use interweave_transport_api::{DirectDestination, MessageId, PeerPath};
+    let classes = |events: Vec<SessionEvent>| -> Vec<(Option<PeerPath>, String)> {
+        events
+            .into_iter()
+            .filter_map(|e| match e {
+                SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
+                    previous,
+                    reason_class,
+                    ..
+                }) => Some((previous, reason_class)),
+                _ => None,
+            })
+            .collect()
+    };
+    let p = pair();
+    let from = p.a.open(suite::full(Some(&agent()))).await.expect("leases");
+    let to = p.b.open(suite::full(Some(&human()))).await.expect("leases");
+    p.b.disconnected(&p.a_peer);
+    from.send_direct(
+        DirectDestination {
+            peer: p.b_peer.clone(),
+            endpoint: Some(human()),
+        },
+        MessageId::from_bytes([1; 16]),
+        suite::text("a route"),
+    )
+    .await
+    .expect("accepted");
+    assert!(
+        classes(to.events(usize::MAX).await.expect("events")).is_empty(),
+        "begun while disconnected: nothing yet"
+    );
+    p.b.connected(&p.a_peer, PeerPath::Relayed);
+    assert_eq!(
+        classes(to.events(usize::MAX).await.expect("events")),
+        [(None, ROUTE_ESTABLISHED.to_owned())],
+        "announced at the connection as its begin"
+    );
+    p.b.disconnected(&p.a_peer);
+    p.b.connected(&p.a_peer, PeerPath::Relayed);
+    assert_eq!(
+        classes(to.events(usize::MAX).await.expect("events")),
+        [(None, RECONNECTED.to_owned())],
+        "the control: a later return"
+    );
+}
+
 /// A session opened before the fake's restart belonged to the runtime
 /// before it, and ends with it, as a real runtime's does: its `events`
 /// and `close` answer `BackendUnavailable` (#215 review P3) -- before,
