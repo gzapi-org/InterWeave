@@ -858,6 +858,13 @@ fn validate_address_grammar(address: &str) -> Result<(), &'static str> {
     if TransportIdentity::parse((*relay).to_owned()).is_err() {
         return Err("the circuit route's relay PeerId is not a valid identity");
     }
+    // `route` keeps the empty component before the leading `/`, so a
+    // route with nothing in it is `[""]`: refused by name here, since
+    // `validate_direct_address("")` would say the address does not
+    // start with '/', which this entry does.
+    if route.iter().all(|c| c.is_empty()) {
+        return Err("the circuit route has no relay address before /p2p/<relay PeerId>");
+    }
     validate_direct_address(&route.join("/"))
 }
 
@@ -4130,9 +4137,10 @@ mod tests {
         // The relay route is held to the four-component grammar, as a
         // direct entry is.
         assert!(split_peer_multiaddr(&format!("/udp/1/p2p/{P1}/p2p-circuit/p2p/{P2}")).is_err());
-        assert!(
-            split_peer_multiaddr(&format!("/p2p/{P1}/p2p-circuit/p2p/{P2}")).is_err(),
-            "a circuit with no route to its relay"
+        assert_eq!(
+            refused(format!("/p2p/{P1}/p2p-circuit/p2p/{P2}")),
+            "the circuit route has no relay address before /p2p/<relay PeerId>",
+            "a circuit with no route to its relay, refused by name"
         );
         // The controls: direct entries as before, a host so named among
         // them -- a value slot is not a protocol.
