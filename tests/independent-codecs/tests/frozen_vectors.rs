@@ -282,3 +282,28 @@ fn endpoint_directory_frames_decode_to_their_fields_and_reencode_byte_equal() {
         }
     }
 }
+
+#[test]
+fn gossipsub_topic_keys_match_every_vector() {
+    use interweave_independent_codecs::gossipsub::topic_key_v1;
+    for v in vectors("gossipsub/gossipsub-topic-key-v1.json") {
+        let name = v["name"].as_str().unwrap();
+        let got = topic_key_v1(v["channel_id"].as_str().unwrap())
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(got.to_vec(), hex(v["sha256"].as_str().unwrap()), "{name}");
+    }
+}
+
+#[test]
+fn gossipsub_message_ids_match_every_vector() {
+    use interweave_independent_codecs::gossipsub::message_id_v1;
+    for v in vectors("gossipsub/gossipsub-message-id-v1.json") {
+        let name = v["name"].as_str().unwrap();
+        let got = message_id_v1(
+            v["peer_id"].as_str().unwrap(),
+            v["sequence_number"].as_u64().unwrap(),
+        )
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(got.to_vec(), hex(v["sha256"].as_str().unwrap()), "{name}");
+    }
+}

@@ -8,6 +8,7 @@ Stage 17's independent codecs (plan §20 (c); `architecture/docs/architecture/te
 | Endpoint directory request and response | `endpoints_v1` | `transport/libp2p/ENDPOINTS.md` §Endpoint directory protocol |
 | `BroadcastMessageV1` envelope | `broadcast_v1` | `transport/libp2p/PUBSUB.md` |
 | `DirectContentFingerprintV1` | `fingerprint` | `contracts/ENDPOINTS.md` |
+| GossipSub topic key and mesh message id | `gossipsub` | `transport/libp2p/PUBSUB.md` |
 | IPC v2 frame and envelope | `ipc_v2` (body JSON: `json`) | `contracts/LOCAL-IPC.md` §Framing, §Message classes; schemas `ipc/frame`, `ipc/hello`, `ipc/hello-response`, `ipc/close` |
 | `AcceptedV2` / `RejectedV2` | `direct_response_v2` | `transport/libp2p/DIRECT.md` §Response byte layout. That section was written when this item found the layout stated only in production's codec. |
 

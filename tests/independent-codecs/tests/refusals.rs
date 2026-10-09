@@ -456,3 +456,27 @@ fn endpoint_directory_rules_hold_beside_their_controls() {
         "a third tag"
     );
 }
+
+#[test]
+fn gossipsub_inputs_outside_their_grammar_are_refused_beside_controls() {
+    use interweave_independent_codecs::gossipsub::{base58btc_decode, message_id_v1, topic_key_v1};
+    for ok in ["a", "ops/alerts", "A.b_c:d-e", &"x".repeat(128)] {
+        assert!(topic_key_v1(ok).is_ok(), "{ok:?}");
+    }
+    for bad in ["", "-lead", "sp ace", "é", &"x".repeat(129)] {
+        assert!(topic_key_v1(bad).is_err(), "{bad:?}");
+    }
+    assert!(message_id_v1(GOLDEN_PEER, 0).is_ok());
+    for bad in ["", "0", "O", "I", "l"] {
+        assert!(message_id_v1(bad, 0).is_err(), "{bad:?}");
+    }
+    // Leading 1s are leading zero bytes; "2" is 1, "21" is 58.
+    assert_eq!(base58btc_decode("11").unwrap(), vec![0, 0]);
+    assert_eq!(base58btc_decode("2").unwrap(), vec![1]);
+    assert_eq!(base58btc_decode("21").unwrap(), vec![58]);
+    assert_eq!(
+        base58btc_decode("5R").unwrap(),
+        vec![1, 0],
+        "4 × 58 + 24 = 256"
+    );
+}
