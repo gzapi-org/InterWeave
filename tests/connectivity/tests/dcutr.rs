@@ -2354,6 +2354,16 @@ async fn a_listener_on_an_ip_the_view_removed_is_not_offered() {
         0,
         "the departed IP's listener is not offered again"
     );
+    // A SECOND PORT bound on the departed IP: bound, and no candidate --
+    // the bind's own offer runs after the detector has observed it, and
+    // only for an IP the host holds.
+    let _second = listening(&subject, ip).await;
+    drain(&mut subject, Duration::from_secs(2)).await;
+    assert_eq!(
+        offered(&subject),
+        0,
+        "a new listener on the departed IP is not offered"
+    );
 
     subject.shutdown().await.expect("shutdown");
 }

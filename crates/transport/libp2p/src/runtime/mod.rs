@@ -2956,13 +2956,19 @@ impl SwarmRuntime {
                                 // the next tick: a circuit can arrive
                                 // between the two, and its CONNECT would
                                 // carry only what a peer had observed.
-                                match &event {
+                                // Offered below, AFTER the detector has
+                                // observed the bind, and only if the host
+                                // holds its IP: a second port on an IP the
+                                // platform's view said departed is bound,
+                                // and is no candidate (ADR-0052 A
+                                // 2026-10-09).
+                                let just_bound = match &event {
                                     libp2p::swarm::SwarmEvent::NewListenAddr { address, .. } => {
-                                        dcutr_driver::offer_listeners(
-                                            swarm.dcutr_mut(),
-                                            std::iter::once(address),
-                                        );
+                                        Some(address.clone())
                                     }
+                                    _ => None,
+                                };
+                                match &event {
                                     // And forgotten as they go, so the
                                     // offered set holds what is bound.
                                     libp2p::swarm::SwarmEvent::ExpiredListenAddr {
@@ -3009,6 +3015,12 @@ impl SwarmRuntime {
                                         &open,
                                         &mut outbox,
                                         config.event_capacity,
+                                    );
+                                }
+                                if let Some(address) = just_bound.filter(|a| network.holds(a)) {
+                                    dcutr_driver::offer_listeners(
+                                        swarm.dcutr_mut(),
+                                        std::iter::once(&address),
                                     );
                                 }
                                 translated
