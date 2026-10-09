@@ -609,16 +609,27 @@ pub(super) fn settle_failed_dial(
     }
 }
 
-/// The relay a failed `RelayCircuit` dial went through, when this node
-/// holds NO direct connection to it: the circuit then failed at the
-/// relay hop, before the destination was asked anything. `None` for any
-/// other dial, for a circuit whose relay is connected -- a failure past
-/// the hop is the destination's or the relay's answer about it, scored
-/// as before -- and for an address with no relay `/p2p` before its
-/// `/p2p-circuit`.
+/// The relay a failed `RelayCircuit` dial went through, when the circuit
+/// failed AT THE RELAY HOP -- before the destination was asked anything.
+/// Two shapes, either sufficient:
+///
+/// - this node holds no direct connection to the relay: nothing past the
+///   hop can have answered;
+/// - the relay client answered [`RELAY_HOP_CANCELED`]: it parked the
+///   circuit on its own dial to the relay and dropped it unsent, which
+///   happens with the relay CONNECTED by the time the failure arrives --
+///   the client asked for the hop a few milliseconds before the
+///   reservation's connection to the same relay established, and its own
+///   dial was refused on the Swarm's peer condition (measured on #245
+///   after a daemon restart, rust-ui-dev-01's 01a1217f).
+///
+/// `None` for any other dial, for a failure the relay or the destination
+/// answered -- scored as before -- and for an address with no relay `/p2p`
+/// before its `/p2p-circuit`.
 pub(super) fn unreached_relay(
     ticket: &DialTicket,
     open: &HashMap<libp2p::swarm::ConnectionId, OpenConnection>,
+    error: &DialError,
 ) -> Option<TransportIdentity> {
     if ticket.origin() != DialOrigin::RelayCircuit {
         return None;
@@ -635,7 +646,26 @@ pub(super) fn unreached_relay(
     let reached = open
         .values()
         .any(|c| c.peer == relay && c.path == PeerPath::Direct);
-    (!reached).then_some(relay)
+    (!reached || hop_canceled(error)).then_some(relay)
+}
+
+/// What `libp2p-relay`'s client transport says when the behaviour drops a
+/// circuit request it never sent: `Error::ResponseFromBehaviourCanceled`'s
+/// text. Read through the boxed transport's `io::Error`, whose nested
+/// `Either`s hide the type from a downcast but keep its `Display`, so the
+/// text is the only handle; `the_relay_clients_canceled_text_is_pinned`
+/// fails if a crate bump changes it.
+pub(super) const RELAY_HOP_CANCELED: &str = "Response from behaviour was canceled";
+
+/// Whether every attempt of `error` is the relay client's canceled
+/// circuit request.
+fn hop_canceled(error: &DialError) -> bool {
+    match error {
+        DialError::Transport(attempts) if !attempts.is_empty() => attempts.iter().all(
+            |(_, e)| matches!(e, TransportError::Other(io) if io.to_string() == RELAY_HOP_CANCELED),
+        ),
+        _ => false,
+    }
 }
 
 /// Whether ONE transport attempt is structural: this process's own
@@ -1102,7 +1132,7 @@ pub(super) fn settle_outcome(
             if let Some(ticket) = in_flight.settle(*connection_id) {
                 // A CIRCUIT THAT NEVER REACHED ITS RELAY says nothing
                 // about the destination (`record_relay_hop_unreached`).
-                match unreached_relay(&ticket, open) {
+                match unreached_relay(&ticket, open, error) {
                     Some(relay) => {
                         let _ = manager.record_relay_hop_unreached(ticket, &relay, now_ms);
                     }
@@ -1789,6 +1819,32 @@ pub(super) type ActiveListeners = HashMap<ListenerId, Vec<Multiaddr>>;
 
 #[cfg(test)]
 mod tests {
+
+    /// `RELAY_HOP_CANCELED` is the pinned relay client's own text for a
+    /// circuit request its behaviour dropped unsent, and `hop_canceled`
+    /// reads it through the boxed transport's `io::Error` the way the
+    /// Swarm hands it over. The control: another error is not it.
+    #[test]
+    fn the_relay_clients_canceled_text_is_pinned() {
+        use libp2p::relay::client::transport::Error as RelayError;
+        let canceled =
+            RelayError::ResponseFromBehaviourCanceled(futures::channel::oneshot::Canceled);
+        assert_eq!(canceled.to_string(), super::RELAY_HOP_CANCELED);
+        let address: libp2p::Multiaddr = "/ip4/127.0.0.1/tcp/1/p2p-circuit".parse().expect("valid");
+        let boxed = |e: RelayError| {
+            libp2p::swarm::DialError::Transport(vec![(
+                address.clone(),
+                libp2p::core::transport::TransportError::Other(std::io::Error::other(
+                    either::Either::<RelayError, std::io::Error>::Left(e),
+                )),
+            )])
+        };
+        assert!(super::hop_canceled(&boxed(canceled)));
+        assert!(
+            !super::hop_canceled(&boxed(RelayError::MissingDstPeerId)),
+            "the control"
+        );
+    }
     use super::{
         AdvertisedBoundary, Held, OpenConnection, PathSample, PolicyClosed, announce_path,
         best_path, book_origin, canonical_dial_address, closed_outright, command_origin,
