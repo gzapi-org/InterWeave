@@ -224,8 +224,7 @@ a static relay both reserve and neither can ever open the conversation.
 **Decision.** Rule 9 names profile configuration as an operator door for
 an address, and rule 8's discovery row sends a relay-only peer's circuit
 "through an operator route"; a grammar that refuses the one form such a
-route has contradicts both. `multiaddr-with-peer-id` — one definition
-for static bootstrap peers, `static_relays` and `static_servers`, the
+route has contradicts both. `multiaddr-with-peer-id` — one grammar, the
 definition `start` seeds the operator set from — is either the
 four-component literal with `/p2p/<id>` or a circuit route
 `<relay route>/p2p/<relay>/p2p-circuit/p2p/<peer>`, the relay route the
@@ -236,9 +235,18 @@ the relay's `/p2p/<relay>`, and exactly `/p2p/<peer>` follows
 refused by the grammar as a shape error that names it. Whether this
 node may dial THROUGH the relay stays the gate's question at dial time
 (`RelayCircuit`, ADR-0036's infrastructure class), never the grammar's.
-The runtime needs nothing: the operator set admits an operator circuit
-and `Dial` / `DialPeer` classify it (relayed_paths.rs pins that path
-through the command).
+The runtime needs nothing for the static bootstrap case: the operator
+set admits an operator circuit and `Dial` / `DialPeer` classify it
+(relayed_paths.rs pins that path through the command). The two
+infrastructure lists are the exception, found by p2p-network-dev-01's
+review of the grammar: `static_relays` and `static_servers` take the
+direct form only and refuse a circuit route at validation by role —
+`RelayClientSettings::from_profile` refuses a relay reached through a
+circuit ("not a relay") and `AutonatClientSettings::from_profile` keys
+the server on the first `/p2p/`, so an admitted circuit would validate
+and then fail at start, or probe the relay as if it were the server
+with the refusal surfacing nowhere (SPIKE-004). One grammar, two roles
+restricting it; the role rule is tested beside the shape rules.
 
 **Alternatives rejected.** An IPC verb reaching `AddAddress`: a
 convenience for a running daemon, not the door a deployment configures;
