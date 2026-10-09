@@ -239,7 +239,9 @@ fn a_state_directory_open_to_others_is_refused_as_not_private() {
 /// A private state root under a directory others can write is refused
 /// as not private, and the person is told WHICH directory and why
 /// (ADR-0028 A 2026-10-08): that ancestor is what they must fix, and the
-/// private directory beneath it looks sound.
+/// private directory beneath it looks sound. And nothing is created
+/// under it: before #228 the lock made the profile's state tree there
+/// first and refused after.
 #[test]
 fn a_state_root_under_a_directory_others_can_write_is_refused_naming_that_directory() {
     let home = Home::new();
@@ -259,6 +261,11 @@ fn a_state_root_under_a_directory_others_can_write_is_refused_naming_that_direct
     assert!(
         message.contains(&wide.display().to_string()) && message.contains("0777"),
         "the ancestor and its mode are named: {message}"
+    );
+    let made: Vec<_> = std::fs::read_dir(&state).expect("state").collect();
+    assert!(
+        made.is_empty(),
+        "nothing is created under the refused ancestor: {made:?}"
     );
 }
 
