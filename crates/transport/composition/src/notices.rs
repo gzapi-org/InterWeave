@@ -1109,4 +1109,38 @@ mod tests {
             "the control's return"
         );
     }
+
+    /// `unannounced` stays a subset of the routes, so bounded by them: a
+    /// revocation drops a route's unannounced begin with the route, and a
+    /// route begun again while connected is announced at once -- its
+    /// later return is `reconnected`, not a stale begin (#245 re-review
+    /// N4). The control is the begin that WAS unannounced at first.
+    #[test]
+    fn a_revoked_routes_unannounced_begin_goes_with_it() {
+        use PeerPath::Relayed;
+        let notices = SessionNotices::default();
+        notices.register("s", None);
+        let p = peer();
+        notices.sent_to("s", &p);
+        assert!(!notices.ready("s"), "begun before the connection was seen");
+        notices.revoked(&p);
+        notices.connected(&p, Relayed, 1);
+        assert!(
+            notices.take_paths("s", usize::MAX).is_empty(),
+            "no route, nothing owed"
+        );
+        notices.sent_to("s", &p);
+        let begun = paths(&notices.take_paths("s", usize::MAX));
+        assert!(
+            matches!(begun.as_slice(), [(None, Relayed, class, _)] if class == "route_established"),
+            "the new route, announced at once: {begun:?}"
+        );
+        notices.disconnected(&p, DisconnectReason::Closed);
+        notices.connected(&p, Relayed, 2);
+        assert_eq!(
+            paths(&notices.take_paths("s", usize::MAX)),
+            [(None, Relayed, "reconnected".to_owned(), 2)],
+            "a return, not the revoked route's begin"
+        );
+    }
 }
