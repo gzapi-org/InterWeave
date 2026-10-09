@@ -336,7 +336,7 @@ pub mod placeholder_en {
             ErrorClass::PeerNotTrusted => "This peer is not trusted for this profile.",
             ErrorClass::RouteUnavailable => "This route is not available now.",
             ErrorClass::NoNetworkPath => "This peer cannot be reached over the network now.",
-            ErrorClass::Busy => "The transport is busy. Try again later.",
+            ErrorClass::Busy => "The transport is temporarily busy.",
             ErrorClass::TransportUnavailable => "The transport daemon cannot be reached.",
             ErrorClass::Incompatible => "The two sides have no protocol version in common.",
             ErrorClass::TooLarge => "The message is too large to send.",
