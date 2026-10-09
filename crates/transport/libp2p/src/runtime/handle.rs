@@ -346,7 +346,13 @@ impl SwarmRuntime {
         peer: TransportIdentity,
         address: Multiaddr,
     ) -> Result<bool, SubstrateError> {
-        let _ = self.operator.insert(&address);
+        // A circuit is recorded as the route TO `peer`, the one form every
+        // door asks about (`operator_set::probe_for`, #246 review F1).
+        if let Ok(owner) = peer.as_str().parse::<libp2p::PeerId>() {
+            let _ = self
+                .operator
+                .insert(&crate::operator_set::probe_for(&address, &owner));
+        }
         let (reply, answer) = oneshot::channel();
         self.commands
             .send(SwarmCommand::AddAddress {

@@ -23,7 +23,8 @@
 //!
 //! # The key, and the pair it must not split
 //!
-//! Keyed by [`strip_peer_suffix`] at BOTH ends, the write and the read.
+//! Keyed by `operator_key` at BOTH ends, the write and the read:
+//! [`strip_peer_suffix`]'s form, a circuit keeping its destination.
 //! An operator writes a bootstrap address with its `/p2p/` suffix as
 //! often as not; a behaviour hands the funnel the same route with or
 //! without one. Two canonicalisations would make one route two keys,
@@ -48,6 +49,38 @@ use libp2p::multiaddr::Protocol;
 use libp2p::{Multiaddr, PeerId};
 
 use crate::outbound_gate::strip_peer_suffix;
+
+/// The key an address is held and looked up by: [`strip_peer_suffix`]'s
+/// form, EXCEPT that a circuit keeps its destination. Stripping every
+/// trailing `/p2p` turned `<relay route>/p2p/R/p2p-circuit/p2p/P` into
+/// `<relay route>/p2p/R/p2p-circuit`, so one operator route "through R to
+/// P" admitted every circuit through R at every store door ADR-0052 rule
+/// 8 closes to circuits (#246 review F1). A circuit with no destination
+/// keys as written, and matches no operator entry, since a profile's
+/// circuit always names one.
+fn operator_key(address: &Multiaddr) -> String {
+    let mut parts: Vec<_> = address.iter().collect();
+    while matches!(parts.last(), Some(Protocol::P2p(_)))
+        && !matches!(parts.iter().rev().nth(1), Some(Protocol::P2pCircuit))
+    {
+        parts.pop();
+    }
+    if parts.iter().any(|p| matches!(p, Protocol::P2pCircuit)) {
+        return parts.into_iter().collect::<Multiaddr>().to_string();
+    }
+    strip_peer_suffix(address)
+}
+
+/// `address` as a probe for `peer`'s route: a circuit that names no
+/// destination is asked about as the circuit TO `peer`, the form the
+/// operator's entry is held in; anything else as it is.
+pub(crate) fn probe_for(address: &Multiaddr, peer: &PeerId) -> Multiaddr {
+    if matches!(address.iter().last(), Some(Protocol::P2pCircuit)) {
+        address.clone().with(Protocol::P2p(*peer))
+    } else {
+        address.clone()
+    }
+}
 
 /// Addresses the operator's door can hold at once.
 ///
@@ -88,7 +121,7 @@ impl OperatorSet {
     /// refusal is counted ([`OperatorSet::refused_full`]). Recording an
     /// address already held is a success and costs nothing.
     pub fn insert(&self, address: &Multiaddr) -> bool {
-        let key = strip_peer_suffix(address);
+        let key = operator_key(address);
         let mut inner = self.write();
         if inner.addresses.contains(&key) {
             return true;
@@ -104,7 +137,7 @@ impl OperatorSet {
     /// Did `address` come in by the operator's door?
     #[must_use]
     pub fn contains(&self, address: &Multiaddr) -> bool {
-        self.read().addresses.contains(&strip_peer_suffix(address))
+        self.read().addresses.contains(&operator_key(address))
     }
 
     /// The boundary every learn site and the root funnel apply: an
@@ -166,7 +199,7 @@ impl OperatorSet {
         // own `AddAddress` circuit through a named relay as `not_literal`,
         // since the set holds the circuit and not the relay's route
         // (#111 post-merge re-review, finding 1).
-        if self.contains(address) {
+        if self.contains(&probe_for(address, advertiser)) {
             return Ok(());
         }
         let parts: Vec<Protocol<'_>> = address.iter().collect();
@@ -201,9 +234,12 @@ impl OperatorSet {
     pub fn admits_discovered<'a>(
         &self,
         address: &Multiaddr,
+        peer: &PeerId,
         own_listeners: impl IntoIterator<Item = &'a str>,
     ) -> Result<(), CandidateRefusal> {
-        if self.contains(address) {
+        // A circuit is asked about as the route TO `peer`: the operator's
+        // circuit to P admits P's candidate and no other (#246 review F1).
+        if self.contains(&probe_for(address, peer)) {
             return Ok(());
         }
         is_discovered_address(&address.to_string(), own_listeners)
@@ -236,6 +272,61 @@ mod tests {
 
     fn addr(s: &str) -> Multiaddr {
         s.parse().expect("valid")
+    }
+
+    /// An operator's circuit route keys WITH its destination: the route
+    /// "through R to P" admits P's candidate at the discovery door,
+    /// whether it arrives bare or suffixed, and P's own Identify
+    /// advertisement -- and never a circuit through R to another peer X,
+    /// which every peer-supplied door refuses as relayed (#246 review F1).
+    /// And a direct seed still keys without its suffix, as before.
+    #[test]
+    fn an_operator_circuit_admits_its_own_destination_and_no_other() {
+        let relay = PeerId::random();
+        let (p, x) = (PeerId::random(), PeerId::random());
+        let through = |to: &PeerId| {
+            addr(&format!(
+                "/ip4/203.0.113.7/tcp/4001/p2p/{relay}/p2p-circuit/p2p/{to}"
+            ))
+        };
+        let bare = addr(&format!(
+            "/ip4/203.0.113.7/tcp/4001/p2p/{relay}/p2p-circuit"
+        ));
+        let set = OperatorSet::new();
+        assert!(set.insert(&through(&p)));
+        let none = std::iter::empty::<&str>;
+        assert_eq!(
+            set.admits_discovered(&bare, &p, none()),
+            Ok(()),
+            "P's own route, bare"
+        );
+        assert_eq!(
+            set.admits_discovered(&through(&p), &p, none()),
+            Ok(()),
+            "and suffixed"
+        );
+        assert_eq!(
+            set.admits_own_route(&bare, &p, none()),
+            Ok(()),
+            "P advertising it"
+        );
+        assert!(set.admits_discovered(&bare, &x, none()).is_err(), "not X's");
+        assert!(
+            set.admits_discovered(&through(&x), &x, none()).is_err(),
+            "not X's, suffixed"
+        );
+        assert!(
+            set.admits_own_route(&bare, &x, none()).is_err(),
+            "not X advertising it"
+        );
+        assert!(
+            !set.contains(&bare),
+            "a bare circuit names no route and matches nothing"
+        );
+        // A direct seed keys as before: suffixed or not, one key.
+        let direct = addr("/ip4/203.0.113.8/tcp/4001");
+        assert!(set.insert(&direct.clone().with(Protocol::P2p(p))));
+        assert!(set.contains(&direct));
     }
 
     const ID: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
