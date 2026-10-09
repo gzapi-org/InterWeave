@@ -145,6 +145,10 @@ fn follow_verdict(
 /// (`ConnectionManager::network_added`; architect-cto's ruling of
 /// 2026-10-09, relay seq 33736): a peer that failed while this host was
 /// offline would otherwise wait out up to five minutes after it is back.
+/// And every relay backing off is asked again at the next tick, its
+/// ladder kept (`ReservationManager::network_added`; the ruling of relay
+/// seq 55562): a relay-only profile is otherwise unreachable for the
+/// rest of its relay backoff.
 /// Pinned by `tests/connectivity/tests/network_change.rs` and `dcutr.rs`'s
 /// `a_network_change_lifts_the_cooldown_and_keeps_the_reservation`.
 #[expect(
@@ -203,6 +207,9 @@ fn on_network_change(
     }
     if change.adds() {
         let _ = manager.network_added(now);
+        if let Some(state) = relay_state {
+            let _ = relay_driver::network_added(state, now);
+        }
     }
     dcutr_driver::offer_listeners(swarm.dcutr_mut(), active.values().flatten());
     if may_buffer_delivery(outbox.len(), event_capacity) {

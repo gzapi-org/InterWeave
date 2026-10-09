@@ -36,6 +36,7 @@
 #![allow(clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeSet;
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use futures::StreamExt as _;
@@ -45,7 +46,7 @@ use interweave_transport_api::{PathReadiness, TransportIdentity};
 use interweave_transport_libp2p::relay_keepalive::RelayKeepalive;
 use interweave_transport_libp2p::runtime::relay_driver::{RelayClientSettings, StaticRelay};
 use interweave_transport_libp2p::{
-    RelayReservationOutcome, SubstrateConfig, SwarmEvent, SwarmRuntime,
+    NetworkView, RelayReservationOutcome, SubstrateConfig, SwarmEvent, SwarmRuntime,
 };
 use interweave_transport_runtime::relay::{ReservationConfig, Standing};
 use interweave_transport_runtime::{DialOrigin, TrustSources};
@@ -825,6 +826,122 @@ async fn an_authorized_peer_advertising_hop_is_learned_reserved_on_over_its_conn
             .is_some_and(|s| !s.contains(&circuit) && !s.is_empty())),
         "the bystander was told an address set without the circuit: {:?}",
         relays.observer.as_ref().map(|(_, seen)| seen)
+    );
+
+    subject.shutdown().await.expect("shutdown");
+}
+
+/// A NETWORK ADDITION makes a backed-off relay due at once
+/// (`transport/libp2p/CONNECTIVITY.md` §14; architect-cto's ruling of
+/// 2026-10-09, relay seq 55562): the relay was down when the subject
+/// asked, so the subject backs off for the ladder's first step -- a
+/// minute here -- and the relay comes back. Without a change the subject
+/// waits (the control); a platform view that adds an address gets the
+/// reservation asked and accepted within seconds. The relay-only
+/// profile after offline -> online, which otherwise stays unreachable
+/// for the rest of its relay backoff.
+#[tokio::test]
+async fn an_addition_asks_a_backed_off_relay_at_once_and_without_one_it_waits() {
+    const CONTROL: Duration = Duration::from_secs(5);
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let relay_keys = identity::Keypair::generate_ed25519();
+    let relay_peer = identity_of(&relay_keys);
+    // Bound once for its address, then gone: the relay is down.
+    let relay_addr = bound(&mut relay_server(relay_keys.clone())).await;
+
+    let subject_id = ProfileIdentity::generate();
+    let mut relay_settings = settings(
+        vec![StaticRelay {
+            peer: relay_peer.clone(),
+            address: format!("{relay_addr}/p2p/{}", relay_peer.as_str()),
+        }],
+        false,
+    );
+    relay_settings.reservations.retry_min_ms = 60_000;
+    relay_settings.reservations.retry_max_ms = 120_000;
+    let mut subject = SwarmRuntime::start(
+        &subject_id,
+        SubstrateConfig {
+            relay_client: Some(relay_settings),
+            ..SubstrateConfig::default()
+        },
+        infrastructure_only(&[&relay_peer]),
+    )
+    .expect("the runtime starts");
+    // A private listener fills the subject's set of addresses; the view
+    // later adds to it.
+    let _private = subject
+        .listen(format!("/ip4/{ip}/tcp/0").parse().expect("valid"))
+        .await
+        .expect("the subject's private listener");
+
+    let outcome_for = |wanted: RelayReservationOutcome| {
+        let relay_peer = relay_peer.clone();
+        move |e: &SwarmEvent| {
+            matches!(e, SwarmEvent::RelayReservationChanged { relay, outcome, .. }
+                if *relay == relay_peer && *outcome == wanted)
+        }
+    };
+    // THE FAILURE: nobody answers.
+    let failed = outcome_for(RelayReservationOutcome::Failed);
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let event = tokio::time::timeout_at(deadline, subject.next_event())
+            .await
+            .expect("the ask fails within the patience")
+            .expect("the runtime is alive");
+        if failed(&event) {
+            break;
+        }
+    }
+    let failed_at = tokio::time::Instant::now();
+
+    // The relay is back, at the same address.
+    let mut relay = relay_server(relay_keys);
+    relay.listen_on(relay_addr.clone()).expect("listens again");
+    relay.add_external_address(relay_addr.clone());
+    let mut relay_seen = Seen::default();
+    let mut relays = Relays {
+        first: (&mut relay, &mut relay_seen),
+        second: None,
+        observer: None,
+    };
+
+    // THE CONTROL: no change, and the subject waits its backoff.
+    let events = settle(&mut subject, &mut relays, CONTROL).await;
+    let accepted = outcome_for(RelayReservationOutcome::Accepted);
+    assert!(
+        !events.iter().any(&accepted),
+        "without a change the relay waits its backoff: {events:?}"
+    );
+
+    // THE ADDITION: asked at once, and accepted.
+    subject.network_changed(NetworkView {
+        addresses: vec![ip.into(), Ipv4Addr::new(10, 255, 0, 1).into()],
+    });
+    let _ = subject_event(
+        &mut subject,
+        &mut relays,
+        "the reservation to be accepted after the addition",
+        accepted,
+    )
+    .await;
+    assert!(
+        failed_at.elapsed() < Duration::from_secs(60),
+        "accepted inside the backoff, so the change made it due: {:?}",
+        failed_at.elapsed()
+    );
+    assert_eq!(
+        relay_seen.accepted,
+        vec![
+            subject_id
+                .transport_identity()
+                .expect("peer id")
+                .as_str()
+                .parse::<PeerId>()
+                .expect("a libp2p identity")
+        ],
+        "the relay's own side of the acceptance"
     );
 
     subject.shutdown().await.expect("shutdown");

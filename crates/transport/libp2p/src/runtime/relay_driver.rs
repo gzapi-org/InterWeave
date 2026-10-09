@@ -397,6 +397,13 @@ pub(super) enum RelayHandled {
     Passed(Box<Libp2pSwarmEvent<SubstrateBehaviourEvent>>),
 }
 
+/// A network change ADDED an address: every relay backing off is due at
+/// the next tick, its ladder kept
+/// (`ReservationManager::network_added`). Returns how many.
+pub(super) fn network_added(state: &mut RelayState, now_ms: u64) -> usize {
+    state.manager.network_added(now_ms)
+}
+
 /// The tick: drop de-authorized learned relays, ask and release as the
 /// manager says, and bring the Swarm's advertised set to the manager's.
 pub(super) fn reconcile(

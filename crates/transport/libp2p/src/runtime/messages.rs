@@ -351,9 +351,9 @@ pub enum SwarmCommand {
 /// SNAPSHOT of every address of every network it reports usable, never
 /// a delta, so a missed or reordered report corrects itself on the
 /// next. Empty means offline. Addresses only: no network id, interface
-/// name or carrier fact, which the runtime has no use for and would
-/// only be one more fact about the device to hold (architect-cto's
-/// ruling of 2026-10-09, relay seq 33736). Handed in through
+/// name or carrier fact: a host-specific concept stops at the bridge,
+/// which hands the runtime normalized local facts (ADR-0001's layering;
+/// `human-client-android.md`). Handed in through
 /// [`super::NetworkMonitor`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NetworkView {
