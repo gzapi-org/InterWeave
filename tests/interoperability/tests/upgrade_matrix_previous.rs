@@ -255,6 +255,19 @@ struct Daemon {
 
 impl Daemon {
     async fn start(home: &Home, bin: &Path, which: &str, extra: &[&str]) -> Self {
+        Self::try_start(home, bin, which, extra)
+            .await
+            .unwrap_or_else(|log| panic!("{which} exited before serving:\n{log}"))
+    }
+
+    /// As [`Self::start`], but a daemon that exits before serving is an
+    /// `Err` carrying its log, for a caller that can retry the cause.
+    async fn try_start(
+        home: &Home,
+        bin: &Path,
+        which: &str,
+        extra: &[&str],
+    ) -> Result<Self, String> {
         let log = home.roots.state_home.with_file_name(format!("{which}.log"));
         let child = home
             .command(bin)
@@ -283,10 +296,10 @@ impl Daemon {
                 admin.status().await.ok()
             });
             if let Ok(Some(_)) = attempt.await {
-                return daemon;
+                return Ok(daemon);
             }
             if let Ok(Some(status)) = daemon.child.try_wait() {
-                panic!("{which} exited ({status}):\n{}", daemon.log());
+                return Err(format!("({status}) {}", daemon.log()));
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
@@ -538,40 +551,61 @@ async fn each_previous_daemon_exchanges_with_head_both_ways() {
         // the other, so whichever starts second connects.
         let head_identity = ProfileIdentity::generate();
         let head_peer = head_identity.transport_identity().expect("peer");
-        let (head_port, old_port) = loop {
-            let (a, b) = (free_port(ip), free_port(ip));
-            if a != b {
-                break (a, b);
+        // Ports are picked, released and then bound by the daemons: the
+        // status carries no listen address, in either build, so the other
+        // side's profile must name it before the daemon starts. A port
+        // taken in between makes that daemon exit before serving with a
+        // transport error ("the runtime: substrate: transport", measured on
+        // 45ba3928), and the attempt is retried on fresh ports. Any other
+        // early exit, or a third taken port in a row, fails the row.
+        let mut attempt = 0;
+        let (old_home, old, old_peer, head_home, head) = loop {
+            attempt += 1;
+            let (head_port, old_port) = loop {
+                let (a, b) = (free_port(ip), free_port(ip));
+                if a != b {
+                    break (a, b);
+                }
+            };
+            let head_listen = format!("/ip4/{ip}/tcp/{head_port}");
+            let old_listen = format!("/ip4/{ip}/tcp/{old_port}");
+            let port_taken = |log: &str| attempt < 3 && log.contains("transport");
+
+            let old_home = Home::new("old");
+            old_home.write_config(&profile_yaml(
+                "old",
+                head_peer.as_str(),
+                &old_listen,
+                &[format!("{head_listen}/p2p/{}", head_peer.as_str())],
+            ));
+            let old = match Daemon::try_start(
+                &old_home,
+                &entry.daemon,
+                &entry.label,
+                &["--create-identity"],
+            )
+            .await
+            {
+                Ok(d) => d,
+                Err(log) if port_taken(&log) => continue,
+                Err(log) => panic!("{} exited before serving:\n{log}", entry.label),
+            };
+            let old_peer = old.peer(&old_home).await;
+
+            let head_home = Home::new("head");
+            head_home.write_key(&head_identity);
+            head_home.write_config(&profile_yaml(
+                "head",
+                old_peer.as_str(),
+                &head_listen,
+                &[format!("{old_listen}/p2p/{}", old_peer.as_str())],
+            ));
+            match Daemon::try_start(&head_home, &head_bin, "HEAD's daemon", &[]).await {
+                Ok(head) => break (old_home, old, old_peer, head_home, head),
+                Err(log) if port_taken(&log) => continue,
+                Err(log) => panic!("HEAD's daemon exited before serving:\n{log}"),
             }
         };
-        let head_listen = format!("/ip4/{ip}/tcp/{head_port}");
-        let old_listen = format!("/ip4/{ip}/tcp/{old_port}");
-
-        let old_home = Home::new("old");
-        old_home.write_config(&profile_yaml(
-            "old",
-            head_peer.as_str(),
-            &old_listen,
-            &[format!("{head_listen}/p2p/{}", head_peer.as_str())],
-        ));
-        let old = Daemon::start(
-            &old_home,
-            &entry.daemon,
-            &entry.label,
-            &["--create-identity"],
-        )
-        .await;
-        let old_peer = old.peer(&old_home).await;
-
-        let head_home = Home::new("head");
-        head_home.write_key(&head_identity);
-        head_home.write_config(&profile_yaml(
-            "head",
-            old_peer.as_str(),
-            &head_listen,
-            &[format!("{old_listen}/p2p/{}", old_peer.as_str())],
-        ));
-        let head = Daemon::start(&head_home, &head_bin, "HEAD's daemon", &[]).await;
 
         let at_head = head
             .within("a leased session", head_home.client().open(human_session()))
