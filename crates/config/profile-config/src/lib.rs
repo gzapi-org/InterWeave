@@ -827,8 +827,42 @@ pub(crate) fn host_this_build_cannot_dial(address: &str) -> Option<&'static str>
         .copied()
 }
 
-/// `/<host>/<value>/<transport>/<port>` against the documented set.
+/// The address half of a `multiaddr-with-peer-id`, as
+/// [`split_peer_multiaddr`] leaves it: `/<host>/<value>/<transport>/<port>`,
+/// or a CIRCUIT ROUTE's `<relay route>/p2p/<relay>/p2p-circuit` -- the
+/// relay route that same four-component form (ADR-0052 rule 9, A
+/// 2026-10-09). Rule 8's two shape conditions hold the circuit to one
+/// form: the component before `/p2p-circuit` is the relay's `/p2p/<id>`,
+/// and nothing but the destination's `/p2p/<peer>` -- split off by the
+/// caller -- follows it, so a foreign destination and a second circuit
+/// are refused by shape, each named
+/// (`a_circuit_route_is_one_shape_and_each_other_is_named`). Whether this
+/// node may dial through the relay is the gate's at dial time
+/// (`RelayCircuit`), not the grammar's.
 fn validate_address_grammar(address: &str) -> Result<(), &'static str> {
+    let components: Vec<&str> = address.split('/').collect();
+    let Some(circuit) = components.iter().position(|c| *c == "p2p-circuit") else {
+        return validate_direct_address(address);
+    };
+    if circuit + 1 != components.len() {
+        return if components[circuit + 1..].contains(&"p2p-circuit") {
+            Err("the circuit route has a second /p2p-circuit")
+        } else {
+            Err("something other than the destination's /p2p/<PeerId> follows /p2p-circuit")
+        };
+    }
+    let relay_route = &components[..circuit];
+    let [route @ .., "p2p", relay] = relay_route else {
+        return Err("the circuit route has no /p2p/<relay PeerId> before /p2p-circuit");
+    };
+    if TransportIdentity::parse((*relay).to_owned()).is_err() {
+        return Err("the circuit route's relay PeerId is not a valid identity");
+    }
+    validate_direct_address(&route.join("/"))
+}
+
+/// `/<host>/<value>/<transport>/<port>` against the documented set.
+fn validate_direct_address(address: &str) -> Result<(), &'static str> {
     if !address.starts_with('/') {
         return Err("the address does not start with '/'");
     }
@@ -3978,6 +4012,35 @@ mod tests {
         );
     }
 
+    /// A circuit route as a static bootstrap peer validates whole: the
+    /// same definition `start` seeds the operator set from (ADR-0052
+    /// rule 9). The foreign destination beside it is the control.
+    #[test]
+    fn a_static_peer_may_be_a_circuit_route() {
+        let with = |peer: String| {
+            let mut c = config(vec![endpoint("human")]);
+            c.discovery.providers.push(DiscoveryProviderConfig {
+                provider_type: DiscoveryProviderType::StaticBootstrap,
+                enabled: true,
+                enabled_implied: false,
+                priority: 30,
+                config: DiscoveryProviderSettings {
+                    peers: vec![peer],
+                    ..DiscoveryProviderSettings::default()
+                },
+            });
+            c.validate()
+        };
+        let errors = with(format!(
+            "/dns4/relay.example/tcp/4001/p2p/{P1}/p2p-circuit/p2p/{P2}"
+        ));
+        assert!(errors.is_empty(), "a circuit route validates: {errors:?}");
+        let errors = with(format!(
+            "/dns4/relay.example/tcp/4001/p2p/{P1}/p2p-circuit/ip4/10.0.0.9/tcp/1/p2p/{P2}"
+        ));
+        assert!(!errors.is_empty(), "a foreign destination does not");
+    }
+
     #[test]
     fn split_peer_multiaddr_names_what_is_missing() {
         let entry = format!("/dns4/host.example/tcp/4001/p2p/{P1}");
@@ -3993,6 +4056,57 @@ mod tests {
         assert!(split_peer_multiaddr(&format!("garbage/p2p/{P1}")).is_err());
         assert!(split_peer_multiaddr(&format!("//p2p/{P1}")).is_err());
         assert!(split_peer_multiaddr(&format!("/ip4//tcp/1/p2p/{P1}")).is_err());
+    }
+
+    /// ADR-0052 rule 9 (A 2026-10-09): a circuit route is one shape --
+    /// `<relay route>/p2p/<relay>/p2p-circuit/p2p/<peer>`, the relay route
+    /// the four-component form, a `/dns4` relay host an operator name --
+    /// and every other circuit is refused, each by a reason of its own.
+    /// The four-component entries beside it are the controls: unchanged.
+    #[test]
+    fn a_circuit_route_is_one_shape_and_each_other_is_named() {
+        for relay_route in ["/ip4/203.0.113.7/tcp/4001", "/dns4/relay.example/tcp/4001"] {
+            let entry = format!("{relay_route}/p2p/{P1}/p2p-circuit/p2p/{P2}");
+            let (address, id) = split_peer_multiaddr(&entry).expect("a circuit route");
+            assert_eq!(address, format!("{relay_route}/p2p/{P1}/p2p-circuit"));
+            assert_eq!(id, peer(P2), "the destination, not the relay");
+        }
+        let refused = |entry: String| match split_peer_multiaddr(&entry) {
+            Err(reason) => reason,
+            Ok(_) => panic!("refused: {entry}"),
+        };
+        assert_eq!(
+            refused(format!(
+                "/ip4/203.0.113.7/tcp/4001/p2p/{P1}/p2p-circuit/ip4/10.0.0.9/tcp/1/p2p/{P2}"
+            )),
+            "something other than the destination's /p2p/<PeerId> follows /p2p-circuit"
+        );
+        assert_eq!(
+            refused(format!(
+                "/ip4/203.0.113.7/tcp/4001/p2p/{P1}/p2p-circuit/p2p/{P2}/p2p-circuit/p2p/{P1}"
+            )),
+            "the circuit route has a second /p2p-circuit"
+        );
+        assert_eq!(
+            refused(format!("/ip4/203.0.113.7/tcp/4001/p2p-circuit/p2p/{P2}")),
+            "the circuit route has no /p2p/<relay PeerId> before /p2p-circuit"
+        );
+        assert_eq!(
+            refused(format!(
+                "/ip4/203.0.113.7/tcp/4001/p2p/not-an-identity/p2p-circuit/p2p/{P2}"
+            )),
+            "the circuit route's relay PeerId is not a valid identity"
+        );
+        // The relay route is held to the four-component grammar, as a
+        // direct entry is.
+        assert!(split_peer_multiaddr(&format!("/udp/1/p2p/{P1}/p2p-circuit/p2p/{P2}")).is_err());
+        assert!(
+            split_peer_multiaddr(&format!("/p2p/{P1}/p2p-circuit/p2p/{P2}")).is_err(),
+            "a circuit with no route to its relay"
+        );
+        // The controls: direct entries as before.
+        assert!(split_peer_multiaddr(&format!("/ip4/10.0.0.1/tcp/4001/p2p/{P1}")).is_ok());
+        assert!(split_peer_multiaddr(&format!("/ip4/10.0.0.1/tcp/1/p2p/{P1}/extra")).is_err());
     }
 
     #[test]

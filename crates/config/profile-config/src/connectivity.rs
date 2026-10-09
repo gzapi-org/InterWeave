@@ -1096,7 +1096,9 @@ impl ConnectivityConfig {
     /// AND THE REUSE NARROWS THE SCHEMA'S TYPE, which is worth saying
     /// where the widening commit will look. The schema says
     /// `multiaddr-with-peer-id`; `validate_address_grammar` accepts
-    /// `ip4|ip6|dns4|dns6` plus `tcp` and exactly four components, so a
+    /// `ip4|ip6|dns4|dns6` plus `tcp` and four components -- or a circuit
+    /// route whose relay route is that form (ADR-0052 rule 9, A
+    /// 2026-10-09) -- so a
     /// relay published as `/dns/relay.example.net/tcp/4001/p2p/<id>` —
     /// the bare `/dns` form — or over QUIC is refused here.
     ///
@@ -1925,6 +1927,43 @@ mod tests {
                 ConfigError::StaticCandidateUnauthorized { peer, .. } if peer.as_str() == P2
             )),
             "authorizing one peer must not authorize another"
+        );
+    }
+
+    /// ADR-0052 rule 9 (A 2026-10-09): ONE grammar for the static
+    /// bootstrap peers, `static_relays` and `static_servers`, the circuit
+    /// route included -- authorized by its destination, the peer after
+    /// `/p2p-circuit` -- and a circuit of another shape refused here as it
+    /// is for a bootstrap peer.
+    #[test]
+    fn a_static_candidate_may_be_a_circuit_route() {
+        let circuit = format!("/ip4/203.0.113.7/tcp/4001/p2p/{P2}/p2p-circuit/p2p/{P1}");
+        let errors = errors_for(&format!(
+            r#"{{"infrastructure":{{"allowed_peers":["{P1}"]}},
+                 "relay":{{"client":{{"static_relays":["{circuit}"]}}}}}}"#
+        ));
+        assert!(
+            !errors.iter().any(|e| matches!(
+                e,
+                ConfigError::StaticCandidateUnusable { .. }
+                    | ConfigError::StaticCandidateUnauthorized { .. }
+            )),
+            "a circuit route to an authorized peer is usable: {errors:?}"
+        );
+        let foreign =
+            format!("/ip4/203.0.113.7/tcp/4001/p2p/{P2}/p2p-circuit/ip4/10.0.0.9/tcp/1/p2p/{P1}");
+        let errors = errors_for(&format!(
+            r#"{{"infrastructure":{{"allowed_peers":["{P1}"]}},
+                 "autonat":{{"client":{{"static_servers":["{foreign}"]}}}}}}"#
+        ));
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ConfigError::StaticCandidateUnusable { role, reason, .. }
+                    if *role == "autonat.client.static_servers"
+                        && reason.contains("follows /p2p-circuit")
+            )),
+            "a foreign destination is refused by name: {errors:?}"
         );
     }
 
