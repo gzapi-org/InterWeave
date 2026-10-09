@@ -305,6 +305,11 @@ ipc:
     max_missed: integer[1..10] = 3
     # Cross-field when enabled=true: response_timeout < interval.
     # If require_for_endpoint_lease=true, keepalive.enabled must also be true.
+    # While enabled, interval + response_timeout must not exceed 120 s, the
+    # client's CLIENT_SILENCE_TIMEOUT (LOCAL-IPC.md §Disconnect/reconnect and
+    # optional keepalive, A 2026-10-08; refused at profile load, #228): the
+    # interval's effective ceiling is 118 s against response_timeout's 2 s floor,
+    # though the field's own range stays 10s..5m.
 observability:
   log_level: enum[error,warn,info,debug] = info
   payload_logging: literal[false]

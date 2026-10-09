@@ -3527,9 +3527,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "interweave-independent-codecs"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "interweave-interoperability-tests"
 version = "0.0.0"
 dependencies = [
+ "futures",
+ "interweave-independent-codecs",
+ "interweave-ipc-protocol",
+ "interweave-ipc-server",
  "interweave-local-client-api",
  "interweave-local-client-conformance-tests",
  "interweave-profile-config",
@@ -3537,6 +3549,11 @@ dependencies = [
  "interweave-test-support",
  "interweave-transport-api",
  "interweave-transport-composition",
+ "interweave-transport-libp2p",
+ "interweave-transport-runtime",
+ "interweave-trust-api",
+ "libp2p",
+ "serde_json",
  "serde_norway",
  "tempfile",
  "tokio",

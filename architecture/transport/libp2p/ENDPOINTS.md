@@ -23,17 +23,19 @@ DirectMessageV2 {
   destination_endpoint_len: u8,       // 0 => receiver default; otherwise 1..64
   destination_endpoint: ASCII bytes,
   media_type_len: u8,
-  media_type: ASCII bytes,
+  media_type: printable ASCII bytes (0x20..0x7E),
   payload_len: u32,
   payload: bytes <= effective profile max_payload_bytes <= 49152,
 }
 ```
 
-`media_type_len = 0` encodes **absence**. No empty media-type string exists on the wire. A non-zero length encodes a present ASCII media type and maps to `media_present = 1`; zero maps to `media_present = 0` in `DirectContentFingerprintV1`.
+`media_type_len = 0` encodes **absence**. No empty media-type string exists on the wire. A non-zero length encodes a present printable-ASCII media type (0x20..0x7E, A 2026-10-08) and maps to `media_present = 1`; zero maps to `media_present = 0` in `DirectContentFingerprintV1`.
 
 The codec rejects invalid endpoint grammar, invalid lengths, or oversized declarations before allocating based on peer-controlled sizes.
 
 Conceptual response:
+
+Conceptual fields; the byte layout — a leading tag byte, 1 Accepted or 2 Rejected, before the fields below — is DIRECT.md §Response byte layout, with its frozen vectors (A 2026-10-08).
 
 ```text
 AcceptedV2 {

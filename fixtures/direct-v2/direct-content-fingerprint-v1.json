@@ -16,7 +16,7 @@
     "hash": "SHA-256",
     "notes": [
       "media_present is exactly 0 or 1. Absent media uses 0 and has NO length field.",
-      "Present media uses 1, must be 1..128 ASCII bytes, and includes its two-byte big-endian length.",
+      "Present media uses 1, must be 1..128 printable ASCII bytes (0x20..0x7E), and includes its two-byte big-endian length.",
       "An empty media type is INVALID - it is not an alias for absence, and the two must not collide.",
       "payload_len is the exact byte length and always precedes the payload, including when it is empty.",
       "No JSON, no UTF-8 normalization, and no endpoint field, message ID, or timestamp participates."

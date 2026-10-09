@@ -47,8 +47,13 @@ pub enum FingerprintError {
         /// Bytes supplied.
         got: usize,
     },
-    /// A present media type was not ASCII.
-    MediaTypeNotAscii,
+    /// A present media type held a byte outside printable ASCII
+    /// (0x20..=0x7E): a control byte or DEL as much as a non-ASCII one.
+    /// Printable, not merely ASCII, by architect-cto's ruling of
+    /// 2026-10-08 (01a11c8d): the schemas and the frame decoders already
+    /// held that domain, and a wider one here hashed media types no
+    /// accepted frame can carry.
+    MediaTypeNotPrintable,
 }
 
 impl core::fmt::Display for FingerprintError {
@@ -63,7 +68,7 @@ impl core::fmt::Display for FingerprintError {
             Self::MediaTypeTooLong { got } => {
                 write!(f, "media type is {got} bytes; the limit is 128")
             }
-            Self::MediaTypeNotAscii => write!(f, "media type is not ASCII"),
+            Self::MediaTypeNotPrintable => write!(f, "media type is not printable ASCII"),
         }
     }
 }
@@ -80,7 +85,7 @@ impl core::error::Error for FingerprintError {}
 /// rather than encoded.
 ///
 /// # Errors
-/// Returns [`FingerprintError`] for an empty, over-long, or non-ASCII
+/// Returns [`FingerprintError`] for an empty, over-long, or non-printable-ASCII
 /// media type.
 pub fn direct_content_fingerprint_v1(
     media_type: Option<&str>,
@@ -94,8 +99,8 @@ pub fn direct_content_fingerprint_v1(
             if media.is_empty() {
                 return Err(FingerprintError::EmptyMediaType);
             }
-            if !media.is_ascii() {
-                return Err(FingerprintError::MediaTypeNotAscii);
+            if !media.bytes().all(|b| (0x20..=0x7e).contains(&b)) {
+                return Err(FingerprintError::MediaTypeNotPrintable);
             }
             let bytes = media.as_bytes();
             if bytes.len() > 128 {
@@ -158,8 +163,22 @@ mod tests {
         );
         assert_eq!(
             direct_content_fingerprint_v1(Some("text/\u{e9}"), b""),
-            Err(FingerprintError::MediaTypeNotAscii)
+            Err(FingerprintError::MediaTypeNotPrintable)
         );
+    }
+
+    #[test]
+    fn a_control_byte_or_del_is_refused_before_hashing() {
+        // The printable edges hash; one past each does not. A tab and a NUL
+        // are ASCII, which is what the old check let through.
+        assert!(direct_content_fingerprint_v1(Some(" ~"), b"").is_ok());
+        for media in ["a\tb", "a\u{0}", "a\u{1f}", "a\u{7f}"] {
+            assert_eq!(
+                direct_content_fingerprint_v1(Some(media), b""),
+                Err(FingerprintError::MediaTypeNotPrintable),
+                "{media:?}"
+            );
+        }
     }
 
     #[test]
