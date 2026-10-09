@@ -1009,8 +1009,8 @@ fn read_names(
         return Err(earlier());
     };
     let returned = ReadReturned(gate);
-    // No budget left -- spent waiting for an earlier read, or none to
-    // begin with: refuse without starting a read that could only be
+    // No budget left -- spent waiting for an earlier read, or spent
+    // before any wait: refuse without starting a read that could only be
     // abandoned (`a_read_with_no_budget_left_starts_no_thread`). The
     // gate goes back as `returned` drops.
     if std::time::Instant::now() >= until {
