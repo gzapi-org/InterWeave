@@ -1096,7 +1096,9 @@ impl ConnectivityConfig {
     /// AND THE REUSE NARROWS THE SCHEMA'S TYPE, which is worth saying
     /// where the widening commit will look. The schema says
     /// `multiaddr-with-peer-id`; `validate_address_grammar` accepts
-    /// `ip4|ip6|dns4|dns6` plus `tcp` and exactly four components, so a
+    /// `ip4|ip6|dns4|dns6` plus `tcp` and four components -- or a circuit
+    /// route whose relay route is that form (ADR-0052 rule 9, A
+    /// 2026-10-09) -- so a
     /// relay published as `/dns/relay.example.net/tcp/4001/p2p/<id>` —
     /// the bare `/dns` form — or over QUIC is refused here.
     ///
@@ -1115,14 +1117,24 @@ impl ConnectivityConfig {
         trusted: &BTreeSet<TransportIdentity>,
         errors: &mut Vec<ConfigError>,
     ) {
-        for (role, candidates) in [
+        // THE DIRECT FORM ONLY, by role (ADR-0052 rule 9, A 2026-10-09):
+        // the grammar admits a circuit route, the static bootstrap peers'
+        // route to a relay-only peer, but a relay reached through a
+        // circuit is not a relay -- the relay client refuses it at start
+        // -- and a probe over a circuit says nothing of direct
+        // reachability, while the AutoNAT client would key the server on
+        // the relay's id. Refused here, named
+        // (`an_infrastructure_candidate_refuses_a_circuit_route_by_role`).
+        for (role, candidates, circuit_refusal) in [
             (
                 "autonat.client.static_servers",
                 &self.autonat.client.static_servers,
+                "an AutoNAT server must be reached directly, not through a circuit",
             ),
             (
                 "relay.client.static_relays",
                 &self.relay.client.static_relays,
+                "a relay must be reached directly, not through a circuit",
             ),
         ] {
             for candidate in candidates {
@@ -1142,6 +1154,13 @@ impl ConnectivityConfig {
                     // checks the address's GRAMMAR, never its length.
                     // Review finding on PR #80.
                     Ok((address, peer)) => {
+                        if crate::is_circuit_route(address) {
+                            errors.push(ConfigError::StaticCandidateUnusable {
+                                role,
+                                entry: candidate.clone(),
+                                reason: circuit_refusal,
+                            });
+                        }
                         // BOTH COMPLAINTS, not the first one. The peer is
                         // in hand here -- the split produced it -- so
                         // returning after the length check made an
@@ -1925,6 +1944,70 @@ mod tests {
                 ConfigError::StaticCandidateUnauthorized { peer, .. } if peer.as_str() == P2
             )),
             "authorizing one peer must not authorize another"
+        );
+    }
+
+    /// ADR-0052 rule 9 (A 2026-10-09): one grammar, and the two
+    /// infrastructure lists take its direct form only -- a circuit route
+    /// there is refused by role, each list named with its own reason,
+    /// though its destination is authorized. A foreign destination is
+    /// refused by shape as everywhere. The control: the same relay and
+    /// server written direct are usable.
+    #[test]
+    fn an_infrastructure_candidate_refuses_a_circuit_route_by_role() {
+        let circuit = format!("/ip4/203.0.113.7/tcp/4001/p2p/{P2}/p2p-circuit/p2p/{P1}");
+        let errors = errors_for(&format!(
+            r#"{{"infrastructure":{{"allowed_peers":["{P1}"]}},
+                 "relay":{{"client":{{"static_relays":["{circuit}"]}}}},
+                 "autonat":{{"client":{{"static_servers":["{circuit}"]}}}}}}"#
+        ));
+        for (list, reason) in [
+            (
+                "relay.client.static_relays",
+                "a relay must be reached directly, not through a circuit",
+            ),
+            (
+                "autonat.client.static_servers",
+                "an AutoNAT server must be reached directly, not through a circuit",
+            ),
+        ] {
+            assert!(
+                errors.iter().any(|e| matches!(
+                    e,
+                    ConfigError::StaticCandidateUnusable { role, reason: got, .. }
+                        if *role == list && *got == reason
+                )),
+                "{list} refuses a circuit route by role: {errors:?}"
+            );
+        }
+        let foreign =
+            format!("/ip4/203.0.113.7/tcp/4001/p2p/{P2}/p2p-circuit/ip4/10.0.0.9/tcp/1/p2p/{P1}");
+        let errors = errors_for(&format!(
+            r#"{{"infrastructure":{{"allowed_peers":["{P1}"]}},
+                 "autonat":{{"client":{{"static_servers":["{foreign}"]}}}}}}"#
+        ));
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ConfigError::StaticCandidateUnusable { reason, .. }
+                    if reason.contains("follows /p2p-circuit")
+            )),
+            "a foreign destination is refused by shape: {errors:?}"
+        );
+        // A host so named is a direct address here too: the role rule
+        // reads the marker where the grammar does.
+        let direct = format!("/ip4/203.0.113.7/tcp/4001/p2p/{P1}");
+        let named = format!("/dns4/p2p-circuit/tcp/4001/p2p/{P1}");
+        let errors = errors_for(&format!(
+            r#"{{"infrastructure":{{"allowed_peers":["{P1}"]}},
+                 "relay":{{"client":{{"static_relays":["{named}"]}}}},
+                 "autonat":{{"client":{{"static_servers":["{direct}"]}}}}}}"#
+        ));
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::StaticCandidateUnusable { .. })),
+            "the control: the direct form is usable: {errors:?}"
         );
     }
 
