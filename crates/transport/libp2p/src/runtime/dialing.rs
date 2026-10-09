@@ -931,12 +931,17 @@ pub(super) fn learn_discovered(
     now_ms: u64,
 ) -> usize {
     let mut remembered = 0;
+    let owner = peer.as_str().parse::<PeerId>().ok();
     for text in addresses {
-        let verdict = match text.parse::<Multiaddr>() {
-            Ok(address) => boundary
-                .operator
-                .admits_discovered(&address, boundary.own_listeners.iter().map(String::as_str)),
-            Err(_) => Err(interweave_transport_runtime::reachability::CandidateRefusal::NotLiteral),
+        let verdict = match (text.parse::<Multiaddr>(), &owner) {
+            (Ok(address), Some(owner)) => boundary.operator.admits_discovered(
+                &address,
+                owner,
+                boundary.own_listeners.iter().map(String::as_str),
+            ),
+            (Ok(_), None) | (Err(_), _) => {
+                Err(interweave_transport_runtime::reachability::CandidateRefusal::NotLiteral)
+            }
         };
         if !boundary
             .stores
