@@ -4,10 +4,12 @@
 //! PRODUCTION relay server field (`relay_server_driver::build_behaviour`,
 //! `RELAY.md` §8's defaults) in a bare Swarm on loopback, told its own
 //! listen address as its external address the way the AutoNAT adapter's
-//! `publish` tells the runtime's Swarm a verdict. Nothing else is
-//! bypassed: its classifier admits only the peers it is given, as
+//! `publish` tells the runtime's Swarm a verdict. The field itself is
+//! unchanged: its classifier admits only the peers it is given, as
 //! infrastructure, and the hop gate reads the external set as it does in
-//! a daemon.
+//! a daemon. What a daemon puts AROUND the field is absent here -- its
+//! inbound retention arm, the relay keepalive and pre-auth admission --
+//! so nothing of those is exercised on the relay's side.
 //!
 //! Why not a daemon configured as the relay: `RELAY.md` §8 offers hop
 //! only while the relay holds a VERIFIED direct address, a daemon's only

@@ -385,6 +385,11 @@ fn concrete(raw: &str, listen: &str, route: Option<&str>) -> String {
         raw = raw.replace(&token, stranger().as_str());
     }
     if let Some(route) = route {
+        assert_eq!(
+            raw.matches("discovery:\n  providers:\n").count(),
+            1,
+            "the example has one providers list for the static entry"
+        );
         raw = raw.replacen(
             "discovery:\n  providers:\n",
             &format!(
