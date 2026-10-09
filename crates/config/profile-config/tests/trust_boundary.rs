@@ -115,8 +115,11 @@ endpoints:
 ";
     let p = embedded_paths(&app);
     let control = desktop_paths(&app.join("desktop"));
-    for paths in [&p, &control] {
-        create_private_dir_within(paths.config_dir(), p.boundary()).expect("config dir");
+    // The app's boundary without the runtime root, to make the control's
+    // directory outside it.
+    let unconfined = TrustBoundary::new(&app).expect("a boundary");
+    for (paths, boundary) in [(&p, p.boundary()), (&control, &unconfined)] {
+        create_private_dir_within(paths.config_dir(), boundary).expect("config dir");
         std::fs::write(paths.config_file(), document).expect("write");
         std::fs::set_permissions(paths.config_file(), std::fs::Permissions::from_mode(0o644))
             .expect("chmod");
@@ -145,4 +148,37 @@ fn the_trust_overlay_persists_under_the_boundary() {
     assert!(path.exists());
     assert!(TrustOverlay::load(&path, &none).is_err(), "the control");
     TrustOverlay::load_within(&path, &none, p.boundary()).expect("read under the boundary");
+}
+
+/// Gate (d)'s row (architect-cto, 2026-10-09): a private directory the
+/// embedded paths' boundary is asked about outside the runtime root --
+/// here under a `files/` the walk alone accepts, which is the control --
+/// is refused naming the root, and nothing is created there.
+#[test]
+fn a_private_dir_under_files_is_refused_by_the_runtime_root() {
+    let (_root, _open, app) = app_under_a_refused_ancestor();
+    let p = embedded_paths(&app);
+    let files = app.join("files");
+    std::fs::create_dir(&files).expect("mkdir");
+    std::fs::set_permissions(&files, std::fs::Permissions::from_mode(0o711)).expect("chmod");
+    let store = files.join("human");
+    let walk_alone = TrustBoundary::new(&app).expect("a boundary");
+    create_private_dir_within(&store, &walk_alone).expect("the control: the walk accepts it");
+    std::fs::remove_dir(&store).expect("rmdir");
+    match create_private_dir_within(&store, p.boundary()) {
+        Err(PersistError::DirectoryNotPrivate { path, detail }) => {
+            assert_eq!(path, store);
+            assert!(detail.contains("outside the runtime root"), "{detail}");
+            assert!(
+                detail.contains(&app.join("interweave").display().to_string()),
+                "{detail}"
+            );
+        }
+        other => panic!("refused outside the root: {other:?}"),
+    }
+    assert!(!store.exists(), "nothing created");
+    assert_eq!(
+        p.boundary().runtime_root(),
+        Some(app.join("interweave").as_path())
+    );
 }

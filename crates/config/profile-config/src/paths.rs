@@ -228,7 +228,9 @@ impl ProfilePaths {
     /// `<boundary>/interweave`, directly under the boundary -- never
     /// under a platform-owned `0771` directory such as Android's `files/`
     /// or `cache/` -- and the four offline roles under it, each with the
-    /// profile's tree beneath. No runtime directory: an embedded runtime
+    /// profile's tree beneath; that root is the boundary's runtime root,
+    /// outside which every private directory is refused. No runtime
+    /// directory: an embedded runtime
     /// serves no socket. Derivation only: whoever writes creates each
     /// directory owner-only, the root included.
     ///
@@ -237,6 +239,7 @@ impl ProfilePaths {
     /// escape or hide in a path.
     pub fn resolve_embedded(profile: &str, boundary: TrustBoundary) -> Result<Self, PersistError> {
         validate_profile(profile)?;
+        let boundary = boundary.with_runtime_root(NAMESPACE);
         let root = boundary.path().join(NAMESPACE);
         let under = |role: &str| root.join(role).join(PROFILES).join(profile);
         Ok(Self {

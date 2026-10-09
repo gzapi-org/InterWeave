@@ -58,8 +58,23 @@ pub const OWNER_ONLY_DIR: u32 = 0o700;
 /// (`a_directory_outside_the_boundary_is_walked_to_the_root`): the
 /// boundary narrows the walk only for what it covers, so a wrong one
 /// refuses rather than excuses.
+///
+/// THE RUNTIME ROOT, where the binding has one (architect-cto's ruling
+/// of 2026-10-09 on gate (d) of plan §20): the directory every private
+/// directory of an embedded runtime lies under, `<boundary>/interweave`.
+/// The walk cannot keep a private directory out of a platform directory
+/// that passes ADR-0028's rule -- Android's `files/` is `0771` with the
+/// app's own group, the group-of-one case the rule accepts -- so every
+/// `_within` function refuses a directory outside the root before it
+/// walks, and a path that resolves outside it after, naming the root
+/// (`a_private_dir_outside_the_runtime_root_is_refused_naming_it`).
+/// Only [`ProfilePaths::resolve_embedded`](crate::ProfilePaths::resolve_embedded)
+/// sets one; the desktop's boundary has none.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrustBoundary(PathBuf);
+pub struct TrustBoundary {
+    path: PathBuf,
+    runtime_root: Option<PathBuf>,
+}
 
 impl TrustBoundary {
     /// `/`: every ancestor judged -- the boundary of the daemon,
@@ -67,7 +82,10 @@ impl TrustBoundary {
     /// every function here without `_within` in its name.
     #[must_use]
     pub fn root() -> Self {
-        Self(PathBuf::from("/"))
+        Self {
+            path: PathBuf::from("/"),
+            runtime_root: None,
+        }
     }
 
     /// `dir`, as the platform reports it, resolved on disk now.
@@ -84,19 +102,84 @@ impl TrustBoundary {
                 detail: "the trust boundary is not a directory".to_owned(),
             });
         }
-        Ok(Self(canonical))
+        Ok(Self {
+            path: canonical,
+            runtime_root: None,
+        })
+    }
+
+    /// This boundary with `<boundary>/<name>` as its runtime root: `name`
+    /// one plain component, so the root lies directly under the boundary.
+    pub(crate) fn with_runtime_root(self, name: &str) -> Self {
+        debug_assert!(
+            matches!(
+                Path::new(name).components().collect::<Vec<_>>().as_slice(),
+                [std::path::Component::Normal(_)]
+            ),
+            "a runtime root is one component under the boundary"
+        );
+        let runtime_root = Some(self.path.join(name));
+        Self {
+            path: self.path,
+            runtime_root,
+        }
     }
 
     /// The boundary as resolved.
     #[must_use]
     pub fn path(&self) -> &Path {
-        &self.0
+        &self.path
+    }
+
+    /// The runtime root every private directory must lie under, where
+    /// the binding has one.
+    #[must_use]
+    pub fn runtime_root(&self) -> Option<&Path> {
+        self.runtime_root.as_deref()
     }
 
     /// Whether the walk judges `dir`: the boundary itself or below it,
     /// by whole components.
     fn covers(&self, dir: &Path) -> bool {
-        dir.starts_with(&self.0)
+        dir.starts_with(&self.path)
+    }
+
+    /// Refuse `dir` outside the runtime root, by its text: absolute,
+    /// no `..`, at or under the root by whole components. Asked of what
+    /// a caller names, before any walk; [`Self::confine_resolved`]
+    /// asks it again of where the path led.
+    fn confine(&self, dir: &Path) -> Result<(), PersistError> {
+        let Some(root) = &self.runtime_root else {
+            return Ok(());
+        };
+        let inside = dir.is_absolute()
+            && !dir
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+            && dir.starts_with(root);
+        if inside {
+            Ok(())
+        } else {
+            Err(PersistError::DirectoryNotPrivate {
+                path: dir.to_path_buf(),
+                detail: format!("outside the runtime root {}", root.display()),
+            })
+        }
+    }
+
+    /// [`Self::confine`] of a resolved path: a link under the root that
+    /// leads out of it is refused there, `dir` named.
+    fn confine_resolved(&self, dir: &Path, resolved: PathBuf) -> Result<PathBuf, PersistError> {
+        match self.confine(&resolved) {
+            Ok(()) => Ok(resolved),
+            Err(PersistError::DirectoryNotPrivate { detail, .. }) => {
+                Err(PersistError::DirectoryNotPrivate {
+                    path: dir.to_path_buf(),
+                    detail: format!("it resolves to {}, {detail}", resolved.display()),
+                })
+            }
+            Err(other) => Err(other),
+        }
     }
 
     /// `refused` at `at`, saying so when `at` is the boundary itself, so
@@ -105,7 +188,7 @@ impl TrustBoundary {
     fn name(&self, at: &Path, refused: PersistError) -> PersistError {
         match refused {
             PersistError::DirectoryNotPrivate { path, detail }
-                if at == self.0.as_path() && self.0.as_path() != Path::new("/") =>
+                if at == self.path.as_path() && self.path.as_path() != Path::new("/") =>
             {
                 PersistError::DirectoryNotPrivate {
                     path,
@@ -147,6 +230,7 @@ pub fn create_private_dir(dir: &Path) -> Result<(), PersistError> {
 /// # Errors
 /// As [`create_private_dir`].
 pub fn create_private_dir_within(dir: &Path, boundary: &TrustBoundary) -> Result<(), PersistError> {
+    boundary.confine(dir)?;
     #[cfg(unix)]
     {
         let uid = effective_uid()?;
@@ -591,7 +675,9 @@ pub fn resolve_private_dir_within(
     dir: &Path,
     boundary: &TrustBoundary,
 ) -> Result<PathBuf, PersistError> {
-    resolve_private_dir_in(dir, effective_uid()?, boundary)
+    boundary.confine(dir)?;
+    let resolved = resolve_private_dir_in(dir, effective_uid()?, boundary)?;
+    boundary.confine_resolved(dir, resolved)
 }
 
 /// [`resolve_private_dir`] for `uid` -- apart so a test can name a uid
@@ -693,7 +779,9 @@ pub fn resolve_owned_private_dir_within(
     dir: &Path,
     boundary: &TrustBoundary,
 ) -> Result<PathBuf, PersistError> {
-    resolve_owned_private_dir_in(dir, effective_uid()?, boundary)
+    boundary.confine(dir)?;
+    let resolved = resolve_owned_private_dir_in(dir, effective_uid()?, boundary)?;
+    boundary.confine_resolved(dir, resolved)
 }
 
 /// [`resolve_owned_private_dir`] for `uid`, apart so a test can name a
@@ -785,7 +873,9 @@ pub fn resolve_guarded_dir_within(
     dir: &Path,
     boundary: &TrustBoundary,
 ) -> Result<PathBuf, PersistError> {
-    resolve_guarded_dir_in(dir, effective_uid()?, boundary)
+    boundary.confine(dir)?;
+    let resolved = resolve_guarded_dir_in(dir, effective_uid()?, boundary)?;
+    boundary.confine_resolved(dir, resolved)
 }
 
 /// [`resolve_guarded_dir`] for `uid`.
@@ -2918,5 +3008,69 @@ mod tests {
             &file,
         );
         TrustBoundary::new(root.path()).expect("the control");
+    }
+
+    /// The runtime root (gate (d) of plan §20, architect-cto 2026-10-09):
+    /// every `_within` function refuses a directory outside it, by its
+    /// text before any walk -- under the root's sibling, or climbing out
+    /// with `..` -- and by where it resolves after, a link under the
+    /// root leading out; each refusal names the root. The controls: the
+    /// same directory accepted by the boundary without a root, and one
+    /// under the root accepted with it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_private_dir_outside_the_runtime_root_is_refused_naming_it() {
+        let (_root, _open, b) = boundary_under_a_refused_ancestor();
+        let walk_alone = TrustBoundary::new(&b).expect("a boundary");
+        let confined = walk_alone.clone().with_runtime_root("interweave");
+        let root = b.join("interweave");
+        fs::create_dir(&root).expect("mkdir");
+        chmod(&root, 0o700);
+        let inside = private_under(&root, &[], 0o700);
+        let outside = private_under(&b, &["files"], 0o711);
+        let named = |result: Result<PathBuf, PersistError>, at: &Path| {
+            let detail = refused_at(result, at);
+            assert!(
+                detail.contains(&format!("outside the runtime root {}", root.display())),
+                "{detail}"
+            );
+        };
+
+        resolve_private_dir_within(&outside, &walk_alone).expect("the control: the walk alone");
+        resolve_private_dir_within(&inside, &confined).expect("the control: under the root");
+        named(resolve_private_dir_within(&outside, &confined), &outside);
+        named(
+            resolve_owned_private_dir_within(&outside, &confined),
+            &outside,
+        );
+        named(resolve_guarded_dir_within(&outside, &confined), &outside);
+        let climbing = root.join("..").join("files").join("p");
+        named(resolve_private_dir_within(&climbing, &confined), &climbing);
+        // Created through `..`, the nearest existing directory would be
+        // `files/` as the kernel resolves it, and the new one made there:
+        // the text is what refuses it.
+        let climbing_new = root.join("..").join("files").join("r");
+        named(
+            create_private_dir_within(&climbing_new, &confined).map(|()| PathBuf::new()),
+            &climbing_new,
+        );
+        assert!(!b.join("files").join("r").exists(), "nothing created");
+        named(
+            create_private_dir_within(&b.join("files").join("q"), &confined)
+                .map(|()| PathBuf::new()),
+            &b.join("files").join("q"),
+        );
+        assert!(!b.join("files").join("q").exists(), "nothing created");
+        named(
+            write_private_atomic_within(&outside.join("f"), b"x", &confined)
+                .map(|()| PathBuf::new()),
+            &outside,
+        );
+
+        let out = root.join("out");
+        std::os::unix::fs::symlink(b.join("files"), &out).expect("symlink");
+        let through = out.join("p");
+        let detail = refused_at(resolve_private_dir_within(&through, &confined), &through);
+        assert!(detail.contains("outside the runtime root"), "{detail}");
     }
 }
