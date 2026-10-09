@@ -941,8 +941,9 @@ mod tests {
     /// with no `previous` (`route_established`), at the acceptance and at
     /// the take alike; a route already held begins nothing; a session that
     /// exchanged nothing is owed nothing; and a route begun while the peer
-    /// is not connected is owed nothing until it connects -- then as a
-    /// return (A 2026-10-09).
+    /// is not connected is owed nothing until it connects -- then as its
+    /// begin, `route_established`, and a later reconnect as a return (A
+    /// 2026-10-09).
     #[test]
     fn a_route_begin_is_owed_the_peers_path_with_no_previous() {
         use PeerPath::Relayed;
@@ -1141,6 +1142,41 @@ mod tests {
             paths(&notices.take_paths("s", usize::MAX)),
             [(None, Relayed, "reconnected".to_owned(), 2)],
             "a return, not the revoked route's begin"
+        );
+    }
+
+    /// The `connected` map follows the runtime's path and its disconnect,
+    /// and a route that begins is told the path NOW: after a change, the
+    /// new path; after a disconnect, nothing until the peer connects again
+    /// (#248 review F4 -- the two lines that keep the map, pinned).
+    #[test]
+    fn a_route_begin_is_told_the_path_now_and_nothing_while_disconnected() {
+        use PeerPath::{Direct, Relayed};
+        let notices = SessionNotices::default();
+        notices.register("after_change", None);
+        notices.register("after_disconnect", None);
+        let p = peer();
+        notices.connected(&p, Relayed, 1);
+        notices.path_changed(&p, Relayed, Direct, "direct_established", 2);
+        notices.sent_to("after_change", &p);
+        let told = paths(&notices.take_paths("after_change", usize::MAX));
+        assert!(
+            matches!(told.as_slice(), [(None, Direct, class, _)] if class == "route_established"),
+            "the path now, not the first one: {told:?}"
+        );
+        notices.disconnected(&p, DisconnectReason::Closed);
+        notices.sent_to("after_disconnect", &p);
+        assert!(
+            notices
+                .take_paths("after_disconnect", usize::MAX)
+                .is_empty(),
+            "disconnected: no path to tell"
+        );
+        notices.connected(&p, Relayed, 3);
+        assert_eq!(
+            paths(&notices.take_paths("after_disconnect", usize::MAX)),
+            [(None, Relayed, "route_established".to_owned(), 3)],
+            "announced at the connection as its begin"
         );
     }
 }
