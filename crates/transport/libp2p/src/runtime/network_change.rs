@@ -604,6 +604,31 @@ mod tests {
         assert!(held.holds(&x), "unheld means bound and not held");
     }
 
+    /// The module note's "bounded spurious pair, never a stuck set": the
+    /// VIEW lagging the listeners across two moves -- X gone and back on
+    /// the listeners before the view saw it go -- reports a move that
+    /// already reversed, and the next view reverses it again; X ends held.
+    #[test]
+    fn a_view_lagging_two_moves_makes_one_spurious_pair_and_ends_held() {
+        let mut set = NetworkSet::default();
+        let x: Multiaddr = "/ip4/192.168.1.5/tcp/4001".parse().expect("valid");
+        let _ = set.observe_listeners(std::iter::once(&x));
+        let _ = set.observe_view(&[ip("192.168.1.5")]);
+        // The listeners lose X and regain it: the view holds X, so no
+        // change either way.
+        assert_eq!(set.observe_listeners(std::iter::empty()), None);
+        assert_eq!(set.observe_listeners(std::iter::once(&x)), None);
+        // The late view drops X: the spurious removal ...
+        assert_eq!(set.observe_view(&[]), change(&["192.168.1.5"], &[]));
+        // ... and the next view names it again: the spurious addition.
+        assert_eq!(
+            set.observe_view(&[ip("192.168.1.5")]),
+            change(&[], &["192.168.1.5"])
+        );
+        assert!(set.holds(&x), "never a stuck set");
+        assert_eq!(set.observe_view(&[ip("192.168.1.5")]), None, "and quiet");
+    }
+
     #[test]
     fn a_first_view_removes_nothing_it_never_named() {
         let mut set = NetworkSet::default();
