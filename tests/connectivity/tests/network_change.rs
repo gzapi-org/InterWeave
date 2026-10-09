@@ -285,9 +285,9 @@ async fn a_removal_closes_what_ran_from_the_departed_ip_and_keeps_the_rest() {
     }
 }
 
-/// The platform's view, with every listener still bound: the first view
-/// agreeing with the listeners moves nothing, and an empty one -- offline
-/// -- takes the private IP off the host, so what ran from it closes and
+/// The platform's view, with every listener still bound: a first view
+/// adding an address closes nothing, and an empty one -- offline -- takes
+/// the private IP off the host, so what ran from it closes and
 /// the loopback connection stays. The hand-over seen before the listener
 /// poll, which on a device is 10 s behind or never comes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -345,24 +345,33 @@ async fn a_view_without_the_ip_closes_what_ran_from_it_while_its_listener_is_sti
     )
     .await;
 
-    // The first view names what the listeners bound: nothing moved.
+    // The first view must be READ before the empty one is sent -- the
+    // latest view replaces one not yet read, and a first view removes
+    // nothing it never named -- so it names an address the listeners do
+    // not, and its reading is the change it reports. Nothing closes for
+    // it: an addition invalidates nothing. (A view that only agrees with
+    // the listeners is no change: `the_two_sources_report_one_move_once`.)
+    let extra = std::net::IpAddr::from(std::net::Ipv4Addr::new(10, 255, 0, 6));
     subject.runtime.network_changed(NetworkView {
-        addresses: vec![ip.into(), "127.0.0.1".parse().expect("an ip")],
+        addresses: vec![ip.into(), "127.0.0.1".parse().expect("an ip"), extra],
     });
     let events = drive(
         &mut subject.runtime,
         &mut others,
-        "settling",
-        WINDOW,
-        None::<fn(&[SwarmEvent]) -> bool>,
+        "the first view read",
+        PATIENCE,
+        Some(|events: &[SwarmEvent]| {
+            events
+                .iter()
+                .any(|e| matches!(e, SwarmEvent::NetworkChanged { .. }))
+        }),
     )
     .await;
     assert!(
-        !events.iter().any(|e| matches!(
-            e,
-            SwarmEvent::NetworkChanged { .. } | SwarmEvent::Disconnected { .. }
-        )),
-        "a view that agrees is no change: {events:?}"
+        !events
+            .iter()
+            .any(|e| matches!(e, SwarmEvent::Disconnected { .. })),
+        "an addition closes nothing: {events:?}"
     );
 
     // OFFLINE: the private IP departs though its listener is bound.
@@ -388,7 +397,7 @@ async fn a_view_without_the_ip_closes_what_ran_from_it_while_its_listener_is_sti
     assert!(
         events.iter().any(
             |e| matches!(e, SwarmEvent::NetworkChanged { removed, added }
-            if *removed == vec![std::net::IpAddr::from(ip)] && added.is_empty())
+            if removed.contains(&std::net::IpAddr::from(ip)) && added.is_empty())
         ),
         "{events:?}"
     );
