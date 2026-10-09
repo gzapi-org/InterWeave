@@ -295,10 +295,12 @@ ui_texts! {
 /// 01a12001-199d-75d9-8e8d-cceb01ea9bbf): person-facing copy is never
 /// self-authored, so a value added later ships as a placeholder its
 /// author drafts and language-culture finalises. A drafted value carries
-/// a line comment reading `PLACEHOLDER (en)` at the end of its line, or
-/// on the line above it when the value wraps. The commit that takes
-/// language-culture's final text removes it, so a search for that
-/// comment lists every value still a draft. The module keeps its
+/// a line comment at the end of its line, or on the line above it when
+/// the value wraps: the word PLACEHOLDER in capitals, a space, and the
+/// locale in parentheses, `(en)`. This paragraph spells the mark out
+/// rather than writing it, so a search for the mark finds only values.
+/// The commit that takes language-culture's final text removes it, so
+/// that search lists every value still a draft. The module keeps its
 /// Stage 14 name, from when these words shipped unreviewed under
 /// architect-cto's ruling on relay message
 /// 01a0fe85-6b39-7d6e-8b2a-f0cc4280c7a8. What every value must pass is
