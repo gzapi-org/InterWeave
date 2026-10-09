@@ -94,6 +94,16 @@ transport:
       version: literal[2] = 2
       client:
         enabled: literal[true] = true
+        # multiaddr-with-peer-id, wherever it appears (static_servers, static_relays,
+        # static-bootstrap peers): either /<host>/<value>/<transport>/<port>/p2p/<id>
+        # or a CIRCUIT ROUTE <relay route>/p2p/<relay>/p2p-circuit/p2p/<peer> --
+        # the relay route the same four-component grammar, the prefix ending in
+        # the relay's /p2p/<relay>, exactly /p2p/<peer> after /p2p-circuit (one
+        # circuit; a foreign destination or a second circuit refused by shape).
+        # Both are OPERATOR addresses (ADR-0052 rule 9, A 2026-10-09): the one
+        # route a relay-only peer has enters here or through AddAddress, never
+        # through discovery; whether this node may dial through the relay is the
+        # gate's question at dial time (RelayCircuit), not the grammar's.
         static_servers: list[multiaddr-with-peer-id, max=16]
         use_authorized_identify_servers: bool = false
         required_distinct_successes: integer[1..4] = 2

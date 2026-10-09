@@ -208,3 +208,48 @@ connection exists, inbound or through an operator route. The hook is
 `admits_discovered` (6d2c1e92); this statement followed the hook's
 correction on the same PR rather than preceding it, which rule 8 asks
 for and the record says plainly.
+
+### Amendment 2026-10-09 — The profile door admits a circuit route
+
+**Trigger.** Stage 17's relay pair (p2p-network-dev-02, GZCoord
+01a1208f): the dialer daemon exited at start because profile-config's
+address grammar takes exactly `/<host>/<value>/<transport>/<port>[/p2p/<id>]`
+and refused a static-bootstrap entry of the form
+`/ip4/…/tcp/…/p2p/<relay>/p2p-circuit/p2p/<peer>`. With discovery, the
+Kademlia stash and mDNS refusing every circuit by rule 8, and the
+operator's `AddAddress` command reachable by no IPC verb, a relay-only
+peer could be dialled only if IT dialled first: two NATed peers sharing
+a static relay both reserve and neither can ever open the conversation.
+
+**Decision.** Rule 9 names profile configuration as an operator door for
+an address, and rule 8's discovery row sends a relay-only peer's circuit
+"through an operator route"; a grammar that refuses the one form such a
+route has contradicts both. `multiaddr-with-peer-id` — one definition
+for static bootstrap peers, `static_relays` and `static_servers`, the
+definition `start` seeds the operator set from — is either the
+four-component literal with `/p2p/<id>` or a circuit route
+`<relay route>/p2p/<relay>/p2p-circuit/p2p/<peer>`, the relay route the
+same four-component grammar with the same host set, under the two shape
+conditions rule 8's Identify clause already imposes: the prefix ends in
+the relay's `/p2p/<relay>`, and exactly `/p2p/<peer>` follows
+`/p2p-circuit`; a foreign destination or a second `/p2p-circuit` is
+refused by the grammar as a shape error that names it. Whether this
+node may dial THROUGH the relay stays the gate's question at dial time
+(`RelayCircuit`, ADR-0036's infrastructure class), never the grammar's.
+The runtime needs nothing: the operator set admits an operator circuit
+and `Dial` / `DialPeer` classify it (relayed_paths.rs pins that path
+through the command).
+
+**Alternatives rejected.** An IPC verb reaching `AddAddress`: a
+convenience for a running daemon, not the door a deployment configures;
+it may come later and does not change this rule. Leaving the grammar and
+seeding circuits in tests only: ships a relay infrastructure no two
+deployed peers behind NATs can use.
+
+**Consequences.** Code: profile-config's `validate_address_grammar` and
+its tests (the circuit accepted; a foreign destination, a double circuit
+and a circuit without the relay id refused by name; a `dns` relay host
+admitted as an operator name) — p2p-network-dev-01's crate, landing with
+the relay-pair batch that first consumes it. `config.schema.yaml` states
+the two forms at the type's first use. Until it lands, a daemon cannot
+be configured to reach a relay-only peer: the recorded gap.
