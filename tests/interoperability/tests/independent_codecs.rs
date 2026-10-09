@@ -566,3 +566,46 @@ fn endpoint_directories_agree_in_both_directions_and_under_mutation() {
         }
     }
 }
+
+/// The two GossipSub derivations, production against the independent ones
+/// over generated inputs: wire topics over channel ids at the grammar's
+/// edges (1 and 128 characters, every allowed punctuation), and message ids
+/// over real Ed25519 `PeerId`s and sequence numbers at their edges. The
+/// independent side decodes the `PeerId` text itself; production uses
+/// libp2p's `to_bytes`.
+#[test]
+fn gossipsub_derivations_agree() {
+    use interweave_transport_api::ChannelId;
+    use interweave_transport_runtime::{gossipsub_message_id_v1, topic::topic_key_v1};
+    const HEAD: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    const TAIL: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:/-";
+    let mut rng = Rng(0xBF58_476D_1CE4_E5B9);
+    for case in 0..CASES {
+        let len = match rng.below(4) {
+            0 => 1,
+            1 => 128,
+            _ => 1 + rng.below(128),
+        };
+        let mut channel = String::from(char::from(rng.pick(HEAD)));
+        while channel.len() < len {
+            channel.push(char::from(rng.pick(TAIL)));
+        }
+        let ours = ind::gossipsub::wire_topic_v1(&channel).expect("legal");
+        let theirs = topic_key_v1(&ChannelId::parse(channel.clone()).expect("legal")).wire_string();
+        assert_eq!(ours, theirs, "case {case}: {channel:?}");
+    }
+    for case in 0..200 {
+        let peer = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let sequence = sent_at(&mut rng);
+        let ours = ind::gossipsub::message_id_v1(&peer.to_base58(), sequence).expect("legal");
+        let theirs = gossipsub_message_id_v1(&peer.to_bytes(), sequence);
+        assert_eq!(&ours, theirs.as_bytes(), "case {case}: {peer} {sequence}");
+        assert_eq!(
+            ind::gossipsub::base58btc_decode(&peer.to_base58()).expect("base58"),
+            peer.to_bytes(),
+            "case {case}: the PeerId's bytes"
+        );
+    }
+}
