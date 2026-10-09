@@ -382,16 +382,24 @@ whether group <gid> is the owner's private group could not be read: the
 name service did not answer within 5s", where "the owner" is the account
 the process runs as (p2p-network-dev-01's term, kept because the same
 predicate serves `transportctl` and the human client, for which "daemon
-user" would be wrong; the body's group-of-one clause now says the same);
+user" would be wrong; the body's group-of-one clause names the owner the
+same way, once, and the prose sites use the term);
 the helper thread is left to finish or leak. The predicate runs wherever
-a private directory is resolved: at start (the daemon, `transportctl`,
-the human client's lock and store) and on every later private write —
+a private directory is resolved or `config.yaml` is loaded: at start (the
+daemon, `transportctl`, the human client's lock and store, every
+`ProfileConfig::load`) and on every later private write —
 the trust overlay's `admin.trust.set` in a running daemon among them
 (the review of this note) — so "once per start" was false; each such
 operation is refused within the deadline, and at most one read is
 outstanding per process: a read requested while an earlier one has not
 returned refuses at once with "an earlier name-service read has not
-returned", so a hung service costs one leaked thread, not one per write. The deadline wraps the `NameService` trait calls inside
+returned", so a hung service costs one leaked thread, not one per write. Those
+refusals last until the abandoned read returns — the guard clears when
+the thread does, so a recovered service is read on the next operation —
+or the process restarts; while they last, an `admin.trust.set` is
+refused and not persisted, which the refusal names, so an operator
+restarts the daemon rather than waiting on a read that may never
+return. The deadline wraps the `NameService` trait calls inside
 the predicate, not the real `HostNames`, so a unit test with a blocking
 fake proves it: a name service that sleeps past the deadline yields the
 refusal naming the deadline; one that answers in time leaves every
@@ -406,9 +414,9 @@ the user name in one call): one call fewer, the same hang.
 
 **Consequences.** Code: p2p-network-dev's — the deadline in
 `owners_private_group`, the constant, the blocking-fake test are on
-#236 at 6cb59136 (one thread per read; the one-outstanding-read rule is
-the one piece still to add, with a test that a second read during a
-hung first refuses at once). Until it lands, a hung name service blocks
+#236 at 6cb59136, and the one-outstanding-read guard
+(`NSS_READ_OUTSTANDING`, cleared by a `Drop` when the thread returns,
+each test with its own guard) at f8b8aa33, with the second-read test. Until it lands, a hung name service blocks
 the start and every overlay write on main: a defect at writing,
 affecting no host here. Under the deadline, a host
 whose directory service is down refuses to start InterWeave for a
