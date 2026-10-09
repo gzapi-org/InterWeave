@@ -25,14 +25,16 @@ crate-type = ["cdylib", "rlib"]
 jni-sys = "=0.3.1"
 
 # THIS REPOSITORY, by revision (SPIKES.md, "frozen all the way down"):
-# the tree this run built against, origin/main when the first recorded
-# device run was made.
-interweave-human-store = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "d019ac06f5149567ab37d7c59c61895c974598e6" }
-interweave-human-core = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "d019ac06f5149567ab37d7c59c61895c974598e6" }
+# the tree the last recorded run built against. That run is part 6,
+# REPRODUCTION-2026-10-07d.log, recorded by 9769076a; the pin is its
+# parent, 03434804, the human store with secure_delete. Parts 1 to 5
+# ran at d019ac06, the pin before this one.
+interweave-human-store = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "034348048f548e208ed37ac4bcd08aba1e342a65" }
+interweave-human-core = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "034348048f548e208ed37ac4bcd08aba1e342a65" }
 # Exact, the root lock's version and features: `bench` times SQLite itself,
 # the same bundled build the store runs, for the cost of the deletion rule.
 rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
-interweave-transport-api = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "d019ac06f5149567ab37d7c59c61895c974598e6" }
+interweave-transport-api = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "034348048f548e208ed37ac4bcd08aba1e342a65" }
 
 [dev-dependencies]
 # Exact, the root lock's version: the label test reads the JSON it checks.
