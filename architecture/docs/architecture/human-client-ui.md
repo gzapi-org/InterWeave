@@ -95,13 +95,14 @@ counts, no addresses:
 online, reachable directly
 online, reachable through a relay
 online, partial (some peers may not reach this client)
-offline (transport not running)
-unknown (not yet determined)
+offline (the transport reports itself unavailable)
+unknown (no status read yet, or the status connection is down — never shown as offline)
 ```
 
 The states are normative; the words a person reads for each are
-language-culture's, kept as keys in `crates/human/ui-model/src/labels.rs`
-and never quoted here (A 2026-10-09).
+language-culture's: the states are the `Connectivity` enum in
+`crates/human/client-api`, the words its table in
+`crates/human/ui-model/src/labels.rs`, never quoted here (A 2026-10-09).
 
 An established peer route may optionally show `direct` or `relayed`. A DCUtR `PeerPathChanged` updates the route indicator without creating a fake reconnect/new-message event.
 

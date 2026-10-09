@@ -4908,7 +4908,7 @@ Android does not add a localhost daemon/IPC transport just to imitate desktop.
 2. Activity/service lifecycle;
 3. foreground service;
 4. notifications;
-5. Android network-change binding;
+5. Android network-change binding — every network change, a Wi-Fi reconnect included (SPIKE-008 L7: the same network returns as a new one), is a re-bind of the embedded runtime's listeners and dials;
 6. Android Keystore wrapping of exact Ed25519 secret;
 7. secure recovery Activity;
 8. secure mnemonic UI/picker/no-clipboard path;
@@ -4948,7 +4948,7 @@ Carried here from Stage 15 (§18): the trust-audit sink — the embedded host in
 
 ### Exit gate
 
-**State (2026-10-08):** open since 2026-10-06, when Stage 16's closing
+**State (2026-10-09):** open since 2026-10-06, when Stage 16's closing
 record moved the status to `stage-17-android-human-client` (54d1c8b8);
 no Android package is built yet, SPIKE-008 and SPIKE-009 closed PASS on 2026-10-09 within the bounds their Result paragraphs record (SPIKES.md),
 and nothing below is met. This section gained its gate on 2026-10-08
