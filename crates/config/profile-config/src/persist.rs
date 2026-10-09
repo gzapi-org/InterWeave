@@ -262,7 +262,12 @@ pub fn create_private_dir_within(dir: &Path, boundary: &TrustBoundary) -> Result
         })?;
         if missing.as_os_str().is_empty() {
             // Followed, as `create_dir_all`'s `is_dir` follows: a link is
-            // the caller's to judge, and every caller judges links.
+            // the caller's to judge, and every caller judges links -- but
+            // not out of a runtime root, which the creator's own contract
+            // answers (#241 review F1).
+            if boundary.runtime_root().is_some() {
+                resolve_judged_as(probe, uid, boundary)?;
+            }
             return match fs::metadata(probe) {
                 Ok(meta) if meta.is_dir() => Ok(()),
                 _ => Err(PersistError::Io(std::io::ErrorKind::AlreadyExists.into())),
@@ -942,11 +947,59 @@ const MAX_LINK_HOPS: u32 = 40;
 /// callers read as "not there yet"); [`PersistError::DirectoryNotPrivate`]
 /// for a link or an ancestor that breaks the rule, cannot be inspected,
 /// or past [`MAX_LINK_HOPS`].
+///
+/// THE BOUNDARY NARROWS THE WALK ONLY FOR A PATH THAT ENDS UNDER IT
+/// (#241 review F2): the path is first resolved judging nothing, to
+/// learn where it ends; a path ending outside the boundary is judged to
+/// `/`, every link on it included, as before the boundary existed
+/// (`links_on_an_outside_directorys_path_are_still_judged`). A path that
+/// ends under it in the first resolution and outside it in the judged
+/// one -- moved between the two -- is judged to `/` as well.
+///
+/// AND A PATH NAMED UNDER THE RUNTIME ROOT MUST END UNDER IT (#241
+/// review F1): refused naming the root otherwise, here, where every
+/// resolution passes -- the creator's probe and its adopted components
+/// as much as the resolvers -- while a path named above the root, the
+/// creator judging the boundary itself, is not asked
+/// (`the_creator_follows_no_link_out_of_the_runtime_root`).
 #[cfg(unix)]
 fn resolve_judged_as(
     dir: &Path,
     uid: u32,
     boundary: &TrustBoundary,
+) -> Result<PathBuf, PersistError> {
+    let root = TrustBoundary::root();
+    let resolved = if boundary.path == root.path {
+        walk_judged(dir, uid, Some(&root))?
+    } else {
+        let ends_under = walk_judged(dir, uid, None).is_ok_and(|end| boundary.covers(&end));
+        let narrowed = if ends_under { boundary } else { &root };
+        match walk_judged(dir, uid, Some(narrowed))? {
+            moved if ends_under && !boundary.covers(&moved) => walk_judged(dir, uid, Some(&root))?,
+            resolved => resolved,
+        }
+    };
+    if let Some(runtime_root) = &boundary.runtime_root {
+        let named = if dir.is_absolute() {
+            dir.to_path_buf()
+        } else {
+            std::env::current_dir().map_err(PersistError::Io)?.join(dir)
+        };
+        if named.starts_with(runtime_root) {
+            return boundary.confine_resolved(dir, resolved);
+        }
+    }
+    Ok(resolved)
+}
+
+/// [`resolve_judged_as`]'s resolution: judging links and the directories
+/// holding them up to `boundary` -- or nothing at all, for `None`, which
+/// only learns where the path ends.
+#[cfg(unix)]
+fn walk_judged(
+    dir: &Path,
+    uid: u32,
+    boundary: Option<&TrustBoundary>,
 ) -> Result<PathBuf, PersistError> {
     use std::collections::VecDeque;
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
@@ -981,12 +1034,14 @@ fn resolve_judged_as(
             // Above the boundary nothing is judged, so a component there
             // that cannot be inspected is an error to report, not a rule
             // broken.
-            Err(e) if !boundary.covers(&next) => return Err(PersistError::Io(e)),
-            Err(e) => {
-                return judge_ancestor(&next, Err(e), uid)
-                    .map_err(|refused| boundary.name(&next, refused))
-                    .map(|()| next);
-            }
+            Err(e) => match boundary {
+                Some(boundary) if boundary.covers(&next) => {
+                    return judge_ancestor(&next, Err(e), uid)
+                        .map_err(|refused| boundary.name(&next, refused))
+                        .map(|()| next);
+                }
+                _ => return Err(PersistError::Io(e)),
+            },
         };
         if !meta.file_type().is_symlink() {
             resolved = next;
@@ -1002,7 +1057,9 @@ fn resolve_judged_as(
         // A link above the boundary is the platform's and is followed
         // unjudged (`a_link_above_the_boundary_is_followed_unjudged`); one
         // at or below it is judged with the directories holding it.
-        if boundary.covers(&next) {
+        if let Some(boundary) = boundary
+            && boundary.covers(&next)
+        {
             judge_link(&next, meta.uid(), meta.permissions().mode(), uid)?;
             judge_ancestors(&resolved, uid, boundary)?;
         }
@@ -3072,5 +3129,62 @@ mod tests {
         let through = out.join("p");
         let detail = refused_at(resolve_private_dir_within(&through, &confined), &through);
         assert!(detail.contains("outside the runtime root"), "{detail}");
+    }
+
+    /// #241 review F1: the creator does not follow a link under the
+    /// runtime root out of it -- not for a tree it would make beyond the
+    /// link, nor for a directory that already exists through one -- and
+    /// nothing is made outside. The control: the same link pointing at a
+    /// directory under the root is followed and the tree made there.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_creator_follows_no_link_out_of_the_runtime_root() {
+        let (_root, _open, b) = boundary_under_a_refused_ancestor();
+        let confined = TrustBoundary::new(&b)
+            .expect("a boundary")
+            .with_runtime_root("interweave");
+        let root = b.join("interweave");
+        let files = private_under(&b, &["files"], 0o711);
+        fs::create_dir(&root).expect("mkdir");
+        chmod(&root, 0o700);
+        std::os::unix::fs::symlink(&files, root.join("state")).expect("symlink");
+        let beyond = root.join("state").join("profiles").join("work");
+        // Named at the link, the component that leads out.
+        let detail = refused_at(
+            create_private_dir_within(&beyond, &confined).map(|()| PathBuf::new()),
+            &root.join("state"),
+        );
+        assert!(detail.contains("outside the runtime root"), "{detail}");
+        assert!(!files.join("profiles").exists(), "nothing made outside");
+        let existing = root.join("state");
+        let detail = refused_at(
+            create_private_dir_within(&existing, &confined).map(|()| PathBuf::new()),
+            &existing,
+        );
+        assert!(detail.contains("outside the runtime root"), "{detail}");
+
+        let inner = private_under(&root, &["inner"], 0o700);
+        std::os::unix::fs::symlink(&inner, root.join("ok")).expect("symlink");
+        create_private_dir_within(&root.join("ok").join("deep"), &confined)
+            .expect("the control: a link inside the root is followed");
+        assert!(inner.join("deep").is_dir());
+    }
+
+    /// #241 review F2: a directory outside the boundary is walked to `/`
+    /// as before, links on its path included -- a link in a directory
+    /// another account can write is refused there, as it is under the
+    /// root boundary (the control).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn links_on_an_outside_directorys_path_are_still_judged() {
+        let (root, open, b) = boundary_under_a_refused_ancestor();
+        let boundary = TrustBoundary::new(&b).expect("a boundary");
+        let real = private_under(root.path(), &["real"], 0o700);
+        std::os::unix::fs::symlink(real.parent().expect("parent"), open.join("l"))
+            .expect("symlink");
+        let through = open.join("l").join("p");
+        refused_at(resolve_private_dir(&through), &open);
+        refused_at(resolve_private_dir_within(&through, &boundary), &open);
+        refused_at(resolve_guarded_dir_within(&through, &boundary), &open);
     }
 }
