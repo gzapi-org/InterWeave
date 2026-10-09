@@ -585,9 +585,21 @@ async fn a_departed_ips_listener_admits_no_private_candidate() {
     assert_eq!(admitted, 1, "the control: beside a held private listener");
 
     subject.runtime.network_changed(NetworkView::default());
-    // The view is read on the task's next turn; a short settle lets it.
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
-    while let Ok(Some(_)) = tokio::time::timeout_at(deadline, subject.runtime.next_event()).await {}
+    // The view and a command reach the task on two channels, so wait for
+    // the removal the view makes -- the proof it was read -- before
+    // asking; a timed settle lost that race under a loaded suite.
+    let removal = std::net::IpAddr::from(ip);
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let event = tokio::time::timeout_at(deadline, subject.runtime.next_event())
+            .await
+            .expect("the view's removal within the patience")
+            .expect("the subject is alive");
+        if matches!(&event, SwarmEvent::NetworkChanged { removed, .. } if removed.contains(&removal))
+        {
+            break;
+        }
+    }
     let admitted = subject
         .runtime
         .learn(far_peer.clone(), ["/ip4/10.1.2.4/tcp/4001".to_owned()])

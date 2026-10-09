@@ -2313,6 +2313,20 @@ async fn a_network_change_keeps_a_given_up_attempts_permit_until_the_crate_is_do
     dialer.shutdown().await.expect("shutdown");
 }
 
+/// Read `runtime`'s events until it reports a network change.
+async fn until_network_changed(runtime: &mut SwarmRuntime) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let event = tokio::time::timeout_at(deadline, runtime.next_event())
+            .await
+            .expect("a network change within the patience")
+            .expect("the runtime is alive");
+        if matches!(event, SwarmEvent::NetworkChanged { .. }) {
+            return;
+        }
+    }
+}
+
 /// Read every event `runtime` emits for `window`.
 async fn drain(runtime: &mut SwarmRuntime, window: Duration) {
     let deadline = tokio::time::Instant::now() + window;
@@ -2341,14 +2355,18 @@ async fn a_listener_on_an_ip_the_view_removed_is_not_offered() {
     drain(&mut subject, Duration::from_secs(2)).await;
     assert_eq!(offered(&subject), 1, "the control: the private listener");
 
-    // Two views, each read before the next: the latest one wins, and a
-    // first view removes nothing it never named.
+    // Two views, the first READ before the second is sent: the latest
+    // view replaces one not yet read, and a first view removes nothing it
+    // never named. The first names an address the listeners do not, so
+    // its reading is an event to wait for, not a timed guess.
     subject.network_changed(NetworkView {
-        addresses: vec![ip.into()],
+        addresses: vec![ip.into(), Ipv4Addr::new(10, 255, 0, 3).into()],
     });
-    drain(&mut subject, Duration::from_millis(500)).await;
+    until_network_changed(&mut subject).await;
     subject.network_changed(NetworkView::default());
-    drain(&mut subject, Duration::from_secs(3)).await;
+    until_network_changed(&mut subject).await;
+    // Past a tick, so the tick's re-offer has run on the new set.
+    drain(&mut subject, Duration::from_secs(2)).await;
     assert_eq!(
         offered(&subject),
         0,
