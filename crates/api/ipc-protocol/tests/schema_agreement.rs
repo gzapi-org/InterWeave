@@ -1274,6 +1274,21 @@ fn a_path_notice_without_previous_omits_it_and_validates() {
         !validator(schema).is_valid(&with_null),
         "null is not absent"
     );
+    // And the decoder refuses it as the schema does (#248 review F3).
+    let raw = serde_json::value::to_raw_value(&with_null).expect("raw");
+    assert_eq!(
+        Event::decode(
+            "peer.path_changed",
+            Some(&raw),
+            interweave_ipc_protocol::IpcVersion {
+                major: 2,
+                minor: interweave_ipc_protocol::ROUTE_NOTICE_SINCE_MINOR,
+            },
+        )
+        .err(),
+        Some(interweave_transport_api::TransportError::ProtocolViolation),
+        "an explicit null previous is the server's violation"
+    );
 }
 
 /// The decode half of the 2.4 gate: a notice without `previous` on a
