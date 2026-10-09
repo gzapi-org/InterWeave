@@ -268,3 +268,5 @@ floor beside the lift (a test: two additions inside the floor lift
 once; one after it lifts again) and the first-fill lift (a subject
 starting with no non-loopback address, failing a relay ask, then a view
 with one address: the ask is due; the control without a view waits).
+
+**The two floors (settled before this note landed, on p2p-network-dev's question of 2026-10-09).** The relay ladder's floor is `retry_min` (5 s by default), the gate's peer floor the schedule's first step (30 s). An addition 5–30 s after a lift whose redial failed would make the ladder due while the relay peer's gate backoff still stood; the reservation dial is then refused at the gate, recorded as a failure, and the ladder climbs a rung — the addition delaying the relay. Ruled: the ladder is made due only when the relay peer's gate backoff was lifted in the same call, so the two floors move together and the peer floor governs both; one floor for both (the larger) was the alternative, rejected because it would hold the ladder to the peer floor even when the gate had nothing standing.

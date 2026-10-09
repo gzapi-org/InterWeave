@@ -208,3 +208,7 @@ connection exists, inbound or through an operator route. The hook is
 `admits_discovered` (6d2c1e92); this statement followed the hook's
 correction on the same PR rather than preceding it, which rule 8 asks
 for and the record says plainly.
+
+### Amendment 2026-10-09 — Rule 3's own listener is one on an IP the host is known to hold
+
+Stage 17 step 5 gave the network-change detector a second source, the platform's view (CONNECTIVITY.md §14, A 2026-10-09), and with it a state the listener set alone never had: a listener still BOUND on an IP the view has said departed, until the listener poll catches up. The offer sites stopped offering such a listener (`NetworkSet::holds`); rule 3's test — the hole punch admits a private candidate only when this node holds a non-loopback listener in a private range of the same family — still read the bound set, so a departed LAN's listener kept admitting private candidates for the poll's lag. Ruled on p2p-network-dev's question: rule 3's "holds" means bound and on an IP the host is known to hold, the same filter; nothing else in the rule changes (family and range, the per-instance decision, the dial-back's refusal). The code is p2p-network-dev's on `feat/network-change-binding`.
