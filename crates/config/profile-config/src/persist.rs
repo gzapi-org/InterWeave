@@ -879,7 +879,14 @@ pub(crate) fn owners_private_group(
     gid: u32,
     acl: std::io::Result<bool>,
 ) -> Result<(), String> {
-    owners_private_group_within(names, euid, gid, acl, NSS_READ_DEADLINE)
+    owners_private_group_within(
+        names,
+        euid,
+        gid,
+        acl,
+        NSS_READ_DEADLINE,
+        &NSS_READ_OUTSTANDING,
+    )
 }
 
 /// How long the private-group predicate waits for the name service
@@ -887,6 +894,27 @@ pub(crate) fn owners_private_group(
 /// milliseconds or is broken, and a read that never completes must
 /// refuse rather than hold the start. Not a configuration knob.
 pub const NSS_READ_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Whether a name-service read this process started has not returned
+/// yet. The predicate runs on every private write of a running daemon
+/// (each trust-overlay write), not once per start: under a hung name
+/// service each would otherwise leave one more thread blocked. So at
+/// most one read is outstanding per process, and a read asked for while
+/// it is refuses at once (ADR-0028, "The name-service read is bounded";
+/// `a_read_asked_for_while_one_is_outstanding_refuses_at_once`).
+static NSS_READ_OUTSTANDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Clears the outstanding flag when the read's thread ends, however it
+/// ends -- a panicking name-service module included, or the flag would
+/// refuse every later read of the process.
+struct ReadReturned(&'static std::sync::atomic::AtomicBool);
+
+impl Drop for ReadReturned {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
 
 /// The predicate's two reads: the user's name, then the group.
 type NameReads = (
@@ -899,20 +927,30 @@ type NameReads = (
 /// a thread limit is not reported as a slow name service: the deadline
 /// passed (the thread is then left to finish or leak, one per refusal),
 /// the read ended without answering (it panicked), or no thread could be
-/// started.
+/// started -- or, while an earlier read has not returned (`outstanding`),
+/// nothing is started at all.
 fn read_names(
     names: &impl NameService,
     euid: u32,
     gid: u32,
     deadline: std::time::Duration,
+    outstanding: &'static std::sync::atomic::AtomicBool,
 ) -> Result<NameReads, String> {
+    if outstanding.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return Err("an earlier name-service read has not returned".to_owned());
+    }
+    let returned = ReadReturned(outstanding);
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     let names = names.clone();
     std::thread::Builder::new()
         .name("nss-read".to_owned())
         .spawn(move || {
-            let _ = tx.send((names.user_name(euid), names.group(gid)));
+            let reads = (names.user_name(euid), names.group(gid));
+            drop(returned);
+            let _ = tx.send(reads);
         })
+        // A thread that never started dropped its closure, and with it
+        // the guard: the flag is already clear.
         .map_err(|e| format!("no thread could be started to read it: {e}"))?;
     rx.recv_timeout(deadline).map_err(|e| match e {
         std::sync::mpsc::RecvTimeoutError::Timeout => {
@@ -933,6 +971,7 @@ fn owners_private_group_within(
     gid: u32,
     acl: std::io::Result<bool>,
     deadline: std::time::Duration,
+    outstanding: &'static std::sync::atomic::AtomicBool,
 ) -> Result<(), String> {
     match acl {
         Ok(false) => {}
@@ -954,7 +993,8 @@ fn owners_private_group_within(
             "group-writable; whether group {gid} is the owner's private group could not be read: {why}"
         )
     };
-    let (user_read, group_read) = read_names(names, euid, gid, deadline).map_err(unread)?;
+    let (user_read, group_read) =
+        read_names(names, euid, gid, deadline, outstanding).map_err(unread)?;
     let user = match user_read {
         Ok(Some(user)) => user,
         Ok(None) => return Err(unread(format!("uid {euid} has no account entry"))),
@@ -1545,6 +1585,90 @@ mod tests {
         assert!(access_acl_of(&opened()).expect("read"), "an access ACL");
     }
 
+    /// A guard of a test's own, so tests running in parallel do not share
+    /// the process's outstanding read.
+    #[cfg(unix)]
+    fn fresh_guard() -> &'static std::sync::atomic::AtomicBool {
+        Box::leak(Box::new(std::sync::atomic::AtomicBool::new(false)))
+    }
+
+    /// While a read the process started has not returned, a second one is
+    /// not started: it refuses at once, naming the earlier read, well
+    /// inside the deadline. Once the blocked read returns the guard
+    /// clears, and the next read is made and answers -- a recovered name
+    /// service is read again (ADR-0028, "The name-service read is
+    /// bounded"; architect-cto seq 29413).
+    #[cfg(unix)]
+    #[test]
+    fn a_read_asked_for_while_one_is_outstanding_refuses_at_once() {
+        #[derive(Clone)]
+        struct Held(std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>);
+        impl NameService for Held {
+            fn user_name(&self, _: u32) -> std::io::Result<Option<String>> {
+                let _ = self.0.lock().expect("the release").recv();
+                Ok(Some("alice".to_owned()))
+            }
+            fn group(&self, _: u32) -> std::io::Result<Option<(String, Vec<String>)>> {
+                Ok(Some(("alice".to_owned(), Vec::new())))
+            }
+        }
+        #[derive(Clone)]
+        struct Answers;
+        impl NameService for Answers {
+            fn user_name(&self, _: u32) -> std::io::Result<Option<String>> {
+                Ok(Some("alice".to_owned()))
+            }
+            fn group(&self, _: u32) -> std::io::Result<Option<(String, Vec<String>)>> {
+                Ok(Some(("alice".to_owned(), Vec::new())))
+            }
+        }
+        let guard = fresh_guard();
+        let (release, held) = std::sync::mpsc::channel();
+        let held = Held(std::sync::Arc::new(std::sync::Mutex::new(held)));
+        let short = std::time::Duration::from_millis(50);
+        let first = owners_private_group_within(&held, 1000, 1001, Ok(false), short, guard)
+            .expect_err("the first read is held past the deadline");
+        assert!(first.contains("did not answer within 50ms"), "{first}");
+
+        let started = std::time::Instant::now();
+        let second = owners_private_group_within(
+            &Answers,
+            1000,
+            1001,
+            Ok(false),
+            std::time::Duration::from_secs(5),
+            guard,
+        )
+        .expect_err("refused while the first read is outstanding");
+        assert!(
+            second.contains("an earlier name-service read has not returned"),
+            "{second}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "refused at once, not at the 5 s deadline"
+        );
+
+        release.send(()).expect("the held read is released");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while guard.load(std::sync::atomic::Ordering::Acquire) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the guard clears once the held read returns"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        owners_private_group_within(
+            &Answers,
+            1000,
+            1001,
+            Ok(false),
+            std::time::Duration::from_secs(5),
+            guard,
+        )
+        .expect("a recovered name service is read again");
+    }
+
     /// A name service that never answers within the deadline is refused
     /// AT the deadline, naming it -- not after the read returns -- staged
     /// with a 50 ms deadline and a read that takes 2 s; one that answers
@@ -1586,6 +1710,7 @@ mod tests {
             1001,
             Ok(false),
             deadline,
+            fresh_guard(),
         )
         .expect_err("a read past the deadline refuses");
         assert!(
@@ -1606,11 +1731,13 @@ mod tests {
             1001,
             Ok(false),
             std::time::Duration::from_secs(2),
+            fresh_guard(),
         )
         .expect("the control: an answer in time, the private group");
 
         // A read that ends without answering is named as that, not as a
         // timeout: the thread panicked, and nothing was waited for.
+        let after_panic = fresh_guard();
         let started = std::time::Instant::now();
         let ended = owners_private_group_within(
             &Panics,
@@ -1618,6 +1745,7 @@ mod tests {
             1001,
             Ok(false),
             std::time::Duration::from_secs(5),
+            after_panic,
         )
         .expect_err("a read that ended refuses");
         assert!(
@@ -1628,6 +1756,16 @@ mod tests {
             started.elapsed() < std::time::Duration::from_secs(4),
             "refused when the read ended, not at the 5 s deadline"
         );
+        // A read that panicked still returned: the guard clears, or the
+        // process would refuse every later read.
+        let cleared_by = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while after_panic.load(std::sync::atomic::Ordering::Acquire) {
+            assert!(
+                std::time::Instant::now() < cleared_by,
+                "a panicked read clears the guard"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 
     /// The host's name service reads the entries `id` reports: this
