@@ -200,10 +200,20 @@ jobs:
       # The rows are #[ignore] so a plain local `cargo test` passes without
       # the builds; here they run, and with the variable unset or an entry
       # missing they FAIL rather than skip (the test file says how).
+      # Rows run HEAD's own transport-daemon from beside the test binary
+      # (target/debug), so it is built first, in the same profile; Tests
+      # below would build it too, but only after this step.
+      # The timeout: the step measured 1m04s without the daemon build
+      # (#238, run 37860086742), and that build is no larger than the
+      # previous build's cold 3m24s; 10 minutes stops a hang well inside
+      # the job's 25 without failing a cold runner.
       - name: The upgrade matrix against the previous production builds
+        timeout-minutes: 10
         env:
           INTERWEAVE_PREVIOUS_BUILDS: ${{ runner.temp }}/previous-builds
-        run: cargo test -p interweave-interoperability-tests --test upgrade_matrix_previous --locked -- --ignored
+        run: |
+          cargo build --locked -p interweave-transport-daemon
+          cargo test -p interweave-interoperability-tests --test upgrade_matrix_previous --locked -- --ignored
 
       # Includes tests/support's fixture-loading suite, which is the
       # Stage-0 gate that the frozen vectors load from Rust with no
