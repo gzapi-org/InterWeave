@@ -1189,6 +1189,24 @@ mod tests {
         }
     }
 
+    /// A connection below 2.4 opens its session WITHOUT route notices, so
+    /// none is ever merged with a later change and then dropped (#245
+    /// review F1); one at 2.4 opens with them. Asked of the request the
+    /// binding receives, since that is what the composition honours.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_connection_below_2_4_opens_its_session_without_route_notices() {
+        let at = |minor: u64| DATA.replace(r#""minor":0"#, &format!(r#""minor":{minor}"#));
+        for (minor, takes) in [(0, false), (3, false), (4, true)] {
+            let fake = Fake::default();
+            let harness = Harness::start(&fake, config());
+            let mut client = Client::connect(&harness.paths.data).await;
+            client.hello(&at(minor)).await;
+            drop(client);
+            harness.stop().await;
+            assert_eq!(fake.script().route_notices, [takes], "2.{minor}");
+        }
+    }
+
     /// A 2.1 event the protocol would refuse -- a path change whose class
     /// is out of bounds -- still takes no number on a 2.0 connection: the
     /// minor is judged before the shape, so that client sees no gap for a
