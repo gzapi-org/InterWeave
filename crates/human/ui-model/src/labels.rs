@@ -132,7 +132,7 @@ ui_texts! {
     ConversationDescription => "{kind}, {unread}",
     /// A route label: `{route}` is the `EndpointId`, verbatim -- a
     /// routing label, never a name.
-    Route => "route: {route}",
+    Route => "Route: {route}",
     /// The author of this client's own messages.
     You => "You",
     /// A message item as a screen reader reads it: `{author}` short,
@@ -179,7 +179,7 @@ ui_texts! {
     /// The same, through a relay's circuit.
     PathRelayed => "Connected through a relay",
     /// An unread message whose content is also kept (U2b).
-    UnreadAlsoKept => "Unread, also kept",
+    UnreadAlsoKept => "Unread, kept",
     /// A reply whose target is shown in this conversation.
     ReplyPresent => "In reply to an earlier message",
     /// A reply whose target is not held here: neutral, never a doubt.
@@ -192,20 +192,20 @@ ui_texts! {
     /// text.
     NotSent => "Not sent: {reason}",
     /// Retry a pending message now.
-    Retry => "Retry",
+    Retry => "Send again",
     /// Cancel a pending message.
     Cancel => "Cancel",
     /// Keep a read message.
     Keep => "Keep",
     /// Remove Keep from a kept message.
-    Unkeep => "Remove keep",
+    Unkeep => "Stop keeping",
     /// No transport daemon serves this profile; the window connects once
     /// one starts.
-    NoDaemon => "The transport daemon for this profile is not running. This window connects when it starts.",
+    NoDaemon => "The transport daemon for this profile is not running. This window will connect when the daemon starts.",
     /// The session is re-opening on its own.
     Reconnecting => "Reconnecting",
     /// Storage cannot hold new messages.
-    StorageDegraded => "Storage is full: new messages cannot be held",
+    StorageDegraded => "This device cannot store new messages now. You will not receive new messages until storage is available again.",
     /// The session was refused. `{reason}` is an error class's text.
     Refused => "Could not open the session: {reason}",
     /// Leave a refused session.
@@ -231,11 +231,11 @@ ui_texts! {
     TrustedPeers => "Trusted peers",
     /// Beside a listed peer that the profile's configuration lists: why it
     /// is there.
-    TrustFromConfiguration => "From the profile's configuration",
+    TrustFromConfiguration => "From this profile's configuration",
     /// Beside a listed peer that was added in these settings.
     TrustAddedHere => "Added here",
     /// Shown in place of the list while it is read.
-    TrustReading => "Reading the trust settings",
+    TrustReading => "Reading the list of trusted peers",
     /// Shown in place of the list when it holds no peer.
     NoTrustedPeer => "No peer is trusted",
     /// The field a person types or pastes a `PeerId` into.
@@ -246,11 +246,11 @@ ui_texts! {
     RemoveTrust => "Remove trust",
     /// The confirmation of an allow. `{peer}` is the exact `PeerId`,
     /// whole: the person must be able to check every character.
-    ConfirmAllow => "Trust {peer} for this profile? It will be able to exchange messages with this profile until you remove its trust.",
+    ConfirmAllow => "Trust {peer} for this profile? It will be able to exchange messages with this profile until you remove trust from it.",
     /// The confirmation of a removal. `{peer}` is the exact `PeerId`,
     /// whole. The warning is human-client-ui.md section 8's: connections
     /// close at once.
-    ConfirmRevoke => "Remove trust from {peer}? Its connections to this profile close now, and it cannot exchange messages with this profile until it is trusted again.",
+    ConfirmRevoke => "Remove trust from {peer}? Its connections to this profile will close now, and it cannot exchange messages with this profile until it is trusted again.",
     /// Carry out the change on show.
     ConfirmChange => "Confirm",
     /// Drop the change on show.
@@ -260,15 +260,15 @@ ui_texts! {
     /// Said once the daemon revoked a peer. `{peer}` the exact `PeerId`.
     PeerUntrusted => "{peer} is no longer trusted.",
     /// The typed text is not a `PeerId`.
-    NotAPeerId => "That is not a PeerId. A PeerId for this profile's network starts with 12D3KooW.",
+    NotAPeerId => "That is not a PeerId. A PeerId starts with 12D3KooW or Qm. Check that you copied all of it.",
     /// The typed `PeerId` is this profile's own.
-    OwnIdentity => "That is this profile's own PeerId.",
+    OwnIdentity => "That is this profile's own PeerId. You do not need to trust it.",
     /// The typed `PeerId` is already listed.
     AlreadyTrusted => "That peer is already trusted.",
     /// Trust could not be read or changed: the daemon is not reachable.
     TrustUnavailable => "The transport daemon cannot be reached. Nothing was changed.",
     /// This client may not administer trust on this daemon.
-    TrustNotPermitted => "This client may not change trust on this daemon. Nothing was changed.",
+    TrustNotPermitted => "This app is not allowed to change trust on this transport daemon. Nothing was changed.",
     /// The daemon refused the change: its own identity, or the list is
     /// full.
     TrustRefused => "The transport daemon refused this change. Nothing was changed.",
@@ -282,24 +282,26 @@ ui_texts! {
     /// The daemon did not confirm a change, which may have been made: the
     /// list is read again. `{peer}` the exact `PeerId`, whole. Never says
     /// that nothing changed (TRANSPORT.md's outcome-unknown class).
-    TrustUnconfirmed => "The transport daemon did not confirm the change for {peer}; it may have been made. The list is read again.",
+    TrustUnconfirmed => "The transport daemon did not confirm the change for {peer}. The change may have been made. The list of trusted peers is being read again.",
     /// The list a made or possibly made change left to read again could
     /// not be read: it may not show that change. Never says that nothing
     /// changed. Opening the settings again reads it.
-    TrustNotReadAgain => "The trust list could not be read again, so it may not show the latest change. Open the trust settings again to read it.",
+    TrustNotReadAgain => "The list of trusted peers could not be read again, so it may not show the latest change. Open the trust settings again to read it.",
 }
 
-/// The English shown until real copy exists.
+/// The English the client shows.
 ///
-/// DEVELOPMENT PLACEHOLDER COPY, UNREVIEWED. architect-cto's ruling on
-/// relay message 01a0fe85-6b39-7d6e-8b2a-f0cc4280c7a8: these words ship in
-/// Stage 14 as placeholders, held in this one module so Stage 15 can
-/// replace it whole. Person-facing copy is never self-authored; final
-/// copy waits for a language-culture remit. What they must already pass
-/// is structural, and the tests below hold it: no delivery label reads
-/// as read, seen, processed or delivered (P6), `Unknown` connectivity
-/// never reads as offline, and every template is filled by placeholder,
-/// never assembled by concatenation, so a translation may reorder it.
+/// Every value here was read by language-culture (relay message
+/// 01a12001-199d-75d9-8e8d-cceb01ea9bbf): person-facing copy is never
+/// self-authored, so a value added later ships as a placeholder its
+/// author drafts and language-culture finalises. The module keeps its
+/// Stage 14 name, from when these words shipped unreviewed under
+/// architect-cto's ruling on relay message
+/// 01a0fe85-6b39-7d6e-8b2a-f0cc4280c7a8. What every value must pass is
+/// structural, and the tests below hold it: no delivery label reads as
+/// read, seen, processed or delivered (P6), `Unknown` connectivity never
+/// reads as offline, and every template is filled by placeholder, never
+/// assembled by concatenation, so a translation may reorder it.
 pub mod placeholder_en {
     use super::{Connectivity, EntryProblem, ErrorClass, LabelKey, PeerPath, TrustProblem, UiText};
 
@@ -308,17 +310,17 @@ pub mod placeholder_en {
     pub const fn label(key: LabelKey) -> &'static str {
         match key {
             LabelKey::Sending => "Sending",
-            LabelKey::NotConfirmed => "Not confirmed",
-            LabelKey::NeedsAttention => "Needs attention",
+            LabelKey::NotConfirmed => "Not confirmed, trying again",
+            LabelKey::NeedsAttention => "Not sent, send again or cancel",
             LabelKey::NeedsAttentionMayHaveBeenReceived => {
-                "Needs attention, may have been received"
+                "May have reached the peer, send again or cancel"
             }
             LabelKey::AcceptedByRemoteTransport => "Accepted by remote transport",
-            LabelKey::PublishedLocally => "Published locally",
-            LabelKey::Cancelled => "Cancelled",
-            LabelKey::CancelledMayHaveBeenReceived => "Cancelled, may have been received",
+            LabelKey::PublishedLocally => "Accepted by local transport",
+            LabelKey::Cancelled => "Canceled",
+            LabelKey::CancelledMayHaveBeenReceived => "Canceled, may have reached the peer",
             LabelKey::Unread => "Unread",
-            LabelKey::ReadNotKept => "Read this session",
+            LabelKey::ReadNotKept => "Read, not kept",
             LabelKey::Kept => "Kept",
         }
     }
@@ -327,20 +329,20 @@ pub mod placeholder_en {
     #[must_use]
     pub const fn error(class: ErrorClass) -> &'static str {
         match class {
-            ErrorClass::PeerNotTrusted => "This peer is not trusted for this profile",
-            ErrorClass::RouteUnavailable => "The selected route is currently unavailable",
-            ErrorClass::NoNetworkPath => "No usable network path",
-            ErrorClass::Busy => "The transport is temporarily busy",
-            ErrorClass::TransportUnavailable => "The local transport is unavailable",
-            ErrorClass::Incompatible => "No common protocol version",
-            ErrorClass::TooLarge => "The message is too large to send",
-            ErrorClass::NotConfigured => "This route or channel is not configured here",
-            ErrorClass::InvalidMessage => "The message cannot be sent as written",
-            ErrorClass::StorageUnavailable => "Local storage cannot hold it",
-            ErrorClass::AlreadyPending => "This message is already waiting to be sent",
-            ErrorClass::EndpointInUse => "This local endpoint is already in use by another client",
-            ErrorClass::EndpointNotAvailable => "This endpoint is not available to this client",
-            ErrorClass::Internal => "Something went wrong; details are in diagnostics",
+            ErrorClass::PeerNotTrusted => "This peer is not trusted for this profile.",
+            ErrorClass::RouteUnavailable => "This route is not available now.",
+            ErrorClass::NoNetworkPath => "This peer cannot be reached over the network now.",
+            ErrorClass::Busy => "The transport is busy. Try again later.",
+            ErrorClass::TransportUnavailable => "The transport daemon cannot be reached.",
+            ErrorClass::Incompatible => "The two sides have no protocol version in common.",
+            ErrorClass::TooLarge => "The message is too large to send.",
+            ErrorClass::NotConfigured => "This route or channel is not configured here.",
+            ErrorClass::InvalidMessage => "The message cannot be sent in this form.",
+            ErrorClass::StorageUnavailable => "The message cannot be stored on this device.",
+            ErrorClass::AlreadyPending => "This message is already waiting to be sent.",
+            ErrorClass::EndpointInUse => "Another app or window is already using this endpoint.",
+            ErrorClass::EndpointNotAvailable => "This endpoint is not available to this app.",
+            ErrorClass::Internal => "Something went wrong.",
         }
     }
 
@@ -357,11 +359,11 @@ pub mod placeholder_en {
     #[must_use]
     pub const fn connectivity(state: Connectivity) -> &'static str {
         match state {
-            Connectivity::OnlineDirect => "Online, direct reachable",
-            Connectivity::OnlineRelay => "Online, relay available",
-            Connectivity::OnlinePartial => "Online, outbound or partial reachability",
-            Connectivity::Offline => "Offline, transport stopped",
-            Connectivity::Unknown => "Connectivity not known yet",
+            Connectivity::OnlineDirect => "Online, reachable directly",
+            Connectivity::OnlineRelay => "Online, reachable through a relay",
+            Connectivity::OnlinePartial => "Online, some peers might not reach you",
+            Connectivity::Offline => "Offline, transport daemon not running",
+            Connectivity::Unknown => "Network status not known yet",
         }
     }
 

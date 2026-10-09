@@ -453,7 +453,10 @@ fn the_tree_labels_message_route_and_connectivity_controls() {
         .collect();
     assert_eq!(authors.len(), 1, "the author carries the exact PeerId");
 
-    let route = the(&view, "route: human");
+    let route = the(
+        &view,
+        &interweave_human_ui_model::fill(text(UiText::Route), &[("route", "human")]),
+    );
     assert_eq!(
         route.accessible_role(),
         Some(i_slint_backend_testing::AccessibleRole::Text)
