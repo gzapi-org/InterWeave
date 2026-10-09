@@ -57,8 +57,8 @@ pub const OWNER_ONLY_DIR: u32 = 0o700;
 /// link or appeared component that breaks the rule; [`PersistError::Io`]
 /// if creation fails, or a missing part of the path is `..`;
 /// [`PersistError::UnsupportedPlatform`] where owner-only permissions
-/// cannot be enforced -- every target but Linux, the uid being read from
-/// `/proc`.
+/// cannot be enforced -- every target but Linux and Android, the uid
+/// being read from `/proc`.
 pub fn create_private_dir(dir: &Path) -> Result<(), PersistError> {
     #[cfg(unix)]
     {
@@ -459,7 +459,8 @@ fn temp_beside(path: &Path) -> std::path::PathBuf {
 /// ancestor or link that broke a rule and which; [`PersistError::Io`] if
 /// the directory itself cannot be inspected (`NotFound` among them), or
 /// [`PersistError::UnsupportedPlatform`] where this cannot be checked --
-/// every target but Linux, the uid being read from `/proc`.
+/// every target but Linux and Android, the uid being read from
+/// `/proc`.
 pub fn resolve_private_dir(dir: &Path) -> Result<PathBuf, PersistError> {
     resolve_private_dir_as(dir, effective_uid()?)
 }
@@ -526,7 +527,7 @@ pub fn require_private_dir(dir: &Path) -> Result<(), PersistError> {
 /// caller holding no file of its own to compare against -- the profile
 /// lock before it creates one, and the identity loader, which only reads.
 ///
-/// LINUX ONLY: the uid is read from `/proc/self/status`
+/// LINUX AND ANDROID ONLY: the uid is read from `/proc/self/status`
 /// ([`effective_uid`]), so every other target answers
 /// [`PersistError::UnsupportedPlatform`] -- as the profile lock already
 /// does there.
@@ -820,20 +821,20 @@ pub(crate) trait NameService: Clone + Send + 'static {
 }
 
 /// The host's name service: `getpwuid_r` and `getgrgid_r`, so NSS
-/// sources answer as well as `/etc/passwd` and `/etc/group`. Off Linux
-/// nothing is read, and the predicate refuses as unreadable.
+/// sources answer as well as `/etc/passwd` and `/etc/group` (bionic's own
+/// answers on Android). Off Linux and Android nothing is read, and the predicate refuses as unreadable.
 #[derive(Clone, Copy)]
 pub(crate) struct HostNames;
 
 impl NameService for HostNames {
     fn user_name(&self, uid: u32) -> std::io::Result<Option<String>> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))
                 .map(|user| user.map(|user| user.name))
                 .map_err(std::io::Error::from)
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
         {
             let _ = uid;
             Err(std::io::ErrorKind::Unsupported.into())
@@ -841,13 +842,13 @@ impl NameService for HostNames {
     }
 
     fn group(&self, gid: u32) -> std::io::Result<Option<(String, Vec<String>)>> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             nix::unistd::Group::from_gid(nix::unistd::Gid::from_raw(gid))
                 .map(|group| group.map(|group| (group.name, group.mem)))
                 .map_err(std::io::Error::from)
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
         {
             let _ = gid;
             Err(std::io::ErrorKind::Unsupported.into())
@@ -1111,11 +1112,11 @@ const ACCESS_ACL: &str = "system.posix_acl_access";
 /// Whether `path` itself -- not a link's target -- carries an access ACL.
 /// A filesystem without extended attributes carries none.
 pub(crate) fn access_acl_at(path: &Path) -> std::io::Result<bool> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         acl_answer(rustix::fs::lgetxattr(path, ACCESS_ACL, &mut [0u8; 0][..]))
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
         let _ = path;
         Err(std::io::ErrorKind::Unsupported.into())
@@ -1125,11 +1126,11 @@ pub(crate) fn access_acl_at(path: &Path) -> std::io::Result<bool> {
 /// Whether the opened `file` carries an access ACL, asked of the handle
 /// so the file judged is the file read.
 pub(crate) fn access_acl_of(file: &fs::File) -> std::io::Result<bool> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         acl_answer(rustix::fs::fgetxattr(file, ACCESS_ACL, &mut [0u8; 0][..]))
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
         let _ = file;
         Err(std::io::ErrorKind::Unsupported.into())
@@ -1138,7 +1139,7 @@ pub(crate) fn access_acl_of(file: &fs::File) -> std::io::Result<bool> {
 
 /// A size query's answer read as presence: a size is an ACL, no such
 /// attribute or no attribute support is none, anything else is an error.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn acl_answer(answer: rustix::io::Result<usize>) -> std::io::Result<bool> {
     match answer {
         Ok(_) => Ok(true),
@@ -1184,7 +1185,7 @@ pub fn effective_uid() -> Result<u32, PersistError> {
 ///
 /// The obvious spelling is `geteuid()`, an unsafe call, and this crate
 /// is `forbid(unsafe_code)` -- so the effective uid is not reachable
-/// through a call (it is read from `/proc` on Linux by
+/// through a call (it is read from `/proc` on Linux and Android by
 /// [`effective_uid`], where no file of ours exists yet). It
 /// does not need to be here: `ours` was
 /// created by this process moments ago, so its owner IS the identity

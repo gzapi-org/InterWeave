@@ -216,11 +216,11 @@ fn held_in(dirs: &[&Path], path: &Path) -> Result<bool, PersistError> {
 /// the value differs by ABI (0o400000 on `x86_64` and riscv64, 0o100000
 /// on aarch64, arm and powerpc), a hand-typed table once gave aarch64 the
 /// `x86_64` value, and CI runs one architecture, so no test here could
-/// have caught it. `None` off Linux refuses the lock there before
+/// have caught it. `None` off Linux and Android refuses the lock there before
 /// anything is touched.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 const O_NOFOLLOW: Option<i32> = Some(libc::O_NOFOLLOW);
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 const O_NOFOLLOW: Option<i32> = None;
 
 /// Open the lock file, deciding on its directories' owner and the
@@ -330,9 +330,9 @@ fn write_diagnostics(mut file: &File) -> std::io::Result<()> {
     file.flush()
 }
 
-// Linux only, as the lock is: `O_NOFOLLOW` is `None` on every other
-// target, Android included, and the lock refuses there before it reads
-// `/proc/self/status`.
+// Linux only, where the tests run: the lock also builds for Android,
+// whose host tests do not exist here, and refuses on every other target
+// before it reads `/proc/self/status`.
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     #![allow(clippy::expect_used)]

@@ -123,7 +123,7 @@ fn open_guarded_as(
         path: path.to_path_buf(),
         detail,
     };
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
         // O_NONBLOCK so a FIFO in its place opens at once and is refused
@@ -155,7 +155,7 @@ fn open_guarded_as(
         .map_err(refuse)?;
         Ok(file)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
         let _ = (refuse, uid, names);
         Err(LoadError::ConfigDirUnguarded(
