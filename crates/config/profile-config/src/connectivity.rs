@@ -1994,10 +1994,13 @@ mod tests {
             )),
             "a foreign destination is refused by shape: {errors:?}"
         );
+        // A host so named is a direct address here too: the role rule
+        // reads the marker where the grammar does.
         let direct = format!("/ip4/203.0.113.7/tcp/4001/p2p/{P1}");
+        let named = format!("/dns4/p2p-circuit/tcp/4001/p2p/{P1}");
         let errors = errors_for(&format!(
             r#"{{"infrastructure":{{"allowed_peers":["{P1}"]}},
-                 "relay":{{"client":{{"static_relays":["{direct}"]}}}},
+                 "relay":{{"client":{{"static_relays":["{named}"]}}}},
                  "autonat":{{"client":{{"static_servers":["{direct}"]}}}}}}"#
         ));
         assert!(

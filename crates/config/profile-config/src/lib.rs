@@ -841,19 +841,11 @@ pub(crate) fn host_this_build_cannot_dial(address: &str) -> Option<&'static str>
 /// (`RelayCircuit`), not the grammar's.
 fn validate_address_grammar(address: &str) -> Result<(), &'static str> {
     let components: Vec<&str> = address.split('/').collect();
-    // AT A PROTOCOL POSITION ONLY -- the odd indices after the leading
-    // `/` -- since the grammar is positional: a value slot holding the
-    // text `p2p-circuit`, a DNS host so named, is a direct address
-    // (`a_circuit_route_is_one_shape_and_each_other_is_named`'s control).
-    let Some(circuit) = components
-        .iter()
-        .enumerate()
-        .position(|(i, c)| i % 2 == 1 && *c == "p2p-circuit")
-    else {
+    let Some(circuit) = circuit_marker(&components, 1) else {
         return validate_direct_address(address);
     };
     if circuit + 1 != components.len() {
-        return if components[circuit + 1..].contains(&"p2p-circuit") {
+        return if circuit_marker(&components, circuit + 1).is_some() {
             Err("the circuit route has a second /p2p-circuit")
         } else {
             Err("something other than the destination's /p2p/<PeerId> follows /p2p-circuit")
@@ -874,10 +866,22 @@ fn validate_address_grammar(address: &str) -> Result<(), &'static str> {
 /// [`validate_address_grammar`] reads it. For a role that takes the
 /// direct form only (ADR-0052 rule 9, A 2026-10-09).
 pub(crate) fn is_circuit_route(address: &str) -> bool {
-    address
-        .split('/')
-        .enumerate()
-        .any(|(i, c)| i % 2 == 1 && c == "p2p-circuit")
+    circuit_marker(&address.split('/').collect::<Vec<_>>(), 1).is_some()
+}
+
+/// The index of the first `p2p-circuit` marker AT A PROTOCOL POSITION,
+/// `protocol` being one and every second index after it: the grammar is
+/// positional, so a value slot holding the text `p2p-circuit` -- a DNS
+/// host so named -- is no marker. From the start the protocols sit at
+/// the odd indices (`1`, after the leading `/`); past a marker, which
+/// carries no value, they sit one after it. The one reading for the
+/// grammar and the role rule alike
+/// (`a_circuit_route_is_one_shape_and_each_other_is_named`'s controls and
+/// `an_infrastructure_candidate_refuses_a_circuit_route_by_role`'s).
+fn circuit_marker(components: &[&str], protocol: usize) -> Option<usize> {
+    (protocol..components.len())
+        .step_by(2)
+        .find(|&i| components[i] == "p2p-circuit")
 }
 
 /// `/<host>/<value>/<transport>/<port>` against the documented set.
