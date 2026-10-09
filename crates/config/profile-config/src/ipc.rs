@@ -19,7 +19,8 @@ use crate::{ConfigError, de_duration_ms, ser_duration_ms};
 /// ping ends the connection after this long without reading a frame, so
 /// a profile's `interval + response_timeout` must not exceed it. Stated
 /// here from the contract rather than imported, since this crate does not
-/// depend on the IPC protocol's.
+/// depend on the IPC protocol; a test holds it equal to the protocol's
+/// `CLIENT_SILENCE_TIMEOUT` (`the_bound_is_the_protocols_client_silence_timeout`).
 pub const CLIENT_SILENCE_TIMEOUT_MS: u32 = 120_000;
 
 /// `ipc.socket_layout`: `literal[split-data-admin]`.
@@ -298,6 +299,18 @@ mod tests {
             ))
             .is_empty(),
             "a keepalive that is off is not judged"
+        );
+    }
+
+    /// The profile's copy of the bound is the IPC protocol's, the one the
+    /// client's timer arms on.
+    #[test]
+    fn the_bound_is_the_protocols_client_silence_timeout() {
+        // Compared as Durations: `as_millis` truncates, so a protocol
+        // bound off by less than a millisecond would have passed.
+        assert_eq!(
+            std::time::Duration::from_millis(u64::from(CLIENT_SILENCE_TIMEOUT_MS)),
+            interweave_ipc_protocol::CLIENT_SILENCE_TIMEOUT
         );
     }
 
