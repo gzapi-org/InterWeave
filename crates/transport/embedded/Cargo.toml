@@ -23,6 +23,10 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+# The admin port the host opens for its owner's own shutdown request
+# (`EmbeddedHost::request_shutdown`): the neutral traits the binding
+# implements.
+interweave-local-client-api = { path = "../../api/local-client-api" }
 interweave-profile-config = { path = "../../config/profile-config" }
 interweave-profile-identity = { path = "../../identity/profile-identity" }
 interweave-transport-composition = { path = "../composition" }
@@ -34,7 +38,8 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-interweave-local-client-api = { path = "../../api/local-client-api" }
+# A runtime of the test's own, to drop a host inside its async context.
+tokio = { workspace = true, features = ["rt"] }
 tempfile = { workspace = true }
 # The daemon's own filter construction, the oracle `log_admits` is held to.
 tracing-subscriber = { workspace = true }

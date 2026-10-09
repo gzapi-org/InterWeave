@@ -253,3 +253,53 @@ fn each_refusal_names_its_cause() {
         .stop(Duration::from_secs(1))
         .expect("stops");
 }
+
+/// The platform stops the Service while a thread of it waits for a
+/// shutdown request: the owner's own request releases that thread with
+/// the grace it named, the host then stops, and a start in the same
+/// process succeeds -- the lock went with it.
+#[test]
+fn a_platform_stop_releases_the_waiter() {
+    let app = app();
+    provision(&app.dir, &document("embedded-android", false));
+    let host = std::sync::Arc::new(EmbeddedHost::start(launch(&app.dir)).expect("starts"));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let waiting = std::sync::Arc::clone(&host);
+    let waiter = std::thread::spawn(move || {
+        let _ = tx.send(waiting.wait_shutdown_requested());
+    });
+    host.request_shutdown(Duration::from_millis(300))
+        .expect("asked");
+    // Bounded, so a request that releases nothing fails here rather than
+    // hanging the run.
+    let request = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the waiter returns within 10 s")
+        .expect("a request");
+    waiter.join().expect("the waiter ends");
+    assert_eq!(request.grace, Duration::from_millis(300));
+    let host = std::sync::Arc::into_inner(host).expect("the only holder");
+    host.stop(request.grace).expect("stops");
+    EmbeddedHost::start(launch(&app.dir))
+        .expect("starts again in the same process")
+        .stop(Duration::from_secs(1))
+        .expect("stops");
+}
+
+/// A host dropped without `stop`, inside another runtime's async
+/// context: the drop does not panic, and the lock is released, so the
+/// next start in the same process succeeds (#241 review part 2 R1).
+#[test]
+fn a_host_dropped_in_an_async_context_releases_the_profile() {
+    let app = app();
+    provision(&app.dir, &document("embedded-android", false));
+    let host = EmbeddedHost::start(launch(&app.dir)).expect("starts");
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("a runtime")
+        .block_on(async move { drop(host) });
+    EmbeddedHost::start(launch(&app.dir))
+        .expect("starts after the drop")
+        .stop(Duration::from_secs(1))
+        .expect("stops");
+}

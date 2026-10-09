@@ -81,3 +81,23 @@ fn the_audit_target_passes_a_stricter_filter() {
     ));
     assert!(!log_admits(AUDIT_TARGET, Level::DEBUG, LogLevel::Error));
 }
+
+/// The oracle above is a copy; this holds the copy to the daemon's
+/// source, so a change to the daemon's filter fails here until the copy
+/// -- and `log_admits` -- follow it.
+#[test]
+fn the_copy_is_the_daemons_construction() {
+    let daemon = include_str!("../../../../apps/transport-daemon/src/daemon.rs");
+    for line in [
+        "const FIRST_PARTY: &str = \"interweave\";",
+        "let widest = if level == tracing::Level::DEBUG {",
+        ".with_default(std::cmp::min(level, tracing::Level::WARN))",
+        ".with_target(FIRST_PARTY, level)",
+        ".with_target(AUDIT_TARGET, tracing::Level::INFO),",
+    ] {
+        assert!(
+            daemon.contains(line),
+            "the daemon's filter no longer has: {line}"
+        );
+    }
+}

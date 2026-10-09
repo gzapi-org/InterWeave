@@ -24,6 +24,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use interweave_local_client_api::{AdminBinding as _, AdminCapability, AdminPort as _};
 use interweave_profile_config::sections::LogLevel;
 use interweave_profile_config::trust_overlay::OverlayError;
 use interweave_profile_config::{
@@ -94,9 +95,20 @@ impl From<PersistError> for EmbeddedRefused {
     fn from(e: PersistError) -> Self {
         match e {
             PersistError::ProfileLocked { .. } => Self::LockHeld(e.to_string()),
-            PersistError::DirectoryNotPrivate { .. }
-            | PersistError::FileNotPrivate { .. }
-            | PersistError::Io(_) => Self::DirectoryRefused(e.to_string()),
+            PersistError::DirectoryNotPrivate { .. } | PersistError::FileNotPrivate { .. } => {
+                Self::DirectoryRefused(e.to_string())
+            }
+            // A directory absent or closed to this app is a directory a
+            // person can act on; a full disk or an I/O error is not
+            // (#241 review part 2 F2).
+            PersistError::Io(ref io)
+                if matches!(
+                    io.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                Self::DirectoryRefused(e.to_string())
+            }
             PersistError::InvalidProfileName { .. } => Self::ProfileInvalid(e.to_string()),
             _ => Self::Internal(e.to_string()),
         }
@@ -142,8 +154,10 @@ const FIRST_PARTY: &str = "interweave";
 /// trust change's record is the contract's, not a diagnostic
 /// (`LOCAL-CLIENT.md` §5, A 2026-10-04). First-party targets at the
 /// profile's level; every other crate's at it, capped at WARN.
-/// `the_filter_admits_what_the_daemons_does` holds it to the daemon's
-/// own construction.
+/// `the_filter_admits_what_the_daemons_does` holds it to a copy of the
+/// daemon's `Targets` construction, and
+/// `the_copy_is_the_daemons_construction` holds that copy to the
+/// daemon's source, so the two cannot drift apart unseen.
 #[must_use]
 pub fn log_admits(target: &str, level: tracing::Level, profile: LogLevel) -> bool {
     let configured = match profile {
@@ -169,8 +183,11 @@ pub fn log_admits(target: &str, level: tracing::Level, profile: LogLevel) -> boo
 /// left no holder, since the kernel releases the lock with it.
 const LOCK_WAIT: Duration = Duration::ZERO;
 
-/// The executor's worker threads: the host's standing bound, as the
-/// daemon's tests run with (`cargo -j 2`, two test threads).
+/// The executor's worker threads: a fixed two rather than the daemon's
+/// one per CPU, so a phone's runtime keeps a bounded thread count beside
+/// the app's UI -- one for the substrate's driver and one for the
+/// sessions' work. A choice, not a measurement: no device run has
+/// shown whether two is too few or more than needed.
 const WORKERS: usize = 2;
 
 /// A running embedded transport runtime and what it holds.
@@ -273,16 +290,41 @@ impl EmbeddedHost {
         &self.paths
     }
 
-    /// Wait for an admin port to ask the runtime's owner to stop
-    /// (`AdminPort::shutdown`): the runtime never stops itself, so the
-    /// Service answers by calling [`stop`](Self::stop) with the grace
-    /// asked for. `None` only if nothing remains that could ask.
+    /// Wait for a request that the runtime's owner stop it: an admin
+    /// port's (`AdminPort::shutdown`), or the owner's own
+    /// [`request_shutdown`](Self::request_shutdown) from another thread
+    /// -- the way out for a Service the platform stops while a thread of
+    /// it waits here, since [`stop`](Self::stop) cannot be called while
+    /// the host is borrowed. The runtime never stops itself: the Service
+    /// answers by calling `stop` with the grace asked for. While the
+    /// host exists the answer is always `Some`; the `Option` is the
+    /// composition's.
     ///
     /// BLOCKS; call it off any async context.
     #[must_use]
     pub fn wait_shutdown_requested(&self) -> Option<ShutdownRequest> {
         let (executor, composed) = (self.executor.as_ref()?, self.composed.as_ref()?);
         executor.block_on(composed.shutdown_requested())
+    }
+
+    /// Ask, as the runtime's owner, that it stop within `grace`: what an
+    /// admin port's shutdown does, through a port the host opens with
+    /// that one capability. A thread waiting in
+    /// [`wait_shutdown_requested`](Self::wait_shutdown_requested)
+    /// returns with it (`a_platform_stop_releases_the_waiter`).
+    ///
+    /// BLOCKS; call it off any async context.
+    ///
+    /// # Errors
+    /// [`EmbeddedRefused::Internal`] once the runtime has stopped.
+    pub fn request_shutdown(&self, grace: Duration) -> Result<(), EmbeddedRefused> {
+        let capabilities = std::collections::BTreeSet::from([AdminCapability::Shutdown]);
+        self.handle
+            .block_on(async {
+                let port = self.sessions.admin(capabilities).await?;
+                port.shutdown(grace).await
+            })
+            .map_err(|e| EmbeddedRefused::Internal(format!("{e:?}")))
     }
 
     /// Stop the runtime, letting exchanges in flight settle for `grace`,
@@ -321,5 +363,29 @@ impl Drop for EmbeddedHost {
             executor.shutdown_background();
         }
         drop(self.lock.take());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A directory absent or closed is the person's to act on; any other
+    /// I/O failure is not a directory's fault.
+    #[test]
+    fn an_io_failure_is_a_directory_only_when_absent_or_closed() {
+        let io = |kind| EmbeddedRefused::from(PersistError::Io(std::io::Error::from(kind)));
+        assert!(matches!(
+            io(std::io::ErrorKind::NotFound),
+            EmbeddedRefused::DirectoryRefused(_)
+        ));
+        assert!(matches!(
+            io(std::io::ErrorKind::PermissionDenied),
+            EmbeddedRefused::DirectoryRefused(_)
+        ));
+        assert!(matches!(
+            io(std::io::ErrorKind::StorageFull),
+            EmbeddedRefused::Internal(_)
+        ));
     }
 }
