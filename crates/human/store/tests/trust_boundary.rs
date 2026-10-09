@@ -18,9 +18,10 @@ fn mode(path: &Path) -> u32 {
     std::fs::metadata(path).expect("stat").permissions().mode() & 0o777
 }
 
-/// A data directory standing where Android's does: under a directory
-/// other accounts can write (no sticky bit), which the walk to `/`
-/// refuses as an ancestor.
+/// A data directory under an ancestor the walk to `/` refuses, as
+/// Android's is. Here the ancestor is writable by others with no sticky
+/// bit; on Android it is owned by `system`, a different branch of the
+/// same rule, which a test cannot make without root.
 fn app_data_under_a_wide_parent() -> (tempfile::TempDir, std::path::PathBuf) {
     let outer = tempfile::Builder::new()
         .permissions(std::fs::Permissions::from_mode(0o700))
