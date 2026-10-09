@@ -289,10 +289,11 @@ pub enum ClientEvent {
         /// The peer.
         peer: TransportIdentity,
     },
-    /// The path to a peer this session has a route to changed: the route
-    /// indicator's, never a reconnect or a message (`human-client-ui.md`
-    /// §7). Its newest value only, per peer; one queued before the same
-    /// peer's [`ClientEvent::PeerDisconnected`] is dropped by it.
+    /// The path to a peer this session has a route to: changed, or said
+    /// when the route began or the peer returned after a disconnection.
+    /// The route indicator's, never a message (`human-client-ui.md` §7).
+    /// Its newest value only, per peer; one queued before the same peer's
+    /// [`ClientEvent::PeerDisconnected`] is dropped by it.
     PeerPath {
         /// The peer.
         peer: TransportIdentity,
