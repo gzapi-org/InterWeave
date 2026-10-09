@@ -989,9 +989,10 @@ type NameReads = (
 /// a thread limit is not reported as a slow name service: the deadline
 /// passed (the thread is then left to finish or leak, one per refusal),
 /// the read ended without answering (it panicked), or no thread could be
-/// started -- or an earlier read of the same service
-/// ([`NameService::outstanding`]) did not end within `deadline`, counted
-/// from this request, and nothing was started.
+/// started -- or nothing was started at all, because an earlier read of
+/// the same service ([`NameService::outstanding`]) did not end within
+/// `deadline`, counted from this request, or ended leaving none of it,
+/// or because the budget was zero from the start ("no time was left").
 fn read_names(
     names: &impl NameService,
     euid: u32,
@@ -1895,7 +1896,12 @@ mod tests {
 
     /// A read with no budget left is refused without being made: no
     /// thread starts, so nothing reads the service, and the gate is free
-    /// afterwards. A zero budget is named as that.
+    /// afterwards. A zero budget is named as that. NOT reached here: the
+    /// branch where the budget went on waiting for an earlier read that
+    /// ended exactly as it ran out, which takes that read to end at the
+    /// caller's deadline itself -- a timing no test schedules without a
+    /// clock seam; that branch reuses the "earlier read" text the
+    /// gate-timeout refusal already pins.
     #[cfg(unix)]
     #[test]
     fn a_read_with_no_budget_left_starts_no_thread() {
