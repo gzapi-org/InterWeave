@@ -662,6 +662,12 @@ pub(super) fn unreached_relay(
 /// `Either`s hide the type from a downcast but keep its `Display`, so the
 /// text is the only handle; `the_relay_clients_canceled_text_is_pinned`
 /// fails if a crate bump changes it.
+///
+/// ACCEPTED, NOT TESTED: libp2p-relay 0.22's client also drops the request
+/// -- and so answers this -- when the relay connection closes with the
+/// request already sent, so a circuit the relay saw is then settled as the
+/// hop's: the route ranked down, no peer backoff, the retry at the
+/// ordinary cadence. Telling the two apart needs the crate to say which.
 pub(super) const RELAY_HOP_CANCELED: &str = "Response from behaviour was canceled";
 
 /// Whether every attempt of `error` is the relay client's canceled
@@ -1854,7 +1860,8 @@ mod tests {
     }
 
     /// `unreached_relay` settles a circuit failure as the relay hop's in
-    /// both of its shapes -- the relay not connected (any error), and the
+    /// both of its shapes -- the relay not connected (any transport
+    /// failure), and the
     /// relay CONNECTED with the client's canceled request (#245
     /// re-review N1, the restart race) -- and not for a connected relay
     /// that answered (the control), nor for a dial that is not a circuit.
