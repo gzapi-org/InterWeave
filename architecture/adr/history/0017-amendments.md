@@ -83,3 +83,54 @@ ruling.)
 
 **Not changed.** The major rule for an added, removed or changed
 property after the build; the result-shape widening of the same day.
+
+
+### Amendment 2026-10-09 — A closed event data shape widens behind a new minor as a result shape does, and a required member may become optional there, the old shape served below it
+
+**Trigger.** Stage 17's j6 (a peer relayed from its first connection
+never reached the route indicator) made the `peer.path_changed` notice
+also announce a route that BEGINS and a routed peer that CONNECTS AGAIN
+after a `peer.disconnected`, with `previous` absent — `ipc/path-changed`
+1.1.0 behind IPC 2.4, a connection below 2.4 sent nothing at either
+moment. `previous` had been required; the 2026-10-07 exception as written
+admitted a widening of a closed RESULT shape only, and the blind review of
+#248 (F1, P2) found the event change authorised by no rule.
+
+**Ruled.** The exception covers a closed EVENT data shape as it covers a
+result shape. What the exception rests on is that the server emits the
+shape after the minor is negotiated and can therefore serve the old
+shape below the new minor; an event's data is emitted the same way, a
+params shape is sent by the client before or regardless of the minor and
+stays outside it. On a result or an event shape a REQUIRED member may
+become OPTIONAL, admitted only when every instance that omits it is
+itself new behind the minor: below the minor no instance without the
+member is ever emitted, so the shape served there is byte-identical to
+what the schema described before; the schema names the minor from which
+the member may be absent. The bound is unchanged — the previous shape on
+every supported minor below the new one — and a change that cannot keep
+it stays a major. First use: `ipc/path-changed` 1.1.0 behind 2.4,
+`previous` absent when the route begins or a routed peer reconnects
+(`route_established` / `reconnected`, or a later change's class once a
+change merged into the pending notice).
+
+**The bound on a stream.** A result has one instance per request, so
+the same shape below the minor is the same result; an event stream does
+not — withholding the new-only instances at serialisation while the
+emitter coalesces per key would let a new-only instance absorb a change
+the old rule owed, and the client below the minor would lose it (#245's
+review F1 measured exactly that). So for an event shape the bound holds
+on the stream: below the minor every instance the old rule owed is
+still emitted with the member, the emitter taking no new-only instance
+for such a connection; a serialiser that withholds the new shape is the
+backstop, never the mechanism. First use's mechanism: the IPC server
+opens a connection below 2.4 as a session that declines route notices
+(`SessionRequest::without_route_notices`, `ipc-server/src/hello.rs`),
+which is then owed every change with its `previous`
+(`a_session_without_route_notices_is_owed_every_change_with_its_previous`);
+the send loop's `available_to` refuses a `previous`-less notice below
+2.4 as the backstop (p2p-network-dev's code on #248).
+
+**Not changed.** Minors additive only; an added, removed or changed
+property of a closed PARAMS shape, or a removed property anywhere, is a
+major; the pre-release exception of 2026-10-01; the result-shape
+exception of 2026-10-07 and its first use.
