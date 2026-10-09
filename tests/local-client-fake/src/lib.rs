@@ -47,9 +47,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use interweave_local_client_api::{
     AdminBinding, AdminCapability, AdminPort, AdminStatus, DataCapability, DataSessionBinding,
     DataSessionPort, EndpointAdminView, EndpointLease, Generation, LeaseRecord, LocalAdminPort,
-    LocalDataSession, LocalSessionEvent, MAX_EVENT_QUEUE, PeerGateView, PeerOutcome,
-    ReceivedBroadcast, ReceivedDirect, SessionEvent, SessionRequest, TrustAdminView, TrustSource,
-    TrustedPeer,
+    LocalDataSession, LocalSessionEvent, MAX_EVENT_QUEUE, PeerGateView, PeerOutcome, RECONNECTED,
+    ROUTE_ESTABLISHED, ReceivedBroadcast, ReceivedDirect, SessionEvent, SessionRequest,
+    TrustAdminView, TrustSource, TrustedPeer,
 };
 use interweave_transport_api::{
     BroadcastMessageV1, ChannelId, ConnectivitySummary, DirectDestination, DirectInboundState,
@@ -190,10 +190,8 @@ impl FakeNode {
     }
 
     /// `peer`'s path changed: owed to each session with a route to it,
-    /// merged into its pending notice -- the pending `previous` kept, the
-    /// newer `current`, class and time taken; one that comes back to its
-    /// `previous` is withdrawn. How a test drives what a real runtime
-    /// reports.
+    /// merged into its pending notice ([`Queues::owe_path`]). How a test
+    /// drives what a real runtime reports.
     pub fn path_changed(
         &self,
         peer: &TransportIdentity,
@@ -203,21 +201,48 @@ impl FakeNode {
         observed_at: u64,
     ) {
         let mut state = lock(&self.0.state);
+        state.path = Some(current);
         for queues in state.sessions.values_mut() {
-            if !queues.routes.contains(peer) {
-                continue;
+            if queues.routes.contains(peer) {
+                queues.owe_path(peer, Some(previous), current, reason_class, observed_at);
             }
-            let merged = queues
-                .paths
-                .remove(peer)
-                .map_or(Some(previous), |(pending, ..)| pending);
-            if merged != Some(current) {
-                queues.paths.insert(
-                    peer.clone(),
-                    (merged, current, reason_class.to_owned(), observed_at),
-                );
+        }
+    }
+
+    /// The pair's connection went, `closed`: each session is owed the
+    /// `PeerDisconnected`, and a path notice pending for `peer` is
+    /// withdrawn while the route is kept, as the runtime does. How a test
+    /// drives a reconnect ([`FakeNode::connected`]).
+    pub fn disconnected(&self, peer: &TransportIdentity) {
+        let mut state = lock(&self.0.state);
+        state.path = None;
+        let bound = state.queue_bound;
+        for queues in state.sessions.values_mut() {
+            queues.paths.remove(peer);
+            if queues.notices.len() >= bound {
+                queues.notices.pop_front();
             }
+            queues
+                .notices
+                .push_back(LocalSessionEvent::PeerDisconnected {
+                    peer: peer.clone(),
+                    reason_class: "closed".into(),
+                });
             queues.wake();
+        }
+    }
+
+    /// The pair connected again on `path`: each session holding a route
+    /// to `peer` is owed that path with no `previous` (`reconnected`, A
+    /// 2026-10-09), as the runtime owes it.
+    pub fn connected(&self, peer: &TransportIdentity, path: PeerPath) {
+        let mut state = lock(&self.0.state);
+        state.path = Some(path);
+        let now = wall_ms();
+        for queues in state.sessions.values_mut() {
+            if queues.routes.contains(peer) {
+                queues.owe_path(peer, None, path, RECONNECTED, now);
+            }
         }
     }
 
@@ -309,6 +334,44 @@ impl Queues {
         }
     }
 
+    /// Merge one path notice into the pending one for `peer`, as the
+    /// runtime merges them: the pending `previous` kept -- an absent one
+    /// stays absent -- the newer `current`, class and time taken, and one
+    /// that comes back to its `previous` withdrawn.
+    fn owe_path(
+        &mut self,
+        peer: &TransportIdentity,
+        previous: Option<PeerPath>,
+        current: PeerPath,
+        reason_class: &str,
+        observed_at: u64,
+    ) {
+        let merged = self
+            .paths
+            .remove(peer)
+            .map_or(previous, |(pending, ..)| pending);
+        if merged != Some(current) {
+            self.paths.insert(
+                peer.clone(),
+                (merged, current, reason_class.to_owned(), observed_at),
+            );
+        }
+        self.wake();
+    }
+
+    /// Hold a route to `peer`: one that BEGINS here, toward the pair
+    /// while it is connected, is owed its path with no `previous`
+    /// (`route_established`, A 2026-10-09).
+    fn route(&mut self, peer: TransportIdentity, path: Option<PeerPath>) {
+        if self.routes.contains(&peer) {
+            return;
+        }
+        if let Some(path) = path {
+            self.owe_path(&peer, None, path, ROUTE_ESTABLISHED, wall_ms());
+        }
+        self.routes.insert(peer);
+    }
+
     fn holds_anything(&self) -> bool {
         self.state.is_some()
             || !self.notices.is_empty()
@@ -350,6 +413,10 @@ struct State {
     shutdown_requests: Vec<Duration>,
     /// What [`FakeNode::set_health`] last set.
     health: Health,
+    /// The pair's path while it is connected: direct from pairing, then
+    /// what [`FakeNode::path_changed`], [`FakeNode::disconnected`] and
+    /// [`FakeNode::connected`] make of it. A route that begins is owed it.
+    path: Option<PeerPath>,
     /// The data-plane allowlist: the pair's other node from pairing, then
     /// what the admin port's `set_trust` makes of it.
     trusted: BTreeSet<TransportIdentity>,
@@ -384,6 +451,7 @@ impl Node {
                 stopped: false,
                 shutdown_requests: Vec::new(),
                 health: Health::Healthy,
+                path: Some(PeerPath::Direct),
                 trusted: BTreeSet::new(),
                 configured: BTreeSet::new(),
                 configured_endpoints,
@@ -751,12 +819,12 @@ impl DataSessionPort for FakeSession {
             message_id,
             payload,
         );
-        if accepted.is_ok()
-            && let Some(queues) = lock(&self.node.state)
-                .sessions
-                .get_mut(self.session.session_id())
-        {
-            queues.routes.insert(destination.peer);
+        if accepted.is_ok() {
+            let mut state = lock(&self.node.state);
+            let path = state.path;
+            if let Some(queues) = state.sessions.get_mut(self.session.session_id()) {
+                queues.route(destination.peer, path);
+            }
         }
         accepted
     }
@@ -764,6 +832,7 @@ impl DataSessionPort for FakeSession {
     async fn events(&self, max: usize) -> Result<Vec<SessionEvent>, TransportError> {
         self.require(DataCapability::Events)?;
         let mut state = self.running()?;
+        let path = state.path;
         let Some(queues) = state.sessions.get_mut(self.session.session_id()) else {
             return Ok(Vec::new());
         };
@@ -779,10 +848,10 @@ impl DataSessionPort for FakeSession {
             } else if let Some(direct) = queues.direct.pop_front() {
                 // A message TAKEN is a route, as the runtime records it
                 // (`SessionNotices::drained_from`): not one merely queued.
-                queues.routes.insert(direct.source_peer.clone());
+                queues.route(direct.source_peer.clone(), path);
                 taken.push(SessionEvent::Direct(direct));
             } else if let Some(broadcast) = queues.broadcast.pop_front() {
-                queues.routes.insert(broadcast.source_peer.clone());
+                queues.route(broadcast.source_peer.clone(), path);
                 taken.push(SessionEvent::Broadcast(broadcast));
             } else if let Some((peer, (previous, current, reason_class, observed_at))) =
                 queues.paths.pop_first()
@@ -1062,6 +1131,12 @@ impl AdminPort for FakeAdmin {
         }
         let bound = state.queue_bound;
         for queues in state.sessions.values_mut() {
+            // The revocation ENDS the route and withdraws its pending
+            // notice, as the runtime's `SessionNotices::revoked` does: a
+            // new exchange after a re-allow is a new route, owed a new
+            // `route_established`.
+            queues.routes.remove(&peer);
+            queues.paths.remove(&peer);
             if queues.notices.len() >= bound {
                 queues.notices.pop_front();
             }
