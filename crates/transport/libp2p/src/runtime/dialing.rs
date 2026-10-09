@@ -12,6 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use libp2p::core::transport::{ListenerId, TransportError};
+use libp2p::multiaddr::Protocol;
 use libp2p::swarm::DialError;
 use libp2p::swarm::SwarmEvent as Libp2pSwarmEvent;
 use libp2p::{Multiaddr, PeerId, identify};
@@ -608,6 +609,78 @@ pub(super) fn settle_failed_dial(
     }
 }
 
+/// The relay a failed `RelayCircuit` dial went through, when the circuit
+/// failed AT THE RELAY HOP -- before the destination was asked anything.
+/// Two shapes, either sufficient:
+///
+/// - this node holds no direct connection to the relay: nothing past the
+///   hop can have answered;
+/// - the relay client answered [`RELAY_HOP_CANCELED`]: it parked the
+///   circuit on its own dial to the relay and dropped it unsent, which
+///   happens with the relay CONNECTED by the time the failure arrives --
+///   the client asked for the hop a few milliseconds before the
+///   reservation's connection to the same relay established, and its own
+///   dial was refused on the Swarm's peer condition (measured on #245
+///   after a daemon restart, rust-ui-dev-01's 01a1217f).
+///
+/// `None` for any other dial, for any error that is not a transport
+/// failure -- a `WrongPeerId` keeps its quarantine whatever the table
+/// says (#247 review R3) -- for a failure the relay or the destination
+/// answered, scored as before, and for an address with no relay `/p2p`
+/// before its `/p2p-circuit`. With the relay, whether a direct connection
+/// to it came up AFTER this dial was admitted: the hop has been reached
+/// since, and the retry is due now (`record_relay_hop_unreached`).
+pub(super) fn unreached_relay(
+    ticket: &DialTicket,
+    open: &HashMap<libp2p::swarm::ConnectionId, OpenConnection>,
+    error: &DialError,
+) -> Option<(TransportIdentity, bool)> {
+    if ticket.origin() != DialOrigin::RelayCircuit || !matches!(error, DialError::Transport(_)) {
+        return None;
+    }
+    let address: Multiaddr = ticket.address().parse().ok()?;
+    let parts: Vec<Protocol<'_>> = address.iter().collect();
+    let at = parts
+        .iter()
+        .position(|p| matches!(p, Protocol::P2pCircuit))?;
+    let Some(Protocol::P2p(relay)) = at.checked_sub(1).and_then(|i| parts.get(i)) else {
+        return None;
+    };
+    let relay = to_transport_identity(relay).ok()?;
+    let direct = || {
+        open.values()
+            .filter(|c| c.peer == relay && c.path == PeerPath::Direct)
+    };
+    let reached = direct().next().is_some();
+    let came_up = direct().any(|c| c.since_ms >= ticket.admitted_at_ms());
+    (!reached || hop_canceled(error)).then_some((relay, came_up))
+}
+
+/// What `libp2p-relay`'s client transport says when the behaviour drops a
+/// circuit request it never sent: `Error::ResponseFromBehaviourCanceled`'s
+/// text. Read through the boxed transport's `io::Error`, whose nested
+/// `Either`s hide the type from a downcast but keep its `Display`, so the
+/// text is the only handle; `the_relay_clients_canceled_text_is_pinned`
+/// fails if a crate bump changes it.
+///
+/// ACCEPTED, NOT TESTED: libp2p-relay 0.22's client also drops the request
+/// -- and so answers this -- when the relay connection closes with the
+/// request already sent, so a circuit the relay saw is then settled as the
+/// hop's: the route ranked down, no peer backoff, the retry at the
+/// ordinary cadence. Telling the two apart needs the crate to say which.
+pub(super) const RELAY_HOP_CANCELED: &str = "Response from behaviour was canceled";
+
+/// Whether every attempt of `error` is the relay client's canceled
+/// circuit request.
+fn hop_canceled(error: &DialError) -> bool {
+    match error {
+        DialError::Transport(attempts) if !attempts.is_empty() => attempts.iter().all(
+            |(_, e)| matches!(e, TransportError::Other(io) if io.to_string() == RELAY_HOP_CANCELED),
+        ),
+        _ => false,
+    }
+}
+
 /// Whether ONE transport attempt is structural: this process's own
 /// stack refusing the address's shape, which no retry changes.
 fn attempt_is_structural(address: &Multiaddr, error: &TransportError<std::io::Error>) -> bool {
@@ -923,6 +996,13 @@ pub(super) fn settle_outcome(
                 refuse.push(*connection_id);
                 return Announce::Suppress;
             };
+            // A DIRECT connection to a peer may be a relay some circuit
+            // retry waits on: due now. A no-op for any other peer, and
+            // asked before retention because a retry made due early only
+            // dials sooner -- the gate still judges it.
+            if path == PeerPath::Direct {
+                manager.relay_reached(&peer, now_ms);
+            }
             #[expect(
                 clippy::single_match_else,
                 reason = "each arm carries the comment naming its case"
@@ -1063,7 +1143,14 @@ pub(super) fn settle_outcome(
             ..
         } => {
             if let Some(ticket) = in_flight.settle(*connection_id) {
-                settle_failed_dial(manager, ticket, error, now_ms);
+                // A CIRCUIT THAT NEVER REACHED ITS RELAY says nothing
+                // about the destination (`record_relay_hop_unreached`).
+                match unreached_relay(&ticket, open, error) {
+                    Some((relay, came_up)) => {
+                        let _ = manager.record_relay_hop_unreached(ticket, &relay, came_up, now_ms);
+                    }
+                    None => settle_failed_dial(manager, ticket, error, now_ms),
+                }
             }
         }
         // ADVISORY, and bounded. These are addresses the peer asserted
@@ -1745,6 +1832,126 @@ pub(super) type ActiveListeners = HashMap<ListenerId, Vec<Multiaddr>>;
 
 #[cfg(test)]
 mod tests {
+
+    /// `RELAY_HOP_CANCELED` is the pinned relay client's own text for a
+    /// circuit request its behaviour dropped unsent, and `hop_canceled`
+    /// reads it through the boxed transport's `io::Error` the way the
+    /// Swarm hands it over. The control: another error is not it.
+    #[test]
+    fn the_relay_clients_canceled_text_is_pinned() {
+        use libp2p::relay::client::transport::Error as RelayError;
+        let canceled =
+            RelayError::ResponseFromBehaviourCanceled(futures::channel::oneshot::Canceled);
+        assert_eq!(canceled.to_string(), super::RELAY_HOP_CANCELED);
+        let address: libp2p::Multiaddr = "/ip4/127.0.0.1/tcp/1/p2p-circuit".parse().expect("valid");
+        let boxed = |e: RelayError| {
+            libp2p::swarm::DialError::Transport(vec![(
+                address.clone(),
+                libp2p::core::transport::TransportError::Other(std::io::Error::other(
+                    either::Either::<RelayError, std::io::Error>::Left(e),
+                )),
+            )])
+        };
+        assert!(super::hop_canceled(&boxed(canceled)));
+        assert!(
+            !super::hop_canceled(&boxed(RelayError::MissingDstPeerId)),
+            "the control"
+        );
+    }
+
+    /// `unreached_relay` settles a circuit failure as the relay hop's in
+    /// both of its shapes -- the relay not connected (any transport
+    /// failure), and the
+    /// relay CONNECTED with the client's canceled request (#245
+    /// re-review N1, the restart race) -- and not for a connected relay
+    /// that answered (the control), nor for a dial that is not a circuit.
+    #[test]
+    fn a_circuit_failure_is_the_hops_when_unreached_or_canceled_and_not_otherwise() {
+        use libp2p::relay::client::transport::Error as RelayError;
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
+        m.set_trust(trust(&[FAR], &[RELAY]), &[]);
+        let circuit = format!("/ip4/10.0.0.1/tcp/4001/p2p/{RELAY}/p2p-circuit");
+        let ticket = m
+            .handle()
+            .admit(
+                &DialRequest {
+                    peer: Some(ident(FAR)),
+                    address: circuit.clone(),
+                    origin: DialOrigin::RelayCircuit,
+                },
+                5,
+            )
+            .expect("a circuit to a data-plane peer is admitted");
+        let address: Multiaddr = circuit.parse().expect("valid");
+        let failed = |e: RelayError| {
+            DialError::Transport(vec![(
+                address.clone(),
+                TransportError::Other(std::io::Error::other(either::Either::<
+                    RelayError,
+                    std::io::Error,
+                >::Left(e))),
+            )])
+        };
+        let canceled = || {
+            failed(RelayError::ResponseFromBehaviourCanceled(
+                futures::channel::oneshot::Canceled,
+            ))
+        };
+        let answered = || failed(RelayError::MissingDstPeerId);
+
+        let mut open = HashMap::new();
+        assert_eq!(
+            super::unreached_relay(&ticket, &open, &answered()),
+            Some((ident(RELAY), false)),
+            "not connected to the relay: the hop's, whatever the error"
+        );
+        // Connected at 0, before the dial was admitted at 5.
+        open.insert(
+            ConnectionId::new_unchecked(1),
+            open_to(&ident(RELAY), &mut m),
+        );
+        assert_eq!(
+            super::unreached_relay(&ticket, &open, &canceled()),
+            Some((ident(RELAY), false)),
+            "connected, but the request was dropped unsent: the hop's, nothing new"
+        );
+        // A second connection to the relay established at 10, after the
+        // dial: the restart race, the retry due now (#247 review F1).
+        let mut fresh = open_to(&ident(RELAY), &mut m);
+        fresh.since_ms = 10;
+        open.insert(ConnectionId::new_unchecked(2), fresh);
+        assert_eq!(
+            super::unreached_relay(&ticket, &open, &canceled()),
+            Some((ident(RELAY), true)),
+            "the relay came up during the dial"
+        );
+        assert_eq!(
+            super::unreached_relay(&ticket, &open, &DialError::Aborted),
+            None,
+            "not a transport failure: settled as before (R3)"
+        );
+        assert_eq!(
+            super::unreached_relay(&ticket, &open, &answered()),
+            None,
+            "the control: connected and answered past the hop"
+        );
+        let direct = m
+            .handle()
+            .admit(
+                &DialRequest {
+                    peer: Some(ident(FAR)),
+                    address: "/ip4/10.0.0.2/tcp/4001".to_owned(),
+                    origin: DialOrigin::Manual,
+                },
+                0,
+            )
+            .expect("a direct dial is admitted");
+        assert_eq!(
+            super::unreached_relay(&direct, &open, &canceled()),
+            None,
+            "not a circuit"
+        );
+    }
     use super::{
         AdvertisedBoundary, Held, OpenConnection, PathSample, PolicyClosed, announce_path,
         best_path, book_origin, canonical_dial_address, closed_outright, command_origin,
@@ -4759,7 +4966,7 @@ mod tests {
             // one of the existing sites passes -- no count here, because
             // this one has now been restated four times and been wrong
             // twice. Said rather than assumed. Review findings on PR #86.
-            let routes: [(&str, usize); 10] = [
+            let routes: [(&str, usize); 12] = [
                 // `learn_route`, the only direct caller.
                 ("learn_address(", 1),
                 // `settle_failed_dial`'s non-structural arm for the extra
@@ -4793,6 +5000,10 @@ mod tests {
                 ("record_permanent_failure(", 3),
                 ("record_identity_mismatch(", 1),
                 ("record_success(", 1),
+                // The event loop's settlement of a circuit dial that never
+                // reached its relay: learns `ticket.address()` and ranks it
+                // down, as `record_failure` does, and backs off no peer.
+                ("record_relay_hop_unreached(", 1),
                 // THE QUARANTINE WRITE ITSELF, expected ZERO in every file
                 // including this one. `ConnectionPolicy::record_address_failure`
                 // is `pub`, `mod.rs` builds a `ConnectionPolicy` in production,
@@ -4825,6 +5036,9 @@ mod tests {
                 // separates it from `record_address_failure_unadmitted(`.
                 // Review finding on PR #86.
                 ("record_address_failure(", 0),
+                // Its address half, `pub` on the same policy: zero here too,
+                // for the same reason (#245 review F2 added it).
+                ("score_address_failure(", 0),
             ];
             for (pattern, in_dialing) in routes {
                 let calls = production.matches(pattern).count();
