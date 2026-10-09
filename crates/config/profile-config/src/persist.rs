@@ -905,7 +905,8 @@ pub const NSS_READ_DEADLINE: std::time::Duration = std::time::Duration::from_sec
 /// process; a read asked for while one is WAITS for it, up to its own
 /// deadline, then refuses -- a healthy concurrent read succeeds, a hung
 /// service costs one thread (ADR-0028, "The name-service read is
-/// bounded"; `a_read_asked_for_while_one_is_outstanding_waits_for_it`).
+/// bounded"; `a_read_asked_for_while_one_is_outstanding_waits_for_it`,
+/// `the_host_name_service_uses_the_process_gate`).
 static NSS_READ_OUTSTANDING: ReadGate = ReadGate::new();
 
 /// At most one read in flight, and a way to wait for it to end.
@@ -1654,6 +1655,17 @@ mod tests {
         );
         setfacl(&["-m", "u:nobody:rw"], &file);
         assert!(access_acl_of(&opened()).expect("read"), "an access ACL");
+    }
+
+    /// The host's name service reads under the process's one gate: what
+    /// bounds a hung service to one thread per process. Every test
+    /// service carries a gate of its own instead.
+    #[test]
+    fn the_host_name_service_uses_the_process_gate() {
+        assert!(std::ptr::eq(
+            HostNames.outstanding(),
+            std::ptr::from_ref(&NSS_READ_OUTSTANDING)
+        ));
     }
 
     /// A guard of a test's own, so tests running in parallel do not share
