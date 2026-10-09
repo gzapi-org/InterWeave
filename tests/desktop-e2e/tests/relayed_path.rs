@@ -349,8 +349,7 @@ async fn a_direct_message_crosses_a_real_circuit_both_ways_beside_a_direct_contr
         "no circuit to or from the control, asked or denied: {seen:?}"
     );
 
-    // What the client-api says of each path: B's one peer is relayed,
-    // C's is not.
+    // What the client-api says of B's one peer: relayed.
     let b_now = summary_where(&b_session, b_told.states.last().cloned(), |s| {
         s.active_relayed_peer_paths == 1
     })
@@ -368,7 +367,10 @@ async fn a_direct_message_crosses_a_real_circuit_both_ways_beside_a_direct_contr
     // B restarts: A's route to B stands, the disconnect is told, and B's
     // return over the circuit is owed with nothing before it.
     let before = relay.seen().await.circuits.len();
-    let told_before = a_told.paths.len();
+    // What A was told before the restart is drained first, so what is
+    // read past these marks was told after it began.
+    a_told.read(&a_session, &b_peer, "").await;
+    let (told_before, gone_before) = (a_told.paths.len(), a_told.gone.len());
     drop(b_session);
     assert!(b_daemon.terminate().await.success(), "{}", b_daemon.log());
     let mut b_daemon = b.start(&[]);
@@ -400,7 +402,8 @@ async fn a_direct_message_crosses_a_real_circuit_both_ways_beside_a_direct_contr
         a_told
             .gone
             .iter()
-            .any(|(p, at)| p == &b_peer && (told_before..=back_at).contains(at)),
+            .skip(gone_before)
+            .any(|(p, at)| p == &b_peer && *at <= back_at),
         "the disconnect was told after the restart began and before the return: {:?}",
         a_told.gone
     );
