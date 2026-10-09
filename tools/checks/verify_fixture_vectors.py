@@ -374,7 +374,18 @@ def gossipsub_topic_key_v1(vector: dict) -> str:
         raise ValueError(f"ChannelId is {len(raw)} bytes; the contract allows 1..128")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}", channel):
         raise ValueError(f"ChannelId '{channel}' does not match the ADR-0025 grammar")
-    return hashlib.sha256(TOPIC_KEY_V1_DOMAIN + raw).hexdigest()
+    key = hashlib.sha256(TOPIC_KEY_V1_DOMAIN + raw).hexdigest()
+    # The wire topic is the key's lowercase hex (PUBSUB.md, ruled
+    # 2026-10-09), recomputed like frame_len beside a frame: a stored
+    # string nobody checks is the drift this script exists to catch.
+    # REQUIRED, not optional: the wire string is the contract, and a vector
+    # that dropped it would leave the spelling pinned by nothing here.
+    stated = vector.get("wire_topic")
+    if stated is None:
+        raise ValueError("wire_topic is missing: the wire string is the contract (PUBSUB.md)")
+    if stated != key:
+        raise ValueError(f"wire_topic disagrees: stored {stated}, computed {key}")
+    return key
 
 
 def kad_network_namespace_v1(vector: dict) -> dict[str, str]:

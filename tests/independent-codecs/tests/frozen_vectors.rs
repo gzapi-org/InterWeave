@@ -239,3 +239,78 @@ fn the_frame_ceiling_is_exact_at_both_ends() {
             .contains("zero")
     );
 }
+
+#[test]
+fn endpoint_directory_frames_decode_to_their_fields_and_reencode_byte_equal() {
+    use interweave_independent_codecs::endpoints_v1::{self, DirectoryResponseV1, REASONS};
+    for v in vectors("endpoints/endpoint-directory-v1-frame.json") {
+        let name = v["name"].as_str().unwrap();
+        let frame = hex(v["frame_hex"].as_str().unwrap());
+        assert_eq!(
+            frame.len() as u64,
+            v["frame_len"].as_u64().unwrap(),
+            "{name}"
+        );
+        match v["kind"].as_str().unwrap() {
+            "request" => {
+                endpoints_v1::decode_request(&frame).unwrap_or_else(|e| panic!("{name}: {e}"));
+                assert_eq!(endpoints_v1::REQUEST.to_vec(), frame, "{name}");
+            }
+            kind => {
+                let want = if kind == "directory" {
+                    DirectoryResponseV1::Directory {
+                        generated_at_ms: v["generated_at_ms"].as_u64().unwrap(),
+                        ttl_ms: u32::try_from(v["ttl_ms"].as_u64().unwrap()).unwrap(),
+                        endpoints: v["endpoints"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|e| e.as_str().unwrap().to_owned())
+                            .collect(),
+                    }
+                } else {
+                    let code = usize::try_from(v["reason"].as_u64().unwrap()).unwrap();
+                    DirectoryResponseV1::Refused {
+                        reason: REASONS[code - 1],
+                    }
+                };
+                let got =
+                    DirectoryResponseV1::decode(&frame).unwrap_or_else(|e| panic!("{name}: {e}"));
+                assert_eq!(got, want, "{name}");
+                assert_eq!(got.encode().unwrap(), frame, "{name}");
+            }
+        }
+    }
+}
+
+#[test]
+fn gossipsub_topic_keys_match_every_vector() {
+    use interweave_independent_codecs::gossipsub::{topic_key_v1, wire_topic_v1};
+    for v in vectors("gossipsub/gossipsub-topic-key-v1.json") {
+        let name = v["name"].as_str().unwrap();
+        let wire = wire_topic_v1(v["channel_id"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            Some(wire.as_str()),
+            v["wire_topic"].as_str(),
+            "{name}: the wire topic"
+        );
+        assert_eq!(wire.len(), 64, "{name}");
+        let got = topic_key_v1(v["channel_id"].as_str().unwrap())
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(got.to_vec(), hex(v["sha256"].as_str().unwrap()), "{name}");
+    }
+}
+
+#[test]
+fn gossipsub_message_ids_match_every_vector() {
+    use interweave_independent_codecs::gossipsub::message_id_v1;
+    for v in vectors("gossipsub/gossipsub-message-id-v1.json") {
+        let name = v["name"].as_str().unwrap();
+        let got = message_id_v1(
+            v["peer_id"].as_str().unwrap(),
+            v["sequence_number"].as_u64().unwrap(),
+        )
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(got.to_vec(), hex(v["sha256"].as_str().unwrap()), "{name}");
+    }
+}

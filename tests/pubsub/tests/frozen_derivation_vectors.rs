@@ -53,6 +53,25 @@ fn every_frozen_topic_key_vector_reproduces() {
     }
 }
 
+/// The wire topic is the contract, not only the key (PUBSUB.md, ruled
+/// 2026-10-09): production's `wire_string` is the frozen `wire_topic`
+/// byte for byte, so a change of spelling, upper-case hex say, fails here
+/// even when the key it spells is still right.
+#[test]
+fn wire_strings_are_the_frozen_wire_topics() {
+    let file = fixtures::load("gossipsub/gossipsub-topic-key-v1.json");
+    for v in file["vectors"].as_array().expect("a vectors array") {
+        let name = v["name"].as_str().expect("name");
+        let channel = ChannelId::parse(v["channel_id"].as_str().expect("channel_id"))
+            .unwrap_or_else(|e| panic!("vector `{name}`: {e:?}"));
+        assert_eq!(
+            Some(topic_key_v1(&channel).wire_string().as_str()),
+            v["wire_topic"].as_str(),
+            "vector `{name}`: the wire topic"
+        );
+    }
+}
+
 #[test]
 fn every_frozen_mesh_id_vector_reproduces() {
     let file = fixtures::load("gossipsub/gossipsub-message-id-v1.json");

@@ -3540,6 +3540,7 @@ version = "0.0.0"
 dependencies = [
  "futures",
  "interweave-independent-codecs",
+ "interweave-ipc-client",
  "interweave-ipc-protocol",
  "interweave-ipc-server",
  "interweave-local-client-api",

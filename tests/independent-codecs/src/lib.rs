@@ -20,8 +20,10 @@
 //!
 //! - [`direct_v2`] — the `DirectMessageV2` request frame;
 //! - [`direct_response_v2`] — its `AcceptedV2`/`RejectedV2` response;
+//! - [`endpoints_v1`] — the endpoint directory's request and response;
 //! - [`broadcast_v1`] — the GossipSub `BroadcastMessageV1` envelope;
 //! - [`fingerprint`] — `DirectContentFingerprintV1`;
+//! - [`gossipsub`] — the topic key and the mesh message id;
 //! - [`ipc_v2`] — the IPC v2 length-prefixed frame and its envelope classes.
 //!
 //! The response codec is written from `DIRECT.md` §Response byte layout,
@@ -31,7 +33,9 @@
 pub mod broadcast_v1;
 pub mod direct_response_v2;
 pub mod direct_v2;
+pub mod endpoints_v1;
 pub mod fingerprint;
+pub mod gossipsub;
 pub mod ipc_v2;
 pub mod json;
 mod wire;

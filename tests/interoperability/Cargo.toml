@@ -5,9 +5,10 @@
 # runtimes composed from two different shipped example profiles exchange
 # direct and broadcast, and the frozen fixture vectors travel through the
 # composed runtime unchanged. Stage 17 (plan §20 (c)) adds production
-# against the independent codecs and the upgrade matrix's rows that need
-# no older build; the previous-build axis and the desktop <-> Android
-# matrix are still to come. TEST-ONLY; nothing depends on this package.
+# against the independent codecs and the upgrade matrix, its
+# previous-build axis included (rows #[ignore]d unless CI supplies the
+# builds); the desktop <-> Android matrix is still to come. TEST-ONLY;
+# nothing depends on this package.
 [package]
 name = "interweave-interoperability-tests"
 version = "0.0.0"
@@ -26,6 +27,7 @@ workspace = true
 [dev-dependencies]
 futures = { workspace = true }
 interweave-independent-codecs = { path = "../independent-codecs" }
+interweave-ipc-client = { path = "../../crates/local/ipc-client" }
 interweave-ipc-protocol = { path = "../../crates/api/ipc-protocol" }
 interweave-ipc-server = { path = "../../crates/local/ipc-server" }
 interweave-local-client-api = { path = "../../crates/api/local-client-api" }

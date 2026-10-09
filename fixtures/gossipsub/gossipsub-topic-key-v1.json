@@ -2,7 +2,8 @@
   "algorithm": {
     "id": "gossipsub-topic-key-v1",
     "specification": "architecture/transport/libp2p/PUBSUB.md",
-    "summary": "SHA-256(\"interweave/topic/v1\\0\" || channel_id_ascii). Keeps raw channel names off the wire; it does not resist dictionary guessing of a low-entropy name."
+    "summary": "SHA-256(\"interweave/topic/v1\\0\" || channel_id_ascii). Keeps raw channel names off the wire; it does not resist dictionary guessing of a low-entropy name.",
+    "wire_topic": "The GossipSub topic string is the lowercase hexadecimal encoding of the 32-byte key: 64 characters from [0-9a-f], no prefix, no separator. It is part of the contract since 2026-10-09 (PUBSUB.md, architect-cto's ruling 01a11e68); before that the text left the encoding to the implementation, and every build already emitted this form."
   },
   "adr": [
     "0025",
@@ -13,29 +14,37 @@
       "name": "general",
       "channel_id": "general",
       "frozen_by": "0047",
-      "note": "Golden re-frozen by ADR-0047; also quoted in PUBSUB.md.",
-      "sha256": "82695daad230a8a8ddb6e43aae1063e4f611ded53d710f48b2ed3d206211c3bc"
+      "note": "Golden re-frozen by ADR-0047; also quoted in PUBSUB.md. wire_topic is the contract since 2026-10-09: the string peers subscribe and publish by, byte-equal or they never meet.",
+      "sha256": "82695daad230a8a8ddb6e43aae1063e4f611ded53d710f48b2ed3d206211c3bc",
+      "wire_topic": "82695daad230a8a8ddb6e43aae1063e4f611ded53d710f48b2ed3d206211c3bc"
     },
     {
       "name": "single-character",
       "channel_id": "a",
-      "sha256": "07e09dd426d9e7e34aa5f2368ed6e842aec576dd2a0ff1c798829cbb3a3600f7"
+      "sha256": "07e09dd426d9e7e34aa5f2368ed6e842aec576dd2a0ff1c798829cbb3a3600f7",
+      "wire_topic": "07e09dd426d9e7e34aa5f2368ed6e842aec576dd2a0ff1c798829cbb3a3600f7",
+      "note": "wire_topic is the contract since 2026-10-09: the string peers subscribe and publish by, byte-equal or they never meet."
     },
     {
       "name": "max-length-128",
       "channel_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-      "sha256": "f4d8a9be178722a7ac91f76f541601da1ba50216f82c9ab5ffe16f378e176791"
+      "sha256": "f4d8a9be178722a7ac91f76f541601da1ba50216f82c9ab5ffe16f378e176791",
+      "wire_topic": "f4d8a9be178722a7ac91f76f541601da1ba50216f82c9ab5ffe16f378e176791",
+      "note": "wire_topic is the contract since 2026-10-09: the string peers subscribe and publish by, byte-equal or they never meet."
     },
     {
       "name": "punctuation-grammar",
       "channel_id": "team.eu:builds/nightly-1",
-      "sha256": "62a5e4736144e6b03bbba8b1cda3a232ae503a3af75e6458121380d71e8c9666"
+      "sha256": "62a5e4736144e6b03bbba8b1cda3a232ae503a3af75e6458121380d71e8c9666",
+      "wire_topic": "62a5e4736144e6b03bbba8b1cda3a232ae503a3af75e6458121380d71e8c9666",
+      "note": "wire_topic is the contract since 2026-10-09: the string peers subscribe and publish by, byte-equal or they never meet."
     },
     {
       "name": "case-sensitive-twin",
       "channel_id": "General",
       "sha256": "5e0ac29f1e0dedf8c5af84396feb8ac6e2df74f0fad04590da7622f05f73408f",
-      "note": "ChannelIds are case-sensitive (ADR-0025), so this must not equal the `general` key."
+      "note": "ChannelIds are case-sensitive (ADR-0025), so this must not equal the `general` key. wire_topic is the contract since 2026-10-09: the string peers subscribe and publish by, byte-equal or they never meet.",
+      "wire_topic": "5e0ac29f1e0dedf8c5af84396feb8ac6e2df74f0fad04590da7622f05f73408f"
     }
   ]
 }

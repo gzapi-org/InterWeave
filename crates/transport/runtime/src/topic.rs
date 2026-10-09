@@ -46,10 +46,12 @@ pub struct TopicKey([u8; 32]);
 impl TopicKey {
     /// The form that goes on the wire as the GossipSub topic string.
     ///
-    /// PUBSUB.md leaves the encoding to the implementation; this picks
-    /// lower-case hex, and it is derived here rather than at each call
-    /// site so two peers cannot disagree about the representation of a
-    /// key they agree about.
+    /// Lower-case hex of the key, 64 characters, which is the contract
+    /// (PUBSUB.md; ruled 2026-10-09; frozen per vector as `wire_topic` in
+    /// `fixtures/gossipsub/gossipsub-topic-key-v1.json`, which
+    /// `wire_strings_are_the_frozen_wire_topics` holds this to). It is
+    /// derived here rather than at each call site so two peers cannot
+    /// disagree about the spelling of a key they agree about.
     #[must_use]
     pub fn wire_string(&self) -> String {
         const HEX: &[u8; 16] = b"0123456789abcdef";

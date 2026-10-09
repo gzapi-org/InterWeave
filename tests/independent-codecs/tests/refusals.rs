@@ -375,3 +375,108 @@ fn response_rules_hold_beside_their_controls() {
         .is_err()
     );
 }
+
+/// `ENDPOINTS.md` §Endpoint directory protocol, each refusal beside its
+/// control.
+#[test]
+fn endpoint_directory_rules_hold_beside_their_controls() {
+    use interweave_independent_codecs::endpoints_v1::{
+        self, DirectoryResponseV1, MAX_RESPONSE_BYTES,
+    };
+    assert!(endpoints_v1::decode_request(&[0x01]).is_ok());
+    for bad in [&[][..], &[0x02][..], &[0x01, 0x01][..]] {
+        assert!(endpoints_v1::decode_request(bad).is_err(), "{bad:?}");
+    }
+
+    let directory = |entries: &[String]| {
+        let mut f = vec![0x01];
+        f.extend_from_slice(&7u64.to_be_bytes());
+        f.extend_from_slice(&60_000u32.to_be_bytes());
+        f.push(u8::try_from(entries.len()).unwrap());
+        for e in entries {
+            f.push(u8::try_from(e.len()).unwrap());
+            f.extend_from_slice(e.as_bytes());
+        }
+        f
+    };
+    let names = |n: usize| -> Vec<String> { (0..n).map(|i| format!("e{i}")).collect() };
+    assert!(DirectoryResponseV1::decode(&directory(&names(32))).is_ok());
+    assert!(
+        DirectoryResponseV1::decode(&directory(&names(33))).is_err(),
+        "33 entries"
+    );
+    // The 33-entry frame of 64-byte names is past the byte ceiling too, so
+    // the ceiling is checked on its own: the 32 × 64 frame is exactly it.
+    let max: Vec<String> = (0..32)
+        .map(|i| format!("{}{:02}", "a".repeat(62), i))
+        .collect();
+    assert_eq!(directory(&max).len(), MAX_RESPONSE_BYTES);
+    assert!(DirectoryResponseV1::decode(&directory(&max)).is_ok());
+    let mut over = directory(&max);
+    over.push(0);
+    assert!(
+        DirectoryResponseV1::decode(&over).is_err(),
+        "a byte past the ceiling"
+    );
+
+    let unsorted = vec!["zeta".to_owned(), "alpha".to_owned()];
+    match DirectoryResponseV1::decode(&directory(&unsorted)).unwrap() {
+        DirectoryResponseV1::Directory { endpoints, .. } => assert_eq!(endpoints, unsorted),
+        other @ DirectoryResponseV1::Refused { .. } => panic!("{other:?}"),
+    }
+    let dup = vec!["human".to_owned(), "human".to_owned()];
+    assert!(
+        DirectoryResponseV1::decode(&directory(&dup)).is_err(),
+        "a duplicate"
+    );
+    assert!(DirectoryResponseV1::decode(&directory(&["Human".to_owned()])).is_err());
+    let mut zero_len = directory(&[]);
+    zero_len[13] = 1;
+    zero_len.push(0);
+    assert!(
+        DirectoryResponseV1::decode(&zero_len).is_err(),
+        "an entry of length 0"
+    );
+
+    for code in 1u8..=3 {
+        assert!(DirectoryResponseV1::decode(&[0x02, code]).is_ok(), "{code}");
+    }
+    for code in [0u8, 4, 255] {
+        assert!(
+            DirectoryResponseV1::decode(&[0x02, code]).is_err(),
+            "{code}"
+        );
+    }
+    assert!(
+        DirectoryResponseV1::decode(&[0x02, 1, 0]).is_err(),
+        "a byte after a refusal"
+    );
+    assert!(
+        DirectoryResponseV1::decode(&[0x03, 1]).is_err(),
+        "a third tag"
+    );
+}
+
+#[test]
+fn gossipsub_inputs_outside_their_grammar_are_refused_beside_controls() {
+    use interweave_independent_codecs::gossipsub::{base58btc_decode, message_id_v1, topic_key_v1};
+    for ok in ["a", "ops/alerts", "A.b_c:d-e", &"x".repeat(128)] {
+        assert!(topic_key_v1(ok).is_ok(), "{ok:?}");
+    }
+    for bad in ["", "-lead", "sp ace", "é", &"x".repeat(129)] {
+        assert!(topic_key_v1(bad).is_err(), "{bad:?}");
+    }
+    assert!(message_id_v1(GOLDEN_PEER, 0).is_ok());
+    for bad in ["", "0", "O", "I", "l"] {
+        assert!(message_id_v1(bad, 0).is_err(), "{bad:?}");
+    }
+    // Leading 1s are leading zero bytes; "2" is 1, "21" is 58.
+    assert_eq!(base58btc_decode("11").unwrap(), vec![0, 0]);
+    assert_eq!(base58btc_decode("2").unwrap(), vec![1]);
+    assert_eq!(base58btc_decode("21").unwrap(), vec![58]);
+    assert_eq!(
+        base58btc_decode("5R").unwrap(),
+        vec![1, 0],
+        "4 × 58 + 24 = 256"
+    );
+}
