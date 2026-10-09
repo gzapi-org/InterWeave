@@ -60,6 +60,21 @@ fn pair() -> Pair {
 }
 
 #[tokio::test]
+async fn item_12_a_route_begin_is_owed_the_peers_path() {
+    let p = pair();
+    suite::a_route_begin_is_owed_the_peers_path(
+        &p.a,
+        &p.b,
+        &p.a_peer,
+        &p.b_peer,
+        &agent(),
+        &human(),
+        interweave_transport_api::PeerPath::Direct,
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn item_1_the_source_endpoint_is_the_senders_lease() {
     let p = pair();
     suite::the_source_endpoint_is_the_senders_lease(
@@ -408,13 +423,25 @@ async fn path_changes_reach_only_routed_sessions_coalesced_per_peer() {
         )
     };
     // A change before the session TAKES a message from the peer is owed
-    // nothing: a queued message is not yet a route.
+    // nothing as a change: a queued message is not yet a route. Taking it
+    // begins the route, owed the path then with nothing before it.
     send(4).await.expect("accepted");
     p.b.path_changed(&p.a_peer, PeerPath::Relayed, PeerPath::Direct, "dcutr", 0);
     let first = routed.events(usize::MAX).await.expect("events");
     assert!(
-        matches!(first.as_slice(), [SessionEvent::Direct(_)]),
-        "only the message: taking it makes the route {first:?}"
+        matches!(
+            first.as_slice(),
+            [
+                SessionEvent::Direct(_),
+                SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
+                    previous: None,
+                    current: PeerPath::Direct,
+                    reason_class,
+                    ..
+                }),
+            ] if reason_class == interweave_local_client_api::ROUTE_ESTABLISHED
+        ),
+        "the message, then its route's begin -- not the dcutr change {first:?}"
     );
 
     // A round trip is withdrawn.
@@ -454,7 +481,12 @@ async fn path_changes_reach_only_routed_sessions_coalesced_per_peer() {
         .collect();
     assert_eq!(
         paths,
-        [(p.a_peer.clone(), Some(PeerPath::Relayed), PeerPath::Direct, 3)],
+        [(
+            p.a_peer.clone(),
+            Some(PeerPath::Relayed),
+            PeerPath::Direct,
+            3
+        )],
         "one per peer, the latest, after the message"
     );
     assert!(
@@ -507,8 +539,19 @@ async fn a_broadcast_is_a_route_once_taken() {
     p.b.path_changed(&p.a_peer, PeerPath::Relayed, PeerPath::Direct, "dcutr", 1);
     let first = listener.events(usize::MAX).await.expect("events");
     assert!(
-        matches!(first.as_slice(), [SessionEvent::Broadcast(_)]),
-        "only the broadcast: a queued one is not yet a route {first:?}"
+        matches!(
+            first.as_slice(),
+            [
+                SessionEvent::Broadcast(_),
+                SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
+                    previous: None,
+                    reason_class,
+                    ..
+                }),
+            ] if reason_class == interweave_local_client_api::ROUTE_ESTABLISHED
+        ),
+        "the broadcast, then its route's begin -- the change before the take \
+         is not owed as a change {first:?}"
     );
     p.b.path_changed(
         &p.a_peer,
@@ -525,6 +568,88 @@ async fn a_broadcast_is_a_route_once_taken() {
             .iter()
             .any(is_path),
         "taken, it is a route"
+    );
+}
+
+/// Item 12's return (A 2026-10-09): a routed peer that disconnects and
+/// connects again is owed its path with no `previous` (`reconnected`),
+/// after the `PeerDisconnected`; the change pending at the disconnect is
+/// withdrawn, not delivered after it (the control). A session with no
+/// route is told the disconnect and nothing else.
+#[tokio::test]
+async fn a_routed_peer_connecting_again_is_owed_its_path_with_no_previous() {
+    use interweave_local_client_api::{
+        DataSessionBinding as _, DataSessionPort as _, LocalSessionEvent, RECONNECTED, SessionEvent,
+    };
+    use interweave_transport_api::{DirectDestination, MessageId, PeerPath};
+    let p = pair();
+    let from = p.a.open(suite::full(Some(&agent()))).await.expect("leases");
+    let routed = p.b.open(suite::full(Some(&human()))).await.expect("leases");
+    let stranger = p.b.open(suite::full(None)).await.expect("opens");
+    from.send_direct(
+        DirectDestination {
+            peer: p.b_peer.clone(),
+            endpoint: Some(human()),
+        },
+        MessageId::from_bytes([1; 16]),
+        suite::text("a route"),
+    )
+    .await
+    .expect("accepted");
+    routed
+        .events(usize::MAX)
+        .await
+        .expect("the message and its route");
+    stranger
+        .events(usize::MAX)
+        .await
+        .expect("the open-time state");
+
+    p.b.path_changed(
+        &p.a_peer,
+        PeerPath::Direct,
+        PeerPath::Relayed,
+        "direct_lost",
+        1,
+    );
+    p.b.disconnected(&p.a_peer);
+    p.b.connected(&p.a_peer, PeerPath::Relayed);
+    let got: Vec<_> = routed
+        .events(usize::MAX)
+        .await
+        .expect("events")
+        .into_iter()
+        .filter(|e| {
+            !matches!(
+                e,
+                SessionEvent::Local(LocalSessionEvent::ServerState { .. })
+            )
+        })
+        .collect();
+    assert!(
+        matches!(
+            got.as_slice(),
+            [
+                SessionEvent::Local(LocalSessionEvent::PeerDisconnected { .. }),
+                SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
+                    previous: None,
+                    current: PeerPath::Relayed,
+                    reason_class,
+                    ..
+                }),
+            ] if reason_class == RECONNECTED
+        ),
+        "the disconnect, then the return with nothing before it: {got:?}"
+    );
+    let told = stranger.events(usize::MAX).await.expect("events");
+    assert!(
+        matches!(
+            told.as_slice(),
+            [SessionEvent::Local(
+                LocalSessionEvent::PeerDisconnected { .. }
+            )]
+        ),
+        "no route: the disconnect only {told:?}"
     );
 }
 

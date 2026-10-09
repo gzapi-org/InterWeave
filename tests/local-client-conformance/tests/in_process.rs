@@ -24,6 +24,23 @@ mod common;
 use common::{Pair, agent, human};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn item_12_a_route_begin_is_owed_the_peers_path() {
+    let pair = Pair::start().await;
+    let (a, b) = pair.bindings();
+    suite::a_route_begin_is_owed_the_peers_path(
+        &a,
+        &b,
+        &pair.a_peer,
+        &pair.b_peer,
+        &agent(),
+        &human(),
+        interweave_transport_api::PeerPath::Direct,
+    )
+    .await;
+    pair.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn item_1_the_source_endpoint_is_the_senders_lease() {
     let pair = Pair::start().await;
     let (a, b) = pair.bindings();
@@ -722,7 +739,12 @@ async fn a_drained_message_is_a_route_and_a_path_change_follows_it() {
     };
     assert_eq!(
         (peer, *previous, *current, reason_class.as_str()),
-        (&pair.a_peer, Some(PeerPath::Relayed), PeerPath::Direct, "dcutr")
+        (
+            &pair.a_peer,
+            Some(PeerPath::Relayed),
+            PeerPath::Direct,
+            "dcutr"
+        )
     );
     assert!(
         !stranger
