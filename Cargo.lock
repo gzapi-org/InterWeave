@@ -3666,6 +3666,7 @@ dependencies = [
  "interweave-test-support",
  "interweave-transport-api",
  "interweave-transport-composition",
+ "interweave-transport-embedded",
  "serde_norway",
  "tempfile",
  "tokio",
