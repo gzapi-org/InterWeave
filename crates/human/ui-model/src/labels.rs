@@ -125,7 +125,8 @@ ui_texts! {
     DirectConversation => "Direct conversation",
     /// What a channel conversation is, beside its title.
     ChannelConversation => "Channel",
-    /// A conversation's unread count. `{count}` is a number.
+    /// A conversation's unread count. `{count}` is a number, never zero:
+    /// a conversation with nothing unread shows its kind alone.
     UnreadCount => "{count} unread",
     /// A conversation row's description: `{kind}` is what the
     /// conversation is, `{unread}` its unread count's text.
@@ -144,8 +145,12 @@ ui_texts! {
     /// sees where it goes before activating it.
     OpenLink => "Open link: {destination}",
     /// An image the body references, in its place: never fetched.
-    /// `{alt}` is the image's alt text, verbatim, possibly empty.
+    /// `{alt}` is the image's alt text, verbatim, never empty
+    /// ([`UiText::ImageNotShownWithoutAlt`] stands in for that).
     ImageNotShown => "[Image not shown: {alt}]",
+    /// The same, for an image whose alt text is empty or only spaces:
+    /// named as an image, with no empty name after a colon.
+    ImageNotShownWithoutAlt => "[Image not shown]", // PLACEHOLDER (en)
     /// Show a message's source as received, in place of the drawn body.
     ShowSource => "Show source",
     /// Return from the source to the drawn body.
