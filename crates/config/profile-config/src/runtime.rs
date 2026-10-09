@@ -21,6 +21,14 @@
 //!    ([`RuntimeConfig::validate_into`]).
 //! 4. `embedded-android` runs no AutoNAT or relay server and Kademlia
 //!    only as a client -- checked.
+//!
+//! And one the schema gained after the six (architect-cto's ruling of
+//! 2026-10-09, relay seq 33736, §20 step 5): `embedded-android` listens
+//! on WILDCARD addresses only (`/ip4/0.0.0.0`, `/ip6/::`). A listener
+//! on one address dies with it and nothing issues it again, and Android
+//! names no address that stays; a wildcard listener follows the
+//! interfaces as they come and go. Checked
+//! ([`RuntimeConfig::validate_into`]); a daemon may name a specific one.
 //! 5. `stay-reachable` means `foreground_service_type = remoteMessaging`
 //!    -- held by the TYPE: the field is `literal[remoteMessaging]`, so no
 //!    other value parses whatever the availability mode.
@@ -151,6 +159,8 @@ pub(crate) struct RuntimeContext<'a> {
     pub enabled_kademlia_modes: Vec<Option<&'a str>>,
     /// `ipc.enabled`.
     pub ipc_enabled: bool,
+    /// `transport.listen.addresses`, as written.
+    pub listen_addresses: &'a [String],
 }
 
 impl RuntimeConfig {
@@ -215,6 +225,27 @@ impl RuntimeConfig {
                 field: "discovery.providers[kademlia].config.mode",
             });
         }
+        for address in context.listen_addresses {
+            if !is_wildcard_listener(address) {
+                errors.push(ConfigError::AndroidListenerNotWildcard {
+                    address: address.clone(),
+                });
+            }
+        }
+    }
+}
+
+/// Whether `address` binds every interface of its family: its first
+/// component is `/ip4/0.0.0.0` or `/ip6/::`. Read as text, since this
+/// crate names no backend type; anything else -- a specific IP, a name,
+/// a string that is no multiaddr -- is not a wildcard.
+fn is_wildcard_listener(address: &str) -> bool {
+    let mut parts = address.split('/');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(""), Some(family @ ("ip4" | "ip6")), Some(host)) => host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_unspecified() && (family == "ip4") == ip.is_ipv4()),
+        _ => false,
     }
 }
 
@@ -234,6 +265,7 @@ pub(crate) fn context(profile: &crate::ProfileConfig) -> RuntimeContext<'_> {
             .map(|p| p.config.mode.as_deref())
             .collect(),
         ipc_enabled: profile.ipc.enabled,
+        listen_addresses: &profile.transport.listen.addresses,
     }
 }
 

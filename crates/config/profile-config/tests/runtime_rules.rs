@@ -39,6 +39,7 @@ fn android_errors(profile: &ProfileConfig) -> Vec<ConfigError> {
                 e,
                 ConfigError::AndroidEndpointNotEnabled { .. }
                     | ConfigError::AndroidServesInfrastructure { .. }
+                    | ConfigError::AndroidListenerNotWildcard { .. }
             )
         })
         .collect()
@@ -98,6 +99,50 @@ fn an_android_profile_runs_no_infrastructure_server() {
         assert!(
             android_errors(&profile("daemon-ipc", true, extra)).is_empty(),
             "the control: a daemon may serve {field}"
+        );
+    }
+}
+
+#[test]
+fn an_android_profile_listens_on_wildcard_addresses_only() {
+    let listening = |addresses: &[&str]| {
+        let quoted: Vec<String> = addresses.iter().map(|a| format!("\"{a}\"")).collect();
+        format!(
+            "transport:\n  listen:\n    addresses: [{}]\n",
+            quoted.join(", ")
+        )
+    };
+    let wildcards = listening(&[
+        "/ip4/0.0.0.0/tcp/0",
+        "/ip6/::/tcp/4001",
+        "/ip4/0.0.0.0/udp/0/quic-v1",
+    ]);
+    assert!(
+        android_errors(&profile("embedded-android", true, &wildcards)).is_empty(),
+        "the control: every wildcard is accepted"
+    );
+    for refused in [
+        "/ip4/127.0.0.1/tcp/0",
+        "/ip4/192.168.1.5/tcp/4001",
+        "/ip6/::1/tcp/0",
+        "/ip6/0.0.0.0/tcp/0",
+        "/ip4/::/tcp/0",
+        "/dns4/localhost/tcp/0",
+        "ip4/0.0.0.0/tcp/0",
+    ] {
+        let extra = listening(&["/ip4/0.0.0.0/tcp/0", refused]);
+        assert_eq!(
+            android_errors(&profile("embedded-android", true, &extra)),
+            vec![ConfigError::AndroidListenerNotWildcard {
+                address: refused.to_owned()
+            }],
+            "{refused}"
+        );
+        assert!(
+            !android_errors(&profile("daemon-ipc", true, &extra))
+                .iter()
+                .any(|e| matches!(e, ConfigError::AndroidListenerNotWildcard { .. })),
+            "the control: a daemon may listen on {refused}"
         );
     }
 }
