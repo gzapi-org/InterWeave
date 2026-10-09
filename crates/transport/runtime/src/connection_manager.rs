@@ -756,7 +756,7 @@ pub const ADMIT_RELOAD_ATTEMPTS: usize = 3;
 pub const DEFAULT_MAX_RETRY_ENTRIES: usize = 1_024;
 
 /// One peer's scheduled reconnection attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Retry {
     due_at_ms: u64,
     attempts: u32,
@@ -765,6 +765,12 @@ struct Retry {
     /// returned by [`ConnectionManager::take_due_retries`] again, which
     /// is what stops the same slow dial from being started twice.
     claimed: bool,
+    /// The relay whose hop the last circuit dial never reached
+    /// ([`ConnectionManager::record_relay_hop_unreached`]): the retry is
+    /// also due the moment a direct connection to it establishes
+    /// ([`ConnectionManager::relay_reached`]), rather than only at its
+    /// delay.
+    waits_on: Option<TransportIdentity>,
 }
 
 /// Default ceiling on addresses remembered for one peer.
@@ -1480,6 +1486,82 @@ impl ConnectionManager {
         scheduled
     }
 
+    /// Settle a circuit dial that never reached its RELAY, scoring
+    /// nothing against the destination.
+    ///
+    /// A `/p2p-circuit` dial goes through the relay first, and when this
+    /// node holds no connection to the relay the relay client opens one
+    /// and parks the circuit on it. If that hop is refused or fails --
+    /// at start-up the client's own reservation dial to the same relay
+    /// is still in flight, and the hop's dial is refused on the Swarm's
+    /// peer condition -- the parked circuit is dropped and the transport
+    /// reports the CIRCUIT as failed. Nothing about the destination was
+    /// learnt: it was never asked. Scored by [`Self::record_failure`],
+    /// the circuit address was the peer's only route, so the peer went
+    /// into punitive backoff and every `DialPeer` for the next thirty
+    /// seconds was refused, while the relay connected milliseconds later
+    /// (rust-ui-dev-01's measurement on j6, 2026-10-09).
+    ///
+    /// So the address and the peer are not scored, the route is kept
+    /// (learnt, as [`Self::record_failure`] learns an attempted address),
+    /// and the reconnect is scheduled at the peer's ordinary delay AND
+    /// marked as waiting on `relay`: the first direct connection to the
+    /// relay makes it due at once ([`Self::relay_reached`]). A relay
+    /// that stays down therefore costs the ordinary cadence, never a
+    /// tight loop. `None` when the ticket was not issued here.
+    pub fn record_relay_hop_unreached(
+        &mut self,
+        ticket: DialTicket,
+        relay: &TransportIdentity,
+        now_ms: u64,
+    ) -> Option<RetryScheduled> {
+        let now_ms = ticket.settled_at(now_ms);
+        self.observe(now_ms);
+        if !self.issued_here(&ticket) {
+            return None;
+        }
+        let mut scheduled = None;
+        if let Some(peer) = ticket.peer().cloned() {
+            if !ticket.address().is_empty() {
+                self.learn_address(&peer, ticket.address(), now_ms);
+            }
+            let delay = self.retry_delay_ms(&peer);
+            let held_by_another = !ticket.owns_scheduler_claim()
+                && self.retries.get(&peer).is_some_and(|entry| entry.claimed);
+            let attempt = self.schedule_retry(peer.clone(), now_ms, delay, held_by_another);
+            if let Some(entry) = self.retries.get_mut(&peer) {
+                entry.waits_on = Some(relay.clone());
+            }
+            let retry = RetryScheduled {
+                attempt,
+                delay_ms: delay,
+                peer_backoff: false,
+            };
+            self.note(GateNote::RetryScheduled {
+                peer,
+                origin: ticket.origin(),
+                retry,
+            });
+            scheduled = Some(retry);
+        }
+        self.settle(ticket);
+        self.publish();
+        scheduled
+    }
+
+    /// A direct connection to `relay` is established: every retry
+    /// waiting on it ([`Self::record_relay_hop_unreached`]) is due now.
+    /// A claimed entry is left alone -- its attempt is under way.
+    pub fn relay_reached(&mut self, relay: &TransportIdentity, now_ms: u64) {
+        self.observe(now_ms);
+        for entry in self.retries.values_mut() {
+            if !entry.claimed && entry.waits_on.as_ref() == Some(relay) {
+                entry.due_at_ms = entry.due_at_ms.min(now_ms);
+                entry.waits_on = None;
+            }
+        }
+    }
+
     /// Score an address-scoped failure with no ticket and no admission.
     ///
     /// SPIKE-003 F15: settling a multi-address `DialError::Transport`
@@ -2103,6 +2185,7 @@ impl ConnectionManager {
                 due_at_ms: now_ms.saturating_add(delay),
                 attempts: attempt,
                 claimed,
+                waits_on: None,
             },
         );
         attempt
@@ -2721,6 +2804,63 @@ mod tests {
         assert!(
             m.policy().peer(&p).is_some_and(|b| !b.is_clear_at(1)),
             "the peer is in backoff"
+        );
+    }
+
+    /// A circuit dial that never reached its relay scores nothing against
+    /// the destination: no peer backoff, so the next `DialPeer` is
+    /// admitted; the route is kept; the reconnect is scheduled and made
+    /// due by the relay's connection, not by its delay. A connection to
+    /// another peer makes nothing due. THE CONTROL: the same failure
+    /// through `record_failure` backs the peer off.
+    #[test]
+    fn a_circuit_that_never_reached_its_relay_backs_off_nothing_and_waits_on_the_relay() {
+        let circuit = format!("/ip4/10.0.0.9/tcp/4001/p2p/{P2}/p2p-circuit");
+        let p = peer(P1);
+        let relay = peer(P2);
+        let mut m = manager(4);
+        let ticket = m
+            .handle()
+            .admit(&request_at(P1, &circuit, DialOrigin::RelayCircuit), 0)
+            .expect("a circuit toward a data-plane peer is admitted");
+        let scheduled = m
+            .record_relay_hop_unreached(ticket, &relay, 0)
+            .expect("a retry is scheduled");
+        assert!(!scheduled.peer_backoff, "reported without peer backoff");
+        assert!(
+            m.policy().peer(&p).is_none_or(|b| b.is_clear_at(1)),
+            "the peer is not in backoff"
+        );
+        assert_eq!(m.known_addresses(&p), 1, "the circuit route is kept");
+        assert_eq!(m.handle().load().pending_dials(), 0, "the slot is settled");
+        assert!(
+            m.handle()
+                .admit(&request_at(P1, &circuit, DialOrigin::RelayCircuit), 1)
+                .is_ok(),
+            "the next circuit dial is admitted at once"
+        );
+        assert!(m.take_due_retries(1, 8).is_empty(), "not due yet");
+        m.relay_reached(&peer(P1), 2);
+        assert!(
+            m.take_due_retries(2, 8).is_empty(),
+            "another peer's connection is not the relay"
+        );
+        m.relay_reached(&relay, 3);
+        assert_eq!(
+            m.take_due_retries(3, 8),
+            [p.clone()],
+            "due the moment the relay connects"
+        );
+
+        let mut m = manager(4);
+        let ticket = m
+            .handle()
+            .admit(&request_at(P1, &circuit, DialOrigin::RelayCircuit), 0)
+            .expect("admitted");
+        m.record_failure(ticket, 0);
+        assert!(
+            m.policy().peer(&p).is_some_and(|b| !b.is_clear_at(1)),
+            "the control: scored as the peer's failure, it backs the peer off"
         );
     }
 
