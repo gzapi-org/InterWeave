@@ -1562,7 +1562,10 @@ impl ConnectionManager {
             }
             let retry = RetryScheduled {
                 attempt,
-                delay_ms: delay,
+                // Due now when the relay came up: report the delay that
+                // applies, not the one the cadence would have used (#247
+                // re-review N3).
+                delay_ms: if relay_came_up { 0 } else { delay },
                 peer_backoff: false,
             };
             self.note(GateNote::RetryScheduled {
@@ -2942,7 +2945,10 @@ mod tests {
                 .expect("admitted")
         };
         let ticket = admit(&mut m, 0);
-        let _ = m.record_relay_hop_unreached(ticket, &relay, true, 1);
+        let now = m
+            .record_relay_hop_unreached(ticket, &relay, true, 1)
+            .expect("scheduled");
+        assert_eq!(now.delay_ms, 0, "reported as the delay that applies");
         assert_eq!(
             m.take_due_retries(1, 8),
             std::slice::from_ref(&p),
