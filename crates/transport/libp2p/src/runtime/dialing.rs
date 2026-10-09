@@ -1845,6 +1845,83 @@ mod tests {
             "the control"
         );
     }
+
+    /// `unreached_relay` settles a circuit failure as the relay hop's in
+    /// both of its shapes -- the relay not connected (any error), and the
+    /// relay CONNECTED with the client's canceled request (#245
+    /// re-review N1, the restart race) -- and not for a connected relay
+    /// that answered (the control), nor for a dial that is not a circuit.
+    #[test]
+    fn a_circuit_failure_is_the_hops_when_unreached_or_canceled_and_not_otherwise() {
+        use libp2p::relay::client::transport::Error as RelayError;
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
+        m.set_trust(trust(&[FAR], &[RELAY]), &[]);
+        let circuit = format!("/ip4/10.0.0.1/tcp/4001/p2p/{RELAY}/p2p-circuit");
+        let ticket = m
+            .handle()
+            .admit(
+                &DialRequest {
+                    peer: Some(ident(FAR)),
+                    address: circuit.clone(),
+                    origin: DialOrigin::RelayCircuit,
+                },
+                0,
+            )
+            .expect("a circuit to a data-plane peer is admitted");
+        let address: Multiaddr = circuit.parse().expect("valid");
+        let failed = |e: RelayError| {
+            DialError::Transport(vec![(
+                address.clone(),
+                TransportError::Other(std::io::Error::other(either::Either::<
+                    RelayError,
+                    std::io::Error,
+                >::Left(e))),
+            )])
+        };
+        let canceled = || {
+            failed(RelayError::ResponseFromBehaviourCanceled(
+                futures::channel::oneshot::Canceled,
+            ))
+        };
+        let answered = || failed(RelayError::MissingDstPeerId);
+
+        let mut open = HashMap::new();
+        assert_eq!(
+            super::unreached_relay(&ticket, &open, &answered()),
+            Some(ident(RELAY)),
+            "not connected to the relay: the hop's, whatever the error"
+        );
+        open.insert(
+            ConnectionId::new_unchecked(1),
+            open_to(&ident(RELAY), &mut m),
+        );
+        assert_eq!(
+            super::unreached_relay(&ticket, &open, &canceled()),
+            Some(ident(RELAY)),
+            "connected, but the request was dropped unsent: the hop's"
+        );
+        assert_eq!(
+            super::unreached_relay(&ticket, &open, &answered()),
+            None,
+            "the control: connected and answered past the hop"
+        );
+        let direct = m
+            .handle()
+            .admit(
+                &DialRequest {
+                    peer: Some(ident(FAR)),
+                    address: "/ip4/10.0.0.2/tcp/4001".to_owned(),
+                    origin: DialOrigin::Manual,
+                },
+                0,
+            )
+            .expect("a direct dial is admitted");
+        assert_eq!(
+            super::unreached_relay(&direct, &open, &canceled()),
+            None,
+            "not a circuit"
+        );
+    }
     use super::{
         AdvertisedBoundary, Held, OpenConnection, PathSample, PolicyClosed, announce_path,
         best_path, book_origin, canonical_dial_address, closed_outright, command_origin,
