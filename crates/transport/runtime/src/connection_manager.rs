@@ -849,6 +849,12 @@ pub struct ConnectionManager {
     /// constructed by a test that never had one.
     local_peer: Option<TransportIdentity>,
     retries: std::collections::BTreeMap<TransportIdentity, Retry>,
+    /// When each peer was last lifted by a network addition, for the
+    /// lift floor ([`Self::network_added`]). Holds only peers lifted
+    /// within the last [`RETRY_BASE_MS`] -- older entries are pruned on
+    /// the next addition -- and only classified ones, so it is bounded
+    /// by the trust sets.
+    network_lifts: std::collections::BTreeMap<TransportIdentity, u64>,
     /// Book peers the current trust no longer classifies, longest-revoked
     /// first, at most [`MAX_RETIRED_BOOK_PEERS`]: their entries are kept
     /// so a trust flap does not cost a peer its routes (`set_trust`).
@@ -925,6 +931,7 @@ impl ConnectionManager {
             shutting_down,
             local_peer: None,
             retries: std::collections::BTreeMap::new(),
+            network_lifts: std::collections::BTreeMap::new(),
             retired: std::collections::VecDeque::new(),
             notes: std::collections::VecDeque::new(),
             notes_dropped: 0,
@@ -1866,15 +1873,25 @@ impl ConnectionManager {
     /// whatever its due time. Address
     /// quarantines stay: a new network does not make an address that
     /// authenticated the wrong peer any better. Not for a removal,
-    /// which can only make fewer routes work. Returns how many peers
-    /// were made dialable.
+    /// which can only make fewer routes work.
+    ///
+    /// ONCE PER LIFT FLOOR (ADR-0011 A 2026-10-09): additions can repeat
+    /// -- a LAN router announcing new IPv6 prefixes, a flapping VPN --
+    /// and each would otherwise redial every held-off peer, so a peer is
+    /// lifted at most once per [`RETRY_BASE_MS`], the cadence's first
+    /// step, measured from its previous lift; an addition inside the
+    /// floor lifts nothing for it. Returns how many peers were made
+    /// dialable.
     pub fn network_added(&mut self, now_ms: u64) -> usize {
         self.observe(now_ms);
+        self.network_lifts
+            .retain(|_, at| now_ms.saturating_sub(*at) < RETRY_BASE_MS);
         let peers: std::collections::BTreeSet<TransportIdentity> = self
             .retries
             .keys()
             .chain(self.policy.backed_off_peers())
             .filter(|p| !matches!(self.classify(p), ConnectionClass::Unauthorized))
+            .filter(|p| !self.network_lifts.contains_key(*p))
             .cloned()
             .collect();
         let mut lifted = 0;
@@ -1890,6 +1907,7 @@ impl ConnectionManager {
             };
             if backoff || retry {
                 lifted += 1;
+                self.network_lifts.insert(peer.clone(), now_ms);
             }
         }
         if lifted > 0 {
@@ -3560,6 +3578,48 @@ mod tests {
         );
         assert!(!m.is_retry_due(&peer(P1), 60_999));
         assert!(m.is_retry_due(&peer(P1), 61_000));
+    }
+
+    /// The lift floor (ADR-0011 A 2026-10-09): two additions inside the
+    /// cadence's first step lift a peer once; one after it lifts again.
+    #[test]
+    fn a_network_addition_lifts_a_peer_once_per_floor() {
+        let mut m = manager(8);
+        let fail = |m: &mut ConnectionManager, at: u64| {
+            let t = m
+                .handle()
+                .load()
+                .admit(&request(P1, "/a"), at)
+                .expect("admitted");
+            let _ = m.record_failure(t, at);
+        };
+        fail(&mut m, 0);
+        assert_eq!(m.network_added(1_000), 1, "the first lift");
+        // The redial fails at once and the backoff is set again.
+        let claimed = m.take_due_retries(1_000, 8);
+        assert_eq!(claimed, vec![peer(P1)]);
+        fail(&mut m, 1_000);
+        assert_eq!(
+            m.network_added(2_000),
+            0,
+            "a second addition inside the floor lifts nothing"
+        );
+        assert_eq!(
+            m.handle().load().admit(&request(P1, "/a"), 2_000).err(),
+            Some(DialDenial::PeerBackoff),
+            "and the peer stays held off"
+        );
+        assert_eq!(
+            m.network_added(1_000 + RETRY_BASE_MS),
+            1,
+            "an addition after the floor lifts again"
+        );
+        assert!(
+            m.handle()
+                .load()
+                .admit(&request(P1, "/a"), 1_000 + RETRY_BASE_MS)
+                .is_ok()
+        );
     }
 
     #[test]

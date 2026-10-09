@@ -176,6 +176,9 @@ struct Candidate {
     addresses: Vec<String>,
     source: RelaySource,
     state: ReservationState,
+    /// When a network addition last made this relay due, for the lift
+    /// floor ([`ReservationManager::network_added`]).
+    lifted_at_ms: Option<u64>,
 }
 
 impl Candidate {
@@ -335,6 +338,7 @@ impl ReservationManager {
                 addresses: vec![address.to_owned()],
                 source: RelaySource::Static,
                 state: ReservationState::Idle,
+                lifted_at_ms: None,
             },
         );
         true
@@ -367,6 +371,7 @@ impl ReservationManager {
                 addresses: vec![address.to_owned()],
                 source: RelaySource::Learned,
                 state: ReservationState::Idle,
+                lifted_at_ms: None,
             },
         );
         true
@@ -633,15 +638,29 @@ impl ReservationManager {
     /// and the next [`Self::tick`] asks it, within the target as ever;
     /// the failure count is KEPT, so if the ask fails the ladder
     /// resumes at its next step rather than starting over. Addresses
-    /// and every other state are untouched. Returns how many relays
-    /// were made due.
+    /// and every other state are untouched.
+    ///
+    /// ONCE PER LIFT FLOOR (ADR-0011 A 2026-10-09): a relay is made due
+    /// at most once per `retry_min_ms`, the ladder's first step,
+    /// measured from its previous lift, so repeated additions -- a LAN
+    /// router announcing new prefixes, a flapping VPN -- cannot ask it
+    /// faster than its own ladder starts. Returns how many relays were
+    /// made due.
     pub fn network_added(&mut self, now_ms: u64) -> usize {
+        let floor = self.config.retry_min_ms;
         let mut due = 0;
         for candidate in self.candidates.values_mut() {
+            if candidate
+                .lifted_at_ms
+                .is_some_and(|at| now_ms.saturating_sub(at) < floor)
+            {
+                continue;
+            }
             if let ReservationState::Backoff { until_ms, .. } = &mut candidate.state
                 && *until_ms > now_ms
             {
                 *until_ms = now_ms;
+                candidate.lifted_at_ms = Some(now_ms);
                 due += 1;
             }
         }
@@ -991,6 +1010,10 @@ mod tests {
                 attempts: 2,
             })
         );
+        // THE FLOOR: the ask fails again at once, and a second addition
+        // inside `retry_min` lifts nothing; one after it lifts again.
+        assert_eq!(m.network_added(1_000 + DEFAULT_RETRY_MIN_MS - 1), 0);
+        assert_eq!(m.network_added(1_000 + DEFAULT_RETRY_MIN_MS), 1);
         // Nothing backing off: nothing to make due.
         assert_eq!(
             with_static(&[R2]).network_added(0),
