@@ -204,9 +204,6 @@ ui_texts! {
     Keep => "Keep",
     /// Remove Keep from a kept message.
     Unkeep => "Stop keeping",
-    /// No transport daemon serves this profile; the window connects once
-    /// one starts.
-    NoDaemon => "The transport daemon for this profile is not running. This window will connect when the daemon starts.",
     /// The session is re-opening on its own.
     Reconnecting => "Reconnecting",
     /// Storage cannot hold new messages.
@@ -270,28 +267,120 @@ ui_texts! {
     OwnIdentity => "That is this profile's own PeerId. You do not need to trust it.",
     /// The typed `PeerId` is already listed.
     AlreadyTrusted => "That peer is already trusted.",
-    /// Trust could not be read or changed: the daemon is not reachable.
-    TrustUnavailable => "The transport daemon cannot be reached. Nothing was changed.",
-    /// This client may not administer trust on this daemon.
-    TrustNotPermitted => "This app is not allowed to change trust on this transport daemon. Nothing was changed.",
-    /// The daemon refused the change: its own identity, or the list is
-    /// full.
-    TrustRefused => "The transport daemon refused this change. Nothing was changed.",
-    /// The daemon and the app are not the same release, so they share no
-    /// version trust needs: what helps is bringing both to one release,
-    /// not trying again.
-    TrustIncompatible => "The transport daemon is a different version from this app, so trust cannot be read or changed here. Nothing was changed.",
     /// Anything else went wrong, before anything was changed. No raw code
     /// is kept, so the text points nowhere for details.
     TrustFailed => "Trust could not be read or changed. Nothing was changed.",
-    /// The daemon did not confirm a change, which may have been made: the
-    /// list is read again. `{peer}` the exact `PeerId`, whole. Never says
-    /// that nothing changed (TRANSPORT.md's outcome-unknown class).
-    TrustUnconfirmed => "The transport daemon did not confirm the change for {peer}. The change may have been made. The list of trusted peers is being read again.",
+    /// ANDROID: the notification channel of the Stay-reachable mode, in
+    /// the system's settings. The glossary's mode name; never a promise.
+    ReachableChannel => "Stay reachable",
+    /// ANDROID: the title of the notification that shows while the
+    /// network service runs under Stay reachable (ADR-0041).
+    ReachableTitle => "Stay reachable is on",
+    /// ANDROID: its text. Says the app tries, never that it is reachable:
+    /// the platform may still stop it (ADR-0041, Operational implications).
+    ReachableBody => "InterWeave tries to stay reachable while this notification is shown.",
+    /// ANDROID: the notification channel of new messages.
+    MessagesChannel => "New messages",
+    /// ANDROID: the notice for one message no window has read. Never its
+    /// sender or its content.
+    NewMessage => "New message",
+    /// ANDROID: the notice for more than one. `{count}` is a number.
+    NewMessages => "New messages: {count}",
     /// The list a made or possibly made change left to read again could
     /// not be read: it may not show that change. Never says that nothing
     /// changed. Opening the settings again reads it.
     TrustNotReadAgain => "The list of trusted peers could not be read again, so it may not show the latest change. Open the trust settings again to read it.",
+}
+
+/// Where the transport runtime runs, which decides how a text that names
+/// it reads (relay 01a12495, after language-culture-en's 01a12491): a
+/// daemon of its own on the desktop, the app's own network service on
+/// Android, which has no daemon (human-client-android.md, "Deployment
+/// decision"). Chosen once by each app's composition root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RuntimeHost {
+    /// A separate process the person starts: the desktop's transport
+    /// daemon (ADR-0040).
+    Daemon,
+    /// The runtime inside the app's own foreground service (ADR-0041).
+    Embedded,
+}
+
+impl RuntimeHost {
+    /// Both, for the tests that walk every text.
+    pub const ALL: &'static [Self] = &[Self::Daemon, Self::Embedded];
+}
+
+/// The interface texts that name where the runtime runs: one key per
+/// situation, a text per [`RuntimeHost`], so a view cannot show the
+/// desktop's daemon on a phone -- it reads them only through
+/// [`placeholder_en::host_text`], which asks for the host.
+macro_rules! host_texts {
+    ($($(#[$doc:meta])* $variant:ident => { daemon: $daemon:literal, embedded: $embedded:literal $(,)? },)+) => {
+        /// An interface text whose words depend on where the runtime runs.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum HostText {
+            $($(#[$doc])* $variant,)+
+        }
+
+        impl HostText {
+            /// Every one, from the same list as the enum.
+            pub const ALL: &'static [Self] = &[$(Self::$variant,)+];
+        }
+
+        /// The placeholder English for `text` on `host`.
+        const fn host_text_en(host: RuntimeHost, text: HostText) -> &'static str {
+            match (host, text) {
+                $(
+                    (RuntimeHost::Daemon, HostText::$variant) => $daemon,
+                    (RuntimeHost::Embedded, HostText::$variant) => $embedded,
+                )+
+            }
+        }
+    };
+}
+
+host_texts! {
+    /// Nothing runs the transport for this profile; the window connects
+    /// once it starts. On the desktop the person starts the daemon; on
+    /// Android the app starts its own service.
+    NotRunning => {
+        daemon: "The transport daemon for this profile is not running. This window will connect when the daemon starts.",
+        embedded: "The network service is not running. The app will connect when the service starts.",
+    },
+    /// Trust could not be read or changed: the runtime is not reachable.
+    TrustUnavailable => {
+        daemon: "The transport daemon cannot be reached. Nothing was changed.",
+        embedded: "The network service is not running. Nothing was changed.",
+    },
+    /// This client may not administer trust on this runtime. Not expected
+    /// on Android, where the settings hold the in-process admin port; not
+    /// yet shown unreachable there (relay 01a12495).
+    TrustNotPermitted => {
+        daemon: "This app is not allowed to change trust on this transport daemon. Nothing was changed.",
+        embedded: "This app is not allowed to change trust. Nothing was changed.",
+    },
+    /// The runtime refused the change: its own identity, or the list is
+    /// full.
+    TrustRefused => {
+        daemon: "The transport daemon refused this change. Nothing was changed.",
+        embedded: "The network service refused this change. Nothing was changed.",
+    },
+    /// The runtime and the app are not the same release, so they share no
+    /// version trust needs: what helps is bringing both to one release,
+    /// not trying again. Not expected on Android, one package holding
+    /// both; not yet shown unreachable there.
+    TrustIncompatible => {
+        daemon: "The transport daemon is a different version from this app, so trust cannot be read or changed here. Nothing was changed.",
+        embedded: "This version of the app cannot read or change trust. Nothing was changed.",
+    },
+    /// The runtime did not confirm a change, which may have been made: the
+    /// list is read again. `{peer}` the exact `PeerId`, whole. Never says
+    /// that nothing changed (TRANSPORT.md's outcome-unknown class).
+    TrustUnconfirmed => {
+        daemon: "The transport daemon did not confirm the change for {peer}. The change may have been made. The list of trusted peers is being read again.",
+        embedded: "The network service did not confirm the change for {peer}. The change may have been made. The list of trusted peers is being read again.",
+    },
 }
 
 /// The English the client shows.
@@ -314,7 +403,10 @@ ui_texts! {
 /// reads as offline, and every template is filled by placeholder, never
 /// assembled by concatenation, so a translation may reorder it.
 pub mod placeholder_en {
-    use super::{Connectivity, EntryProblem, ErrorClass, LabelKey, PeerPath, TrustProblem, UiText};
+    use super::{
+        Connectivity, EntryProblem, ErrorClass, HostText, LabelKey, PeerPath, RuntimeHost,
+        TrustProblem, UiText,
+    };
 
     /// A status label.
     #[must_use]
@@ -336,15 +428,19 @@ pub mod placeholder_en {
         }
     }
 
-    /// An error class's message (`human-client-ui.md` §12).
+    /// An error class's message (`human-client-ui.md` §12), as it reads
+    /// where the runtime runs on `host`.
     #[must_use]
-    pub const fn error(class: ErrorClass) -> &'static str {
+    pub const fn error(host: RuntimeHost, class: ErrorClass) -> &'static str {
         match class {
+            ErrorClass::TransportUnavailable => match host {
+                RuntimeHost::Daemon => "The transport daemon cannot be reached.",
+                RuntimeHost::Embedded => "The network service is not running.",
+            },
             ErrorClass::PeerNotTrusted => "This peer is not trusted for this profile.",
             ErrorClass::RouteUnavailable => "This route is not available now.",
             ErrorClass::NoNetworkPath => "This peer cannot be reached over the network now.",
             ErrorClass::Busy => "The transport is temporarily busy.",
-            ErrorClass::TransportUnavailable => "The transport daemon cannot be reached.",
             ErrorClass::Incompatible => "The two sides have no protocol version in common.",
             ErrorClass::TooLarge => "The message is too large to send.",
             ErrorClass::NotConfigured => "This route or channel is not configured here.",
@@ -366,14 +462,18 @@ pub mod placeholder_en {
         })
     }
 
-    /// Connectivity as `human-client-ui.md` §7 normalizes it.
+    /// Connectivity as `human-client-ui.md` §7 normalizes it, as it
+    /// reads where the runtime runs on `host`.
     #[must_use]
-    pub const fn connectivity(state: Connectivity) -> &'static str {
+    pub const fn connectivity(host: RuntimeHost, state: Connectivity) -> &'static str {
         match state {
             Connectivity::OnlineDirect => "Online, reachable directly",
             Connectivity::OnlineRelay => "Online, reachable through a relay",
             Connectivity::OnlinePartial => "Online, some peers might not reach you",
-            Connectivity::Offline => "Offline, transport daemon not running",
+            Connectivity::Offline => match host {
+                RuntimeHost::Daemon => "Offline, transport daemon not running",
+                RuntimeHost::Embedded => "Offline, network service not running",
+            },
             Connectivity::Unknown => "Network status not known yet",
         }
     }
@@ -384,16 +484,23 @@ pub mod placeholder_en {
         super::ui_text_en(text)
     }
 
-    /// Why trust was not read or changed.
+    /// An interface text that names where the runtime runs, as it reads
+    /// on `host`.
     #[must_use]
-    pub const fn trust_problem(problem: TrustProblem) -> &'static str {
-        text(match problem {
-            TrustProblem::Unavailable => UiText::TrustUnavailable,
-            TrustProblem::NotPermitted => UiText::TrustNotPermitted,
-            TrustProblem::Refused => UiText::TrustRefused,
-            TrustProblem::Incompatible => UiText::TrustIncompatible,
-            TrustProblem::Internal => UiText::TrustFailed,
-        })
+    pub const fn host_text(host: RuntimeHost, text: HostText) -> &'static str {
+        super::host_text_en(host, text)
+    }
+
+    /// Why trust was not read or changed, as it reads on `host`.
+    #[must_use]
+    pub const fn trust_problem(host: RuntimeHost, problem: TrustProblem) -> &'static str {
+        match problem {
+            TrustProblem::Unavailable => host_text(host, HostText::TrustUnavailable),
+            TrustProblem::NotPermitted => host_text(host, HostText::TrustNotPermitted),
+            TrustProblem::Refused => host_text(host, HostText::TrustRefused),
+            TrustProblem::Incompatible => host_text(host, HostText::TrustIncompatible),
+            TrustProblem::Internal => text(UiText::TrustFailed),
+        }
     }
 
     /// Why a typed `PeerId` was not proposed.
@@ -635,13 +742,107 @@ mod tests {
 
     #[test]
     fn unknown_connectivity_never_reads_as_offline() {
-        let unknown = placeholder_en::connectivity(Connectivity::Unknown).to_ascii_lowercase();
-        assert!(!unknown.contains("offline"), "{unknown}");
+        for &host in RuntimeHost::ALL {
+            let unknown = placeholder_en::connectivity(host, Connectivity::Unknown);
+            assert!(
+                !unknown.to_ascii_lowercase().contains("offline"),
+                "{unknown}"
+            );
+            assert!(
+                placeholder_en::connectivity(host, Connectivity::Offline)
+                    .to_ascii_lowercase()
+                    .contains("offline"),
+                "the control: Offline does say so on {host:?}"
+            );
+        }
+    }
+
+    /// Every class, state and host text, as `host` reads it: what the
+    /// platform-value tests walk. An exhaustive match keeps the lists
+    /// whole: a variant added to either enum fails to compile until it is
+    /// named here.
+    fn host_dependent(host: RuntimeHost) -> Vec<&'static str> {
+        const fn listed(class: ErrorClass) -> ErrorClass {
+            match class {
+                ErrorClass::PeerNotTrusted
+                | ErrorClass::RouteUnavailable
+                | ErrorClass::NoNetworkPath
+                | ErrorClass::Busy
+                | ErrorClass::TransportUnavailable
+                | ErrorClass::Incompatible
+                | ErrorClass::TooLarge
+                | ErrorClass::NotConfigured
+                | ErrorClass::InvalidMessage
+                | ErrorClass::StorageUnavailable
+                | ErrorClass::AlreadyPending
+                | ErrorClass::EndpointInUse
+                | ErrorClass::EndpointNotAvailable
+                | ErrorClass::Internal => class,
+            }
+        }
+        const fn state(state: Connectivity) -> Connectivity {
+            match state {
+                Connectivity::OnlineDirect
+                | Connectivity::OnlineRelay
+                | Connectivity::OnlinePartial
+                | Connectivity::Offline
+                | Connectivity::Unknown => state,
+            }
+        }
+        let classes = [
+            ErrorClass::PeerNotTrusted,
+            ErrorClass::RouteUnavailable,
+            ErrorClass::NoNetworkPath,
+            ErrorClass::Busy,
+            ErrorClass::TransportUnavailable,
+            ErrorClass::Incompatible,
+            ErrorClass::TooLarge,
+            ErrorClass::NotConfigured,
+            ErrorClass::InvalidMessage,
+            ErrorClass::StorageUnavailable,
+            ErrorClass::AlreadyPending,
+            ErrorClass::EndpointInUse,
+            ErrorClass::EndpointNotAvailable,
+            ErrorClass::Internal,
+        ];
+        let states = [
+            Connectivity::OnlineDirect,
+            Connectivity::OnlineRelay,
+            Connectivity::OnlinePartial,
+            Connectivity::Offline,
+            Connectivity::Unknown,
+        ];
+        let mut texts: Vec<&str> = classes
+            .iter()
+            .map(|c| placeholder_en::error(host, listed(*c)))
+            .collect();
+        texts.extend(
+            states
+                .iter()
+                .map(|s| placeholder_en::connectivity(host, state(*s))),
+        );
+        texts.extend(
+            HostText::ALL
+                .iter()
+                .map(|t| placeholder_en::host_text(host, *t)),
+        );
+        texts
+    }
+
+    /// Android has no daemon (relay 01a12495): no text it can show names
+    /// one. The desktop's do, the control that the walk reaches them.
+    #[test]
+    fn no_embedded_text_names_a_daemon() {
+        for text in host_dependent(RuntimeHost::Embedded) {
+            assert!(!text.to_ascii_lowercase().contains("daemon"), "{text}");
+        }
         assert!(
-            placeholder_en::connectivity(Connectivity::Offline)
-                .to_ascii_lowercase()
-                .contains("offline"),
-            "the control: Offline does say so"
+            host_dependent(RuntimeHost::Daemon)
+                .iter()
+                .filter(|t| t.contains("transport daemon"))
+                .count()
+                >= 8,
+            "the control: the desktop names its daemon"
         );
     }
 
@@ -670,6 +871,12 @@ mod tests {
         for text in UiText::ALL {
             let filled = fill(placeholder_en::text(*text), &values);
             assert!(!filled.contains('{'), "{text:?}: {filled}");
+        }
+        for &host in RuntimeHost::ALL {
+            for text in HostText::ALL {
+                let filled = fill(placeholder_en::host_text(host, *text), &values);
+                assert!(!filled.contains('{'), "{host:?} {text:?}: {filled}");
+            }
         }
         assert_eq!(fill("route: {route}", &[("route", "a{b}")]), "route: a{b}");
         assert_eq!(
@@ -756,14 +963,25 @@ mod tests {
 
     #[test]
     fn every_ui_text_appears_once_in_all() {
-        let mut texts: Vec<&str> = UiText::ALL
-            .iter()
-            .map(|t| placeholder_en::text(*t))
-            .collect();
-        texts.sort_unstable();
-        let n = texts.len();
-        texts.dedup();
-        assert_eq!(texts.len(), n, "no two interface texts read the same");
+        for &host in RuntimeHost::ALL {
+            let mut texts: Vec<&str> = UiText::ALL
+                .iter()
+                .map(|t| placeholder_en::text(*t))
+                .chain(
+                    HostText::ALL
+                        .iter()
+                        .map(|t| placeholder_en::host_text(host, *t)),
+                )
+                .collect();
+            texts.sort_unstable();
+            let n = texts.len();
+            texts.dedup();
+            assert_eq!(
+                texts.len(),
+                n,
+                "no two interface texts read the same on {host:?}"
+            );
+        }
     }
 
     #[test]
@@ -780,18 +998,24 @@ mod tests {
                 | TrustProblem::Internal => problem,
             }
         }
-        let mut texts: Vec<&str> = [
-            TrustProblem::Unavailable,
-            TrustProblem::NotPermitted,
-            TrustProblem::Refused,
-            TrustProblem::Incompatible,
-            TrustProblem::Internal,
-        ]
-        .map(|p| placeholder_en::trust_problem(listed(p)))
-        .to_vec();
-        texts.sort_unstable();
-        texts.dedup();
-        assert_eq!(texts.len(), 5, "each problem says its own cause");
+        for &host in RuntimeHost::ALL {
+            let mut texts: Vec<&str> = [
+                TrustProblem::Unavailable,
+                TrustProblem::NotPermitted,
+                TrustProblem::Refused,
+                TrustProblem::Incompatible,
+                TrustProblem::Internal,
+            ]
+            .map(|p| placeholder_en::trust_problem(host, listed(p)))
+            .to_vec();
+            texts.sort_unstable();
+            texts.dedup();
+            assert_eq!(
+                texts.len(),
+                5,
+                "each problem says its own cause on {host:?}"
+            );
+        }
     }
 
     #[test]

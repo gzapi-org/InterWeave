@@ -5,7 +5,7 @@ topic: "pr179-vendoring-landed"
 description: "#179 (ADR-0054 vendoring, provenance check, two carried fixes) merged 97d83830 on 2026-10-04; what it carries"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

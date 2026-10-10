@@ -5,7 +5,7 @@ topic: "discovery-relearn-holds-a-newly-allowed-peer"
 description: "Composition discovery: a candidate offered to the book while untrusted is held back 5 min by the learned map, so a peer allowed at run time stays unreachable unless set_trust clears it"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

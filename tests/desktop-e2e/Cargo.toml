@@ -34,18 +34,11 @@ interweave-ipc-client = { path = "../../crates/local/ipc-client" }
 interweave-ipc-protocol = { path = "../../crates/api/ipc-protocol" }
 interweave-local-client-api = { path = "../../crates/api/local-client-api" }
 interweave-local-client-conformance-tests = { path = "../local-client-conformance" }
-interweave-profile-config = { path = "../../crates/config/profile-config" }
-interweave-profile-identity = { path = "../../crates/identity/profile-identity" }
-interweave-test-support = { path = "../support", features = ["silent-peer"] }
+# The shared desktop harness (`e2e`: `tests/common` re-exports it) and the
+# silent peer.
+interweave-test-support = { path = "../support", features = ["e2e", "silent-peer"] }
 interweave-transport-api = { path = "../../crates/api/transport-api" }
-# common/relay.rs: the relay the relayed-path suites put between two
-# daemons -- the PRODUCTION server field (`relay_server_driver`) in a bare
-# Swarm told its external address, since a daemon as relay never opens
-# RELAY.md section 8's hop gate on one host (the module note).
-interweave-transport-libp2p = { path = "../../crates/transport/libp2p" }
-interweave-transport-runtime = { path = "../../crates/transport/runtime" }
-interweave-trust-api = { path = "../../crates/api/trust-api" }
-futures = { workspace = true }
+# relayed_path.rs and human_chat.rs: the relay's PeerIds, read back.
 libp2p = { workspace = true }
 # human_app/a11y.rs: the client's window read and pressed over AT-SPI, the
 # way a screen reader reaches it. Both are already compiled for the

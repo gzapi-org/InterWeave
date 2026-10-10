@@ -24,6 +24,8 @@
 // reachable from untrusted remote input, which this crate never sees.
 #![allow(clippy::expect_used, clippy::panic)]
 
+#[cfg(feature = "e2e")]
+pub mod e2e;
 pub mod fixtures;
 pub mod hex;
 pub mod net;

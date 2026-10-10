@@ -11,9 +11,9 @@
 #   bash tools/ci/check_android_target.sh [<package>...]
 #
 # The packages default to ANDROID_CHECK_PACKAGES below, each checked only
-# when the workspace has it: interweave-transport-embedded joins on its own
-# the day it lands, and until then the check is profile-config alone. A
-# package NAMED on the command line that the workspace lacks is an error.
+# when the workspace has it, so a crate listed ahead of its landing joins
+# on its own the day it lands. A package NAMED on the command line that the
+# workspace lacks is an error.
 #
 # Every version comes from tools/host/android/android-toolchain.pins, the
 # one place the host reads them: the target from RUST_ANDROID_TARGET, the
@@ -28,6 +28,17 @@
 # Environment: ANDROID_HOME with the NDK under ndk/<version> (the runner's
 # SDK, after sdkmanager installs the pin), or ANDROID_NDK_HOME at an NDK of
 # exactly the pinned revision (its source.properties says which).
+#
+# interweave-human-android needs more: Slint's Android backend build script
+# compiles a Java helper with the JDK's javac against an android.jar and
+# dexes it with the SDK's d8. So for it JAVA_HOME must hold bin/javac and
+# ANDROID_HOME the SDK, and ANDROID_JAR is set to the HIGHEST pinned
+# platform's jar (the compileSdk; the helper needs API 33's classes, and
+# left to itself the build script takes the lowest platform installed).
+#
+# A package that is checked with features names them in
+# ANDROID_CHECK_FEATURES: interweave-human-android-platform's stand-ins are
+# what its host tests run against, so they are checked for the phone too.
 # CARGO overrides the cargo binary (the self-test's seam).
 #
 # Exit codes: 0 every package checks; 1 cargo check failed; 2 usage,
@@ -40,7 +51,9 @@ CARGO="${CARGO:-cargo}"
 me="check_android_target"
 die() { echo "$me: $*" >&2; exit 2; }
 
-ANDROID_CHECK_PACKAGES=(interweave-profile-config interweave-transport-embedded)
+ANDROID_CHECK_PACKAGES=(interweave-profile-config interweave-transport-embedded
+                        interweave-human-android-platform interweave-human-android)
+ANDROID_CHECK_FEATURES=(interweave-human-android-platform/dev-stand-ins)
 
 [[ -r "$PINS" ]] || die "cannot read the pins file $PINS"
 pin() { awk -F= -v k="$1" '$1==k {print substr($0, index($0, "=") + 1); exit}' "$PINS"; }
@@ -50,6 +63,7 @@ ndk="$(grep -oE '^PKG_[0-9]+=ndk;[0-9.]+@' "$PINS" | head -n1 | sed 's/.*ndk;//;
 [[ -n "$ndk" ]] || die "no ndk;<version> package in $PINS"
 api="$(grep -oE '^PKG_[0-9]+=platforms;android-[0-9]+@' "$PINS" | sed 's/.*android-//; s/@$//' | sort -n | head -n1)"
 [[ -n "$api" ]] || die "no platforms;android-<n> package in $PINS"
+compile_api="$(grep -oE '^PKG_[0-9]+=platforms;android-[0-9]+@' "$PINS" | sed 's/.*android-//; s/@$//' | sort -n | tail -n1)"
 
 # The PINNED NDK, by its own source.properties: the SDK's ndk/<pin> first,
 # ANDROID_NDK_HOME only if it is that same revision. GitHub's runner image
@@ -88,9 +102,25 @@ else
 fi
 (( ${#pkgs[@]} )) || die "none of ${ANDROID_CHECK_PACKAGES[*]} is in the workspace"
 
+# What the Java-compiling build script under interweave-human-android needs.
+for p in "${pkgs[@]}"; do
+    [[ "$p" == interweave-human-android ]] || continue
+    [[ -n "${JAVA_HOME:-}" && -x "$JAVA_HOME/bin/javac" ]] \
+        || die "interweave-human-android needs a JDK: JAVA_HOME is '${JAVA_HOME:-}', with no bin/javac"
+    [[ -n "${ANDROID_HOME:-}" ]] || die "interweave-human-android needs the SDK: ANDROID_HOME is not set"
+    jar="$ANDROID_HOME/platforms/android-$compile_api/android.jar"
+    [[ -f "$jar" ]] || die "interweave-human-android needs $jar (platforms;android-$compile_api)"
+    export ANDROID_JAR="$jar"
+    echo "$me: JDK at $JAVA_HOME, ANDROID_JAR at $jar"
+done
+features=()
+for f in "${ANDROID_CHECK_FEATURES[@]}"; do
+    for p in "${pkgs[@]}"; do [[ "${f%%/*}" == "$p" ]] && features+=("$f"); done
+done
 T="${target//-/_}"
 export "CARGO_TARGET_${T^^}_LINKER=$clang" "CC_$T=$clang" "AR_$T=$bin/llvm-ar"
 echo "$me: $target, NDK $ndk at $ndk_home, API $api: ${pkgs[*]}"
 args=(); for p in "${pkgs[@]}"; do args+=(-p "$p"); done
+(( ${#features[@]} )) && args+=(--features "$(IFS=,; echo "${features[*]}")")
 (cd "$REPO" && "$CARGO" check --locked --target "$target" "${args[@]}") || { echo "$me: cargo check failed for $target" >&2; exit 1; }
 echo "$me: OK — ${pkgs[*]} check for $target"

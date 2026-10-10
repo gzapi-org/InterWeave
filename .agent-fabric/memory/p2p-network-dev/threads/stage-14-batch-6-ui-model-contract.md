@@ -5,7 +5,7 @@ topic: "stage-14-batch-6-ui-model-contract"
 description: "Stage 14 batch 6 (ui-model) agreed surface with rust-ui-dev-01 and architect-cto's client-api ruling; replay relay seqs 10630, 10639, 10642, 10633 for full text"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

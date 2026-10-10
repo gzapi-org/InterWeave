@@ -50,6 +50,14 @@ desktop = [
     # renderer, so this names it rather than adding it.
     "i-slint-common/shared-fontique",
 ]
+# The Android Activity (plan section 20 step 2): Slint's own backend over
+# the platform's NativeActivity. It draws with Skia, whatever renderer
+# feature is named (i-slint-backend-android-activity's window adapter), so
+# none is: the desktop's software renderer would be compiled and unused.
+android = [
+    "slint/backend-android-activity-06",
+    "slint/accessibility",
+]
 
 [build-dependencies]
 slint-build = { workspace = true }

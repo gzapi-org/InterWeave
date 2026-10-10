@@ -5,7 +5,7 @@ topic: "a-cleanup-regex-spans-what-sits-before-its-anchor"
 description: "A DOTALL regex removing a temporary marker deleted a file's licence header and module doc, because a stray copy of the marker's first line sat at the top of the file"
 tier: 1
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

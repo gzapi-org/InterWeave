@@ -5,7 +5,7 @@ topic: "insert-tests-after-the-previous-item"
 description: "A scripted test insert anchored on \"#[test]\\n    fn next\" lands between next's doc comment and its #[test], stealing the doc; anchor on the previous item's closing brace"
 tier: 1
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

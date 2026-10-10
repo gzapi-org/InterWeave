@@ -25,9 +25,9 @@ use std::rc::Rc;
 
 use interweave_human_client_api::TrustOrigin;
 use interweave_human_ui_model::{
-    ConversationKey, Direction, Intent, ItemKey, ItemStatus, MessageItem, Reply, Retention,
-    SessionNotice, TrustChange, TrustInput, TrustOutcome, UiModel, UiText, fill, placeholder_en,
-    short_peer, visible_destination,
+    ConversationKey, Direction, HostText, Intent, ItemKey, ItemStatus, MessageItem, Reply,
+    Retention, RuntimeHost, SessionNotice, TrustChange, TrustInput, TrustOutcome, UiModel, UiText,
+    fill, placeholder_en, short_peer, visible_destination,
 };
 use interweave_transport_api::TransportIdentity;
 use slint::{Model as _, ModelRc, SharedString, VecModel};
@@ -83,6 +83,48 @@ pub fn defer(task: impl FnOnce() + 'static) {
     slint::Timer::single_shot(std::time::Duration::ZERO, task);
 }
 
+/// The Activity the platform hands `android_main`: what [`init_android`]
+/// takes, re-exported so the app names no Slint crate (the human-layering
+/// check, rule 4).
+#[cfg(all(feature = "android", target_os = "android"))]
+pub use slint::android::AndroidApp;
+
+/// What the Activity reports beside its input, for the root to follow.
+#[cfg(all(feature = "android", target_os = "android"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityEvent {
+    /// The window gained (`true`) or lost the person's focus: what a
+    /// read is gated on, as the desktop window's focus is.
+    Focus(bool),
+    /// The Activity is being destroyed: its window goes with it.
+    Destroy,
+}
+
+/// Make the Activity `app` the views' platform, reporting `event` as the
+/// Activity's focus and lifecycle change. Call it from `android_main`,
+/// before [`View::new`].
+///
+/// # Errors
+/// The toolkit's, as text: a platform is already set in this process.
+#[cfg(all(feature = "android", target_os = "android"))]
+pub fn init_android(
+    app: AndroidApp,
+    event: impl Fn(ActivityEvent) + 'static,
+) -> Result<(), String> {
+    use slint::android::android_activity::{MainEvent, PollEvent};
+    slint::android::init_with_event_listener(app, move |polled| {
+        if let PollEvent::Main(main) = polled {
+            match main {
+                MainEvent::GainedFocus => event(ActivityEvent::Focus(true)),
+                MainEvent::LostFocus => event(ActivityEvent::Focus(false)),
+                MainEvent::Destroy => event(ActivityEvent::Destroy),
+                _ => {}
+            }
+        }
+    })
+    .map_err(|e| e.to_string())
+}
+
 /// End the event loop: [`WindowHandle::run`] returns.
 pub fn quit_event_loop() {
     // An event loop already gone has nothing to end.
@@ -105,7 +147,8 @@ pub enum PlatformProblem {
 /// # Errors
 /// The first [`PlatformProblem`] found.
 pub fn platform_check() -> Result<(), PlatformProblem> {
-    #[cfg(all(unix, not(target_vendor = "apple")))]
+    // Android draws with the platform's own fonts and has no fontconfig.
+    #[cfg(all(unix, not(target_vendor = "apple"), not(target_os = "android")))]
     if fontconfig_sys::statics::LIB_RESULT.is_err() {
         return Err(PlatformProblem::NoFontconfig);
     }
@@ -375,15 +418,20 @@ pub struct View {
     trusted_handles: Handles<TransportIdentity>,
     /// The trust settings' outcome count last announced.
     trust_announced: u64,
+    /// Where the runtime runs, which the texts that name it follow.
+    host: RuntimeHost,
     shared: Rc<RefCell<Shared>>,
 }
 
 impl View {
-    /// A view over a new window. Shows nothing until [`render`](Self::render).
+    /// A view over a new window, for a client whose runtime runs on
+    /// `host`: the texts that name the runtime follow it (a phone never
+    /// shows the desktop's daemon). Shows nothing until
+    /// [`render`](Self::render).
     ///
     /// # Errors
     /// The toolkit's, when no platform can create a window.
-    pub fn new() -> Result<Self, slint::PlatformError> {
+    pub fn new(host: RuntimeHost) -> Result<Self, slint::PlatformError> {
         let window = AppWindow::new()?;
         let conversations = Rc::new(VecModel::<ConversationRow>::default());
         let messages = Rc::new(VecModel::<MessageRow>::default());
@@ -513,6 +561,7 @@ impl View {
             trusted_keys: Vec::new(),
             trusted_handles: Handles::new(),
             trust_announced: 0,
+            host,
             shared,
         })
     }
@@ -559,6 +608,9 @@ impl View {
 
     /// Select a conversation, as a click on its row does.
     pub fn select(&self, key: ConversationKey) {
+        // In a narrow window the conversation is the pane shown, as when
+        // the person picks it from the list.
+        self.window.set_list_shown(false);
         let _ = self.shared.borrow_mut().push(Input::Select(key));
     }
 
@@ -948,7 +1000,9 @@ impl View {
         window.set_has_pending(pending.is_some());
         window.set_pending_text(pending.unwrap_or_default().into());
         let (outcome, count) = settings.outcome();
-        let said = outcome.map(outcome_text).unwrap_or_default();
+        let said = outcome
+            .map(|outcome| outcome_text(self.host, outcome))
+            .unwrap_or_default();
         window.set_trust_outcome(said.as_str().into());
         if count == self.trust_announced || said.is_empty() {
             self.trust_announced = count;
@@ -960,11 +1014,17 @@ impl View {
 
     fn render_chrome(&self, model: &UiModel) {
         let window = &self.window;
-        window.set_connectivity(placeholder_en::connectivity(model.connectivity()).into());
+        window
+            .set_connectivity(placeholder_en::connectivity(self.host, model.connectivity()).into());
         let notice = model.session_notice();
         self.shared.borrow_mut().notice = notice;
         window.set_has_notice(notice.is_some());
-        window.set_notice(notice.map(notice_text).unwrap_or_default().into());
+        window.set_notice(
+            notice
+                .map(|notice| notice_text(self.host, notice))
+                .unwrap_or_default()
+                .into(),
+        );
         let action = notice
             .and_then(SessionNotice::resolution)
             .and_then(|i| action_text(&i));
@@ -1012,7 +1072,7 @@ impl View {
                         .map(|class| {
                             fill(
                                 placeholder_en::text(UiText::NotSent),
-                                &[("reason", placeholder_en::error(class))],
+                                &[("reason", placeholder_en::error(self.host, class))],
                             )
                         })
                         .unwrap_or_default()
@@ -1414,7 +1474,7 @@ fn action_text(intent: &Intent) -> Option<&'static str> {
 }
 
 /// What a trust settings outcome says.
-fn outcome_text(outcome: &TrustOutcome) -> String {
+fn outcome_text(host: RuntimeHost, outcome: &TrustOutcome) -> String {
     match outcome {
         TrustOutcome::Changed(change) => fill(
             placeholder_en::text(if change.allowed {
@@ -1425,23 +1485,23 @@ fn outcome_text(outcome: &TrustOutcome) -> String {
             &[("peer", change.peer.as_str())],
         ),
         TrustOutcome::Unconfirmed(change) => fill(
-            placeholder_en::text(UiText::TrustUnconfirmed),
+            placeholder_en::host_text(host, HostText::TrustUnconfirmed),
             &[("peer", change.peer.as_str())],
         ),
-        TrustOutcome::Problem(problem) => placeholder_en::trust_problem(*problem).to_owned(),
+        TrustOutcome::Problem(problem) => placeholder_en::trust_problem(host, *problem).to_owned(),
         TrustOutcome::NotReadAgain(_) => placeholder_en::text(UiText::TrustNotReadAgain).to_owned(),
         TrustOutcome::Entry(problem) => placeholder_en::entry_problem(*problem).to_owned(),
     }
 }
 
-fn notice_text(notice: SessionNotice) -> String {
+fn notice_text(host: RuntimeHost, notice: SessionNotice) -> String {
     match notice {
-        SessionNotice::NoDaemon => placeholder_en::text(UiText::NoDaemon).to_owned(),
+        SessionNotice::NoDaemon => placeholder_en::host_text(host, HostText::NotRunning).to_owned(),
         SessionNotice::Reconnecting => placeholder_en::text(UiText::Reconnecting).to_owned(),
         SessionNotice::StorageDegraded => placeholder_en::text(UiText::StorageDegraded).to_owned(),
         SessionNotice::Refused(class) => fill(
             placeholder_en::text(UiText::Refused),
-            &[("reason", placeholder_en::error(class))],
+            &[("reason", placeholder_en::error(host, class))],
         ),
     }
 }

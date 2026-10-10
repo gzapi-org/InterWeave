@@ -19,8 +19,8 @@ mod model;
 mod trust;
 
 pub use labels::{
-    ErrorClass, LabelKey, UiText, fill, outbound_label, placeholder_en, send_error_class,
-    send_problem_class, session_problem_class, short_peer, visible_destination,
+    ErrorClass, HostText, LabelKey, RuntimeHost, UiText, fill, outbound_label, placeholder_en,
+    send_error_class, send_problem_class, session_problem_class, short_peer, visible_destination,
 };
 pub use model::{
     Composer, ConversationKey, ConversationSummary, DEDUP_CAP, Direction, HELD_UPDATE_CAP, Intent,

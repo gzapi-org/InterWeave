@@ -5,7 +5,7 @@ topic: "status-tests-must-watch-fields-move"
 description: a status/introspection surface gets review findings unless each field is seen at two values through the real wiring; two counters can be one atomic
 tier: 1
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

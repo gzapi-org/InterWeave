@@ -20,6 +20,14 @@
 //! field carries; what this relay therefore does NOT prove is a daemon
 //! acting as the relay, or any NAT.
 
+// A harness helper panics when the case cannot be set up -- that is its
+// failure, by name -- and its value is always used by the case.
+#![allow(
+    clippy::missing_panics_doc,
+    clippy::must_use_candidate,
+    reason = "test harness: every helper panics on a broken setup"
+)]
+
 use std::time::Duration;
 
 use futures::StreamExt as _;
@@ -43,22 +51,22 @@ struct RelayBehaviour {
 
 /// What the relay did, as its server field reported it.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct RelaySeen {
+pub struct RelaySeen {
     /// Reservations granted, by the peer that reserved.
-    pub(crate) reservations: Vec<PeerId>,
+    pub reservations: Vec<PeerId>,
     /// Circuits accepted, as (source, destination).
-    pub(crate) circuits: Vec<(PeerId, PeerId)>,
+    pub circuits: Vec<(PeerId, PeerId)>,
     /// Circuit requests denied, as (source, destination).
-    pub(crate) denied: Vec<(PeerId, PeerId)>,
+    pub denied: Vec<(PeerId, PeerId)>,
 }
 
 /// A running relay; dropping it stops it.
-pub(crate) struct Relay {
+pub struct Relay {
     /// Its `PeerId`.
-    pub(crate) peer: TransportIdentity,
+    pub peer: TransportIdentity,
     /// Where it listens, ending in `/p2p/<peer>`: the `static_relays`
     /// entry a daemon is given.
-    pub(crate) address: String,
+    pub address: String,
     seen: mpsc::UnboundedSender<oneshot::Sender<RelaySeen>>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -72,7 +80,7 @@ impl Drop for Relay {
 impl Relay {
     /// Serve `clients` -- the daemons, as infrastructure clients of this
     /// relay -- on loopback. Call from inside a tokio runtime.
-    pub(crate) async fn start(clients: &[&TransportIdentity]) -> Self {
+    pub async fn start(clients: &[&TransportIdentity]) -> Self {
         let mut manager = ConnectionManager::new(ConnectionPolicy::new(64, 64), 64);
         let _ = manager.set_trust(
             TrustSources::new(
@@ -151,7 +159,7 @@ impl Relay {
     }
 
     /// What the relay has done so far.
-    pub(crate) async fn seen(&self) -> RelaySeen {
+    pub async fn seen(&self) -> RelaySeen {
         let (reply, answer) = oneshot::channel();
         self.seen.send(reply).expect("the relay task is alive");
         answer.await.expect("the relay task answers")
@@ -159,7 +167,7 @@ impl Relay {
 
     /// The circuit address through this relay to `target`: the route a
     /// daemon is given when the circuit must be the only one it knows.
-    pub(crate) fn circuit_to(&self, target: &TransportIdentity) -> String {
+    pub fn circuit_to(&self, target: &TransportIdentity) -> String {
         format!("{}/p2p-circuit/p2p/{}", self.address, target.as_str())
     }
 }

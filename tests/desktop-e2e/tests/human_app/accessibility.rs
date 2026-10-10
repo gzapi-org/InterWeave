@@ -10,7 +10,7 @@
 //! trust-mutation case (`trust.rs`), where they are used.
 
 use interweave_human_transport_client::Connectivity;
-use interweave_human_ui_model::{UiText, fill, placeholder_en, short_peer};
+use interweave_human_ui_model::{RuntimeHost, UiText, fill, placeholder_en, short_peer};
 
 use crate::a11y::{Bus, Element};
 use crate::common::human;
@@ -139,7 +139,7 @@ async fn the_tree_read_over_atspi_labels_message_route_and_connectivity_controls
                         Connectivity::Unknown,
                     ]
                     .iter()
-                    .any(|c| e.name == placeholder_en::connectivity(*c))
+                    .any(|c| e.name == placeholder_en::connectivity(RuntimeHost::Daemon, *c))
             },
             log,
         )

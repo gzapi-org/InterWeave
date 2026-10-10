@@ -459,3 +459,7 @@ this note, the log row, the digest bullet and `resource-limits.md`'s
 table row; IDENTITY.md, the threat row and configuration.md carry the
 predicate by reference and change only in the term — "the owner's
 private group" where they said "the daemon user's".
+
+### Amendment 2026-10-10 — The Android availability choice is the trust overlay's sibling
+
+ADR-0041's amendment of the same day puts the person's Android stay-reachable choice where trust's administrative changes already live: a persisted overlay in the profile's state directory under the trust boundary, owner-only under this record's rule, never a rewrite of `config.yaml`. The Decision's overlay sentence names it as the trust overlay's sibling so the rule — authored files are never rewritten by the daemon or the host; a runtime-made change is an overlay in state — is stated once for both. Built (InterWeave #254): `<state>/availability-overlay.json`, owner-only, exactly `{"availability_mode": "stay-reachable"}`, read through the private reader shared with `trust-overlay.json`; an untrusted present overlay refuses the host's start, as the trust overlay's does.

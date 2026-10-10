@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# Stage 17 (plan §20 gate (c)): Android <-> desktop interoperability over
+# a direct and a relayed path, behind the device seam the src/lib.rs
+# defines. The Android side is the embedded runtime on this host until a
+# target build and a device exist. TEST-ONLY; nothing depends on this
+# package.
+[package]
+name = "interweave-android-e2e-tests"
+version = "0.0.0"
+publish = false
+description = "Android-to-desktop interoperability tests for InterWeave, with a host stand-in for the device."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+interweave-local-client-api = { path = "../../crates/api/local-client-api" }
+interweave-profile-config = { path = "../../crates/config/profile-config" }
+interweave-profile-identity = { path = "../../crates/identity/profile-identity" }
+interweave-transport-api = { path = "../../crates/api/transport-api" }
+interweave-transport-composition = { path = "../../crates/transport/composition" }
+interweave-transport-embedded = { path = "../../crates/transport/embedded" }
+tempfile = { workspace = true }
+# The desktop side and the relay: the harness desktop-e2e shares.
+interweave-test-support = { path = "../support", features = ["e2e"] }
+interweave-ipc-client = { path = "../../crates/local/ipc-client" }
+
+[dev-dependencies]
+# human_chat.rs: the human client's own facade, store, envelope and
+# model on each side, and the captured payloads' schema check.
+interweave-human-chat-protocol = { path = "../../crates/human/chat-protocol" }
+interweave-human-store = { path = "../../crates/human/store" }
+interweave-human-transport-client = { path = "../../crates/human/transport-client" }
+interweave-human-ui-model = { path = "../../crates/human/ui-model" }
+serde_json = { workspace = true }
+# paths.rs: the relay's PeerIds, read back, and the cases' runtime.
+libp2p = { workspace = true }
+tokio = { workspace = true }

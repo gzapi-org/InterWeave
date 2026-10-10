@@ -5,7 +5,7 @@ topic: "reviewer-declined-dispatch-opus"
 description: "The review is the review class's blind review of the current head, posted with post-review.sh; there is no automated reviewer to request or wait for"
 tier: 1
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

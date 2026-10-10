@@ -19,7 +19,7 @@ use interweave_human_desktop::app::{App, SlintSurface};
 use interweave_human_desktop::facade_thread::FacadeThread;
 use interweave_human_store::{HumanStore, StoreOptions};
 use interweave_human_transport_client::{ClientConfig, TransportClient};
-use interweave_human_ui_model::{ConversationKey, SessionNotice};
+use interweave_human_ui_model::{ConversationKey, RuntimeHost, SessionNotice};
 use interweave_human_ui_slint::View;
 use interweave_local_client_fake::{FakeConfig, FakeEndpoint, FakeNetwork, FakeNode};
 use interweave_profile_identity::ProfileIdentity;
@@ -68,7 +68,7 @@ impl Opener for NoLinks {
 
 fn app(node: &FakeNode, daemon: Result<bool, &'static str>) -> App<SlintSurface, NoLinks> {
     i_slint_backend_testing::init_no_event_loop();
-    let view = View::new().expect("a window");
+    let view = View::new(RuntimeHost::Daemon).expect("a window");
     let node = node.clone();
     let thread = FacadeThread::spawn(
         move || Ok(facade(node)),
@@ -186,7 +186,7 @@ fn over_the_real_binding_with_no_daemon_the_window_says_so() {
     let store = HumanStore::open(&profile.store_path(), StoreOptions::default()).expect("store");
 
     i_slint_backend_testing::init_no_event_loop();
-    let view = View::new().expect("a window");
+    let view = View::new(RuntimeHost::Daemon).expect("a window");
     let thread = FacadeThread::spawn(
         facade_over_ipc(&profile, store),
         move || daemon::present(&paths),
@@ -209,7 +209,7 @@ fn a_lock_that_cannot_answer_is_never_read_as_no_daemon() {
     let (a, _b) = FakeNetwork::pair(node(), node());
     a.stop();
     i_slint_backend_testing::init_no_event_loop();
-    let view = View::new().expect("a window");
+    let view = View::new(RuntimeHost::Daemon).expect("a window");
     let node_for = a.clone();
     let thread = FacadeThread::spawn(
         move || Ok(facade(node_for)),
@@ -247,7 +247,7 @@ fn a_lock_that_cannot_answer_is_never_read_as_no_daemon() {
 #[test]
 fn closing_a_facade_thread_that_already_ended_returns_at_once() {
     i_slint_backend_testing::init_no_event_loop();
-    let view = View::new().expect("a window");
+    let view = View::new(RuntimeHost::Daemon).expect("a window");
     let thread = FacadeThread::spawn(
         || -> Result<FacadeSide<FakeNode, FakeNode>, _> {
             Err(interweave_human_store::StoreError::AlreadyRead)
@@ -371,7 +371,7 @@ fn no_daemon_does_not_outlive_a_lock_that_can_no_longer_answer() {
     let (a, _b) = FakeNetwork::pair(node(), node());
     a.stop();
     i_slint_backend_testing::init_no_event_loop();
-    let view = View::new().expect("a window");
+    let view = View::new(RuntimeHost::Daemon).expect("a window");
     let node_for = a.clone();
     let thread = FacadeThread::spawn(
         move || Ok(facade(node_for)),

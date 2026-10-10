@@ -31,7 +31,7 @@ Stages 18 (the adversarial and security gate) and 19 (packaging and release) fol
 - **`human-desktop`** (`apps/human-desktop`): the first-party desktop client, a Slint window over a headless application core.
 - **`claude-channel`** (`apps/claude-channel`): the Claude Code Channel bridge, a stdio MCP server over the daemon's data socket; the plugin that starts it is `packaging/claude-plugin/interweave`.
 
-`apps/human-android` is a landing zone until Stage 17 lands the Android client.
+`apps/human-android` is the Android client Stage 17 is building: its APK draws the client's views, and does not host a transport yet.
 
 Trust changes made through the admin socket persist in the profile's state directory, never in its configuration file, and survive a daemon restart.
 

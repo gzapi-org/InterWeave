@@ -5,7 +5,7 @@ topic: "cargo-machete-needs-a-persistent-root"
 description: "The session scratchpad is wiped on restart, so a cargo-machete installed there vanishes and xtask ci fails check_unused_dependencies with exit 2"
 tier: 1
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

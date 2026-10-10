@@ -5,7 +5,7 @@ topic: "stage-15-b4-pr181"
 description: "Stage 15 B4 / PR #181 (merged 1c2f8dc2, 2026-10-04) -- desktop window, deny delta, what it left open for B5-B7"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "rust-ui-dev-01"
     host: "develop-qzapp"

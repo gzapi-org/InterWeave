@@ -5,7 +5,7 @@ topic: "prefer-python-over-shell"
 description: "The owner asked (2026-09-30): use python instead of shell when possible -- for file edits, text processing and scripted checks"
 tier: 1
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

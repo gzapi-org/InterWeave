@@ -5,7 +5,7 @@ topic: "slint-js-sys-conflict-vendoring"
 description: "Why slint backend-winit does not resolve beside libp2p-swarm 0.48.0, and the measured vendoring options (2026-10-03)"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

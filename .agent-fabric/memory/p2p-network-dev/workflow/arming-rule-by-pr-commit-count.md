@@ -5,7 +5,7 @@ topic: "arming-rule-by-pr-commit-count"
 description: "when to arm a PR's merge without asking the owner — 8 to 16 commits of work (review-round fixes do not count) arm on your own once the review gate is met; fewer, ask; keep the work at or under 16 commits"
 tier: 1
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

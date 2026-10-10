@@ -42,9 +42,18 @@ members = [
     # commands that never touch a socket (plan §16 (10)).
     "apps/transportctl",
     "tests/desktop-e2e",
+    # Stage 17 (plan §20 gate (c)): Android <-> desktop, the device behind
+    # a seam, a host stand-in for it until a device exists.
+    "tests/android-e2e",
     # Stage 15 batch 2: the desktop human client (plan section 18).
     "apps/human-desktop",
+    # Stage 17 (plan section 20 steps 2-4): the Android human client's
+    # native library; its Gradle project is apps/human-android/android.
+    "apps/human-android",
     "crates/human/app-core",
+    # Stage 17 (plan section 20 steps 2-4): the Android client's Service
+    # side, host-testable.
+    "crates/human/android-platform",
     "crates/human/client-api",
     "crates/human/chat-protocol",
     "crates/human/core",
@@ -514,6 +523,11 @@ rusqlite = { version = "0.40", default-features = false, features = ["bundled"] 
 # Temporary directories for storage tests. A retention test that never
 # touches a real file cannot prove anything survives a restart.
 tempfile = "3"
+# The Android client's JNI entry points and its logcat line
+# (apps/human-android), at the versions Slint's Android backend already
+# resolves to.
+jni = { version = "0.22", default-features = false }
+ndk-sys = { version = "0.6", default-features = false }
 
 [profile.release]
 lto = "thin"
