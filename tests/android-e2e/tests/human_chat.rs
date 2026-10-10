@@ -13,7 +13,10 @@
 //! over the 48 KiB limit raw), both ways on both paths; every payload a
 //! runtime handed a client, captured as handed, validates against
 //! `human-chat/envelope.schema.json`; and each side's route indicator,
-//! read through its `ui-model`, says the path the route began on.
+//! read through its `ui-model`, says the path to the peer now -- the
+//! model keeps the latest path notice, so this reads the current path;
+//! that a route's BEGIN is told on the path it took is `paths.rs`'s
+//! (`ROUTE_ESTABLISHED`, previous none).
 //!
 //! What makes the circuit R's only route is `paths.rs`'s module note.
 //!
@@ -23,11 +26,14 @@
 //! evidence the phone does any of it. The relayed run is #245's harness
 //! with #245's limits: one host, loopback, a bare-Swarm relay carrying the
 //! production relay-server field rather than a daemon acting as the
-//! relay, and no NAT. The rendering: the stand-in has no Slint window, so
-//! the route indicator is read at the `ui-model`, and `human-client-ui.md`
-//! §13's bullets that need a drawn view -- what the indicator looks like,
-//! what a screen reader announces, keyboard reach -- are not exercised
-//! here. Broadcast is not crossed here; desktop-e2e's `human_chat.rs`
+//! relay, no NAT, and a host whose interface addresses are private -- on
+//! one carrying a public address D could learn a direct address for R,
+//! and the relayed reading would not hold (`paths.rs`). The rendering:
+//! the stand-in has no Slint window, so the route indicator is read at
+//! the `ui-model`. Not exercised here, from `human-client-ui.md`: §13's
+//! accessibility-tree labels for the route and connectivity controls and
+//! the consistent rendering of a `HumanChatV2` fixture on both clients;
+//! and §11's screen-reader-friendly controls and keyboard navigation. Broadcast is not crossed here; desktop-e2e's `human_chat.rs`
 //! crosses it between daemons.
 
 #![cfg(target_os = "linux")]
@@ -484,7 +490,7 @@ async fn human_chat_crosses_between_android_and_desktop_relayed_and_direct_plain
     }
 
     // Each route indicator, read through the side's model, says the path
-    // the route began on: relayed between R and D, direct between C and D.
+    // to the peer now: relayed between R and D, direct between C and D.
     sides
         .until(
             clock,
