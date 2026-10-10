@@ -2395,9 +2395,10 @@ async fn a_listener_on_an_ip_the_view_removed_is_not_offered() {
 /// `a_loopback_only_subject_sends_no_candidate_at_all` reads it: `Ok` when
 /// the punch to a candidate landed, the crate's error text when the
 /// CONNECT carried no address. The subject listens on this host's private
-/// address, which it offers to the crate; with `depart`, the platform's
-/// view then removes that IP before the circuit is dialled.
-async fn connect_outcome(ip: Ipv4Addr, depart: bool) -> Result<(), String> {
+/// address, which it offers to the crate; then the platform's view
+/// removes `departs`, if any, before the circuit is dialled -- the
+/// listener's own IP, or another the first view named.
+async fn connect_outcome(ip: Ipv4Addr, departs: Option<Ipv4Addr>) -> Result<(), String> {
     let Reserved {
         mut relay,
         relay_peer,
@@ -2425,14 +2426,23 @@ async fn connect_outcome(ip: Ipv4Addr, depart: bool) -> Result<(), String> {
         1,
         "the private listener was offered to the crate"
     );
-    if depart {
+    if let Some(gone) = departs {
         // Two views, the first read before the second is sent, as
-        // `a_listener_on_an_ip_the_view_removed_is_not_offered` sends them.
+        // `a_listener_on_an_ip_the_view_removed_is_not_offered` sends them:
+        // the first names the listener's IP and another, the second drops
+        // `gone`.
+        let named = [ip, OTHER_IP];
         subject.network_changed(NetworkView {
-            addresses: vec![ip.into(), Ipv4Addr::new(10, 255, 0, 3).into()],
+            addresses: named.iter().map(|&a| a.into()).collect(),
         });
         until_network_changed(&mut subject).await;
-        subject.network_changed(NetworkView::default());
+        subject.network_changed(NetworkView {
+            addresses: named
+                .iter()
+                .filter(|&&a| a != gone)
+                .map(|&a| a.into())
+                .collect(),
+        });
         until_network_changed(&mut subject).await;
         drain(&mut subject, Duration::from_secs(2)).await;
     }
@@ -2472,20 +2482,29 @@ async fn connect_outcome(ip: Ipv4Addr, depart: bool) -> Result<(), String> {
     outcome
 }
 
+/// An address the first view names beside the listener's, which no
+/// interface of this host holds.
+const OTHER_IP: Ipv4Addr = Ipv4Addr::new(10, 255, 0, 3);
+
 /// An address offered to the crate before its IP left the host is not
 /// sent in a CONNECT after: the network change builds the crate again, so
 /// its candidate cache -- which nothing else empties -- starts from what
 /// the host still holds (`HolePunchScope::network_changed`). Over this
-/// host's private address, since loopback candidates are withheld. THE
-/// CONTROL: the same subject with the IP still held sends the private
-/// candidate and the bare peer's punch lands.
+/// host's private address, since loopback candidates are withheld. TWO
+/// CONTROLS: with no change the private candidate is sent and the bare
+/// peer's punch lands; and after a change that removed ANOTHER IP -- the
+/// crate built again all the same -- the listener still held is offered
+/// to the new crate and sent, so the punch lands too.
 #[tokio::test]
 async fn a_departed_address_is_not_sent_in_a_later_connect() {
     let ip = interweave_test_support::net::require_private_interface_v4();
-    connect_outcome(ip, false)
+    connect_outcome(ip, None)
         .await
         .expect("the control: the held private candidate is sent and the punch lands");
-    let detail = connect_outcome(ip, true)
+    connect_outcome(ip, Some(OTHER_IP))
+        .await
+        .expect("after another IP left, the held candidate reaches the rebuilt crate");
+    let detail = connect_outcome(ip, Some(ip))
         .await
         .expect_err("the departed candidate is not sent, so nothing can be punched");
     assert_eq!(
