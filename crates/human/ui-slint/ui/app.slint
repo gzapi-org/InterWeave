@@ -11,6 +11,8 @@
 // no focus query, so each focusable element reports itself when it gains
 // focus. They are never shown and never person-facing.
 
+import { Palette as Style } from "std-widgets.slint";
+
 export struct ActionRow {
     // Position in the item's rendered actions: identifies the press,
     // which the Rust side turns back into the action as rendered.
@@ -107,7 +109,7 @@ component ActionButton inherits FocusScope {
     min-height: 24px;
     Rectangle {
         border-width: root.has-focus ? 2px : 1px;
-        border-color: #444;
+        border-color: Palette.border;
         HorizontalLayout {
             padding-left: 8px;
             padding-right: 8px;
@@ -146,7 +148,7 @@ component LinkButton inherits FocusScope {
     VerticalLayout {
         Rectangle {
             border-width: root.has-focus ? 2px : 1px;
-            border-color: #444;
+            border-color: Palette.border;
             HorizontalLayout {
                 padding: 4px;
                 padding-left: 8px;
@@ -166,15 +168,21 @@ component LinkButton inherits FocusScope {
     }
 }
 
-// Colours, each pair holding at least WCAG AA contrast (4.5:1) for text.
+// Colours, each pair holding at least WCAG AA contrast (4.5:1) for text
+// in the colour scheme the platform asks for: the window's background and
+// its default text follow the style's scheme, so every surface drawn here
+// follows it too -- a fixed light pane under a dark scheme's light text
+// was white on light grey (seen on the Android client, 2026-10-10).
 global Palette {
-    out property <color> pane: #f3f3f3;
-    out property <color> divider: #c8c8c8;
-    out property <color> muted-text: #4a4a4a;
+    out property <bool> dark: Style.color-scheme == ColorScheme.dark;
+    out property <color> pane: dark ? #262626 : #f3f3f3;
+    out property <color> divider: dark ? #5c5c5c : #c8c8c8;
+    out property <color> border: dark ? #a0a0a0 : #444444;
+    out property <color> muted-text: dark ? #c8c8c8 : #4a4a4a;
     out property <color> notice-background: #fff4ce;
     out property <color> notice-text: #3d2c00;
-    out property <color> refused-text: #8a1c1c;
-    out property <color> selected: #dde8f7;
+    out property <color> refused-text: dark ? #ff9e9e : #8a1c1c;
+    out property <color> selected: dark ? #2e4a6e : #dde8f7;
 }
 
 export component AppWindow inherits Window {
@@ -257,6 +265,29 @@ export component AppWindow inherits Window {
     callback trust-confirm();
     callback trust-cancel();
 
+    // A window narrower than this shows one pane at a time -- the list,
+    // or a conversation or the trust settings with a way back -- rather
+    // than cutting the second pane off (a phone, plan section 20).
+    property <bool> narrow: root.width < 600px;
+    // In a narrow window: the conversation list is the pane shown.
+    in-out property <bool> list-shown: true;
+    // The bottom of the window an open virtual keyboard covers.
+    property <length> keyboard-overlap: root.virtual-keyboard-size.height > 0
+        ? max(0px, root.height - root.virtual-keyboard-position.y) : 0px;
+
+    function choose(handle: int) {
+        root.list-shown = false;
+        root.select(handle);
+    }
+    function open-settings() {
+        root.list-shown = false;
+        root.open-trust();
+    }
+    function close-settings() {
+        root.list-shown = true;
+        root.close-trust();
+    }
+
     // The announcement, for a screen reader only: a sighted
     // person sees each change where it happened. Clipped to a
     // point rather than hidden, which would take it out of the
@@ -280,9 +311,18 @@ export component AppWindow inherits Window {
             accessible-live-region: polite;
         }
     }
+    // The system bars' and the virtual keyboard's edges are drawn under
+    // but hold nothing a person must reach (Window.safe-area-insets).
     HorizontalLayout {
+        padding-top: root.safe-area-insets.top;
+        padding-left: root.safe-area-insets.left;
+        padding-right: root.safe-area-insets.right;
+        padding-bottom: max(root.safe-area-insets.bottom, root.keyboard-overlap);
         Rectangle {
-            width: 280px;
+            visible: !root.narrow || root.list-shown;
+            width: !root.narrow ? 280px
+                : root.list-shown ? root.width - root.safe-area-insets.left - root.safe-area-insets.right
+                : 0px;
             background: Palette.pane;
         VerticalLayout {
             padding: 12px;
@@ -313,10 +353,10 @@ export component AppWindow inherits Window {
                 accessible-description: row.description;
                 accessible-item-selectable: true;
                 accessible-item-selected: row.selected;
-                accessible-action-default => { root.select(row.handle); }
+                accessible-action-default => { root.choose(row.handle); }
                 key-pressed(event) => {
                     if (event.text == Key.Return || event.text == " ") {
-                        root.select(row.handle);
+                        root.choose(row.handle);
                         return accept;
                     }
                     reject
@@ -340,7 +380,7 @@ export component AppWindow inherits Window {
                         accessible-role: none;
                     }
                 }
-                TouchArea { clicked => { root.select(row.handle); } }
+                TouchArea { clicked => { root.choose(row.handle); } }
             }
             }
             }
@@ -350,13 +390,18 @@ export component AppWindow inherits Window {
             ActionButton {
                 text: root.trust-settings-label;
                 focus-key: "open-trust";
-                pressed => { root.open-trust(); }
+                pressed => { root.open-settings(); }
                 focused(k) => { root.focus-id = k; }
             }
         }
         }
-        Rectangle { width: 1px; background: Palette.divider; }
+        Rectangle {
+            visible: !root.narrow;
+            width: root.narrow ? 0px : 1px;
+            background: Palette.divider;
+        }
         if root.trust-page: VerticalLayout {
+            visible: !root.narrow || !root.list-shown;
             padding: 12px;
             spacing: 8px;
             HorizontalLayout {
@@ -364,7 +409,7 @@ export component AppWindow inherits Window {
                 ActionButton {
                     text: root.back-label;
                     focus-key: "close-trust";
-                    pressed => { root.close-trust(); }
+                    pressed => { root.close-settings(); }
                     focused(k) => { root.focus-id = k; }
                 }
             }
@@ -414,7 +459,7 @@ export component AppWindow inherits Window {
                 height: 36px;
                 Rectangle {
                     border-width: 1px;
-                    border-color: #444;
+                    border-color: Palette.border;
                     border-radius: 4px;
                     TextInput {
                         x: 8px;
@@ -531,8 +576,18 @@ export component AppWindow inherits Window {
             }
         }
         if !root.trust-page: VerticalLayout {
+            visible: !root.narrow || !root.list-shown;
             padding: 12px;
             spacing: 8px;
+            if root.narrow: HorizontalLayout {
+                alignment: start;
+                ActionButton {
+                    text: root.back-label;
+                    focus-key: "back-to-list";
+                    pressed => { root.list-shown = true; }
+                    focused(k) => { root.focus-id = k; }
+                }
+            }
             Text {
                 text: root.connectivity;
                 color: Palette.muted-text;
@@ -746,7 +801,7 @@ export component AppWindow inherits Window {
                 height: 36px;
                 Rectangle {
                     border-width: 1px;
-                    border-color: #444;
+                    border-color: Palette.border;
                     border-radius: 4px;
                     input := TextInput {
                         x: 8px;

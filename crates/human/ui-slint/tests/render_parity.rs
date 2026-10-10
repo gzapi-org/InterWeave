@@ -21,7 +21,7 @@
 use interweave_human_chat_protocol::{HumanChatV2, MessageKind};
 use interweave_human_client_api::{Origin, Received};
 use interweave_human_core::RowId;
-use interweave_human_ui_model::{ConversationKey, UiModel};
+use interweave_human_ui_model::{ConversationKey, RuntimeHost, UiModel};
 use interweave_human_ui_slint::View;
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::EndpointId;
@@ -36,7 +36,7 @@ fn golden_path() -> std::path::PathBuf {
 /// The drawn body of the one message `text` makes, as the window's model
 /// holds it.
 fn drawn(text: &str) -> Value {
-    let mut view = View::new().expect("a window");
+    let mut view = View::new(RuntimeHost::Daemon).expect("a window");
     let mut model = UiModel::new();
     let peer = ProfileIdentity::generate()
         .transport_identity()
