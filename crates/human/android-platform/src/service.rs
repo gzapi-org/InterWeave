@@ -19,7 +19,9 @@ use interweave_profile_config::ProfileConfig;
 pub use interweave_profile_config::runtime::AvailabilityMode;
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::MAX_PAYLOAD_BYTES;
-use interweave_transport_embedded::{EmbeddedHost, EmbeddedLaunch, EmbeddedRefused, NetworkView};
+use interweave_transport_embedded::{
+    EmbeddedHost, EmbeddedLaunch, EmbeddedRefused, Ended as HostEnded, NetworkView, StayReachable,
+};
 
 use crate::facade::{FacadeLoop, SpawnError};
 use crate::hub::Hub;
@@ -75,6 +77,13 @@ pub enum Ended {
         /// The grace asked for.
         grace: Duration,
     },
+    /// The runtime stopped without being asked, its substrate gone: the
+    /// Service stops and reports it; it was no request.
+    RuntimeEnded,
+    /// The effective availability is no longer the one the client started
+    /// in -- the person's Stay-reachable choice changed it -- and the
+    /// Service restarts in this mode (ADR-0041 A 2026-10-10).
+    AvailabilityChanged(AvailabilityMode),
     /// Nothing runs.
     NotRunning,
 }
@@ -93,7 +102,6 @@ pub struct Stopped {
 struct Running {
     host: Arc<EmbeddedHost>,
     facade: FacadeLoop,
-    availability: AvailabilityMode,
 }
 
 /// The process's one client host.
@@ -229,20 +237,47 @@ impl ServiceHost {
         *running = Some(Running {
             host: Arc::new(host),
             facade,
-            availability: config.runtime.android.availability_mode,
         });
         Ok(())
     }
 
-    /// The profile's availability while the client runs: whether the
-    /// Service keeps it reachable as a foreground service (ADR-0041).
-    /// Read from the profile's `runtime.android.availability_mode`, the
-    /// authored default; the person's choice is a persisted overlay over
-    /// it (ADR-0041 A 2026-10-10), read here once the embedded host
-    /// exposes the effective mode. `None` while nothing runs.
+    /// The profile's effective availability while the client runs:
+    /// whether the Service keeps it reachable as a foreground service
+    /// (ADR-0041) -- the person's Stay-reachable choice where one is
+    /// persisted, else the profile's authored default (ADR-0041 A
+    /// 2026-10-10), as the embedded host reads it. `None` while nothing
+    /// runs.
     #[must_use]
     pub fn availability(&self) -> Option<AvailabilityMode> {
-        self.lock().as_ref().map(|r| r.availability)
+        self.lock().as_ref().map(|r| r.host.availability())
+    }
+
+    /// Record the person's Stay-reachable choice: `Some` turns it on,
+    /// `None` removes it and the authored default applies again. The
+    /// running client's wait then answers [`Ended::AvailabilityChanged`]
+    /// when the effective mode moved. Call it only on the person's act.
+    ///
+    /// BLOCKS; call it off the Service's main thread.
+    ///
+    /// # Errors
+    /// The host's, when the choice could not be written (the entry is
+    /// then as it was); [`EmbeddedRefused::Internal`] when nothing runs.
+    pub fn set_availability(&self, choice: Option<StayReachable>) -> Result<(), EmbeddedRefused> {
+        let Some(host) = self.lock().as_ref().map(|r| Arc::clone(&r.host)) else {
+            return Err(EmbeddedRefused::Internal(
+                "the network service is not running".to_owned(),
+            ));
+        };
+        host.set_availability(choice)
+    }
+
+    /// End the runtime as if its substrate had gone, for a test of
+    /// [`Ended::RuntimeEnded`]. TEST BUILDS ONLY.
+    #[cfg(feature = "test-hooks")]
+    pub fn end_runtime_for_test(&self) {
+        if let Some(running) = self.lock().as_ref() {
+            running.host.end_runtime_for_test();
+        }
     }
 
     /// Wait until the client is asked to stop. Returns at once when
@@ -255,10 +290,11 @@ impl ServiceHost {
             return Ended::NotRunning;
         };
         match host.wait_shutdown_requested() {
-            Some(request) => Ended::ShutdownRequested {
+            HostEnded::ShutdownRequested(request) => Ended::ShutdownRequested {
                 grace: request.grace,
             },
-            None => Ended::NotRunning,
+            HostEnded::RuntimeEnded => Ended::RuntimeEnded,
+            HostEnded::AvailabilityChanged(mode) => Ended::AvailabilityChanged(mode),
         }
     }
 

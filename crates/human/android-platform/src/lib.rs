@@ -21,6 +21,7 @@ pub mod stand_in;
 pub mod view_side;
 
 pub use hub::{Hub, TO_VIEW, ToView, ViewLink};
+pub use interweave_transport_embedded::StayReachable;
 pub use notice::Notices;
 pub use service::{
     AvailabilityMode, CLIENT_KIND, Ended, ServiceHost, ServiceLaunch, StartRefused, Stopped,
