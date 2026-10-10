@@ -284,8 +284,8 @@ fn each_refusal_names_its_cause() {
         .expect("stops");
 }
 
-/// A listener the platform refuses a socket is `NetworkDenied`, the cause
-/// the Service shows as "grant network access": on this host a wildcard
+/// A listener the platform refuses a socket is `NetworkDenied`, a cause
+/// distinct from every other start refusal: on this host a wildcard
 /// listener on port 80 without the privilege, refused with EACCES as an
 /// ungranted INTERNET permission is with EPERM on Android 17. The
 /// control: the same profile on port 0 starts. Needs an unprivileged

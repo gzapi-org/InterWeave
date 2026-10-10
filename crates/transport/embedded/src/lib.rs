@@ -105,8 +105,10 @@ pub enum EmbeddedRefused {
     /// EACCES). On Android 17 an ungranted INTERNET runtime permission
     /// reads this way -- measured on a Pixel 9a, API 37 -- and so does a
     /// listener on a port below 1024 without the privilege, which this
-    /// variant does not tell apart: the Service checks the permission to
-    /// know which. The text is for the log only.
+    /// variant does not tell apart: a caller that shows the person a
+    /// cause must check the permission itself to know which (agreed with
+    /// the Android client's owner for its Service, plan §20). The text
+    /// is for the log only.
     NetworkDenied(String),
     /// The runtime failed to start or to stop.
     Internal(String),
