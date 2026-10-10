@@ -32,7 +32,11 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 # TEST-ONLY: the composition with its `test-hooks` on, so a unit test
-# ends the runtime's driver under the daemon's wait. Never in the
-# shipped binary: features of a dev-dependency reach test builds only.
+# ends the runtime's driver under the daemon's wait. A dev-dependency's
+# features are unified only into builds that compile dev targets
+# (`cargo test`, `--all-targets`); the binary's own build resolves
+# without them -- `cargo tree -p interweave-transport-daemon -e
+# normal,features -i interweave-transport-composition` shows no
+# `test-hooks`, and with `dev` added it does (measured 2026-10-10).
 interweave-transport-composition = { path = "../../crates/transport/composition", features = ["test-hooks"] }
 tempfile = { workspace = true }
