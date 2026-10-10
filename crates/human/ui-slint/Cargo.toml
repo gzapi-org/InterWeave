@@ -50,6 +50,14 @@ desktop = [
     # renderer, so this names it rather than adding it.
     "i-slint-common/shared-fontique",
 ]
+# The Android Activity (plan section 20 step 2): Slint's own backend over
+# the platform's NativeActivity, with the software renderer the desktop
+# uses, so both draw the same pixels from the same views.
+android = [
+    "slint/backend-android-activity-06",
+    "slint/renderer-software",
+    "slint/accessibility",
+]
 
 [build-dependencies]
 slint-build = { workspace = true }

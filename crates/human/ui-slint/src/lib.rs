@@ -83,6 +83,48 @@ pub fn defer(task: impl FnOnce() + 'static) {
     slint::Timer::single_shot(std::time::Duration::ZERO, task);
 }
 
+/// The Activity the platform hands `android_main`: what [`init_android`]
+/// takes, re-exported so the app names no Slint crate (the human-layering
+/// check, rule 4).
+#[cfg(all(feature = "android", target_os = "android"))]
+pub use slint::android::AndroidApp;
+
+/// What the Activity reports beside its input, for the root to follow.
+#[cfg(all(feature = "android", target_os = "android"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityEvent {
+    /// The window gained (`true`) or lost the person's focus: what a
+    /// read is gated on, as the desktop window's focus is.
+    Focus(bool),
+    /// The Activity is being destroyed: its window goes with it.
+    Destroy,
+}
+
+/// Make the Activity `app` the views' platform, reporting `event` as the
+/// Activity's focus and lifecycle change. Call it from `android_main`,
+/// before [`View::new`].
+///
+/// # Errors
+/// The toolkit's, as text: a platform is already set in this process.
+#[cfg(all(feature = "android", target_os = "android"))]
+pub fn init_android(
+    app: AndroidApp,
+    event: impl Fn(ActivityEvent) + 'static,
+) -> Result<(), String> {
+    use slint::android::android_activity::{MainEvent, PollEvent};
+    slint::android::init_with_event_listener(app, move |polled| {
+        if let PollEvent::Main(main) = polled {
+            match main {
+                MainEvent::GainedFocus => event(ActivityEvent::Focus(true)),
+                MainEvent::LostFocus => event(ActivityEvent::Focus(false)),
+                MainEvent::Destroy => event(ActivityEvent::Destroy),
+                _ => {}
+            }
+        }
+    })
+    .map_err(|e| e.to_string())
+}
+
 /// End the event loop: [`WindowHandle::run`] returns.
 pub fn quit_event_loop() {
     // An event loop already gone has nothing to end.
@@ -105,7 +147,8 @@ pub enum PlatformProblem {
 /// # Errors
 /// The first [`PlatformProblem`] found.
 pub fn platform_check() -> Result<(), PlatformProblem> {
-    #[cfg(all(unix, not(target_vendor = "apple")))]
+    // Android draws with the platform's own fonts and has no fontconfig.
+    #[cfg(all(unix, not(target_vendor = "apple"), not(target_os = "android")))]
     if fontconfig_sys::statics::LIB_RESULT.is_err() {
         return Err(PlatformProblem::NoFontconfig);
     }
