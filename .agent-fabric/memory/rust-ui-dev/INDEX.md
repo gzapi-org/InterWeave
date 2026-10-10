@@ -32,7 +32,7 @@ control plane checked out beside it.
 ## solution
 
 - [`.agent-fabric/memory/rust-ui-dev/solution/android-network-change-contract.md`](.agent-fabric/memory/rust-ui-dev/solution/android-network-change-contract.md) — §20 step 5 (j44): what the Android Service's network callback owes EmbeddedHost::network_changed, and the wildcard-listener rule
-- [`.agent-fabric/memory/rust-ui-dev/solution/android-spike-device.md`](.agent-fabric/memory/rust-ui-dev/solution/android-spike-device.md) — SPIKE-008/009 test device (Samsung A40, adb over network) and its baseline facts; toolchain provisioning is devex-tooling's
+- [`.agent-fabric/memory/rust-ui-dev/solution/android-spike-device.md`](.agent-fabric/memory/rust-ui-dev/solution/android-spike-device.md) — SPIKE-008/009 test device: no StrongBox, Smart Switch path, no emulator (no /dev/kvm), release after use; the owner unlocks it
 - [`.agent-fabric/memory/rust-ui-dev/solution/desktop-e2e-load-flakes.md`](.agent-fabric/memory/rust-ui-dev/solution/desktop-e2e-load-flakes.md) — j15 -- how to reproduce desktop-e2e timeouts under load, and the send-without-step defect found (Peer::deliver)
 - [`.agent-fabric/memory/rust-ui-dev/solution/embedded-host-seam.md`](.agent-fabric/memory/rust-ui-dev/solution/embedded-host-seam.md) — the agreed seam between p2p-network-dev's embedded runtime (§20 step 1) and my Android Service, the human store and the audit sink
 - [`.agent-fabric/memory/rust-ui-dev/solution/stage-15-b2-pr178.md`](.agent-fabric/memory/rust-ui-dev/solution/stage-15-b2-pr178.md) — Stage 15 B2+B3 = PR #178 (branch develop-qzapp/rust-ui-dev-01/feat/stage-15-desktop): app start-up/running + store v7 read_pairs; review history and SQLite lessons

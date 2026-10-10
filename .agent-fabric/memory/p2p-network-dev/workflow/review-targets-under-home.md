@@ -25,7 +25,7 @@ On 2026-10-07 develop-qzapp's root filesystem (/, 40G, which holds /var/tmp for 
 **Why:** /var/tmp is shared and small. /home has about 140G free.
 
 **How to apply:**
-- In every review dispatch brief, tell the reviewer to put any CARGO_TARGET_DIR under /home/p2p-network-dev-01/ (for example a `review-targets/` folder there).
+- In every review dispatch brief, tell the reviewer to put any CARGO_TARGET_DIR under this login's home (e.g. $HOME/review-targets/).
 - When a review finishes, remove its directory yourself. These are this account's own build caches, and the hygiene rule makes cleaning them the session's job.
 
 Related: [[release-target-after-test-runs]].
