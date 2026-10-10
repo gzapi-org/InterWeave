@@ -219,3 +219,47 @@ fn an_overlay_that_cannot_be_trusted_refuses_the_start() {
     assert_eq!(host.availability(), AvailabilityMode::StayReachable);
     host.stop(Duration::from_secs(1)).expect("stops");
 }
+
+/// When more than one end holds, the Service hears them in order: a
+/// request before a changed mode, and the runtime's end before a changed
+/// mode -- a platform stop must not come back as a restart. Each pair is
+/// made to hold before the waits, and each wait is asked many times:
+/// without the select's bias the pick between two ready arms is random.
+#[test]
+fn a_request_and_a_runtime_end_win_over_a_changed_mode() {
+    let app = provisioned(AvailabilityMode::ForegroundOnly);
+    let host = start(&app).expect("starts");
+    host.set_availability(Some(StayReachable)).expect("on");
+    assert_eq!(
+        host.wait_shutdown_requested(),
+        Ended::AvailabilityChanged(AvailabilityMode::StayReachable),
+        "alone, the change is what the Service hears"
+    );
+    host.request_shutdown(Duration::from_millis(100))
+        .expect("asked");
+    for _ in 0..32 {
+        assert!(
+            matches!(host.wait_shutdown_requested(), Ended::ShutdownRequested(_)),
+            "the request wins over a changed mode"
+        );
+    }
+    host.stop(Duration::from_secs(1)).expect("stops");
+
+    let other = provisioned(AvailabilityMode::ForegroundOnly);
+    let host = start(&other).expect("starts");
+    host.end_runtime_for_test();
+    assert_eq!(
+        host.wait_shutdown_requested(),
+        Ended::RuntimeEnded,
+        "alone, the end is what the Service hears"
+    );
+    host.set_availability(Some(StayReachable)).expect("on");
+    for _ in 0..32 {
+        assert_eq!(
+            host.wait_shutdown_requested(),
+            Ended::RuntimeEnded,
+            "the runtime's end wins over a changed mode"
+        );
+    }
+    host.stop(Duration::from_secs(1)).expect("stops");
+}
