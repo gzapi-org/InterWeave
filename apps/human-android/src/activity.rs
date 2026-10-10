@@ -2,7 +2,7 @@
 // Copyright 2026 Andrea Benetton
 //! The Activity's side: the views on the platform's NativeActivity.
 
-use interweave_human_ui_model::UiModel;
+use interweave_human_ui_model::{RuntimeHost, UiModel};
 use interweave_human_ui_slint::{ActivityEvent, AndroidApp, View, init_android};
 
 /// Called by the NativeActivity glue on a thread of its own, once per
@@ -17,7 +17,7 @@ fn android_main(app: AndroidApp) {
         eprintln!("human-android: the views' platform could not be set: {e}");
         return;
     }
-    let mut view = match View::new() {
+    let mut view = match View::new(RuntimeHost::Embedded) {
         Ok(view) => view,
         Err(e) => {
             eprintln!("human-android: no window: {e}");

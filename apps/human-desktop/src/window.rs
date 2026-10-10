@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use interweave_human_store::HumanStore;
+use interweave_human_ui_model::RuntimeHost;
 use interweave_human_ui_slint::{View, defer, invoke_on_window, quit_event_loop};
 
 use crate::app::{App, DesktopOpener, SlintSurface};
@@ -71,7 +72,7 @@ fn focus(focused: bool) {
 /// # Errors
 /// The toolkit's, as text: no window could be created or shown.
 pub(crate) fn run(profile: &Profile, store: HumanStore) -> Result<(), String> {
-    let view = View::new().map_err(|e| e.to_string())?;
+    let view = View::new(RuntimeHost::Daemon).map_err(|e| e.to_string())?;
     let handle = view.handle();
     view.set_wake(|| defer(turn));
     view.on_window_focus(focus);

@@ -418,15 +418,20 @@ pub struct View {
     trusted_handles: Handles<TransportIdentity>,
     /// The trust settings' outcome count last announced.
     trust_announced: u64,
+    /// Where the runtime runs, which the texts that name it follow.
+    host: RuntimeHost,
     shared: Rc<RefCell<Shared>>,
 }
 
 impl View {
-    /// A view over a new window. Shows nothing until [`render`](Self::render).
+    /// A view over a new window, for a client whose runtime runs on
+    /// `host`: the texts that name the runtime follow it (a phone never
+    /// shows the desktop's daemon). Shows nothing until
+    /// [`render`](Self::render).
     ///
     /// # Errors
     /// The toolkit's, when no platform can create a window.
-    pub fn new() -> Result<Self, slint::PlatformError> {
+    pub fn new(host: RuntimeHost) -> Result<Self, slint::PlatformError> {
         let window = AppWindow::new()?;
         let conversations = Rc::new(VecModel::<ConversationRow>::default());
         let messages = Rc::new(VecModel::<MessageRow>::default());
@@ -556,6 +561,7 @@ impl View {
             trusted_keys: Vec::new(),
             trusted_handles: Handles::new(),
             trust_announced: 0,
+            host,
             shared,
         })
     }
@@ -991,7 +997,9 @@ impl View {
         window.set_has_pending(pending.is_some());
         window.set_pending_text(pending.unwrap_or_default().into());
         let (outcome, count) = settings.outcome();
-        let said = outcome.map(outcome_text).unwrap_or_default();
+        let said = outcome
+            .map(|outcome| outcome_text(self.host, outcome))
+            .unwrap_or_default();
         window.set_trust_outcome(said.as_str().into());
         if count == self.trust_announced || said.is_empty() {
             self.trust_announced = count;
@@ -1003,13 +1011,17 @@ impl View {
 
     fn render_chrome(&self, model: &UiModel) {
         let window = &self.window;
-        window.set_connectivity(
-            placeholder_en::connectivity(RuntimeHost::Daemon, model.connectivity()).into(),
-        );
+        window
+            .set_connectivity(placeholder_en::connectivity(self.host, model.connectivity()).into());
         let notice = model.session_notice();
         self.shared.borrow_mut().notice = notice;
         window.set_has_notice(notice.is_some());
-        window.set_notice(notice.map(notice_text).unwrap_or_default().into());
+        window.set_notice(
+            notice
+                .map(|notice| notice_text(self.host, notice))
+                .unwrap_or_default()
+                .into(),
+        );
         let action = notice
             .and_then(SessionNotice::resolution)
             .and_then(|i| action_text(&i));
@@ -1057,7 +1069,7 @@ impl View {
                         .map(|class| {
                             fill(
                                 placeholder_en::text(UiText::NotSent),
-                                &[("reason", placeholder_en::error(RuntimeHost::Daemon, class))],
+                                &[("reason", placeholder_en::error(self.host, class))],
                             )
                         })
                         .unwrap_or_default()
@@ -1459,7 +1471,7 @@ fn action_text(intent: &Intent) -> Option<&'static str> {
 }
 
 /// What a trust settings outcome says.
-fn outcome_text(outcome: &TrustOutcome) -> String {
+fn outcome_text(host: RuntimeHost, outcome: &TrustOutcome) -> String {
     match outcome {
         TrustOutcome::Changed(change) => fill(
             placeholder_en::text(if change.allowed {
@@ -1470,27 +1482,23 @@ fn outcome_text(outcome: &TrustOutcome) -> String {
             &[("peer", change.peer.as_str())],
         ),
         TrustOutcome::Unconfirmed(change) => fill(
-            placeholder_en::host_text(RuntimeHost::Daemon, HostText::TrustUnconfirmed),
+            placeholder_en::host_text(host, HostText::TrustUnconfirmed),
             &[("peer", change.peer.as_str())],
         ),
-        TrustOutcome::Problem(problem) => {
-            placeholder_en::trust_problem(RuntimeHost::Daemon, *problem).to_owned()
-        }
+        TrustOutcome::Problem(problem) => placeholder_en::trust_problem(host, *problem).to_owned(),
         TrustOutcome::NotReadAgain(_) => placeholder_en::text(UiText::TrustNotReadAgain).to_owned(),
         TrustOutcome::Entry(problem) => placeholder_en::entry_problem(*problem).to_owned(),
     }
 }
 
-fn notice_text(notice: SessionNotice) -> String {
+fn notice_text(host: RuntimeHost, notice: SessionNotice) -> String {
     match notice {
-        SessionNotice::NoDaemon => {
-            placeholder_en::host_text(RuntimeHost::Daemon, HostText::NotRunning).to_owned()
-        }
+        SessionNotice::NoDaemon => placeholder_en::host_text(host, HostText::NotRunning).to_owned(),
         SessionNotice::Reconnecting => placeholder_en::text(UiText::Reconnecting).to_owned(),
         SessionNotice::StorageDegraded => placeholder_en::text(UiText::StorageDegraded).to_owned(),
         SessionNotice::Refused(class) => fill(
             placeholder_en::text(UiText::Refused),
-            &[("reason", placeholder_en::error(RuntimeHost::Daemon, class))],
+            &[("reason", placeholder_en::error(host, class))],
         ),
     }
 }

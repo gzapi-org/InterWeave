@@ -23,7 +23,7 @@ use interweave_human_client_api::{
 };
 use interweave_human_core::{AppMessageId, RowId};
 use interweave_human_ui_model::{
-    ConversationKey, Intent, RuntimeHost, TrustChange, UiModel, UiText, placeholder_en,
+    ConversationKey, HostText, Intent, RuntimeHost, TrustChange, UiModel, UiText, placeholder_en,
 };
 use interweave_human_ui_slint::{INPUT_CAP, View, ViewEvent};
 use interweave_profile_identity::ProfileIdentity;
@@ -99,7 +99,7 @@ fn update(model: &mut UiModel, row: i64, id: &AppMessageId, status: OutboundStat
 
 fn view() -> View {
     i_slint_backend_testing::init_no_event_loop();
-    let view = View::new().expect("a window");
+    let view = View::new(RuntimeHost::Daemon).expect("a window");
     view.window().show().expect("shown");
     view
 }
@@ -558,6 +558,40 @@ fn unknown_connectivity_is_not_shown_as_offline() {
         )
         .is_empty()
     );
+}
+
+/// The not-running notice follows where the view's runtime runs: an
+/// Android view names the app's network service and never a daemon, and
+/// a desktop view, the control, names its transport daemon (relay
+/// 01a12495).
+#[test]
+fn the_not_running_notice_names_the_runtime_the_view_runs_on() {
+    i_slint_backend_testing::init_no_event_loop();
+    let mut model = UiModel::new();
+    model.daemon_seen(Some(false));
+    for (host, other) in [
+        (RuntimeHost::Embedded, RuntimeHost::Daemon),
+        (RuntimeHost::Daemon, RuntimeHost::Embedded),
+    ] {
+        let mut view = View::new(host).expect("a window");
+        view.window().show().expect("shown");
+        view.render(&model);
+        let said = placeholder_en::host_text(host, HostText::NotRunning);
+        the(&view, said);
+        assert!(
+            labelled(
+                &view,
+                placeholder_en::host_text(other, HostText::NotRunning)
+            )
+            .is_empty(),
+            "{host:?} shows only its own text"
+        );
+        assert_eq!(
+            said.contains("daemon"),
+            host == RuntimeHost::Daemon,
+            "{host:?}: {said}"
+        );
+    }
 }
 
 /// U5b: every action element exposes a default action, invoked through
