@@ -31,4 +31,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+# TEST-ONLY: the composition with its `test-hooks` on, so a unit test
+# ends the runtime's driver under the daemon's wait. Never in the
+# shipped binary: features of a dev-dependency reach test builds only.
+interweave-transport-composition = { path = "../../crates/transport/composition", features = ["test-hooks"] }
 tempfile = { workspace = true }

@@ -26,7 +26,7 @@ use interweave_profile_config::sections::LogLevel;
 use interweave_profile_config::{ProfileConfig, ProfilePaths, XdgRoots};
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_composition::{
-    AUDIT_TARGET, ComposedRuntime, CompositionOptions, SHUTDOWN_GRACE,
+    AUDIT_TARGET, ComposedRuntime, CompositionOptions, Ended, SHUTDOWN_GRACE,
 };
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::oneshot;
@@ -135,7 +135,7 @@ pub(crate) async fn run(args: Args) -> Result<(), Refused> {
     }));
     tracing::info!(data = %sockets.data.display(), "serving");
 
-    let (grace, ended_early) = signals.wait_for_stop(&runtime, &mut server).await;
+    let (grace, ended_early, runtime_ended) = signals.wait_for_stop(&runtime, &mut server).await;
 
     tracing::info!(grace_ms = millis(grace), "stopping");
     let _ = stop_server.send(());
@@ -150,6 +150,12 @@ pub(crate) async fn run(args: Args) -> Result<(), Refused> {
     // Released, never unlinked (ADR-0028, A 2026-09-28).
     drop(lock);
     server_outcome.map_err(|e| refused("the IPC server")(&e))?;
+    // A RUNTIME THAT ENDED ON ITS OWN is a failure, reported as one, not
+    // a clean shutdown: the daemon stopped serving because nothing was
+    // left to serve.
+    if runtime_ended {
+        return Err(Refused("the transport runtime ended on its own".into()));
+    }
     let dropped = stopped.map_err(|e| Refused(format!("the runtime's stop: {e:?}")))?;
     tracing::info!(events_dropped = dropped, "stopped");
     Ok(())
@@ -211,10 +217,13 @@ impl Signals {
         })
     }
 
-    /// Until SIGINT, SIGTERM, an admin port's request, or the server
-    /// ending on its own: the grace the stop is given -- the admin's, or
-    /// the default -- and the server's outcome if it had already ended (a
-    /// finished task must not be awaited twice).
+    /// Until SIGINT, SIGTERM, an admin port's request, the server ending
+    /// on its own, or the RUNTIME ending on its own: the grace the stop is
+    /// given -- the admin's, or the default -- the server's outcome if it
+    /// had already ended (a finished task must not be awaited twice), and
+    /// whether the runtime ended, which the daemon then reports as a
+    /// failure rather than serving IPC over a dead runtime
+    /// (`a_runtime_that_ends_on_its_own_stops_the_wait`).
     async fn wait_for_stop(
         mut self,
         runtime: &ComposedRuntime,
@@ -222,29 +231,30 @@ impl Signals {
     ) -> (
         Duration,
         Option<Result<Arc<Counters>, tokio::task::JoinError>>,
+        bool,
     ) {
         tokio::select! {
             _ = self.interrupt.recv() => tracing::info!("SIGINT"),
             _ = self.terminate.recv() => tracing::info!("SIGTERM"),
-            request = runtime.shutdown_requested() => {
-                if let Some(request) = request {
+            end = runtime.wait_end() => match end {
+                Ended::ShutdownRequested(request) => {
                     tracing::info!(
                         port = request.port.as_str(),
                         grace_ms = millis(request.grace),
                         "an admin port asked for shutdown"
                     );
-                    return (request.grace, None);
+                    return (request.grace, None, false);
                 }
-                tracing::warn!("nothing is left that could ask for shutdown");
-            }
+                Ended::RuntimeEnded => return (SHUTDOWN_GRACE, None, true),
+            },
             // It ends only when told to; ending first is a failure, and
             // a daemon serving no IPC is not left running.
             outcome = &mut *server => {
                 tracing::error!("the IPC server ended on its own");
-                return (SHUTDOWN_GRACE, Some(outcome));
+                return (SHUTDOWN_GRACE, Some(outcome), false);
             }
         }
-        (SHUTDOWN_GRACE, None)
+        (SHUTDOWN_GRACE, None, false)
     }
 }
 
@@ -321,4 +331,71 @@ fn init_logging(level: LogLevel) {
                 .with_target(AUDIT_TARGET, tracing::Level::INFO),
         )
         .try_init();
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    fn composed_profile() -> interweave_profile_config::ProfileConfig {
+        interweave_profile_config::ProfileConfig::parse_yaml(
+            "schema_version: 2
+trust:
+  policy: static-allowlist
+  allowed_peers: []
+endpoints:
+  entries:
+    - id: human
+      enabled: true
+      advertise: false
+discovery:
+  providers: []
+",
+        )
+        .expect("the document parses")
+    }
+
+    /// The daemon's wait returns when the runtime under it ends on its
+    /// own, flagged so the daemon reports a failure instead of serving
+    /// IPC over a dead runtime -- and not before (the control: with the
+    /// runtime alive and nothing asked, the wait is still waiting). The
+    /// request path is the composition's (`the_owner_hears_a_runtime_that_ended_on_its_own`).
+    #[tokio::test]
+    async fn a_runtime_that_ends_on_its_own_stops_the_wait() {
+        let identity = ProfileIdentity::generate();
+        let runtime = ComposedRuntime::start(
+            &identity,
+            &composed_profile(),
+            CompositionOptions::default(),
+        )
+        .await
+        .expect("composes");
+        let mut server = tokio::spawn(std::future::pending::<Arc<Counters>>());
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(300),
+                Signals::register()
+                    .expect("signals")
+                    .wait_for_stop(&runtime, &mut server),
+            )
+            .await
+            .is_err(),
+            "the control: a live runtime, nothing asked, still waiting"
+        );
+        runtime.end_driver().await.expect("the driver ends");
+        let (_, server_outcome, runtime_ended) = tokio::time::timeout(
+            Duration::from_secs(20),
+            Signals::register()
+                .expect("signals")
+                .wait_for_stop(&runtime, &mut server),
+        )
+        .await
+        .expect("the wait returns");
+        assert!(runtime_ended, "the end is reported");
+        assert!(server_outcome.is_none(), "the server did not end");
+        server.abort();
+        let _ = runtime.stop().await;
+    }
 }
