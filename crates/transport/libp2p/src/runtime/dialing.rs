@@ -666,8 +666,9 @@ pub(super) fn unreached_relay(
 /// ACCEPTED, NOT TESTED: libp2p-relay 0.22's client also drops the request
 /// -- and so answers this -- when the relay connection closes with the
 /// request already sent, so a circuit the relay saw is then settled as the
-/// hop's: the route ranked down, no peer backoff, the retry at the
-/// ordinary cadence. Telling the two apart needs the crate to say which.
+/// hop's: the route ranked down, no peer backoff, the retry due at the
+/// ordinary delay or at the relay's reconnect, whichever comes first.
+/// Telling the two apart needs the crate to say which.
 pub(super) const RELAY_HOP_CANCELED: &str = "Response from behaviour was canceled";
 
 /// Whether every attempt of `error` is the relay client's canceled
