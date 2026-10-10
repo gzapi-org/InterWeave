@@ -2472,16 +2472,6 @@ mod tests {
         );
     }
 
-    /// THE DEFECT THE #111 RE-REVIEW FOUND, pinned: the static-bootstrap
-    /// provider's candidates reach this door as `OfferRoutingPeer`, which
-    /// carries no provenance, so the floor as first built refused the
-    /// OPERATOR's own `/dns4` seed. Rule 9 answers it with the operator
-    /// set: the same name is admitted when it came in by the operator's
-    /// door and refused when it did not.
-    ///
-    /// The control is the first half -- refused before the operator's
-    /// door has seen it -- so the admission after is the set's doing,
-    /// not a boundary that stopped refusing names.
     /// The operator's circuit route to P is admitted at the routing
     /// stash when it is offered bare for P -- the form the static provider
     /// hands over -- and the same relay's circuit offered for another peer
@@ -2525,6 +2515,16 @@ mod tests {
         );
     }
 
+    /// THE DEFECT THE #111 RE-REVIEW FOUND, pinned: the static-bootstrap
+    /// provider's candidates reach this door as `OfferRoutingPeer`, which
+    /// carries no provenance, so the floor as first built refused the
+    /// OPERATOR's own `/dns4` seed. Rule 9 answers it with the operator
+    /// set: the same name is admitted when it came in by the operator's
+    /// door and refused when it did not.
+    ///
+    /// The control is the first half -- refused before the operator's
+    /// door has seen it -- so the admission after is the set's doing,
+    /// not a boundary that stopped refusing names.
     #[test]
     fn the_operators_named_seed_reaches_the_routing_stash_and_a_peers_does_not() {
         let settings = KademliaSettings {
