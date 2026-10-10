@@ -173,3 +173,21 @@ fn a_file_that_is_not_private_or_too_large_is_refused() {
     let read = read_within(&path, paths.boundary());
     assert!(matches!(read, Err(AvailabilityError::TooLarge)), "{read:?}");
 }
+
+/// Turning the choice off on a profile whose state directory does not
+/// exist yet -- a fresh install -- finds nothing to remove and is no
+/// error, and creates nothing.
+#[test]
+fn off_without_a_state_directory_is_nothing_to_remove() {
+    let (_root, paths) = profile();
+    assert!(
+        !paths.state_dir().exists(),
+        "provisioning made no state dir"
+    );
+    write_within(&path_for(&paths), None, paths.boundary()).expect("nothing to remove");
+    assert!(!paths.state_dir().exists(), "and created none");
+    assert_eq!(
+        effective_availability_mode(&paths).expect("effective"),
+        AvailabilityMode::ForegroundOnly
+    );
+}
