@@ -3192,13 +3192,17 @@ checksum = "36eee07d8e02bd95bf52b2e642cf13d33701b94c6e4b04fbf1d1fb07e9cb19e7"
 name = "interweave-android-e2e-tests"
 version = "0.0.0"
 dependencies = [
+ "interweave-ipc-client",
  "interweave-local-client-api",
  "interweave-profile-config",
  "interweave-profile-identity",
+ "interweave-test-support",
  "interweave-transport-api",
  "interweave-transport-composition",
  "interweave-transport-embedded",
+ "libp2p",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]

@@ -359,7 +359,20 @@ pub fn relayed_example(
     relay: &relay::Relay,
     route: Option<&str>,
 ) -> String {
-    let mut raw = example_text("human-desktop.yaml");
+    relayed_example_of("human-desktop.yaml", allow, listen, relay, route)
+}
+
+/// [`relayed_example`] for the shipped example `name`: the Android one
+/// (`human-android.yaml`) carries the same relay block, and listens on an
+/// ephemeral port that `listen` replaces as the desktop's fixed one is.
+pub fn relayed_example_of(
+    name: &str,
+    allow: &[&TransportIdentity],
+    listen: &str,
+    relay: &relay::Relay,
+    route: Option<&str>,
+) -> String {
+    let mut raw = example_text(name).replace("/ip4/0.0.0.0/tcp/0\"", &format!("{listen}\""));
     let allowed = allow
         .iter()
         .map(|p| format!("\"{}\"", p.as_str()))

@@ -10,7 +10,7 @@
 use interweave_android_e2e_tests::{Device as _, HostStandIn};
 
 /// The shipped `human-android.yaml`, with every placeholder a peer that
-/// does not exist and its listener on loopback.
+/// does not exist; it listens on the wildcard, as the device does.
 fn shipped() -> String {
     let raw = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -23,7 +23,6 @@ fn shipped() -> String {
     raw.replace("<PEER_A>", stranger.as_str())
         .replace("<INFRA_A>", stranger.as_str())
         .replace("<INFRA_B>", stranger.as_str())
-        .replace("/ip4/0.0.0.0/tcp/0", "/ip4/127.0.0.1/tcp/0")
 }
 
 /// A kill and a restart: the same `PeerId`, a bound listener, and the
@@ -32,7 +31,8 @@ fn shipped() -> String {
 /// the runtime root the host made in the app data directory.
 #[test]
 fn a_killed_stand_in_restarts_as_the_same_peer() {
-    let mut device = HostStandIn::start(&shipped());
+    let mut device = HostStandIn::new();
+    device.start(&shipped());
     let peer = device.peer();
     assert_eq!(
         device.host().paths().boundary().runtime_root(),
@@ -47,6 +47,6 @@ fn a_killed_stand_in_restarts_as_the_same_peer() {
     assert_eq!(device.peer(), peer, "the same profile identity");
     let after = device.listening();
     assert_eq!(after.len(), 1, "{after:?}");
-    assert!(after[0].starts_with("/ip4/127.0.0.1/tcp/"), "{after:?}");
+    assert!(!after[0].ends_with("/tcp/0"), "a bound port: {after:?}");
     device.stop();
 }

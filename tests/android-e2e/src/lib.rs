@@ -27,9 +27,14 @@ use std::time::Duration;
 use interweave_local_client_api::{AdminBinding, DataSessionBinding};
 use interweave_profile_config::{ProfilePaths, TrustBoundary, create_private_dir_within};
 use interweave_profile_identity::{ProfileIdentity, RecoveryPhrase};
+use interweave_test_support::e2e;
 use interweave_transport_api::TransportIdentity;
 use interweave_transport_composition::InProcessBinding;
 use interweave_transport_embedded::{EmbeddedHost, EmbeddedLaunch};
+
+pub use interweave_test_support::e2e::{
+    PATIENCE, free_port, human, lease_request, relay::Relay, relayed_example_of, schema_validator,
+};
 
 /// How long a stand-in's stop lets exchanges in flight settle.
 const GRACE: Duration = Duration::from_secs(1);
@@ -81,8 +86,9 @@ pub struct HostStandIn {
 }
 
 impl HostStandIn {
-    /// Provision `config` (an `embedded-android` profile) under a fresh
-    /// app data directory and start the runtime on it.
+    /// A fresh app data directory and identity, nothing started: the
+    /// `PeerId` is known before either side's profile is written, since
+    /// each names the other.
     ///
     /// The directory sits under a scratch root made `0700`, as Android's
     /// `/data/data/<package>` is the app's alone; the embedded runtime
@@ -91,9 +97,9 @@ impl HostStandIn {
     /// the same check here.
     ///
     /// # Panics
-    /// If provisioning or the start fails: the case cannot run.
+    /// If the directory cannot be made.
     #[must_use]
-    pub fn start(config: &str) -> Self {
+    pub fn new() -> Self {
         let scratch = tempfile::Builder::new()
             .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir()
@@ -102,9 +108,8 @@ impl HostStandIn {
         std::fs::create_dir(&app_data_dir).expect("the app data directory");
         std::fs::set_permissions(&app_data_dir, std::fs::Permissions::from_mode(0o700))
             .expect("owner-only");
-        provision(&app_data_dir, config);
         let identity = ProfileIdentity::generate();
-        let mut stand_in = Self {
+        Self {
             _scratch: scratch,
             app_data_dir,
             peer: identity
@@ -114,9 +119,17 @@ impl HostStandIn {
                 .recovery_phrase()
                 .expect("a generated identity has a phrase"),
             host: None,
-        };
-        stand_in.restart();
-        stand_in
+        }
+    }
+
+    /// Provision `config` (an `embedded-android` profile) as the app does
+    /// before its first start, and start the runtime on it.
+    ///
+    /// # Panics
+    /// If provisioning or the start fails: the case cannot run.
+    pub fn start(&mut self, config: &str) {
+        provision(&self.app_data_dir, config);
+        self.restart();
     }
 
     /// The app data directory: the trust boundary the platform supplies.
@@ -140,7 +153,7 @@ impl HostStandIn {
     /// If the runtime's driver failed.
     pub fn stop(&mut self) {
         if let Some(host) = self.host.take() {
-            host.stop(GRACE).expect("stops");
+            off_runtime(|| host.stop(GRACE)).expect("stops");
         }
     }
 }
@@ -171,14 +184,18 @@ impl Device for HostStandIn {
     fn restart(&mut self) {
         assert!(self.host.is_none(), "restart of a runtime still up");
         let identity = ProfileIdentity::from_phrase(&self.phrase).expect("the same identity");
-        self.host = Some(
-            EmbeddedHost::start(EmbeddedLaunch {
-                app_data_dir: self.app_data_dir.clone(),
-                profile: PROFILE.to_owned(),
-                identity,
-            })
-            .expect("the stand-in starts"),
-        );
+        let launch = EmbeddedLaunch {
+            app_data_dir: self.app_data_dir.clone(),
+            profile: PROFILE.to_owned(),
+            identity,
+        };
+        self.host = Some(off_runtime(|| EmbeddedHost::start(launch)).expect("the stand-in starts"));
+    }
+}
+
+impl Default for HostStandIn {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -186,6 +203,14 @@ impl Drop for HostStandIn {
     fn drop(&mut self) {
         self.kill();
     }
+}
+
+/// `f` on a thread of its own: the host's start and stop block on its own
+/// executor, which may not be done on a thread that drives a runtime --
+/// and a case's async test is one. The Service calls them from its own
+/// thread, so this is that thread.
+fn off_runtime<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|scope| scope.spawn(f).join().expect("the host thread"))
 }
 
 /// `config.yaml` under the host's configuration root, before the first
@@ -198,4 +223,67 @@ fn provision(app_data_dir: &Path, config: &str) {
     .expect("paths");
     create_private_dir_within(paths.config_dir(), paths.boundary()).expect("config dir");
     std::fs::write(paths.config_file(), config).expect("write");
+}
+
+/// The desktop side: a `transport-daemon` in an XDG home of its own,
+/// driven over its sockets as the desktop client drives it.
+pub struct Desktop {
+    /// The daemon's home: its XDG tree and the profile's paths.
+    pub home: e2e::Home,
+    /// The profile's `PeerId`, its key written before the first start.
+    pub peer: TransportIdentity,
+    daemon: Option<e2e::Daemon>,
+}
+
+impl Desktop {
+    /// A home with the profile's key, nothing started.
+    #[must_use]
+    pub fn new() -> Self {
+        let home = e2e::Home::new("human-desktop");
+        let peer = home.write_key();
+        Self {
+            home,
+            peer,
+            daemon: None,
+        }
+    }
+
+    /// Write `config` and start the daemon, until both sockets serve.
+    pub async fn start(&mut self, config: &str) {
+        self.home.write_config(config);
+        let mut daemon = self.home.start(&[]);
+        daemon.serving(&self.home).await;
+        self.daemon = Some(daemon);
+    }
+
+    /// The data and admin binding on the daemon's two sockets.
+    #[must_use]
+    pub fn binding(&self) -> interweave_ipc_client::IpcBinding {
+        self.home.binding()
+    }
+
+    /// What the daemon logged so far, for a failing case to show.
+    #[must_use]
+    pub fn log(&self) -> String {
+        self.daemon
+            .as_ref()
+            .map(e2e::Daemon::log)
+            .unwrap_or_default()
+    }
+
+    /// `SIGTERM` and the daemon's exit, which must be a clean one.
+    ///
+    /// # Panics
+    /// If it exits otherwise, with its log.
+    pub async fn stop(&mut self) {
+        if let Some(mut daemon) = self.daemon.take() {
+            assert!(daemon.terminate().await.success(), "{}", daemon.log());
+        }
+    }
+}
+
+impl Default for Desktop {
+    fn default() -> Self {
+        Self::new()
+    }
 }

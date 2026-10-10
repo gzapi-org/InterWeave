@@ -27,3 +27,11 @@ interweave-transport-api = { path = "../../crates/api/transport-api" }
 interweave-transport-composition = { path = "../../crates/transport/composition" }
 interweave-transport-embedded = { path = "../../crates/transport/embedded" }
 tempfile = { workspace = true }
+# The desktop side and the relay: the harness desktop-e2e shares.
+interweave-test-support = { path = "../support", features = ["e2e"] }
+interweave-ipc-client = { path = "../../crates/local/ipc-client" }
+
+[dev-dependencies]
+# paths.rs: the relay's PeerIds, read back, and the cases' runtime.
+libp2p = { workspace = true }
+tokio = { workspace = true }
