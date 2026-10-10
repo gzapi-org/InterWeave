@@ -5,7 +5,7 @@ topic: "arm-through-arm-sh"
 description: "InterWeave PRs are armed with tools/gh/arm.sh <n> --basis \"<one line>\", never gh pr merge --auto by hand (since #177, 2026-10-04)"
 tier: 1
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

@@ -33,8 +33,9 @@
 //! the `ui-model`. Not exercised here, from `human-client-ui.md`: §13's
 //! accessibility-tree labels for the route and connectivity controls and
 //! the consistent rendering of a `HumanChatV2` fixture on both clients;
-//! and §11's screen-reader-friendly controls and keyboard navigation. Broadcast is not crossed here; desktop-e2e's `human_chat.rs`
-//! crosses it between daemons.
+//! and §11's screen-reader-friendly controls and keyboard navigation.
+//! Broadcast is not crossed here; desktop-e2e's `human_chat.rs` crosses
+//! it between daemons.
 
 #![cfg(target_os = "linux")]
 #![allow(clippy::expect_used, clippy::panic)]

@@ -5,7 +5,7 @@ topic: "routing-tests-run-on-the-hosts-private-address"
 description: "ADR-0052's floor refuses loopback from a peer, so any test that needs a peer's ADVERTISED address to be learned or routed must listen on the host's private address; and an absence-only test goes vacuous when the sibling that was its…"
 tier: 1
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"
@@ -29,7 +29,7 @@ unconnected UDP socket (`connect("10.255.255.255:9")`, no packet sent),
 the runtimes listen there, and rule 3 admits the peer's private address
 beside a private listener of the same family. A host without one stands
 the test DOWN with an `eprintln!` rather than passing it — ADR-0052 has
-no test-only knob to admit loopback. This host is `10.137.0.2`; the
+no test-only knob to admit loopback. This host has one; the
 hosted CI runners have one too. The helper is copied in three test
 files today (`dcutr.rs`, `kademlia_driver.rs`, `overlay_health.rs`);
 moving it to `tests/support` is an open follow-up.

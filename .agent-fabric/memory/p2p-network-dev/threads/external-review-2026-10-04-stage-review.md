@@ -5,7 +5,7 @@ topic: "external-review-2026-10-04-stage-review"
 description: "Job j15: the owner's external stage review of main 58463fb9 (2026-10-04) — the review class's verdicts on its 5 findings and what is mine to fix"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

@@ -5,7 +5,7 @@ topic: "spike-004-phase-b-node-rows"
 description: "SPIKE-004 phase B's five items as node rows on the podman NAT matrix (PR #127) — the four harness facts a row needs before it measures anything, and the six findings"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

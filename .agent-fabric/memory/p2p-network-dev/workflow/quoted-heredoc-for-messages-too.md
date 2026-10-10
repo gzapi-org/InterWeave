@@ -5,7 +5,7 @@ topic: "quoted-heredoc-for-messages-too"
 description: a GZCoord message body needs a QUOTED heredoc for the same reason a commit message does — an unquoted one executes every backtick
 tier: 1
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

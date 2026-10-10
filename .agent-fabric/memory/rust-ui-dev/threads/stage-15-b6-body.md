@@ -5,13 +5,14 @@ topic: "stage-15-b6-body"
 description: "Stage 15 B6+B7 (drawn body, one announcement, AT-SPI e2e) -- local branch state and what waits on #183"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "rust-ui-dev-01"
     host: "develop-qzapp"
     project: interweave
     working_copy: interweave
 derived_from:
+  - 4c6ade67dd538c5f
   - bd57c21fa919551f
 ---
 
@@ -29,6 +30,7 @@ B7 (job j14) added on the same branch 2026-10-04: merged #183's head locally (a3
 2026-10-05: #187 ARMED on the owner's word (head 0571cc37, queued). B8 branch develop-qzapp/rust-ui-dev-01/feat/stage-15-paths PUSHED, no PR yet (8 work commits incl. a1466c35 session log for j15); open its PR after #187 merges (merge origin/main in first). Session paused by the owner after arming.
 2026-10-05: #187 MERGED 2026-10-04T23:17Z. B8 opened as PR #191 (8 work commits, origin/main merged at 0547a9c2; no Cargo.toml in diff). Local verification: xtask ci green except 4 AT-SPI cases that need with_display.sh; under the wrapper 2537 passed/0 failed. Blind review dispatched on 0547a9c2. Arming: 8 work commits = floor met; arm.sh decides boundary (transport-client?) -- if it asks, owner's word. j15 (lease flake) blocked behind #191.
 2026-10-05 #191 review: P2 stale path after disconnect -> queue fail-blank (cbae80ca); root cause sent to p2p-network-dev (01a10d05-54e2), TAKEN onto their #192 (Notices::disconnected withdraws pending path notice); architect-cto writes LOCAL-CLIENT §2 sentence. CARRY: when #192 lands, REMOVE EventQueue::push's PeerPath-behind-queued-disconnect arm (it drops live paths) and its test, keep the drop-on-disconnect arm, and update transport-client README:52 + queue.rs doc. Bot (codex) thread 2: paths not cleared on session end -- being judged.
+2026-10-05 later: #192 merged (f2b771ea; Notices::disconnected withdraws pending path notice; LOCAL-CLIENT §2 says so). CARRY DONE on #191: origin/main merged, queue's PeerPath-behind-disconnect refusal removed (work commit, test a_path_behind_a_queued_disconnection_is_the_path), drop-on-disconnect + drop-at-session-event kept. Also 7693ecb8/ff42fc26: paths cleared at every session event (bot thread, judged P2). #191 = 9 work + 7 fix; arm needs owner's word (transport-client = boundary in arm.json).
 
 *References: slint-rendered-window-lessons, stage-15-b4-pr181*
 

@@ -5,7 +5,7 @@ topic: "review-dispatch-shape-in-interweave"
 description: "Blind review dispatch here: subagent_type code-review, model fable, lowercase description starting \"review\"/\"re-review\", no isolation -- opus is refused since the fabric's 2026-09-25 guard change (it was the reverse before)"
 tier: 1
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

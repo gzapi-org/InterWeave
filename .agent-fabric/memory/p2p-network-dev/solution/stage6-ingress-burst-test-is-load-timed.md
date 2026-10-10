@@ -5,7 +5,7 @@ topic: "stage6-ingress-burst-test-is-load-timed"
 description: "two wall-clock-timed suites flake under a full workspace run on this host — tests/direct-v2 a_peer_cannot_mint_allowance_by_inventing_source_endpoints (burst + 1 vs a refilling bucket, got 34 against 33) and tests/pubsub stage7…"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"
@@ -14,6 +14,7 @@ origin:
 derived_from:
   - 4baa3e55611dedf4
   - 5e2641d2ecdc020a
+  - f387aedbadc5535b
 ---
 
 ## two wall-clock-timed suites flake under a full workspace run on this host — tests/direct-v2 a_peer_cannot_mint_allowance_by_inventing_source_endpoints (burst + 1 vs a refilling bucket, got 34 against 33) and tests/pubsub stage7 an_actual_loss_outranks_the_zero_mesh_report (timed out waiting for the local overflow report, 2026-09-18) — rerun alone before suspecting the change; a follow-up PR each
@@ -29,5 +30,7 @@ ALSO 2026-10-02: a backgrounded `cargo xtask ci ...; echo ci=$?` reports the ECH
 **Why:** the test measures a rate limit with wall time it does not control. The right fix is a tolerance derived from the elapsed time of the flood (`burst + ceil(elapsed_s × 2)`) or a paused tokio clock, with the reason written at the assertion — not a wider constant.
 
 **How to apply:** if it fails in a full workspace run, rerun the suite alone before suspecting the change; fix it as its own small PR in `tests/direct-v2` (mine — the workspace), citing this memory.
+
+2026-10-07, #215 at 6b0ee197: a fourth suite flaked under a full `cargo xtask ci` run. `tools/ci/test_with_display.sh`'s self-test failed 3 assertions there (fusermount fallback, rm --one-file-system, umount fallback). Rerun alone, it passed every assertion, and GitHub's `tool self-tests` passed on the same head. #215 touches nothing under tools/.
 
 *Observed 2026-09-17 (p2p-network-dev)*
