@@ -43,12 +43,13 @@ cat > "$S/cargo" <<'C'
 case "$1" in
   metadata) printf '{"packages":['; sep=""; for p in $FAKE_PKGS; do printf '%s{"name":"%s"}' "$sep" "$p"; sep=","; done; printf ']}\n' ;;
   check) { echo "ARGS $*"; echo "LINKER $CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER";
-           echo "CC $CC_aarch64_linux_android"; echo "AR $AR_aarch64_linux_android"; } > "$FAKE_LOG"
+           echo "CC $CC_aarch64_linux_android"; echo "AR $AR_aarch64_linux_android";
+           echo "ANDROID_JAR ${ANDROID_JAR:-}"; } > "$FAKE_LOG"
          [ -z "${FAKE_CHECK_FAIL:-}" ] ;;
 esac
 C
 chmod +x "$S/cargo"
-run() { env -u ANDROID_HOME -u ANDROID_SDK_ROOT -u ANDROID_NDK_HOME ANDROID_CHECK_REPO="$S/repo" \
+run() { env -u ANDROID_HOME -u ANDROID_SDK_ROOT -u ANDROID_NDK_HOME -u JAVA_HOME -u ANDROID_JAR ANDROID_CHECK_REPO="$S/repo" \
             ANDROID_TOOLCHAIN_PINS="${PINS:-$S/pins}" CARGO="$S/cargo" FAKE_LOG="$S/log" \
             ${NDK-ANDROID_NDK_HOME=$S/ndk} ${SDK:+ANDROID_HOME=$SDK} "$@" bash "$SUT" ${ARGS:-} 2>&1; }
 
@@ -99,6 +100,34 @@ out="$(FAKE_PKGS="interweave-profile-config" PINS="$S/pins-noapi" run)"; rc=$?
 sed 's/^RUST_ANDROID_TARGET=.*/RUST_ANDROID_TARGET=x86_64-unknown-linux-gnu/' "$S/pins" > "$S/pins-badtarget"
 out="$(FAKE_PKGS="interweave-profile-config" PINS="$S/pins-badtarget" run)"; rc=$?
 [[ $rc -eq 2 && "$out" == *"not a <arch>-linux-android triple"* ]] && ok "a target that is not Android" || bad "rc $rc" "$out"
+
+echo "check_android_target: the human-android crates, with their features and the JDK and jar Slint needs"
+mkdir -p "$S/jdk/bin" "$S/sdk/platforms/android-30" "$S/sdk/platforms/android-36"
+printf '#!/bin/sh\n' > "$S/jdk/bin/javac"; chmod +x "$S/jdk/bin/javac"
+: > "$S/sdk/platforms/android-30/android.jar"; : > "$S/sdk/platforms/android-36/android.jar"
+ALL="interweave-profile-config interweave-transport-embedded interweave-human-android-platform interweave-human-android"
+rm -f "$S/log"; out="$(FAKE_PKGS="$ALL" NDK="" SDK="$S/sdk" run JAVA_HOME="$S/jdk")"; rc=$?
+[[ $rc -eq 0 ]] && ok "all four packages: exit 0" || bad "rc $rc" "$out"
+grep -q -- '-p interweave-human-android-platform -p interweave-human-android --features interweave-human-android-platform/dev-stand-ins$' "$S/log" \
+    && ok "one cargo check, the platform crate with dev-stand-ins" || bad "cargo argv" "$(cat "$S/log" 2>/dev/null)"
+grep -qx "ANDROID_JAR $S/sdk/platforms/android-36/android.jar" "$S/log" \
+    && ok "ANDROID_JAR is the HIGHEST pinned platform's (36, not 30)" || bad "ANDROID_JAR" "$(cat "$S/log" 2>/dev/null)"
+grep -q "JDK at $S/jdk, ANDROID_JAR at" <<<"$out" && ok "the log names the JDK and the jar" || bad "not named" "$out"
+rm -f "$S/log"; out="$(FAKE_PKGS="interweave-profile-config interweave-human-android-platform" run)"; rc=$?
+[[ $rc -eq 0 ]] && grep -q -- '-p interweave-human-android-platform --features interweave-human-android-platform/dev-stand-ins$' "$S/log" \
+    && grep -qx "ANDROID_JAR " "$S/log" \
+    && ok "the platform crate alone needs no JDK, and gets no ANDROID_JAR" || bad "rc $rc" "$(cat "$S/log" 2>/dev/null; echo "$out")"
+rm -f "$S/log"; out="$(FAKE_PKGS="interweave-profile-config interweave-transport-embedded" run)"
+grep -q -- '--features' "$S/log" && bad "features passed with no featured package" "$(cat "$S/log")" || ok "no --features when no listed package is checked"
+out="$(FAKE_PKGS="$ALL" NDK="" SDK="$S/sdk" run)"; rc=$?
+[[ $rc -eq 2 && "$out" == *"interweave-human-android needs a JDK"* ]] && ok "human-android without JAVA_HOME: exit 2" || bad "rc $rc" "$out"
+out="$(FAKE_PKGS="$ALL" NDK="" SDK="$S/sdk" run JAVA_HOME="$S/nowhere")"; rc=$?
+[[ $rc -eq 2 && "$out" == *"with no bin/javac"* ]] && ok "a JAVA_HOME without javac: exit 2" || bad "rc $rc" "$out"
+out="$(FAKE_PKGS="$ALL" run JAVA_HOME="$S/jdk")"; rc=$?
+[[ $rc -eq 2 && "$out" == *"needs the SDK: ANDROID_HOME is not set"* ]] && ok "an NDK alone, no SDK: exit 2" || bad "rc $rc" "$out"
+rm "$S/sdk/platforms/android-36/android.jar"
+out="$(FAKE_PKGS="$ALL" NDK="" SDK="$S/sdk" run JAVA_HOME="$S/jdk")"; rc=$?
+[[ $rc -eq 2 && "$out" == *"needs $S/sdk/platforms/android-36/android.jar"* ]] && ok "the compileSdk platform missing: exit 2, the jar named" || bad "rc $rc" "$out"
 
 echo "check_android_target: a failing cargo check is exit 1"
 out="$(FAKE_PKGS="interweave-profile-config" run FAKE_CHECK_FAIL=1)"; rc=$?
