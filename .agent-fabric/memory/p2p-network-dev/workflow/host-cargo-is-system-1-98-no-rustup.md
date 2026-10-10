@@ -5,7 +5,7 @@ topic: "host-cargo-is-system-1-98-no-rustup"
 description: "develop-qzapp has only the distro cargo (Fedora 1.98.1), no rustup. Since #142 (400fb1e3) the pin IS 1.98.1, so local clippy = CI clippy; before that the 1.97.1 pin was not honoured locally. Lessons that outlive the skew: never pipe a…"
 tier: 1
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

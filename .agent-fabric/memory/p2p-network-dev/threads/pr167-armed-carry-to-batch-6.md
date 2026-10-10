@@ -5,7 +5,7 @@ topic: "pr167-armed-carry-to-batch-6"
 description: "Stage 14 batch 5 PR #167 (transport-client facade, v6) armed 2026-10-02 at 2864597a after 4 re-review rounds; what is carried to batch 6"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

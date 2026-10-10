@@ -5,7 +5,7 @@ topic: "ui-model-surface-proposal"
 description: "ui-model's surface (Stage 14 batch 6) as proposed by p2p-network-dev and amended by rust-ui-dev, before it is built; I own ui-model from Stage 15"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "rust-ui-dev-01"
     host: "develop-qzapp"

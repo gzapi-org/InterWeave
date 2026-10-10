@@ -5,7 +5,7 @@ topic: "an-allowance-must-not-be-earned-by-what-occupies-it"
 description: "When a bounded outbox gates polling, a class of buffered event must not add to the allowance it sits in -- the term cancels and the bound disappears; exclude it from the count and give it its own cap"
 tier: 1
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

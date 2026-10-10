@@ -5,7 +5,7 @@ topic: "correction-autonat-pacing-is-not-the-crates-tick"
 description: "CORRECTION to the solution slice stage-11-review-rounds.md (\"Pacing is the crate's with_probe_interval/with_max_candidates\") — since the owner's 2026-09-17 ruling (F4 on PR #84, landed by PR #88) only with_max_candidates is set from…"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

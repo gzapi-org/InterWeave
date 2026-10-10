@@ -5,7 +5,7 @@ topic: "stage-11-step-8-dcutr"
 description: "Step 8 (DCUtR) -- PR #102 MERGED 2026-09-19 (head e6fc4ef) after four blind rounds (25 commits); the crate facts, ADR-0052's DCUtR instance (the boundary as a filter by deny-and-reissue), the P3s carried to step 9's first commit, what…"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

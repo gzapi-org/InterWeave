@@ -5,7 +5,7 @@ topic: "kademlia-routing-table-is-a-second-door"
 description: "Identify listen_addrs reach TWO dialled stores — the address book and Kademlia's routing table — so a peer-address boundary on the book alone is half-closed; admits_offer is the routing table's funnel"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

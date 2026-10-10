@@ -5,7 +5,7 @@ topic: "transport-client-facade-contract"
 description: "The agreed caller-facing contract of crates/human/transport-client (Stage 14 batch 5), before its PR quotes it"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "rust-ui-dev-01"
     host: "develop-qzapp"

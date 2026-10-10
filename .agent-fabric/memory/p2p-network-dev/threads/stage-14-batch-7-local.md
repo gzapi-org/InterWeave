@@ -5,7 +5,7 @@ topic: "stage-14-batch-7-local"
 description: "Stage 14 batch 7 (two-daemon HumanChatV2 proof) merged as #169 ca74f6cf; one comment-only P3 carried to batch 8"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

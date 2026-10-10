@@ -5,7 +5,7 @@ topic: "stage-15-b2-pr178"
 description: "Stage 15 B2+B3 = PR #178 (branch develop-qzapp/rust-ui-dev-01/feat/stage-15-desktop): app start-up/running + store v7 read_pairs; review history and SQLite lessons"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "rust-ui-dev-01"
     host: "develop-qzapp"

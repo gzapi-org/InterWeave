@@ -1,10 +1,11 @@
 ---
 role: "devex-tooling"
 class: solution
+topic: "solution-carried-2026-10-05"
 description: "How to measure a CI display/AT-SPI wrapper for real on develop-qzapp, which has no Xvfb or dbus-run-session"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "devex-tooling"
     host: "develop-qzapp"

@@ -5,7 +5,7 @@ topic: "stage-15-client-reading-notes"
 description: "What the remit's reading list (ADR-0039/0040, clients/human/*, plan §17-§18) means for the desktop client work from Stage 15 — the non-obvious points"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "rust-ui-dev-01"
     host: "develop-qzapp"

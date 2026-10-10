@@ -5,7 +5,7 @@ topic: "threads-carried-2026-09-17"
 description: "Stage 11 current state — which PRs merged (#86, #85), what #84 waits on, the arming rule for a PR whose late rounds find only comment defects, and what is next"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

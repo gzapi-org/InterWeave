@@ -5,7 +5,7 @@ topic: "review-class-cannot-write-scratch"
 description: "A code-review dispatch cannot write any file, scratchpad included — it cannot build fixture trees or run a guard's self-test on a mutated copy"
 tier: 1
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "devex-tooling"
     host: "develop-qzapp"
