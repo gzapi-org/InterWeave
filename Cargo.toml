@@ -45,6 +45,9 @@ members = [
     # Stage 17 (plan §20 gate (c)): Android <-> desktop, the device behind
     # a seam, a host stand-in for it until a device exists.
     "tests/android-e2e",
+    # Its Android half: the case bodies the stand-in and the app's
+    # instrumentation both run (architect-cto, 2026-10-10).
+    "tests/android-e2e-cases",
     # Stage 15 batch 2: the desktop human client (plan section 18).
     "apps/human-desktop",
     # Stage 17 (plan section 20 steps 2-4): the Android human client's
@@ -638,6 +641,7 @@ planned_test_packages = [
   "tests/security",
   "tests/desktop-e2e",
   "tests/android-e2e",
+  "tests/android-e2e-cases",
   "tests/interoperability",
 ]
 
