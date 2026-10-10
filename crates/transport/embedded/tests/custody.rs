@@ -1189,3 +1189,110 @@ fn aliases_are_one_per_profile_and_policy() {
     }
     assert_eq!(aliases.len(), profiles.len() * POLICIES.len());
 }
+
+/// ADR-0042 A 2026-10-10 (ii): a record under another policy than the
+/// configured one still unlocks, and `reseal` brings it to the configured
+/// policy -- the same identity, the old record retired. Under the policy
+/// it already has, nothing is sealed (the control).
+#[test]
+fn reseal_moves_the_record_to_the_configured_policy_and_retires_the_old() {
+    let (mnemonic, frozen) = vectors().remove(0);
+    let app = new_app();
+    let cipher = SoftCipher::default();
+    custody::provision(
+        &app.paths,
+        &cipher,
+        &identity(&mnemonic),
+        KeyUnlockPolicy::BackgroundCompatible,
+    )
+    .expect("stored");
+    let old = record(&app);
+    let unlocked = custody::unlock(&app.paths, &cipher).expect("unlocks under its own policy");
+
+    assert!(
+        !custody::reseal(
+            &app.paths,
+            &cipher,
+            &unlocked,
+            KeyUnlockPolicy::BackgroundCompatible
+        )
+        .expect("the same policy")
+    );
+    assert_eq!(cipher.seals(), 1, "nothing sealed for the same policy");
+    assert_eq!(record(&app), old);
+
+    assert!(
+        custody::reseal(
+            &app.paths,
+            &cipher,
+            &unlocked,
+            KeyUnlockPolicy::UserPresence
+        )
+        .expect("re-sealed")
+    );
+    assert_eq!(record(&app)[5], slot(KeyUnlockPolicy::UserPresence));
+    assert_eq!(
+        peer_of(&custody::unlock(&app.paths, &cipher).expect("opens")),
+        frozen
+    );
+    put(&app, &old);
+    assert_eq!(
+        custody::unlock(&app.paths, &cipher).err(),
+        Some(UnlockRefused::RecoveryRequired(RecoveryCause::KeyMissing))
+    );
+}
+
+/// `reseal` writes nothing for another identity, without a record, or
+/// while another holds the profile.
+#[test]
+fn reseal_refuses_another_identity_no_record_and_a_held_profile() {
+    let vectors = two();
+    let app = new_app();
+    let cipher = SoftCipher::default();
+    assert!(matches!(
+        custody::reseal(
+            &app.paths,
+            &cipher,
+            &identity(&vectors[0].0),
+            KeyUnlockPolicy::UserPresence
+        ),
+        Err(CustodyRefused::NotProvisioned)
+    ));
+    custody::provision(
+        &app.paths,
+        &cipher,
+        &identity(&vectors[0].0),
+        KeyUnlockPolicy::BackgroundCompatible,
+    )
+    .expect("stored");
+    let before = record(&app);
+    assert!(matches!(
+        custody::reseal(
+            &app.paths,
+            &cipher,
+            &identity(&vectors[1].0),
+            KeyUnlockPolicy::UserPresence
+        ),
+        Err(CustodyRefused::RecordNamesOther)
+    ));
+    let held = ProfileLock::acquire(&app.paths, Duration::ZERO).expect("the test holds it");
+    assert!(matches!(
+        custody::reseal(
+            &app.paths,
+            &cipher,
+            &identity(&vectors[0].0),
+            KeyUnlockPolicy::UserPresence
+        ),
+        Err(CustodyRefused::ProfileLocked)
+    ));
+    drop(held);
+    assert_eq!(record(&app), before);
+    assert_eq!(cipher.seals(), 1, "nothing sealed by a refusal");
+    custody::reseal(
+        &app.paths,
+        &cipher,
+        &identity(&vectors[0].0),
+        KeyUnlockPolicy::UserPresence,
+    )
+    .expect("the control: its own identity, released");
+}

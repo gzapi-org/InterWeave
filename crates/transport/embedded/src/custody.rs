@@ -290,6 +290,8 @@ pub enum UnlockRefused {
 pub enum CustodyRefused {
     /// [`provision`] found a record: the profile has an identity.
     AlreadyProvisioned,
+    /// [`reseal`] found no record to re-seal.
+    NotProvisioned,
     /// Another holder has the profile -- a running host, or a provision
     /// or restore in flight -- so nothing was sealed.
     ProfileLocked,
@@ -331,6 +333,7 @@ impl std::fmt::Display for CustodyRefused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::AlreadyProvisioned => f.write_str("the profile already has a stored identity"),
+            Self::NotProvisioned => f.write_str("the profile has no stored identity to re-seal"),
             Self::ProfileLocked => f.write_str("the profile is held by another host or flow"),
             Self::OtherIdentity => f.write_str("the phrase restores another identity"),
             Self::RecordNamesOther => f.write_str("the stored record names another identity"),
@@ -717,4 +720,48 @@ pub fn restore(
     write_private_atomic_within(&custody_file(paths), &record, paths.boundary())
         .map_err(CustodyRefused::Storage)?;
     Ok(identity)
+}
+
+/// Bring the record's policy to the profile's configured one: ADR-0042 A
+/// 2026-10-10 (ii). The record's policy byte governs OPENING, so a
+/// profile whose operator changed `key_unlock_policy` still unlocks; its
+/// caller then calls this with the identity [`unlock`] gave back, and the
+/// record is sealed again under `policy` -- the seal deleting the
+/// profile's keys, the old record retired as a restore retires it.
+/// `Ok(false)` and nothing sealed when the record is already under
+/// `policy`. Under the profile's lock, as [`provision`]: called after
+/// unlock and before the host starts, which takes the lock itself.
+///
+/// # Errors
+/// [`CustodyRefused::NotProvisioned`] with no record;
+/// [`CustodyRefused::RecordNamesOther`] when the record does not name
+/// `identity`; [`CustodyRefused::Unreadable`] for a record [`unlock`]
+/// would refuse before its cipher; nothing is written in any of these.
+pub fn reseal(
+    paths: &ProfilePaths,
+    cipher: &dyn SeedCipher,
+    identity: &ProfileIdentity,
+    policy: KeyUnlockPolicy,
+) -> Result<bool, CustodyRefused> {
+    let _held = hold(paths)?;
+    let bytes = match private_bytes(paths) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return Err(CustodyRefused::NotProvisioned),
+        Err(e) => return Err(CustodyRefused::Unreadable(e.to_string())),
+    };
+    let parsed =
+        parse(&bytes).map_err(|refused| CustodyRefused::Unreadable(format!("{refused:?}")))?;
+    let own = identity
+        .transport_identity()
+        .map_err(|e| CustodyRefused::Identity(e.to_string()))?;
+    if parsed.peer.as_str() != own.as_str() {
+        return Err(CustodyRefused::RecordNamesOther);
+    }
+    if parsed.policy == policy {
+        return Ok(false);
+    }
+    let (_, record) = seal_record(paths, cipher, policy, identity)?;
+    write_private_atomic_within(&custody_file(paths), &record, paths.boundary())
+        .map_err(CustodyRefused::Storage)?;
+    Ok(true)
 }
