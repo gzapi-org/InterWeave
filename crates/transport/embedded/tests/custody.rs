@@ -79,15 +79,17 @@ fn identity(mnemonic: &str) -> ProfileIdentity {
 }
 
 /// The device's Keystore, in software: one AES-256-GCM key per alias
-/// (`KeyRef::alias`, a profile and a policy), and on every seal the
-/// profile's keys deleted and a NEW one made, as the seam requires; the
-/// IV the cipher's own. `fail` makes `open` answer as the platform would
-/// on that failure.
+/// (`KeyRef::alias`, a profile and a policy); a seal replaces the key at
+/// its alias with a NEW one and touches no other, `retire` deletes one,
+/// as the seam requires; the IV the cipher's own. `fail` makes `open`
+/// answer as the platform would on that failure, `fail_retire` makes
+/// `retire` fail.
 #[derive(Default)]
 struct SoftCipher {
     keys: Mutex<HashMap<String, [u8; 32]>>,
     seals: AtomicUsize,
     fail: Mutex<Option<CipherFailure>>,
+    fail_retire: Mutex<Option<CipherFailure>>,
 }
 
 fn slot(policy: KeyUnlockPolicy) -> u8 {
@@ -123,12 +125,7 @@ impl SeedCipher for SoftCipher {
     fn seal(&self, key_ref: &KeyRef, aad: &[u8], seed: &Seed) -> Result<Sealed, CipherFailure> {
         self.seals.fetch_add(1, Ordering::SeqCst);
         let key: [u8; 32] = rand::random();
-        let mut keys = self.keys.lock().unwrap();
-        for of_profile in key_ref.of_profile() {
-            keys.remove(&of_profile.alias());
-        }
-        keys.insert(key_ref.alias(), key);
-        drop(keys);
+        self.keys.lock().unwrap().insert(key_ref.alias(), key);
         let iv: [u8; IV_LEN] = rand::random();
         let sealed = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key))
             .encrypt(
@@ -143,6 +140,14 @@ impl SeedCipher for SoftCipher {
             iv: iv.to_vec(),
             sealed,
         })
+    }
+
+    fn retire(&self, key_ref: &KeyRef) -> Result<(), CipherFailure> {
+        if let Some(failure) = self.fail_retire.lock().unwrap().clone() {
+            return Err(failure);
+        }
+        self.keys.lock().unwrap().remove(&key_ref.alias());
+        Ok(())
     }
 
     fn open(
@@ -173,6 +178,9 @@ impl SeedCipher for SoftCipher {
 struct Substituting(Seed);
 
 impl SeedCipher for Substituting {
+    fn retire(&self, _: &KeyRef) -> Result<(), CipherFailure> {
+        Ok(())
+    }
     fn seal(&self, _: &KeyRef, _: &[u8], _: &Seed) -> Result<Sealed, CipherFailure> {
         Err(CipherFailure::Unavailable("not used".to_owned()))
     }
@@ -194,6 +202,9 @@ struct Misshapen {
 }
 
 impl SeedCipher for Misshapen {
+    fn retire(&self, _: &KeyRef) -> Result<(), CipherFailure> {
+        Ok(())
+    }
     fn seal(&self, _: &KeyRef, _: &[u8], _: &Seed) -> Result<Sealed, CipherFailure> {
         Ok(Sealed {
             iv: vec![0; self.iv],
@@ -1295,4 +1306,133 @@ fn reseal_refuses_another_identity_no_record_and_a_held_profile() {
         KeyUnlockPolicy::UserPresence,
     )
     .expect("the control: its own identity, released");
+}
+
+/// A seal whose record cannot be written leaves the profile's record
+/// openable: `reseal` and a cross-policy `restore` that fail at the write
+/// (the identity directory not writable) answer `Storage`, and the
+/// record on disk still unlocks -- its key was not deleted ahead of the
+/// write. Once writable, the same calls succeed and the old record is
+/// retired (the control).
+#[test]
+fn a_write_that_fails_after_the_seal_leaves_the_record_openable() {
+    let (mnemonic, frozen) = vectors().remove(0);
+    let expected = TransportIdentity::parse(frozen.clone()).expect("peer");
+    let phrase = RecoveryPhrase::parse(&mnemonic).expect("phrase");
+    let app = new_app();
+    let cipher = SoftCipher::default();
+    custody::provision(
+        &app.paths,
+        &cipher,
+        &identity(&mnemonic),
+        KeyUnlockPolicy::BackgroundCompatible,
+    )
+    .expect("stored");
+    let old = record(&app);
+    let unlocked = custody::unlock(&app.paths, &cipher).expect("unlocks");
+    let dir = app.paths.identity_dir();
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o500)).expect("chmod");
+
+    assert!(matches!(
+        custody::reseal(
+            &app.paths,
+            &cipher,
+            &unlocked,
+            KeyUnlockPolicy::UserPresence
+        ),
+        Err(CustodyRefused::Storage(_))
+    ));
+    assert_eq!(record(&app), old);
+    assert_eq!(
+        peer_of(&custody::unlock(&app.paths, &cipher).expect("still opens after reseal")),
+        frozen
+    );
+    assert!(matches!(
+        custody::restore(
+            &app.paths,
+            &cipher,
+            &phrase,
+            &expected,
+            KeyUnlockPolicy::UserPresence
+        ),
+        Err(CustodyRefused::Storage(_))
+    ));
+    assert_eq!(
+        peer_of(&custody::unlock(&app.paths, &cipher).expect("still opens after restore")),
+        frozen
+    );
+
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+    assert!(
+        custody::reseal(
+            &app.paths,
+            &cipher,
+            &unlocked,
+            KeyUnlockPolicy::UserPresence
+        )
+        .expect("writable, it re-seals")
+    );
+    put(&app, &old);
+    assert_eq!(
+        custody::unlock(&app.paths, &cipher).err(),
+        Some(UnlockRefused::RecoveryRequired(RecoveryCause::KeyMissing))
+    );
+}
+
+/// A key that cannot be retired after the write is said, not swallowed:
+/// `OldKeyRemains`, the new record written and opening, and the old copy
+/// still opening until a `reseal` deletes the key (the control).
+#[test]
+fn an_old_key_that_cannot_be_retired_is_said_and_reseal_retries_it() {
+    let (mnemonic, frozen) = vectors().remove(0);
+    let app = new_app();
+    let cipher = SoftCipher::default();
+    custody::provision(
+        &app.paths,
+        &cipher,
+        &identity(&mnemonic),
+        KeyUnlockPolicy::BackgroundCompatible,
+    )
+    .expect("stored");
+    let old = record(&app);
+    let unlocked = custody::unlock(&app.paths, &cipher).expect("unlocks");
+    *cipher.fail_retire.lock().unwrap() = Some(CipherFailure::Unavailable("busy".to_owned()));
+    assert!(matches!(
+        custody::reseal(
+            &app.paths,
+            &cipher,
+            &unlocked,
+            KeyUnlockPolicy::UserPresence
+        ),
+        Err(CustodyRefused::OldKeyRemains(_))
+    ));
+    let new = record(&app);
+    assert_eq!(
+        new[5],
+        slot(KeyUnlockPolicy::UserPresence),
+        "the new record is written"
+    );
+    assert_eq!(
+        peer_of(&custody::unlock(&app.paths, &cipher).expect("opens")),
+        frozen
+    );
+    put(&app, &old);
+    custody::unlock(&app.paths, &cipher).expect("the old key remains, as said");
+
+    put(&app, &new);
+    *cipher.fail_retire.lock().unwrap() = None;
+    assert!(
+        !custody::reseal(
+            &app.paths,
+            &cipher,
+            &unlocked,
+            KeyUnlockPolicy::UserPresence
+        )
+        .expect("the same policy: nothing sealed, the old key retired")
+    );
+    put(&app, &old);
+    assert_eq!(
+        custody::unlock(&app.paths, &cipher).err(),
+        Some(UnlockRefused::RecoveryRequired(RecoveryCause::KeyMissing))
+    );
 }

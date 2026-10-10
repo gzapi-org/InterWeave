@@ -210,16 +210,27 @@ fn policy_name(policy: KeyUnlockPolicy) -> &'static str {
 /// meanwhile is not reached. A limit, not a zeroization claim.
 pub trait SeedCipher: Send + Sync {
     /// Encrypt `seed` with `aad` under a key the cipher GENERATES at
-    /// `key`'s alias for this seal, after deleting EVERY key of `key`'s
-    /// profile ([`KeyRef::of_profile`], both policies) and no other
-    /// profile's -- so a restore after [`CipherFailure::KeyInvalidated`]
-    /// never reuses the invalidated key, and an envelope of this profile
-    /// sealed before, under either policy, no longer opens. Only
-    /// [`provision`] and [`restore`] seal.
+    /// `key`'s alias for this seal, deleting the key at that alias first
+    /// and NO OTHER -- so a restore after [`CipherFailure::KeyInvalidated`]
+    /// never reuses the invalidated key, and the profile's key for the
+    /// other policy, which the record on disk may still need, survives
+    /// until the new record is written. [`provision`], [`restore`] and
+    /// [`reseal`] seal.
     ///
     /// # Errors
     /// [`CipherFailure`].
     fn seal(&self, key: &KeyRef, aad: &[u8], seed: &Seed) -> Result<Sealed, CipherFailure>;
+
+    /// Delete the key at `key`'s alias; no key there is success. Custody
+    /// calls it for the profile's OTHER policy only after the record
+    /// sealed under the new key is written, so an envelope of this
+    /// profile sealed before, under either policy, no longer opens -- and
+    /// a write that fails retires nothing
+    /// (`a_write_that_fails_after_the_seal_leaves_the_record_openable`).
+    ///
+    /// # Errors
+    /// [`CipherFailure`].
+    fn retire(&self, key: &KeyRef) -> Result<(), CipherFailure>;
 
     /// Decrypt `sealed` (ciphertext and tag) with `iv` and `aad` under the
     /// key at `key`'s alias.
@@ -292,9 +303,13 @@ pub enum CustodyRefused {
     AlreadyProvisioned,
     /// [`reseal`] found no record to re-seal.
     NotProvisioned,
-    /// Another holder has the profile -- a running host, or a provision
-    /// or restore in flight -- so nothing was sealed.
+    /// Another holder has the profile -- a running host, or a provision,
+    /// restore or reseal in flight -- so nothing was sealed.
     ProfileLocked,
+    /// The record WAS written and opens; the profile's key for the other
+    /// policy could not be deleted, so a copy of the record from before
+    /// may still open until it is. [`reseal`] retries the deletion.
+    OldKeyRemains(CipherFailure),
     /// [`restore`]'s phrase restores another `PeerId` than the one asked.
     OtherIdentity,
     /// [`restore`] was asked for one `PeerId` and the record names another.
@@ -334,6 +349,10 @@ impl std::fmt::Display for CustodyRefused {
         match self {
             Self::AlreadyProvisioned => f.write_str("the profile already has a stored identity"),
             Self::NotProvisioned => f.write_str("the profile has no stored identity to re-seal"),
+            Self::OldKeyRemains(failure) => write!(
+                f,
+                "the identity is stored; the previous key could not be deleted: {failure:?}"
+            ),
             Self::ProfileLocked => f.write_str("the profile is held by another host or flow"),
             Self::OtherIdentity => f.write_str("the phrase restores another identity"),
             Self::RecordNamesOther => f.write_str("the stored record names another identity"),
@@ -637,22 +656,40 @@ pub fn provision(
     policy: KeyUnlockPolicy,
 ) -> Result<TransportIdentity, CustodyRefused> {
     let _held = hold(paths)?;
-    // Checked before sealing as well, because a seal replaces the
-    // profile's wrapping keys: sealing first would leave the existing
-    // record unopenable even though the write is then refused.
+    // Checked before sealing as well, because a seal replaces the key at
+    // its alias: sealing first would leave an existing record under that
+    // policy unopenable even though the write is then refused.
     if custody_present(paths)? {
         return Err(CustodyRefused::AlreadyProvisioned);
     }
     let (peer, record) = seal_record(paths, cipher, policy, identity)?;
     match create_private_exclusive_within(&custody_file(paths), &record, paths.boundary()) {
-        Ok(()) => Ok(peer),
-        Err(PersistError::AlreadyExists) => Err(CustodyRefused::AlreadyProvisioned),
-        Err(e) => Err(CustodyRefused::Storage(e)),
+        Ok(()) => {}
+        Err(PersistError::AlreadyExists) => return Err(CustodyRefused::AlreadyProvisioned),
+        Err(e) => return Err(CustodyRefused::Storage(e)),
     }
+    retire_others(paths, cipher, policy)?;
+    Ok(peer)
+}
+
+/// Delete the profile's key for every policy but `kept`, AFTER the record
+/// sealed under `kept`'s key is written: the order is what keeps a failed
+/// write from stranding the record already on disk.
+fn retire_others(
+    paths: &ProfilePaths,
+    cipher: &dyn SeedCipher,
+    kept: KeyUnlockPolicy,
+) -> Result<(), CustodyRefused> {
+    for key in KeyRef::new(paths, kept).of_profile() {
+        if key.policy() != kept {
+            cipher.retire(&key).map_err(CustodyRefused::OldKeyRemains)?;
+        }
+    }
+    Ok(())
 }
 
 /// The profile's lock, taken without waiting, for the whole of a flow
-/// that seals. A seal rotates the profile's keys, so check-seal-create is
+/// that seals. A seal replaces the key at its alias, so check-seal-create is
 /// not atomic by itself: two first runs could both pass the check, the
 /// second seal replacing the key the first's record -- the one the
 /// exclusive create keeps -- was sealed under, and BOTH lose. Held, the
@@ -719,6 +756,7 @@ pub fn restore(
     let (_, record) = seal_record(paths, cipher, policy, &identity)?;
     write_private_atomic_within(&custody_file(paths), &record, paths.boundary())
         .map_err(CustodyRefused::Storage)?;
+    retire_others(paths, cipher, policy)?;
     Ok(identity)
 }
 
@@ -726,17 +764,24 @@ pub fn restore(
 /// 2026-10-10 (ii). The record's policy byte governs OPENING, so a
 /// profile whose operator changed `key_unlock_policy` still unlocks; its
 /// caller then calls this with the identity [`unlock`] gave back, and the
-/// record is sealed again under `policy` -- the seal deleting the
-/// profile's keys, the old record retired as a restore retires it.
+/// record is sealed again under `policy` and written, and only then is the
+/// old policy's key deleted -- the old record retired as a restore retires
+/// it, and a write that fails leaving the old record openable.
 /// `Ok(false)` and nothing sealed when the record is already under
-/// `policy`. Under the profile's lock, as [`provision`]: called after
-/// unlock and before the host starts, which takes the lock itself.
+/// `policy`; the other policy's key is still deleted, so this also
+/// retries an [`CustodyRefused::OldKeyRemains`]. Under the profile's
+/// lock, as [`provision`]: called after unlock and before the host
+/// starts, which takes the lock itself.
 ///
 /// # Errors
 /// [`CustodyRefused::NotProvisioned`] with no record;
 /// [`CustodyRefused::RecordNamesOther`] when the record does not name
 /// `identity`; [`CustodyRefused::Unreadable`] for a record [`unlock`]
-/// would refuse before its cipher; nothing is written in any of these.
+/// would refuse before its cipher; nothing is sealed or written in any of
+/// these. After the seal: [`CustodyRefused::CipherShape`] or
+/// [`CustodyRefused::Storage`], the record on disk untouched and still
+/// opening; [`CustodyRefused::OldKeyRemains`] with the new record
+/// written.
 pub fn reseal(
     paths: &ProfilePaths,
     cipher: &dyn SeedCipher,
@@ -758,10 +803,12 @@ pub fn reseal(
         return Err(CustodyRefused::RecordNamesOther);
     }
     if parsed.policy == policy {
+        retire_others(paths, cipher, policy)?;
         return Ok(false);
     }
     let (_, record) = seal_record(paths, cipher, policy, identity)?;
     write_private_atomic_within(&custody_file(paths), &record, paths.boundary())
         .map_err(CustodyRefused::Storage)?;
+    retire_others(paths, cipher, policy)?;
     Ok(true)
 }
