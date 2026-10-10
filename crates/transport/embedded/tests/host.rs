@@ -162,6 +162,35 @@ fn the_host_serves_under_its_root() {
     host.stop(Duration::from_secs(1)).expect("stops");
 }
 
+/// A FRESH INSTALL: nothing has written `config.yaml`, so the start is
+/// refused naming the read -- the control -- until the Service provisions
+/// the profile once (`profile-config`'s `provision_embedded`, the seam
+/// agreed with rust-ui-dev); then the host starts and serves on it.
+#[test]
+fn a_fresh_install_is_provisioned_once_then_starts() {
+    let app = app();
+    assert!(
+        matches!(
+            EmbeddedHost::start(launch(&app.dir)),
+            Err(EmbeddedRefused::ProfileInvalid(_))
+        ),
+        "nothing provisioned: refused"
+    );
+    let paths =
+        ProfilePaths::resolve_embedded(PROFILE, TrustBoundary::new(&app.dir).expect("a boundary"))
+            .expect("paths");
+    interweave_profile_config::provision::provision_embedded(&paths).expect("provisioned");
+    let launched = launch(&app.dir);
+    let peer = launched.identity.transport_identity().expect("peer");
+    let host = EmbeddedHost::start(launched).expect("starts on the provisioned profile");
+    let status = host
+        .runtime()
+        .block_on(admin(&host).status())
+        .expect("status");
+    assert_eq!(status.peer, peer);
+    host.stop(Duration::from_secs(1)).expect("stops");
+}
+
 /// A second start in the same process while a host holds the profile is
 /// refused `LockHeld`, and the first keeps serving; once the first has
 /// stopped, a start succeeds -- the lock went with it.
