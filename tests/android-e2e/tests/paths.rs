@@ -92,9 +92,11 @@ async fn send_until_routed(
         if sent.is_ok() {
             return;
         }
-        // The refusal itself is not printed: CodeQL traces it, through a
-        // helper generic over every binding, to the in-memory fake's
-        // trusted peer (alert 75). What failing here means is the message:
+        // The refusal itself is not printed: this helper is generic over
+        // every binding, the in-memory fake's among them, whose refusal
+        // carries a trusted peer's identity, and a static analysis reads
+        // printing it as logging that identity in clear. What failing
+        // here means is the message:
         // no route by the deadline. D's log, shown with it, explains D's
         // side only -- a stand-in's refusal is in no log this case keeps.
         assert!(
