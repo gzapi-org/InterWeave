@@ -270,6 +270,22 @@ ui_texts! {
     /// Anything else went wrong, before anything was changed. No raw code
     /// is kept, so the text points nowhere for details.
     TrustFailed => "Trust could not be read or changed. Nothing was changed.",
+    /// ANDROID: the notification channel of the Stay-reachable mode, in
+    /// the system's settings. The glossary's mode name; never a promise.
+    ReachableChannel => "Stay reachable", // PLACEHOLDER (en)
+    /// ANDROID: the title of the notification that shows while the
+    /// network service runs under Stay reachable (ADR-0041).
+    ReachableTitle => "Stay reachable is on", // PLACEHOLDER (en)
+    /// ANDROID: its text. Says the app tries, never that it is reachable:
+    /// the platform may still stop it (ADR-0041, Operational implications).
+    ReachableBody => "InterWeave keeps trying to stay reachable while this notification shows.", // PLACEHOLDER (en)
+    /// ANDROID: the notification channel of new messages.
+    MessagesChannel => "New messages", // PLACEHOLDER (en)
+    /// ANDROID: the notice for one message no window has read. Never its
+    /// sender or its content.
+    NewMessage => "New message", // PLACEHOLDER (en)
+    /// ANDROID: the notice for more than one. `{count}` is a number.
+    NewMessages => "New messages: {count}", // PLACEHOLDER (en)
     /// The list a made or possibly made change left to read again could
     /// not be read: it may not show that change. Never says that nothing
     /// changed. Opening the settings again reads it.
