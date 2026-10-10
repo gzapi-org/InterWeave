@@ -52,16 +52,17 @@
 //! (ADR-0052 rule 5): the far end loses only the refused address, never
 //! the punch.
 //!
-//! ONE GAP, recorded rather than closed: libp2p-dcutr 0.15.0 keeps every
-//! candidate it is offered in its own cache, an LRU of 20 nothing here
-//! can reach, and every new relayed handler's CONNECT carries it. So an
-//! address offered while its listener held, or its IP was the host's,
-//! is still sent after either is gone, until 20 newer ones push it out;
-//! the wrapper stops offering it again (`network_changed`,
-//! `forget_listener`) and that is all. Closing it means rebuilding the
-//! inner behaviour on a removal, which drops the crate's record of the
-//! attempts in flight that `network_changed` waits out -- a change of
-//! its own, not a filter (PR #250's recorded limit).
+//! THE CRATE'S OWN CACHE. libp2p-dcutr 0.15.0 keeps every candidate it
+//! is offered in a cache nothing here can reach (an LRU of 20), and every
+//! new relayed handler's CONNECT carries it. An address whose IP left
+//! the host is not sent after: a network change builds the crate again
+//! (`network_changed`; recorded as a gap on PR #250, closed after it).
+//! What stays is narrower: a listener CLOSED while its IP is still held
+//! is not offered again (`forget_listener`) but stays in the cache until
+//! the next network change or until newer candidates push it out --
+//! still an address inside the boundary, of a port no longer answering.
+//! Rebuilding there too would drop the crate's punch-dial retries for
+//! attempts still LIVE, which a network change has already given up.
 //!
 //! The crate's `Dial` carries its address list in a field the
 //! Swarm crate keeps to itself, so the first place the list is visible
@@ -352,6 +353,9 @@ struct Attempt {
 /// The pinned DCUtR behaviour under §13's attempt lifecycle.
 pub struct HolePunchScope {
     inner: dcutr::Behaviour,
+    /// This profile's `PeerId`, what the crate is built with: kept so a
+    /// network change can build it again (`network_changed`).
+    local: PeerId,
     budgets: HolePunchBudgets,
     now_ms: u64,
     /// Direct connections per peer, both directions, as this wrapper
@@ -374,8 +378,10 @@ pub struct HolePunchScope {
     /// address and listener-closed events), so the set holds at most
     /// the addresses currently bound -- the runtime's active-listener
     /// ceiling times the addresses a listener reports. The crate's own
-    /// candidate cache keeps what it was told (an LRU of twenty), so a
-    /// stale listener may still be sent in a CONNECT until it ages out.
+    /// candidate cache keeps what it was told (an LRU of twenty) until a
+    /// network change builds it again, so a listener closed on a
+    /// still-held IP may be sent in a CONNECT until then (the module
+    /// note).
     /// `a_bound_listener_is_offered_once_and_forgotten_with_its_listener`
     /// pins the set.
     offered: HashSet<Multiaddr>,
@@ -418,11 +424,12 @@ pub struct HolePunchScope {
 }
 
 impl HolePunchScope {
-    /// Wrap `inner` under `budgets`.
+    /// The crate's behaviour for `local`, wrapped under `budgets`.
     #[must_use]
-    pub fn new(inner: dcutr::Behaviour, budgets: HolePunchBudgets) -> Self {
+    pub fn new(local: PeerId, budgets: HolePunchBudgets) -> Self {
         Self {
-            inner,
+            inner: dcutr::Behaviour::new(local),
+            local,
             budgets,
             now_ms: 0,
             direct: HashMap::new(),
@@ -547,7 +554,40 @@ impl HolePunchScope {
     /// interface's and not the path's. The listener set starts over
     /// (the runtime re-offers what is bound). Pinned by
     /// `a_network_change_abandons_attempts_lifts_cooldowns_and_stops_judging`.
+    ///
+    /// AND THE CRATE IS BUILT AGAIN. libp2p-dcutr 0.15.0 keeps every
+    /// candidate it was offered in a cache nothing outside it can reach (an
+    /// LRU of twenty) and puts the whole cache in every new relayed
+    /// handler's CONNECT, so an address of the network this profile left
+    /// was still sent after its IP departed. A fresh instance holds none;
+    /// the runtime re-offers the listeners still bound, and a peer's
+    /// Identify reports the observed addresses again -- an observation made
+    /// on the old network named a mapping that is gone. What the old
+    /// instance held is either rebuilt or not needed: the direct
+    /// connections it was told of are told again from `direct`, since its
+    /// close `expect`s each one; its handlers on open relayed connections
+    /// keep running and their events reach the new instance, which acts on
+    /// them without prior state; and the record of its punch dials and
+    /// their retries goes, which only an attempt given up above was using.
+    /// Pinned by `a_departed_address_is_not_sent_in_a_later_connect`
+    /// (`tests/connectivity/tests/dcutr.rs`).
     pub fn network_changed(&mut self) {
+        let mut fresh = dcutr::Behaviour::new(self.local);
+        // A direct connection's addresses: the crate reads only that the
+        // local one is not a circuit, and the handler it answers is a
+        // placeholder for this already-open connection, discarded.
+        let direct_addr: Multiaddr = Multiaddr::empty();
+        for (peer, ids) in &self.direct {
+            for id in ids {
+                let _ = fresh.handle_established_inbound_connection(
+                    *id,
+                    *peer,
+                    &direct_addr,
+                    &direct_addr,
+                );
+            }
+        }
+        self.inner = fresh;
         for attempt in self.attempts.values_mut() {
             attempt.abandoned = true;
         }
@@ -1048,7 +1088,7 @@ mod tests {
     }
 
     fn scope(budgets: HolePunchBudgets) -> HolePunchScope {
-        HolePunchScope::new(dcutr::Behaviour::new(peer()), budgets)
+        HolePunchScope::new(peer(), budgets)
     }
 
     /// The subject's own id, for the circuit's trailing component.
@@ -1131,6 +1171,26 @@ mod tests {
             cause: None,
             remaining_established: 0,
         })
+    }
+
+    /// The crate built again by a network change is told of the direct
+    /// connections the old one knew, so a later close of one -- which the
+    /// crate `expect`s to find -- is answered, not a panic. And a direct
+    /// connection first seen after the change closes the same way.
+    #[test]
+    fn a_rebuilt_crate_knows_the_direct_connections_open_across_the_change() {
+        let mut s = scope(HolePunchBudgets::default());
+        let a = peer();
+        direct_inbound(&mut s, 1, a);
+        s.network_changed();
+        direct_inbound(&mut s, 2, a);
+        let endpoint = ConnectedPoint::Listener {
+            local_addr: direct(),
+            send_back_addr: direct(),
+        };
+        s.on_swarm_event(closed(1, a, &endpoint));
+        s.on_swarm_event(closed(2, a, &endpoint));
+        assert!(s.direct.get(&a).is_none_or(HashSet::is_empty));
     }
 
     #[test]

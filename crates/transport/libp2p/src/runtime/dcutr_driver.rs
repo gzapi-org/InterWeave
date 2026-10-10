@@ -23,7 +23,6 @@
 use interweave_profile_config::connectivity::{DCUTR_INFLIGHT_PER_PEER, DcutrConfig};
 use interweave_transport_api::TransportIdentity;
 use interweave_transport_runtime::{DialOrigin, SnapshotHandle};
-use libp2p::dcutr;
 use libp2p::swarm::ConnectionId;
 use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::{Multiaddr, PeerId};
@@ -122,7 +121,7 @@ pub fn build_behaviour(
     attribution: DialAttribution,
     policy: SnapshotHandle,
 ) -> (DcutrField, HolePunchCounterHandle) {
-    let scope = HolePunchScope::new(dcutr::Behaviour::new(local_peer), settings.budgets());
+    let scope = HolePunchScope::new(local_peer, settings.budgets());
     let counters = scope.counter_handle();
     (
         Toggle::from(Some(ClassGated::new(
