@@ -46,10 +46,24 @@
 //! listener of the same family -- is applied three times here: to the
 //! candidates the Swarm tells the crate about (a peer's Identify
 //! observed us on loopback, say), so what this profile SENDS in a
-//! CONNECT is inside it; to the listeners the runtime offers, for the
-//! same reason; and to every punch dial the crate issues, FILTERED
+//! CONNECT was inside it WHEN IT WAS OFFERED; to the listeners the
+//! runtime offers, for the same reason; and to every punch dial the
+//! crate issues, FILTERED
 //! (ADR-0052 rule 5): the far end loses only the refused address, never
-//! the punch. The crate's `Dial` carries its address list in a field the
+//! the punch.
+//!
+//! ONE GAP, recorded rather than closed: libp2p-dcutr 0.15.0 keeps every
+//! candidate it is offered in its own cache, an LRU of 20 nothing here
+//! can reach, and every new relayed handler's CONNECT carries it. So an
+//! address offered while its listener held, or its IP was the host's,
+//! is still sent after either is gone, until 20 newer ones push it out;
+//! the wrapper stops offering it again (`network_changed`,
+//! `forget_listener`) and that is all. Closing it means rebuilding the
+//! inner behaviour on a removal, which drops the crate's record of the
+//! attempts in flight that `network_changed` waits out -- a change of
+//! its own, not a filter (PR #250's recorded limit).
+//!
+//! The crate's `Dial` carries its address list in a field the
 //! Swarm crate keeps to itself, so the first place the list is visible
 //! is the pending hook -- and a hook can add addresses, never remove one
 //! -- so the filter runs THERE by denying the crate's dial and issuing
