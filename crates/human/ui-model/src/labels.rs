@@ -272,20 +272,20 @@ ui_texts! {
     TrustFailed => "Trust could not be read or changed. Nothing was changed.",
     /// ANDROID: the notification channel of the Stay-reachable mode, in
     /// the system's settings. The glossary's mode name; never a promise.
-    ReachableChannel => "Stay reachable", // PLACEHOLDER (en)
+    ReachableChannel => "Stay reachable",
     /// ANDROID: the title of the notification that shows while the
     /// network service runs under Stay reachable (ADR-0041).
-    ReachableTitle => "Stay reachable is on", // PLACEHOLDER (en)
+    ReachableTitle => "Stay reachable is on",
     /// ANDROID: its text. Says the app tries, never that it is reachable:
     /// the platform may still stop it (ADR-0041, Operational implications).
-    ReachableBody => "InterWeave keeps trying to stay reachable while this notification shows.", // PLACEHOLDER (en)
+    ReachableBody => "InterWeave tries to stay reachable while this notification is shown.",
     /// ANDROID: the notification channel of new messages.
-    MessagesChannel => "New messages", // PLACEHOLDER (en)
+    MessagesChannel => "New messages",
     /// ANDROID: the notice for one message no window has read. Never its
     /// sender or its content.
-    NewMessage => "New message", // PLACEHOLDER (en)
+    NewMessage => "New message",
     /// ANDROID: the notice for more than one. `{count}` is a number.
-    NewMessages => "New messages: {count}", // PLACEHOLDER (en)
+    NewMessages => "New messages: {count}",
     /// The list a made or possibly made change left to read again could
     /// not be read: it may not show that change. Never says that nothing
     /// changed. Opening the settings again reads it.
@@ -346,26 +346,25 @@ host_texts! {
     /// Android the app starts its own service.
     NotRunning => {
         daemon: "The transport daemon for this profile is not running. This window will connect when the daemon starts.",
-        // PLACEHOLDER (en)
-        embedded: "The network service is not running. This window will connect when it starts.",
+        embedded: "The network service is not running. The app will connect when the service starts.",
     },
     /// Trust could not be read or changed: the runtime is not reachable.
     TrustUnavailable => {
         daemon: "The transport daemon cannot be reached. Nothing was changed.",
-        embedded: "The network service is not running. Nothing was changed.", // PLACEHOLDER (en)
+        embedded: "The network service is not running. Nothing was changed.",
     },
     /// This client may not administer trust on this runtime. Not expected
     /// on Android, where the settings hold the in-process admin port; not
     /// yet shown unreachable there (relay 01a12495).
     TrustNotPermitted => {
         daemon: "This app is not allowed to change trust on this transport daemon. Nothing was changed.",
-        embedded: "This app is not allowed to change trust. Nothing was changed.", // PLACEHOLDER (en)
+        embedded: "This app is not allowed to change trust. Nothing was changed.",
     },
     /// The runtime refused the change: its own identity, or the list is
     /// full.
     TrustRefused => {
         daemon: "The transport daemon refused this change. Nothing was changed.",
-        embedded: "The network service refused this change. Nothing was changed.", // PLACEHOLDER (en)
+        embedded: "The network service refused this change. Nothing was changed.",
     },
     /// The runtime and the app are not the same release, so they share no
     /// version trust needs: what helps is bringing both to one release,
@@ -373,7 +372,6 @@ host_texts! {
     /// both; not yet shown unreachable there.
     TrustIncompatible => {
         daemon: "The transport daemon is a different version from this app, so trust cannot be read or changed here. Nothing was changed.",
-        // PLACEHOLDER (en)
         embedded: "This version of the app cannot read or change trust. Nothing was changed.",
     },
     /// The runtime did not confirm a change, which may have been made: the
@@ -381,7 +379,6 @@ host_texts! {
     /// that nothing changed (TRANSPORT.md's outcome-unknown class).
     TrustUnconfirmed => {
         daemon: "The transport daemon did not confirm the change for {peer}. The change may have been made. The list of trusted peers is being read again.",
-        // PLACEHOLDER (en)
         embedded: "The network service did not confirm the change for {peer}. The change may have been made. The list of trusted peers is being read again.",
     },
 }
@@ -438,7 +435,7 @@ pub mod placeholder_en {
         match class {
             ErrorClass::TransportUnavailable => match host {
                 RuntimeHost::Daemon => "The transport daemon cannot be reached.",
-                RuntimeHost::Embedded => "The network service is not running.", // PLACEHOLDER (en)
+                RuntimeHost::Embedded => "The network service is not running.",
             },
             ErrorClass::PeerNotTrusted => "This peer is not trusted for this profile.",
             ErrorClass::RouteUnavailable => "This route is not available now.",
@@ -475,7 +472,7 @@ pub mod placeholder_en {
             Connectivity::OnlinePartial => "Online, some peers might not reach you",
             Connectivity::Offline => match host {
                 RuntimeHost::Daemon => "Offline, transport daemon not running",
-                RuntimeHost::Embedded => "Offline, network service not running", // PLACEHOLDER (en)
+                RuntimeHost::Embedded => "Offline, network service not running",
             },
             Connectivity::Unknown => "Network status not known yet",
         }
