@@ -77,3 +77,26 @@ fn a_first_run_writes_the_profile_and_a_second_is_refused() {
         "nothing replaced"
     );
 }
+
+/// A legal profile name YAML would read as another scalar -- a null, a
+/// boolean, a number -- still round-trips: the first-run document writes
+/// it plain, and the name's `String` field takes the scalar's text, so
+/// the profile loads under its own name. Pinned because a change of YAML
+/// reader or of the field's type would break it silently.
+#[test]
+fn a_name_yaml_reads_as_another_scalar_round_trips() {
+    for name in ["null", "true", "no", "on", "123", "0x1F", "1e3", "-1"] {
+        let (_root, app) = app();
+        let paths =
+            ProfilePaths::resolve_embedded(name, TrustBoundary::new(&app).expect("a boundary"))
+                .expect("a legal name");
+        provision_embedded(&paths).expect("written");
+        let config = ProfileConfig::load(&paths)
+            .unwrap_or_else(|e| panic!("{name}: the provisioned profile loads: {e}"));
+        assert_eq!(
+            config.profile.map(|profile| profile.name).as_deref(),
+            Some(name),
+            "{name}"
+        );
+    }
+}
