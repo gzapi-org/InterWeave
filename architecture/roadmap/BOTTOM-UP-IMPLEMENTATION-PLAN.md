@@ -5009,13 +5009,7 @@ canonical form (human-client-ui.md §11) on the device — proved here, not
 deferrable, as §18 carried it; (g) the trust-audit sink's platform
 test shows a trust set in the embedded host's log under a filter
 stricter than INFO, so the sink's admission of the audit target is what
-is proved, not the default level; (h) OWASP
-Dependency-Check runs in CI against the NVD with the key as a repository
-secret, as a required context (`CLAUDE.md` §9's list and the ruleset) on
-`pull_request`, `merge_group` and pushes to `main` — a job that reports
-nothing gates nothing — its suppressions file holds only entries with
-their sentence, and the Gradle graph is green under it, the pin landed
-by devex-tooling;
+is proved, not the default level; (h) the Gradle graph's OSV.dev scan (§Dependency hygiene, A 2026-10-10: `osv-scanner` over the committed Gradle lockfiles, run locally, no CI job — the owner's words) has run against the head that closes the stage and the closing PR's body says so with what it found; `osv-scanner.toml` holds only `[[IgnoredVulns]]` entries with their reason, each reviewed; dependency locking is on and the lockfiles are committed; the README command is landed by devex-tooling;
 (i) the ledger holds no `stage-17` entry, and the closing record moves
 the status to the lowest open stage on the owner's word. No contract
 flips at this gate: the Android binding consumes contracts already
