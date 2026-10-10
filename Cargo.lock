@@ -3437,6 +3437,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "interweave-human-android-platform"
+version = "0.0.0"
+dependencies = [
+ "interweave-human-android-platform",
+ "interweave-human-app-core",
+ "interweave-human-client-api",
+ "interweave-human-store",
+ "interweave-human-transport-client",
+ "interweave-local-client-api",
+ "interweave-profile-config",
+ "interweave-profile-identity",
+ "interweave-transport-api",
+ "interweave-transport-embedded",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "interweave-human-app-core"
 version = "0.0.0"
 dependencies = [

@@ -48,6 +48,9 @@ members = [
     # native library; its Gradle project is apps/human-android/android.
     "apps/human-android",
     "crates/human/app-core",
+    # Stage 17 (plan section 20 steps 2-4): the Android client's Service
+    # side, host-testable.
+    "crates/human/android-platform",
     "crates/human/client-api",
     "crates/human/chat-protocol",
     "crates/human/core",
