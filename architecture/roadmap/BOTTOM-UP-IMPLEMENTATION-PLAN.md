@@ -4553,7 +4553,9 @@ rendered window with a scripted relayed path only. Met 2026-10-10 by
 and `human_chat.rs::a_relayed_peer_reads_relayed_through_the_client_beside_a_direct_control`
 prove the relayed route begin and the relayed reconnect live between
 two daemons through a bare-Swarm relay carrying the production
-relay-server field — one host, loopback, no NAT, no daemon as the relay;
+relay-server field, read at the presentation model that drives the
+indicator (not the rendered view, not AT-SPI) — one host, loopback, no
+NAT, no daemon as the relay;
 §20 gate (c)'s relayed row (Android↔desktop) stays open, this being its
 desktop groundwork. Windows and macOS were not built
 (12). The copy is placeholder: read by architect-cto against
@@ -5043,7 +5045,7 @@ Android key/backup/recovery failure cases
 
 Carried here from Stage 13 (§16): SPIKE-005 (a hostile same-uid process); the foreign-uid peer refused on a real OS (Stage 13 unit-tests it with an injected uid); `HandshakeSlot::source`.
 
-Carried here from Stage 15 (§18): the Windows binding behind the non-Unix stub (§18 (12), §16's named pipe, its ACL model and peer identity) and the BSL-1.0 decision that waits for it (§18 (14): `clipboard-win` and `error-code` through `arboard`, admitted nowhere until Windows is built); a real relayed path reaching the human client's route indicator — met on the desktop by #245 (2026-10-10, §18's record), the Android↔desktop proof staying §20 gate (c)'s.
+Carried here from Stage 15 (§18): the Windows binding behind the non-Unix stub (§18 (12), §16's named pipe, its ACL model and peer identity) and the BSL-1.0 decision that waits for it (§18 (14): `clipboard-win` and `error-code` through `arboard`, admitted nowhere until Windows is built); a real relayed path reaching the human client's route indicator — met on the desktop by #245 at the presentation model, not the rendered view (2026-10-10, §18's record), the Android↔desktop proof staying §20 gate (c)'s.
 
 Carried here from Stage 16 (§19): the Claude Code Channel bridge proved on one host's private address only — a second network, and the bridge exchanging with the human client's facade as the far end, plain and `;ce=br` (both §19 proofs used plain IPC sessions with untyped payloads there — step 4's recorded deviation), are this gate's integration proofs.
 
