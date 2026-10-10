@@ -83,18 +83,62 @@ fn identity() -> Option<ProfileIdentity> {
     }
 }
 
+/// `Native.startWithoutNetwork`'s answer when the posture runs: neither
+/// mode, since no runtime runs to have one (Native.kt's NETWORK_DENIED).
+const NETWORK_DENIED: jint = 2;
+
+/// Write the stand-in profile where the debug build needs one.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "Ok in a build without dev-stand-ins, which writes no profile"
+)]
+fn provision(app_data_dir: &str) -> Result<(), jint> {
+    #[cfg(feature = "dev-stand-ins")]
+    if let Err(e) = interweave_human_android_platform::stand_in::provision(
+        std::path::Path::new(app_data_dir),
+        PROFILE,
+    ) {
+        log(&format!("the stand-in profile could not be written: {e}"));
+        return Err(refused::PROFILE);
+    }
+    #[cfg(not(feature = "dev-stand-ins"))]
+    let _ = app_data_dir;
+    Ok(())
+}
+
+/// The code a refusal answers Java with, after logging it.
+fn refusal(why: &StartRefused) -> jint {
+    log(&format!("the network service did not start: {why:?}"));
+    match why {
+        StartRefused::Runtime(_) => refused::RUNTIME,
+        StartRefused::NoHumanEndpoint => refused::ENDPOINT,
+        StartRefused::StoreNeedsRecovery => refused::STORE_RECOVERY,
+        StartRefused::StoreNotPrivate(_) => refused::STORE_PRIVATE,
+        StartRefused::StoreUnavailable(_) => refused::STORE_UNAVAILABLE,
+        StartRefused::Thread(_) => refused::THREAD,
+    }
+}
+
+fn start_without_network(app_data_dir: &str) -> jint {
+    if let Err(code) = provision(app_data_dir) {
+        return code;
+    }
+    match ServiceHost::global().start_without_network(std::path::Path::new(app_data_dir), PROFILE) {
+        Ok(()) => {
+            log("no network access: the store is open and no runtime runs");
+            NETWORK_DENIED
+        }
+        Err(why) => refusal(&why),
+    }
+}
+
 fn start(app_data_dir: String) -> jint {
     let Some(identity) = identity() else {
         log("no identity source in this build: the network service does not start");
         return refused::NO_IDENTITY;
     };
-    #[cfg(feature = "dev-stand-ins")]
-    if let Err(e) = interweave_human_android_platform::stand_in::provision(
-        std::path::Path::new(&app_data_dir),
-        PROFILE,
-    ) {
-        log(&format!("the stand-in profile could not be written: {e}"));
-        return refused::PROFILE;
+    if let Err(code) = provision(&app_data_dir) {
+        return code;
     }
     let host = ServiceHost::global();
     match host.start(ServiceLaunch {
@@ -106,17 +150,7 @@ fn start(app_data_dir: String) -> jint {
             Some(AvailabilityMode::StayReachable) => 1,
             _ => 0,
         },
-        Err(why) => {
-            log(&format!("the network service did not start: {why:?}"));
-            match why {
-                StartRefused::Runtime(_) => refused::RUNTIME,
-                StartRefused::NoHumanEndpoint => refused::ENDPOINT,
-                StartRefused::StoreNeedsRecovery => refused::STORE_RECOVERY,
-                StartRefused::StoreNotPrivate(_) => refused::STORE_PRIVATE,
-                StartRefused::StoreUnavailable(_) => refused::STORE_UNAVAILABLE,
-                StartRefused::Thread(_) => refused::THREAD,
-            }
-        }
+        Err(why) => refusal(&why),
     }
 }
 
@@ -133,6 +167,42 @@ extern "system" fn Java_org_interweave_human_Native_start<'caller>(
 ) -> jint {
     env.with_env(|env| -> Result<jint, jni::errors::Error> {
         Ok(start(app_data_dir.try_to_string(env)?))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// `Native.startWithoutNetwork(appDataDir)`.
+#[allow(
+    unsafe_code,
+    reason = "the JVM finds a native method by its unmangled name"
+)]
+#[unsafe(no_mangle)]
+extern "system" fn Java_org_interweave_human_Native_startWithoutNetwork<'caller>(
+    mut env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    app_data_dir: JString<'caller>,
+) -> jint {
+    env.with_env(|env| -> Result<jint, jni::errors::Error> {
+        Ok(start_without_network(&app_data_dir.try_to_string(env)?))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// `Native.waitNetworkAsk(timeoutMs)`: whether the person asked, from
+/// the window, for the network access the platform withholds.
+#[allow(
+    unsafe_code,
+    reason = "the JVM finds a native method by its unmangled name"
+)]
+#[unsafe(no_mangle)]
+extern "system" fn Java_org_interweave_human_Native_waitNetworkAsk<'caller>(
+    mut env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    timeout_ms: jlong,
+) -> jboolean {
+    env.with_env(|_| -> Result<jboolean, jni::errors::Error> {
+        let timeout = Duration::from_millis(u64::try_from(timeout_ms).unwrap_or(0));
+        Ok(crate::activity::NETWORK_ASK.wait(timeout))
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }
@@ -211,6 +281,8 @@ fn text(key: jint, count: jint) -> String {
         1 => UiText::ReachableTitle,
         2 => UiText::ReachableBody,
         3 => UiText::MessagesChannel,
+        5 => UiText::NetworkOffTitle,
+        6 => UiText::NetworkOffBody,
         _ if count == 1 => UiText::NewMessage,
         _ => UiText::NewMessages,
     };

@@ -7,7 +7,8 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::time::Duration;
 
 use interweave_human_android_platform::{ServiceHost, ViewLink, ViewSide};
 use interweave_human_app_core::{ModelSide, Opener, Problem, Surface};
@@ -32,8 +33,46 @@ impl Surface for AndroidSurface {
     }
 }
 
-/// A link's destination. Not opened yet: the platform's intent is a
-/// later step, and a link pressed now is logged, never followed.
+/// The person's ask for network access, raised on the window's thread
+/// and taken by the Activity's Kotlin thread (`Native.waitNetworkAsk`),
+/// which shows the platform's prompt or the app's settings. Asks made
+/// before one is taken count as one.
+pub(crate) struct Ask {
+    asked: Mutex<bool>,
+    changed: Condvar,
+}
+
+impl Ask {
+    const fn new() -> Self {
+        Self {
+            asked: Mutex::new(false),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn raise(&self) {
+        *self.asked.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        self.changed.notify_all();
+    }
+
+    /// Wait at most `timeout` for an ask, and take it: true when there
+    /// was one.
+    pub(crate) fn wait(&self, timeout: Duration) -> bool {
+        let asked = self.asked.lock().unwrap_or_else(PoisonError::into_inner);
+        let (mut asked, _) = self
+            .changed
+            .wait_timeout_while(asked, timeout, |asked| !*asked)
+            .unwrap_or_else(PoisonError::into_inner);
+        std::mem::take(&mut *asked)
+    }
+}
+
+pub(crate) static NETWORK_ASK: Ask = Ask::new();
+
+/// What the window opens outside itself: links not yet -- the platform's
+/// intent is a later step, and a link pressed now is logged, never
+/// followed -- and the ask for network access, which the Activity's
+/// Kotlin side carries out.
 struct AndroidOpener;
 
 impl Opener for AndroidOpener {
@@ -42,7 +81,7 @@ impl Opener for AndroidOpener {
     }
 
     fn ask_network_access(&mut self) {
-        log("network access was asked for: the ask is not built yet on Android");
+        NETWORK_ASK.raise();
     }
 }
 
