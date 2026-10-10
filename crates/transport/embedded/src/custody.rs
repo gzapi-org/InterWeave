@@ -124,9 +124,81 @@ pub enum CipherFailure {
     Unavailable(String),
 }
 
-/// The platform's wrapping cipher: on Android, an AES-256-GCM key in
-/// `AndroidKeyStore`, one per [`KeyUnlockPolicy`] (the seam agreed with
-/// the app's adapter, rust-ui-dev's 01a12567). `Send + Sync`, and its
+/// Which wrapping key a seal or an open uses: the PROFILE's, for one
+/// policy -- computed here from the profile's paths, never read from a
+/// record, and used by the adapter as given ([`KeyRef::alias`]). One key
+/// per profile is what keeps profiles apart: sealing one rotates no
+/// other profile's key, and a record copied into another profile's
+/// directory is opened under that profile's key and fails
+/// authentication (`a_record_copied_from_another_profile_does_not_open`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyRef {
+    profile: String,
+    policy: KeyUnlockPolicy,
+}
+
+impl KeyRef {
+    /// The key of `paths`' profile for `policy`.
+    #[must_use]
+    pub fn new(paths: &ProfilePaths, policy: KeyUnlockPolicy) -> Self {
+        Self {
+            profile: paths.profile().to_owned(),
+            policy,
+        }
+    }
+
+    /// The profile's name.
+    #[must_use]
+    pub fn profile(&self) -> &str {
+        &self.profile
+    }
+
+    /// The policy the key is generated under.
+    #[must_use]
+    pub fn policy(&self) -> KeyUnlockPolicy {
+        self.policy
+    }
+
+    /// The Keystore alias, `interweave.iwk1.<profile>.<policy>`: the one
+    /// name the adapter generates, deletes and opens under, so no adapter
+    /// derives it differently. A profile name holds no `.`
+    /// (`ProfilePaths`' rule: letters, digits, `-` and `_`), so two
+    /// profiles' aliases never meet (`aliases_are_one_per_profile_and_policy`).
+    #[must_use]
+    pub fn alias(&self) -> String {
+        format!(
+            "interweave.iwk1.{}.{}",
+            self.profile,
+            policy_name(self.policy)
+        )
+    }
+
+    /// Every key this profile may hold, one per policy: what a seal
+    /// deletes before it generates.
+    #[must_use]
+    pub fn of_profile(&self) -> [KeyRef; 2] {
+        [
+            KeyUnlockPolicy::BackgroundCompatible,
+            KeyUnlockPolicy::UserPresence,
+        ]
+        .map(|policy| KeyRef {
+            profile: self.profile.clone(),
+            policy,
+        })
+    }
+}
+
+fn policy_name(policy: KeyUnlockPolicy) -> &'static str {
+    match policy {
+        KeyUnlockPolicy::BackgroundCompatible => "background-compatible",
+        KeyUnlockPolicy::UserPresence => "user-presence",
+    }
+}
+
+/// The platform's wrapping cipher: on Android, AES-256-GCM keys in
+/// `AndroidKeyStore`, one per profile and policy, named by [`KeyRef`]
+/// (the seam agreed with the app's adapter, rust-ui-dev's 01a12567,
+/// keyed by profile after #256's review). `Send + Sync`, and its
 /// calls may block: the adapter reaches the platform from whatever thread
 /// asks.
 ///
@@ -137,29 +209,26 @@ pub enum CipherFailure {
 /// Java heap for the length of one call, and what the collector copied
 /// meanwhile is not reached. A limit, not a zeroization claim.
 pub trait SeedCipher: Send + Sync {
-    /// Encrypt `seed` with `aad` under a wrapping key the cipher
-    /// GENERATES for this seal, deleting any key it held for `policy`
-    /// first -- so a restore after [`CipherFailure::KeyInvalidated`]
-    /// never reuses the invalidated key, and an envelope sealed before no
-    /// longer opens. Only [`provision`] and [`restore`] seal.
+    /// Encrypt `seed` with `aad` under a key the cipher GENERATES at
+    /// `key`'s alias for this seal, after deleting EVERY key of `key`'s
+    /// profile ([`KeyRef::of_profile`], both policies) and no other
+    /// profile's -- so a restore after [`CipherFailure::KeyInvalidated`]
+    /// never reuses the invalidated key, and an envelope of this profile
+    /// sealed before, under either policy, no longer opens. Only
+    /// [`provision`] and [`restore`] seal.
     ///
     /// # Errors
     /// [`CipherFailure`].
-    fn seal(
-        &self,
-        policy: KeyUnlockPolicy,
-        aad: &[u8],
-        seed: &Seed,
-    ) -> Result<Sealed, CipherFailure>;
+    fn seal(&self, key: &KeyRef, aad: &[u8], seed: &Seed) -> Result<Sealed, CipherFailure>;
 
     /// Decrypt `sealed` (ciphertext and tag) with `iv` and `aad` under the
-    /// wrapping key for `policy`.
+    /// key at `key`'s alias.
     ///
     /// # Errors
     /// [`CipherFailure`].
     fn open(
         &self,
-        policy: KeyUnlockPolicy,
+        key: &KeyRef,
         iv: &[u8; IV_LEN],
         sealed: &[u8; SEALED_LEN],
         aad: &[u8],
@@ -348,13 +417,22 @@ pub fn custody_file(paths: &ProfilePaths) -> PathBuf {
 /// What reading the record found.
 enum Read {
     Absent,
-    Bytes(Vec<u8>),
+    /// A regular file's bytes, and whether only its owner may read it.
+    /// A record that is not private is refused by [`unlock`]; its
+    /// `PeerId` field still answers whose it is, for [`restore`].
+    Bytes {
+        bytes: Vec<u8>,
+        private: bool,
+    },
 }
 
 /// Read the record under its directory as judged (ADR-0028), as the
 /// identity loader reads a key: the directory owner-only and this uid's,
-/// the entry not a link, the open handle the same inode, owner-only, and
-/// no more read than a record can hold.
+/// the entry not a link, the open handle the same inode, and no more read
+/// than a record can hold. Whether the file is owner-only is REPORTED,
+/// not refused here: [`unlock`] refuses it, [`restore`] still asks it
+/// whose it is. A link or another kind of entry is refused outright --
+/// nothing is read through it.
 fn read_record(paths: &ProfilePaths) -> Result<Read, UnlockRefused> {
     let io = |e: std::io::Error| UnlockRefused::Unavailable(e.to_string());
     let dir = match resolve_owned_private_dir_within(paths.identity_dir(), paths.boundary()) {
@@ -379,15 +457,12 @@ fn read_record(paths: &ProfilePaths) -> Result<Read, UnlockRefused> {
     let opened = file.metadata().map_err(io)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        use std::os::unix::fs::MetadataExt as _;
         // The same inode the link check saw: belt and braces behind the
         // private directory, which already stops the entry being swapped,
         // and NO TEST REACHES IT -- a swap between two syscalls cannot be
         // scheduled -- as in the identity loader.
         if (opened.dev(), opened.ino()) != (here.dev(), here.ino()) || !opened.is_file() {
-            return Err(not_private);
-        }
-        if opened.permissions().mode() & 0o077 != 0 {
             return Err(not_private);
         }
     }
@@ -402,7 +477,45 @@ fn read_record(paths: &ProfilePaths) -> Result<Read, UnlockRefused> {
     // One past the bound, so an oversized record is seen as one.
     let limit = u64::try_from(ENVELOPE_LEN + PEER_MAX + 1).unwrap_or(u64::MAX);
     file.take(limit).read_to_end(&mut bytes).map_err(io)?;
-    Ok(Read::Bytes(bytes))
+    #[cfg(unix)]
+    let private = {
+        use std::os::unix::fs::PermissionsExt as _;
+        // Group and other hold no permission bit, read as the mask it is,
+        // as `profile-config`'s `is_owner_only` reads it.
+        #[expect(clippy::verbose_bit_mask, reason = "a permission mask reads as one")]
+        let owner_only = opened.permissions().mode() & 0o077 == 0;
+        owner_only
+    };
+    #[cfg(not(unix))]
+    let private = false;
+    Ok(Read::Bytes { bytes, private })
+}
+
+/// The bytes of a record [`unlock`] may use: its own, owner-only.
+fn private_bytes(paths: &ProfilePaths) -> Result<Option<Vec<u8>>, UnlockRefused> {
+    match read_record(paths)? {
+        Read::Absent => Ok(None),
+        Read::Bytes { private: false, .. } => Err(UnlockRefused::RecoveryRequired(
+            RecoveryCause::Record(RecordRefused::NotPrivate),
+        )),
+        Read::Bytes {
+            bytes,
+            private: true,
+        } => Ok(Some(bytes)),
+    }
+}
+
+/// Whose record `bytes` is, from its `PeerId` field ALONE: a header
+/// damaged, a policy swapped or a ciphertext flipped leaves the field
+/// readable, and the field is public. `None` only when no `PeerId` can
+/// be read there.
+fn named_peer(bytes: &[u8]) -> Option<TransportIdentity> {
+    if bytes.len() <= ENVELOPE_LEN || bytes.len() > ENVELOPE_LEN + PEER_MAX {
+        return None;
+    }
+    std::str::from_utf8(&bytes[ENVELOPE_LEN..])
+        .ok()
+        .and_then(|text| TransportIdentity::parse(text).ok())
 }
 
 /// The `PeerId` `seed` derives through the production derivation, and
@@ -422,9 +535,9 @@ fn identity_of(seed: &Seed) -> Option<(ProfileIdentity, TransportIdentity)> {
 /// # Errors
 /// [`UnlockRefused`], as [`unlock`] would answer before the cipher.
 pub fn recorded_identity(paths: &ProfilePaths) -> Result<Option<TransportIdentity>, UnlockRefused> {
-    match read_record(paths)? {
-        Read::Absent => Ok(None),
-        Read::Bytes(bytes) => parse(&bytes)
+    match private_bytes(paths)? {
+        None => Ok(None),
+        Some(bytes) => parse(&bytes)
             .map(|parsed| Some(parsed.peer))
             .map_err(|refused| UnlockRefused::RecoveryRequired(RecoveryCause::Record(refused))),
     }
@@ -440,15 +553,14 @@ pub fn unlock(
     paths: &ProfilePaths,
     cipher: &dyn SeedCipher,
 ) -> Result<ProfileIdentity, UnlockRefused> {
-    let record = match read_record(paths)? {
-        Read::Absent => return Err(UnlockRefused::Unprovisioned),
-        Read::Bytes(bytes) => bytes,
+    let Some(record) = private_bytes(paths)? else {
+        return Err(UnlockRefused::Unprovisioned);
     };
     let parsed = parse(&record)
         .map_err(|refused| UnlockRefused::RecoveryRequired(RecoveryCause::Record(refused)))?;
     let seed = cipher
         .open(
-            parsed.policy,
+            &KeyRef::new(paths, parsed.policy),
             &parsed.iv,
             &parsed.sealed,
             &aad(parsed.policy, &parsed.peer),
@@ -474,6 +586,7 @@ pub fn unlock(
 
 /// Seal `identity`'s seed for `policy` and frame the record.
 fn seal_record(
+    paths: &ProfilePaths,
     cipher: &dyn SeedCipher,
     policy: KeyUnlockPolicy,
     identity: &ProfileIdentity,
@@ -489,7 +602,7 @@ fn seal_record(
             .map_err(unusable)?,
     );
     let Sealed { iv, sealed } = cipher
-        .seal(policy, &aad(policy, &peer), &seed)
+        .seal(&KeyRef::new(paths, policy), &aad(policy, &peer), &seed)
         .map_err(CustodyRefused::Cipher)?;
     if iv.len() != IV_LEN || sealed.len() != SEALED_LEN {
         return Err(CustodyRefused::CipherShape);
@@ -522,12 +635,12 @@ pub fn provision(
 ) -> Result<TransportIdentity, CustodyRefused> {
     let _held = hold(paths)?;
     // Checked before sealing as well, because a seal replaces the
-    // policy's wrapping key: sealing first would leave the existing
+    // profile's wrapping keys: sealing first would leave the existing
     // record unopenable even though the write is then refused.
     if custody_present(paths)? {
         return Err(CustodyRefused::AlreadyProvisioned);
     }
-    let (peer, record) = seal_record(cipher, policy, identity)?;
+    let (peer, record) = seal_record(paths, cipher, policy, identity)?;
     match create_private_exclusive_within(&custody_file(paths), &record, paths.boundary()) {
         Ok(()) => Ok(peer),
         Err(PersistError::AlreadyExists) => Err(CustodyRefused::AlreadyProvisioned),
@@ -536,7 +649,7 @@ pub fn provision(
 }
 
 /// The profile's lock, taken without waiting, for the whole of a flow
-/// that seals. A seal rotates the policy's key, so check-seal-create is
+/// that seals. A seal rotates the profile's keys, so check-seal-create is
 /// not atomic by itself: two first runs could both pass the check, the
 /// second seal replacing the key the first's record -- the one the
 /// exclusive create keeps -- was sealed under, and BOTH lose. Held, the
@@ -561,15 +674,19 @@ fn custody_present(paths: &ProfilePaths) -> Result<bool, CustodyRefused> {
 
 /// Re-store the identity `phrase` restores, sealed for `policy` under a
 /// fresh wrapping key -- ONLY if it restores `expected` (ADR-0033's
-/// mandatory expected `PeerId`), and only over a record that names
-/// `expected` or that cannot be read as naming anyone. Where `expected`
+/// mandatory expected `PeerId`), and only over a record whose `PeerId`
+/// field names `expected` or holds no `PeerId` at all -- whatever its
+/// mode, header or ciphertext, since those say nothing about whose it
+/// is. A record that cannot be read (a link, another kind of entry, a
+/// directory refused) is not replaced: it may name another. Where `expected`
 /// comes from is the recovery flow's (step 7). Under the profile's
 /// lock, as [`provision`]: refused while a host runs.
 ///
 /// # Errors
 /// [`CustodyRefused::OtherIdentity`] for a phrase restoring another
 /// `PeerId`; [`CustodyRefused::RecordNamesOther`] when the record names
-/// another; nothing is written in either case.
+/// another; [`CustodyRefused::Unreadable`] when it cannot be read;
+/// nothing is written in any of these.
 pub fn restore(
     paths: &ProfilePaths,
     cipher: &dyn SeedCipher,
@@ -581,26 +698,22 @@ pub fn restore(
         return Err(CustodyRefused::OtherIdentity);
     }
     let _held = hold(paths)?;
-    // A record that parses names its PeerId, and only `expected`'s may be
-    // replaced; one refused for its own shape -- the damage recovery
-    // exists for -- names nobody. A record that could not be READ is
-    // neither: it may name another profile, so nothing is written.
+    // Whose record this is comes from its PeerId field alone (`named_peer`),
+    // read whatever the file's mode or the envelope's state; only a record
+    // with no PeerId there names nobody. One that cannot be read at all may
+    // name another, so nothing is written over it.
     match read_record(paths) {
-        Ok(Read::Bytes(bytes)) => {
-            if let Ok(parsed) = parse(&bytes)
-                && parsed.peer.as_str() != expected.as_str()
-            {
+        Ok(Read::Absent) => {}
+        Ok(Read::Bytes { bytes, .. }) => {
+            if named_peer(&bytes).is_some_and(|named| named.as_str() != expected.as_str()) {
                 return Err(CustodyRefused::RecordNamesOther);
             }
-        }
-        Ok(Read::Absent)
-        | Err(UnlockRefused::RecoveryRequired(RecoveryCause::Record(RecordRefused::NotPrivate))) => {
         }
         Err(e) => return Err(CustodyRefused::Unreadable(e.to_string())),
     }
     let identity = ProfileIdentity::from_phrase(phrase)
         .map_err(|e| CustodyRefused::Identity(e.to_string()))?;
-    let (_, record) = seal_record(cipher, policy, &identity)?;
+    let (_, record) = seal_record(paths, cipher, policy, &identity)?;
     write_private_atomic_within(&custody_file(paths), &record, paths.boundary())
         .map_err(CustodyRefused::Storage)?;
     Ok(identity)

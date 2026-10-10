@@ -30,8 +30,8 @@ use interweave_profile_config::{ProfileLock, ProfilePaths, TrustBoundary};
 use interweave_profile_identity::{ProfileIdentity, RecoveryPhrase};
 use interweave_transport_api::TransportIdentity;
 use interweave_transport_embedded::custody::{
-    self, CipherFailure, CustodyRefused, ENVELOPE_LEN, IV_LEN, RecordRefused, RecoveryCause,
-    SEALED_LEN, Sealed, Seed, SeedCipher, UnlockRefused,
+    self, CipherFailure, CustodyRefused, ENVELOPE_LEN, IV_LEN, KeyRef, RecordRefused,
+    RecoveryCause, SEALED_LEN, Sealed, Seed, SeedCipher, UnlockRefused,
 };
 
 const PROFILE: &str = "work";
@@ -78,12 +78,14 @@ fn identity(mnemonic: &str) -> ProfileIdentity {
     ProfileIdentity::from_phrase(&RecoveryPhrase::parse(mnemonic).expect("phrase")).expect("id")
 }
 
-/// The device's Keystore, in software: one AES-256-GCM key per policy,
-/// a NEW one on every seal as the seam requires, the IV the cipher's own.
-/// `fail` makes `open` answer as the platform would on that failure.
+/// The device's Keystore, in software: one AES-256-GCM key per alias
+/// (`KeyRef::alias`, a profile and a policy), and on every seal the
+/// profile's keys deleted and a NEW one made, as the seam requires; the
+/// IV the cipher's own. `fail` makes `open` answer as the platform would
+/// on that failure.
 #[derive(Default)]
 struct SoftCipher {
-    keys: Mutex<HashMap<u8, [u8; 32]>>,
+    keys: Mutex<HashMap<String, [u8; 32]>>,
     seals: AtomicUsize,
     fail: Mutex<Option<CipherFailure>>,
 }
@@ -99,8 +101,18 @@ impl SoftCipher {
     fn fail_with(&self, failure: Option<CipherFailure>) {
         *self.fail.lock().unwrap() = failure;
     }
-    fn forget(&self, policy: KeyUnlockPolicy) {
-        self.keys.lock().unwrap().remove(&slot(policy));
+    fn forget(&self, paths: &ProfilePaths, policy: KeyUnlockPolicy) {
+        self.keys
+            .lock()
+            .unwrap()
+            .remove(&KeyRef::new(paths, policy).alias());
+    }
+    /// Put a key at `paths`' alias for `policy` without sealing anything.
+    fn plant(&self, paths: &ProfilePaths, policy: KeyUnlockPolicy) {
+        self.keys
+            .lock()
+            .unwrap()
+            .insert(KeyRef::new(paths, policy).alias(), rand::random());
     }
     fn seals(&self) -> usize {
         self.seals.load(Ordering::SeqCst)
@@ -108,15 +120,15 @@ impl SoftCipher {
 }
 
 impl SeedCipher for SoftCipher {
-    fn seal(
-        &self,
-        policy: KeyUnlockPolicy,
-        aad: &[u8],
-        seed: &Seed,
-    ) -> Result<Sealed, CipherFailure> {
+    fn seal(&self, key_ref: &KeyRef, aad: &[u8], seed: &Seed) -> Result<Sealed, CipherFailure> {
         self.seals.fetch_add(1, Ordering::SeqCst);
         let key: [u8; 32] = rand::random();
-        self.keys.lock().unwrap().insert(slot(policy), key);
+        let mut keys = self.keys.lock().unwrap();
+        for of_profile in key_ref.of_profile() {
+            keys.remove(&of_profile.alias());
+        }
+        keys.insert(key_ref.alias(), key);
+        drop(keys);
         let iv: [u8; IV_LEN] = rand::random();
         let sealed = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key))
             .encrypt(
@@ -135,7 +147,7 @@ impl SeedCipher for SoftCipher {
 
     fn open(
         &self,
-        policy: KeyUnlockPolicy,
+        key_ref: &KeyRef,
         iv: &[u8; IV_LEN],
         sealed: &[u8; SEALED_LEN],
         aad: &[u8],
@@ -147,7 +159,7 @@ impl SeedCipher for SoftCipher {
             .keys
             .lock()
             .unwrap()
-            .get(&slot(policy))
+            .get(&key_ref.alias())
             .ok_or(CipherFailure::KeyMissing)?;
         let plain = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key))
             .decrypt(Nonce::from_slice(iv), Payload { msg: sealed, aad })
@@ -161,12 +173,12 @@ impl SeedCipher for SoftCipher {
 struct Substituting(Seed);
 
 impl SeedCipher for Substituting {
-    fn seal(&self, _: KeyUnlockPolicy, _: &[u8], _: &Seed) -> Result<Sealed, CipherFailure> {
+    fn seal(&self, _: &KeyRef, _: &[u8], _: &Seed) -> Result<Sealed, CipherFailure> {
         Err(CipherFailure::Unavailable("not used".to_owned()))
     }
     fn open(
         &self,
-        _: KeyUnlockPolicy,
+        _: &KeyRef,
         _: &[u8; IV_LEN],
         _: &[u8; SEALED_LEN],
         _: &[u8],
@@ -182,7 +194,7 @@ struct Misshapen {
 }
 
 impl SeedCipher for Misshapen {
-    fn seal(&self, _: KeyUnlockPolicy, _: &[u8], _: &Seed) -> Result<Sealed, CipherFailure> {
+    fn seal(&self, _: &KeyRef, _: &[u8], _: &Seed) -> Result<Sealed, CipherFailure> {
         Ok(Sealed {
             iv: vec![0; self.iv],
             sealed: vec![0; self.sealed],
@@ -190,7 +202,7 @@ impl SeedCipher for Misshapen {
     }
     fn open(
         &self,
-        _: KeyUnlockPolicy,
+        _: &KeyRef,
         _: &[u8; IV_LEN],
         _: &[u8; SEALED_LEN],
         _: &[u8],
@@ -203,7 +215,16 @@ impl SeedCipher for Misshapen {
 /// `0700` under an other-writable parent no walk may cross.
 struct App {
     _root: tempfile::TempDir,
+    dir: PathBuf,
     paths: ProfilePaths,
+}
+
+impl App {
+    /// Another profile of the same app, under the same boundary.
+    fn profile(&self, name: &str) -> ProfilePaths {
+        ProfilePaths::resolve_embedded(name, TrustBoundary::new(&self.dir).expect("a boundary"))
+            .expect("paths")
+    }
 }
 
 fn new_app() -> App {
@@ -220,7 +241,11 @@ fn new_app() -> App {
     let paths =
         ProfilePaths::resolve_embedded(PROFILE, TrustBoundary::new(&dir).expect("a boundary"))
             .expect("paths");
-    App { _root: root, paths }
+    App {
+        _root: root,
+        dir,
+        paths,
+    }
 }
 
 fn record(app: &App) -> Vec<u8> {
@@ -363,15 +388,9 @@ fn the_swapped_policy_fails_with_both_keys_held() {
     )
     .expect("stored");
     let good = record(&app);
-    // The other policy's key, sealed for another profile's record.
-    let other = new_app();
-    custody::provision(
-        &other.paths,
-        &cipher,
-        &ProfileIdentity::generate(),
-        KeyUnlockPolicy::UserPresence,
-    )
-    .expect("the other key");
+    // The profile's key for the other policy, which no seal leaves
+    // beside the first: planted.
+    cipher.plant(&app.paths, KeyUnlockPolicy::UserPresence);
     let mut swapped = good.clone();
     swapped[5] = 1;
     put(&app, &swapped);
@@ -483,7 +502,7 @@ fn another_wrapping_key_fails_authentication() {
     .expect("stored");
     custody::unlock(&app.paths, &cipher).expect("the control unlocks");
     let other = SoftCipher::default();
-    other.keys.lock().unwrap().insert(1, rand::random());
+    other.plant(&app.paths, KeyUnlockPolicy::UserPresence);
     assert_eq!(
         custody::unlock(&app.paths, &other).err(),
         Some(UnlockRefused::RecoveryRequired(
@@ -516,7 +535,7 @@ fn an_invalidated_or_missing_key_requires_recovery_and_mints_nothing() {
         let before = record(&app);
 
         if failure == CipherFailure::KeyMissing {
-            cipher.forget(KeyUnlockPolicy::UserPresence);
+            cipher.forget(&app.paths, KeyUnlockPolicy::UserPresence);
         } else {
             cipher.fail_with(Some(failure.clone()));
         }
@@ -989,4 +1008,184 @@ fn a_seed_formats_without_its_bytes() {
     }
     assert_eq!(format!("{seed:?}"), format!("{:?}", Seed::new([0; 32])));
     assert_eq!(seed.expose(), &bytes);
+}
+
+/// Each profile's key is its own: provisioning and restoring a second
+/// profile under the same policy rotate none of the first's, and both
+/// records open.
+#[test]
+fn a_second_profile_under_the_same_policy_leaves_the_first_openable() {
+    let vectors = two();
+    let cipher = SoftCipher::default();
+    for policy in POLICIES {
+        let work = new_app();
+        let home = work.profile("home");
+        custody::provision(&work.paths, &cipher, &identity(&vectors[0].0), policy)
+            .expect("work stored");
+        custody::provision(&home, &cipher, &identity(&vectors[1].0), policy).expect("home stored");
+        custody::restore(
+            &home,
+            &cipher,
+            &RecoveryPhrase::parse(&vectors[1].0).expect("phrase"),
+            &TransportIdentity::parse(vectors[1].1.clone()).expect("peer"),
+            policy,
+        )
+        .expect("home restored");
+        assert_eq!(
+            peer_of(&custody::unlock(&work.paths, &cipher).expect("work still opens")),
+            vectors[0].1
+        );
+        assert_eq!(
+            peer_of(&custody::unlock(&home, &cipher).expect("home opens")),
+            vectors[1].1
+        );
+    }
+}
+
+/// A record copied from another profile's directory is opened under THIS
+/// profile's key and fails authentication: it never unlocks this profile
+/// as the other. The profile's own record opens (the control).
+#[test]
+fn a_record_copied_from_another_profile_does_not_open() {
+    let vectors = two();
+    for policy in POLICIES {
+        let app = new_app();
+        let home = app.profile("home");
+        let cipher = SoftCipher::default();
+        custody::provision(&app.paths, &cipher, &identity(&vectors[0].0), policy)
+            .expect("work stored");
+        custody::provision(&home, &cipher, &identity(&vectors[1].0), policy).expect("home stored");
+        let own = record(&app);
+        let copied = std::fs::read(custody::custody_file(&home)).expect("home's record");
+        put(&app, &copied);
+        assert_eq!(
+            custody::unlock(&app.paths, &cipher).err(),
+            Some(UnlockRefused::RecoveryRequired(
+                RecoveryCause::Authentication
+            ))
+        );
+        put(&app, &own);
+        assert_eq!(
+            peer_of(&custody::unlock(&app.paths, &cipher).expect("its own opens")),
+            vectors[0].1
+        );
+    }
+}
+
+/// A restore under the OTHER policy retires the profile's old key too: a
+/// copy of the record from before it no longer opens, whichever policy
+/// it was sealed under. The restored record opens (the control).
+#[test]
+fn a_restore_under_the_other_policy_retires_the_old_record() {
+    let (mnemonic, frozen) = vectors().remove(0);
+    let app = new_app();
+    let cipher = SoftCipher::default();
+    custody::provision(
+        &app.paths,
+        &cipher,
+        &identity(&mnemonic),
+        KeyUnlockPolicy::BackgroundCompatible,
+    )
+    .expect("stored");
+    let old = record(&app);
+    custody::restore(
+        &app.paths,
+        &cipher,
+        &RecoveryPhrase::parse(&mnemonic).expect("phrase"),
+        &TransportIdentity::parse(frozen.clone()).expect("peer"),
+        KeyUnlockPolicy::UserPresence,
+    )
+    .expect("restored");
+    assert_eq!(
+        peer_of(&custody::unlock(&app.paths, &cipher).expect("opens")),
+        frozen
+    );
+    put(&app, &old);
+    assert_eq!(
+        custody::unlock(&app.paths, &cipher).err(),
+        Some(UnlockRefused::RecoveryRequired(RecoveryCause::KeyMissing))
+    );
+}
+
+/// Whose record it is comes from its `PeerId` field, whatever its mode or
+/// header: restore refuses to replace a record naming another `PeerId`
+/// when it is readable by others or its header is damaged, and refuses a
+/// link it cannot read through; the same restores of the record's own
+/// identity proceed (the controls).
+#[test]
+fn restore_asks_whose_record_it_is_whatever_its_mode_or_header() {
+    let vectors = two();
+    let own = TransportIdentity::parse(vectors[0].1.clone()).expect("peer");
+    let other = TransportIdentity::parse(vectors[1].1.clone()).expect("peer");
+    let phrase = |i: usize| RecoveryPhrase::parse(&vectors[i].0).expect("phrase");
+    let policy = KeyUnlockPolicy::BackgroundCompatible;
+
+    let app = new_app();
+    let cipher = SoftCipher::default();
+    custody::provision(&app.paths, &cipher, &identity(&vectors[0].0), policy).expect("stored");
+    let good = record(&app);
+    let path = custody::custody_file(&app.paths);
+
+    // Readable by others.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+    assert!(matches!(
+        custody::restore(&app.paths, &cipher, &phrase(1), &other, policy),
+        Err(CustodyRefused::RecordNamesOther)
+    ));
+    assert_eq!(record(&app), good);
+    custody::restore(&app.paths, &cipher, &phrase(0), &own, policy).expect("its own, over 0644");
+
+    // A damaged header, the PeerId field intact.
+    let mut damaged = record(&app);
+    damaged[0] ^= 1;
+    put(&app, &damaged);
+    assert!(matches!(
+        custody::restore(&app.paths, &cipher, &phrase(1), &other, policy),
+        Err(CustodyRefused::RecordNamesOther)
+    ));
+    assert_eq!(record(&app), damaged);
+    custody::restore(&app.paths, &cipher, &phrase(0), &own, policy)
+        .expect("its own, over a damaged header");
+
+    // A link in the record's place: nothing read through it, nothing written.
+    let real = path.with_extension("real");
+    std::fs::rename(&path, &real).expect("move");
+    std::os::unix::fs::symlink(&real, &path).expect("link");
+    assert!(matches!(
+        custody::restore(&app.paths, &cipher, &phrase(0), &own, policy),
+        Err(CustodyRefused::Unreadable(_))
+    ));
+    assert!(
+        std::fs::symlink_metadata(&path)
+            .expect("still there")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(cipher.seals(), 3, "the two controls sealed, nothing else");
+}
+
+/// One alias per profile and policy: two profiles' aliases never meet,
+/// and `of_profile` names exactly the profile's own two.
+#[test]
+fn aliases_are_one_per_profile_and_policy() {
+    let app = new_app();
+    let profiles = [
+        app.paths.profile().to_owned(),
+        "home".to_owned(),
+        "work-2".to_owned(),
+    ];
+    let mut aliases = std::collections::BTreeSet::new();
+    for name in &profiles {
+        let paths = app.profile(name);
+        for policy in POLICIES {
+            let key = KeyRef::new(&paths, policy);
+            assert!(aliases.insert(key.alias()), "{}", key.alias());
+            let own: Vec<String> = key.of_profile().iter().map(KeyRef::alias).collect();
+            assert_eq!(
+                own,
+                POLICIES.map(|p| KeyRef::new(&paths, p).alias()).to_vec()
+            );
+        }
+    }
+    assert_eq!(aliases.len(), profiles.len() * POLICIES.len());
 }
