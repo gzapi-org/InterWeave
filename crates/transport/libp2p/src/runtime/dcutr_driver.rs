@@ -132,12 +132,24 @@ pub fn build_behaviour(
     )
 }
 
-/// The network changed: attempts given up, cooldowns lifted, the
-/// listener set restarted (`HolePunchScope::network_changed`); a no-op
-/// when DCUtR is off.
-pub fn network_changed(field: &mut DcutrField) {
+/// The network changed: IPs that joined are no longer departed
+/// (`HolePunchScope::network_added`), and a removal gives up the
+/// attempts, lifts the cooldowns, restarts the listener set and builds
+/// the crate again with the IPs that left
+/// (`HolePunchScope::network_changed`); a no-op when DCUtR is off.
+pub(super) fn network_changed(
+    field: &mut DcutrField,
+    change: &super::network_change::NetworkChange,
+) {
     if let Some(gated) = field.as_mut() {
-        gated.inner_mut().inner_mut().network_changed();
+        let scope = gated.inner_mut().inner_mut();
+        // THE WHOLE CHANGE, not two lists a caller could get wrong: the
+        // IPs that joined stop being departed, and a removal builds the
+        // crate again with the IPs that left.
+        scope.network_added(&change.added);
+        if change.invalidates() {
+            scope.network_changed(&change.removed);
+        }
     }
 }
 

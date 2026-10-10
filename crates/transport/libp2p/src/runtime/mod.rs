@@ -179,6 +179,7 @@ fn on_network_change(
         }
         return;
     };
+    dcutr_driver::network_changed(swarm.dcutr_mut(), &change);
     if change.invalidates() {
         if let Some(state) = autonat_state {
             let mut autonat_events = Vec::new();
@@ -205,7 +206,6 @@ fn on_network_change(
                 }
             }
         }
-        dcutr_driver::network_changed(swarm.dcutr_mut());
         let departed: std::collections::BTreeSet<std::net::IpAddr> =
             change.removed.iter().copied().collect();
         for (id, connection) in open {

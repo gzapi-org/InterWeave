@@ -101,6 +101,7 @@
 //! `tests/connectivity/tests/dcutr.rs`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll};
 
@@ -299,9 +300,13 @@ pub struct HolePunchCounters {
     /// candidates right now -- the `offered` set's size, which follows
     /// the bound listeners.
     pub listeners_offered: usize,
-    /// Observed candidates the wrapper holds to give back to the crate
-    /// after a network change -- the public ones survive it.
+    /// Observed candidates the crate was given and the wrapper still
+    /// records -- private ones included between changes; a change keeps
+    /// only the public ones whose IP did not depart.
     pub observed_kept: usize,
+    /// Observed candidates given back to a crate rebuilt by a network
+    /// change, over the wrapper's life.
+    pub observed_replayed: u64,
     /// Candidates the far end named that were removed from a punch dial
     /// by the boundary, by [`CandidateRefusal::label`] -- apart from
     /// `refused_by_class`, which is the attempt-level outcome when
@@ -362,6 +367,26 @@ struct Attempt {
 /// rebuilt crate no more than the old one could have held.
 const CRATE_CANDIDATE_CACHE: usize = 20;
 
+/// The most departed IPs the wrapper remembers (`HolePunchScope::departed`).
+/// A host's own addresses, so a handful in practice; the bound is for a
+/// phone rotating IPv6 temporary addresses for days, and past it the
+/// oldest departure is forgotten first -- an observation of it could then
+/// be learned again, the cost of a bound.
+const MAX_DEPARTED_IPS: usize = 64;
+
+/// Whether `address` names an IP in `departed` -- one that left this
+/// host and has not come back: the one predicate both doors to the crate
+/// ask, the forward of a peer's observation and the replay into a
+/// rebuilt crate.
+fn on_departed_ip(address: &Multiaddr, departed: &VecDeque<IpAddr>) -> bool {
+    let ip = match address.iter().next() {
+        Some(Protocol::Ip4(ip)) => IpAddr::from(ip),
+        Some(Protocol::Ip6(ip)) => IpAddr::from(ip),
+        _ => return false,
+    };
+    departed.contains(&ip)
+}
+
 /// The pinned DCUtR behaviour under §13's attempt lifecycle.
 pub struct HolePunchScope {
     inner: dcutr::Behaviour,
@@ -404,6 +429,14 @@ pub struct HolePunchScope {
     /// be given back (`network_changed`).
     /// `a_public_observation_is_kept_across_a_network_change` pins it.
     observed: VecDeque<Multiaddr>,
+    /// The IPs that left this host and have not come back, oldest first,
+    /// at most [`MAX_DEPARTED_IPS`]: the runtime's removed set at every
+    /// change (`network_changed`), less its added set (`network_added`).
+    /// An address on one of them is neither forwarded to the crate nor
+    /// given back to a rebuilt one, whichever door it comes through
+    /// (`on_departed_ip`). `a_departed_ip_is_neither_replayed_nor_learned_again_until_it_returns`
+    /// pins it.
+    departed: VecDeque<IpAddr>,
     /// Direct connections whose establishment ended an attempt -- the
     /// punched ones -- until the runtime reads them (`take_punched`),
     /// which it does for every connection it is told of. Bounded by
@@ -458,6 +491,7 @@ impl HolePunchScope {
             counters: HolePunchCounterHandle::default(),
             offered: HashSet::new(),
             observed: VecDeque::new(),
+            departed: VecDeque::new(),
             punched: HashSet::new(),
             stabilising: HashMap::new(),
             punch_dials: HashMap::new(),
@@ -466,6 +500,12 @@ impl HolePunchScope {
             reissued_in_flight: HashMap::new(),
             actions: VecDeque::new(),
         }
+    }
+
+    /// IPs that joined this host: no longer departed, so an observation
+    /// of one is forwarded again.
+    pub fn network_added(&mut self, added: &[IpAddr]) {
+        self.departed.retain(|ip| !added.contains(ip));
     }
 
     /// Whether `address` is inside the boundary, given the listeners
@@ -593,7 +633,15 @@ impl HolePunchScope {
     /// their retries goes, which only an attempt given up above was using.
     /// Pinned by `a_departed_address_is_not_sent_in_a_later_connect`
     /// (`tests/connectivity/tests/dcutr.rs`).
-    pub fn network_changed(&mut self) {
+    pub fn network_changed(&mut self, removed: &[IpAddr]) {
+        for ip in removed {
+            if !self.departed.contains(ip) {
+                self.departed.push_back(*ip);
+            }
+        }
+        while self.departed.len() > MAX_DEPARTED_IPS {
+            self.departed.pop_front();
+        }
         let mut fresh = dcutr::Behaviour::new(self.local);
         // A direct connection's addresses: the crate reads only that the
         // local one is not a circuit, and the handler it answers is a
@@ -609,24 +657,36 @@ impl HolePunchScope {
                 );
             }
         }
-        // A PUBLIC OBSERVATION IS GIVEN BACK. What a peer's Identify saw
-        // this profile on from outside is a NAT's mapping, which a local
-        // interface leaving does not name -- the AutoNAT client keeps its
-        // observations across a change for the same reason -- and without
-        // it every CONNECT until Identify's next round would carry no
-        // address a peer outside the LAN could reach, and the failed
-        // punch would cool the peer down. A private or special-use
-        // observation names an interface, so it goes with the change and
-        // is learned again if it still holds.
-        self.observed
-            .retain(|address| is_probeable_address(&address.to_string()));
-        for address in &self.observed {
-            fresh.on_swarm_event(FromSwarm::NewExternalAddrCandidate(
-                libp2p::swarm::behaviour::NewExternalAddrCandidate { addr: address },
-            ));
-        }
-        self.counters.lock().observed_kept = self.observed.len();
         self.inner = fresh;
+        // A PUBLIC OBSERVATION IS GIVEN BACK -- unless its IP is one the
+        // change took off the host. What a peer's Identify saw this
+        // profile on from outside is usually a NAT's mapping, which a
+        // local interface leaving does not name -- the AutoNAT client
+        // keeps its observations across a change for the same reason --
+        // and without it every CONNECT until Identify's next round would
+        // carry no address a peer outside the LAN could reach, and the
+        // failed punch would cool the peer down. But a public address can
+        // be the interface's own (a global IPv6, a public IPv4 with no
+        // NAT), and then it left with the interface. A private or
+        // special-use observation names an interface too, so it goes with
+        // the change and is learned again if it still holds. Given to the
+        // crate now in place, the only one there is to give it to.
+        let departed = &self.departed;
+        self.observed.retain(|address| {
+            is_probeable_address(&address.to_string()) && !on_departed_ip(address, departed)
+        });
+        let mut replayed = 0u64;
+        for address in &self.observed {
+            self.inner
+                .on_swarm_event(FromSwarm::NewExternalAddrCandidate(
+                    libp2p::swarm::behaviour::NewExternalAddrCandidate { addr: address },
+                ));
+            replayed += 1;
+        }
+        let mut counters = self.counters.lock();
+        counters.observed_kept = self.observed.len();
+        counters.observed_replayed += replayed;
+        drop(counters);
         for attempt in self.attempts.values_mut() {
             attempt.abandoned = true;
         }
@@ -999,6 +1059,20 @@ impl NetworkBehaviour for HolePunchScope {
                 .or_default() += 1;
             return;
         }
+        // NOR IS ONE ON AN IP THAT LEFT THIS HOST: a peer's Identify can
+        // report it after the change that removed it, and the crate would
+        // put it in every CONNECT.
+        if let FromSwarm::NewExternalAddrCandidate(candidate) = &event
+            && on_departed_ip(candidate.addr, &self.departed)
+        {
+            *self
+                .counters
+                .lock()
+                .candidates_withheld
+                .entry("departed")
+                .or_default() += 1;
+            return;
+        }
         if let FromSwarm::DialFailure(failure) = &event {
             self.punch_dials.remove(&failure.connection_id);
             // THE DENIAL OF A DIAL THIS WRAPPER REISSUED is not the
@@ -1240,8 +1314,13 @@ mod tests {
         observe(&mut s, &direct());
         observe(&mut s, &lan());
         assert_eq!(kept(&s), 2, "both reached the crate");
-        s.network_changed();
+        s.network_changed(&[]);
         assert_eq!(kept(&s), 1, "the public one is kept, the private one goes");
+        assert_eq!(
+            s.counter_handle().snapshot().observed_replayed,
+            1,
+            "and given to the rebuilt crate"
+        );
         // Bounded by the crate's cache: the oldest leave first.
         for port in 0..30u16 {
             let address: Multiaddr = format!("/ip4/93.184.216.34/tcp/{}", 5000 + port)
@@ -1250,6 +1329,65 @@ mod tests {
             observe(&mut s, &address);
         }
         assert_eq!(kept(&s), CRATE_CANDIDATE_CACHE);
+    }
+
+    /// An observation on an IP the change took off the host -- a public
+    /// address that was the interface's own -- is not given back to the
+    /// rebuilt crate, and one a peer reports AFTER the change is withheld,
+    /// until the IP joins again; an observation on another IP is kept
+    /// throughout. And the departed set is bounded.
+    #[test]
+    fn a_departed_ip_is_neither_replayed_nor_learned_again_until_it_returns() {
+        let mut s = scope(HolePunchBudgets::default());
+        let observe = |s: &mut HolePunchScope, address: &Multiaddr| {
+            s.on_swarm_event(FromSwarm::NewExternalAddrCandidate(
+                libp2p::swarm::behaviour::NewExternalAddrCandidate { addr: address },
+            ));
+        };
+        let snapshot = |s: &HolePunchScope| s.counter_handle().snapshot();
+        let own: Multiaddr = "/ip6/2001:4860::7/tcp/4001".parse().expect("an address");
+        let mapping = direct();
+        observe(&mut s, &own);
+        observe(&mut s, &mapping);
+        assert_eq!(snapshot(&s).observed_kept, 2);
+
+        let own_ip: IpAddr = "2001:4860::7".parse().expect("an IP");
+        s.network_changed(&[own_ip]);
+        assert_eq!(
+            snapshot(&s).observed_kept,
+            1,
+            "the departed one is not kept"
+        );
+        assert_eq!(
+            snapshot(&s).observed_replayed,
+            1,
+            "only the mapping is given back"
+        );
+
+        observe(&mut s, &own);
+        assert_eq!(
+            snapshot(&s).observed_kept,
+            1,
+            "a late report of it is withheld"
+        );
+        assert_eq!(snapshot(&s).candidates_withheld.get("departed"), Some(&1));
+
+        s.network_added(&[own_ip]);
+        observe(&mut s, &own);
+        assert_eq!(
+            snapshot(&s).observed_kept,
+            2,
+            "back on the host, learned again"
+        );
+
+        for n in 0..u32::try_from(MAX_DEPARTED_IPS + 10).expect("small") {
+            s.network_changed(&[IpAddr::from(std::net::Ipv4Addr::from(0x0a00_0000 + n))]);
+        }
+        assert_eq!(
+            s.departed.len(),
+            MAX_DEPARTED_IPS,
+            "the departed set is bounded"
+        );
     }
 
     /// The crate built again by a network change is told of the direct
@@ -1261,7 +1399,7 @@ mod tests {
         let mut s = scope(HolePunchBudgets::default());
         let a = peer();
         direct_inbound(&mut s, 1, a);
-        s.network_changed();
+        s.network_changed(&[]);
         direct_inbound(&mut s, 2, a);
         let endpoint = ConnectedPoint::Listener {
             local_addr: direct(),
@@ -1966,7 +2104,7 @@ mod tests {
         let _ = s.offer_listener(&direct());
         drain(&mut s);
 
-        s.network_changed();
+        s.network_changed(&[]);
         assert!(s.cooldown.is_empty(), "every cooldown lifted");
         assert!(s.stabilising.is_empty(), "nothing judged");
         assert!(s.offered.is_empty(), "the listener set starts over");
@@ -2017,7 +2155,7 @@ mod tests {
         // stability like any punch.
         let d = peer();
         assert!(matches!(relayed_inbound(&mut s, 7, d), Either::Left(_)));
-        s.network_changed();
+        s.network_changed(&[]);
         direct_inbound(&mut s, 8, d);
         assert!(
             s.take_punched(ConnectionId::new_unchecked(8), 500),
