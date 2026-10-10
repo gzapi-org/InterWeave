@@ -34,6 +34,7 @@ class NetworkService : Service() {
     private val binder = Binder()
     private val main = Handler(Looper.getMainLooper())
     @Volatile private var alive = false
+    // -1 until the start answers.
     @Volatile private var mode = -1
 
     override fun onCreate() {
@@ -70,6 +71,16 @@ class NetworkService : Service() {
             ongoing(),
             ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING,
         )
+        // The start may have answered already, before this command reached
+        // the main thread: its withdrawal then ran first and found nothing
+        // to withdraw, so withdraw here (review of #255, F1's ordering).
+        // The platform requires startForeground once a foreground start was
+        // asked, so it goes up first either way.
+        val answer = mode
+        if (answer != -1 && answer != Native.STAY_REACHABLE) {
+            leaveForeground()
+            return START_NOT_STICKY
+        }
         return START_STICKY
     }
 
