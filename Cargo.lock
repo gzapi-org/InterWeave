@@ -3432,8 +3432,13 @@ dependencies = [
 name = "interweave-human-android"
 version = "0.0.0"
 dependencies = [
+ "interweave-human-android-platform",
+ "interweave-human-app-core",
  "interweave-human-ui-model",
  "interweave-human-ui-slint",
+ "interweave-profile-identity",
+ "jni 0.22.4",
+ "ndk-sys 0.6.0+11769913",
 ]
 
 [[package]]

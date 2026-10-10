@@ -62,7 +62,12 @@ listOf("Debug", "Release").forEach { variant ->
                 sdk.sdkDirectory.get().asFile.resolve("platforms/android-36/android.jar").path,
             )
         }
-        val profile = if (variant == "Release") listOf("--release") else emptyList()
+        // The release build is optimised; the debug build carries the
+        // stand-in profile and identity (crates/human/android-platform's
+        // stand_in) until profile-config's provisioning and step 6's
+        // Keystore key land, and only it does.
+        val profile =
+            if (variant == "Release") listOf("--release") else listOf("--features", "dev-stand-ins")
         // --locked: the library is built from the reviewed Cargo.lock, as
         // every other cargo build here is (CI's `cargo check --locked` for
         // this target included); a lockfile the build would rewrite is a

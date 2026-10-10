@@ -27,5 +27,23 @@ crate-type = ["cdylib", "rlib"]
 interweave-human-ui-model = { path = "../../crates/human/ui-model" }
 
 [target.'cfg(target_os = "android")'.dependencies]
+# The Service's hold on the runtime, store and facade, and the hub the
+# Activity's view attaches to.
+interweave-human-android-platform = { path = "../../crates/human/android-platform" }
+interweave-human-app-core = { path = "../../crates/human/app-core" }
 # The views with Slint's Android backend over NativeActivity.
 interweave-human-ui-slint = { path = "../../crates/human/ui-slint", features = ["android"] }
+interweave-profile-identity = { path = "../../crates/identity/profile-identity" }
+# The entry points the Kotlin side calls; the version Slint's Android
+# backend already brings.
+jni = { workspace = true }
+# The platform's log, which a started Service without an Activity
+# reaches only directly.
+ndk-sys = { workspace = true }
+
+[features]
+# The first-run profile and in-memory identity of
+# crates/human/android-platform's stand_in, which the Gradle build turns
+# on for the debug APK alone: without it no identity exists and the
+# network service starts nothing.
+dev-stand-ins = ["interweave-human-android-platform/dev-stand-ins"]
