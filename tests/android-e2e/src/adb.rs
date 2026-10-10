@@ -203,7 +203,7 @@ fn outcome(out: &Output) -> String {
     if !out.status.success() || !out.stderr.is_empty() {
         let _ = write!(
             text,
-            "\nINSTRUMENTATION_FAILED: adb exited {}: {}",
+            "\nINSTRUMENTATION_FAILED: adb ended with {}: {}",
             out.status,
             String::from_utf8_lossy(&out.stderr).trim_end()
         );

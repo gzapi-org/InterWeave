@@ -214,6 +214,15 @@ async fn relayed_and_direct<R: Device, C: Device>(mut r: R, mut c: C) {
     // return over a new circuit, relayed with nothing before it. On the
     // stand-in the death is `kill`; on a device it is the end of R's
     // first case's process, and `kill` makes sure of it.
+    // R's circuits to D at the death: the return must add one, and an
+    // extra circuit opened before it cannot stand in for it.
+    let r_to_d = |seen: &interweave_test_support::e2e::relay::RelaySeen| {
+        seen.circuits
+            .iter()
+            .filter(|c| **c == (pid(&r_peer), pid(&d_peer)))
+            .count()
+    };
+    let r_circuits_at_death = r_to_d(&relay.seen().await);
     r.kill();
     r.restart();
     let run = r.run_case(cases::PATHS, &args(&d_peer, PeerPath::Relayed, 3));
@@ -242,8 +251,9 @@ async fn relayed_and_direct<R: Device, C: Device>(mut r: R, mut c: C) {
         d_told.gone
     );
     assert!(
-        relay.seen().await.circuits.len() > circuits_before,
-        "the return took a new circuit"
+        relay.seen().await.circuits.len() > circuits_before
+            && r_to_d(&relay.seen().await) > r_circuits_at_death,
+        "the return took a new circuit of R's to D"
     );
 
     drop(d_session);

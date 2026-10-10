@@ -48,7 +48,9 @@ pub mod keys {
     pub const PEER: &str = "peer";
     /// The path a case observed to the desktop (`paths`).
     pub const PATH: &str = "path";
-    /// Where captured payloads were written, for the host to pull.
+    /// Where captured payloads were written. Reserved by the seam agreed
+    /// with rust-ui-dev (01a12771) for the `HumanChatV2` case its j66 batch
+    /// moves here; no case writes it and no host reads it yet.
     pub const PAYLOADS: &str = "payloads";
     /// [`RESULT`] of a case that held.
     pub const PASS: &str = "pass";
@@ -504,10 +506,6 @@ mod tests {
         }
     }
 
-    /// The `paths` case on the fake pair -- its third runner: the Android
-    /// side runs the case on a thread of its own, as the instrumentation
-    /// does, while this test is the desktop's half, answering and then
-    /// reporting the route as `told` from the Android side's view.
     /// What the fake tells the Android side about its route to the
     /// desktop, once the route exists.
     #[derive(Clone, Copy)]
@@ -523,6 +521,10 @@ mod tests {
         paths_told(want, Notice::Connected(told))
     }
 
+    /// The `paths` case on the fake pair -- its third runner: the Android
+    /// side runs the case on a thread of its own, as the instrumentation
+    /// does, while this test is the desktop's half, answering and then
+    /// reporting the route as `told` from the Android side's view.
     fn paths_told(want: PeerPath, told: Notice) -> Map<String, Value> {
         let (android, desktop) = FakeNetwork::pair(config(peer()), config(other_peer()));
         // The pair starts connected directly, and a first route would be
