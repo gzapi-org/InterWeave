@@ -3,10 +3,10 @@
 # Copyright 2026 Andrea Benetton
 # tools/gh/test_arm.sh
 #
-# Behavioural tests for arm.sh — the hand-off to agent-fabric's copy (runtime/github/).
+# Behavioural tests for arm.sh — the hand-off to agent-fabric's `fabric-pr arm`.
 # The script itself decides nothing about PRs; what it promises is:
 #
-#   1. it runs agent-fabric's runtime/github/arm.sh
+#   1. it runs agent-fabric's bin/fabric-pr
 #      with the arguments and stdin untouched (the gates themselves are
 #      tested in agent-fabric, where they live)
 #   2. AGENT_FABRIC_ROOT wins over the sibling-checkout default
@@ -33,14 +33,16 @@ fail() { echo "  FAIL $1"; [[ -n "${2:-}" ]] && printf '%s\n' "$2" | sed 's/^/  
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
 
-# A fake agent-fabric whose arm.sh records argv and stdin verbatim.
+# A fake agent-fabric whose fabric-pr records argv and stdin verbatim.
 FABRIC="$SANDBOX/agent-fabric"
-mkdir -p "$FABRIC/runtime/github"
-STUB="$FABRIC/runtime/github/arm.sh"
+STUB="$FABRIC/bin/fabric-pr"
+mkdir -p "$(dirname "$FABRIC/bin/fabric-pr")"
 cat > "$STUB" <<'STUB'
 #!/usr/bin/env bash
+[[ "${1:-}" == arm ]] || { echo "stub fabric-pr: verb '${1:-}', not arm" >&2; exit 99; }; shift
 printf '%s\n' "$#" > "$RECORD.argc"
 printf '%s\0' "$@" > "$RECORD.argv"
+printf '%s\n' "${AGENT_FABRIC_ARM_CONFIG:-}" > "$RECORD.config"
 cat > "$RECORD.stdin"
 echo "stub ran"
 exit 7
@@ -57,14 +59,16 @@ out="$(printf '%s' "$body" | RECORD="$RECORD" AGENT_FABRIC_ROOT="$FABRIC" bash "
 [[ "$(cat "$RECORD.argc")" == 3 ]] && pass "three arguments handed over" || fail "argc" "$(cat "$RECORD.argc")"
 mapfile -d '' argv < "$RECORD.argv"
 [[ "${argv[0]}" == "PRRT_x" && "${argv[1]}" == "--flag" && "${argv[2]}" == "two words" ]] && pass "arguments intact, a space-containing one still one argument" || fail "argv" "$(printf '[%s]' "${argv[@]}")"
+[[ "$(cat "$RECORD.config")" == "$FABRIC/projects/interweave/integration/gh/arm.json" ]] && pass "InterWeave's arm.json is named, whatever remote this clone has" || fail "arm config" "$(cat "$RECORD.config")"
 [[ "$(cat "$RECORD.stdin")" == "$body" ]] && pass "stdin byte-for-byte: backticks, \$vars, quotes and the newline survive" || fail "stdin" "$(cat "$RECORD.stdin")"
 
 echo "resolution: AGENT_FABRIC_ROOT wins; otherwise the sibling of this working copy"
 RECORD="$SANDBOX/rec2"
-SIB="$SANDBOX/projects"; mkdir -p "$SIB/interweave/tools/gh" "$SIB/agent-fabric/runtime/github"
+SIB="$SANDBOX/projects"; mkdir -p "$SIB/interweave/tools/gh"
 cp "$UNDER_TEST" "$SCRIPT_DIR/fabric-root.sh" "$SIB/interweave/tools/gh/"
 git -C "$SIB/interweave" init -q 2>/dev/null
-printf '#!/usr/bin/env bash\necho "sibling copy"\n' > "$SIB/agent-fabric/runtime/github/arm.sh"
+mkdir -p "$(dirname "$SIB/agent-fabric/bin/fabric-pr")"
+printf '#!/usr/bin/env bash\necho "sibling copy"\n' > "$SIB/agent-fabric/bin/fabric-pr"
 out="$(cd "$SIB/interweave" && env -u AGENT_FABRIC_ROOT bash tools/gh/arm.sh 2>&1)"
 [[ "$out" == "sibling copy" ]] && pass "with no AGENT_FABRIC_ROOT, ../agent-fabric beside the working copy is used" || fail "sibling default" "$out"
 out="$(cd "$SIB/interweave" && RECORD="$RECORD" AGENT_FABRIC_ROOT="$FABRIC" bash tools/gh/arm.sh 2>&1 </dev/null)"

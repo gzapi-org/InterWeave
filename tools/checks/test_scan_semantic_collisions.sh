@@ -90,14 +90,18 @@ help_out="$(bash "$SCAN" --help 2>/dev/null)"
 bash "$SCAN" --root >/dev/null 2>&1
 [ "$?" = "2" ] && ok "--root without a value exits 2" || bad "--root with no value should exit 2"
 
-# The hand-over to agent-fabric's scan-semantic-collisions.sh: every case above ran the
+# The hand-over to agent-fabric's tools/fabric/github module for scan-semantic-collisions: every case above ran the
 # real one (CI points AGENT_FABRIC_ROOT at its pinned checkout); these pin
 # what the hand-over itself promises, against a recording stub.
 hcheck() { if eval "$2"; then ok "$1"; else bad "$1" "$hout"; fi; }
 hstub="$(mktemp -d)"
-mkdir -p "$hstub/fabric/runtime/github" "$hstub/fabric/projects/interweave/integration/gh"
+# The module stub is a shell script; a fake interpreter runs it with bash.
+printf '#!/bin/sh\nexec bash "$@"\n' > "$hstub/fake-python"; chmod +x "$hstub/fake-python"
+export AGENT_FABRIC_PYTHON="$hstub/fake-python"
+mkdir -p "$hstub/fabric/projects/interweave/integration/gh"
 printf '{}' > "$hstub/fabric/projects/interweave/integration/gh/collisions.json"
-cat > "$hstub/fabric/runtime/github/scan-semantic-collisions.sh" <<'STUB'
+mkdir -p "$(dirname "$hstub/fabric/tools/fabric/github/semantic_collisions.py")"
+cat > "$hstub/fabric/tools/fabric/github/semantic_collisions.py" <<'STUB'
 #!/usr/bin/env bash
 printf 'config=%s cache=%s' "${AGENT_FABRIC_COLLISIONS_CONFIG-<unset>}" "${AGENT_FABRIC_TOOL_CACHE-<unset>}"; printf ' [%s]' "$@"; echo
 exit 3

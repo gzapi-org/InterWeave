@@ -9,7 +9,7 @@
 # (0 healthy, 1 degraded, 2 could not find out).
 #
 # actions-health lives in agent-fabric, the control plane checked out
-# beside this working copy: runtime/github/actions-health.sh. This file
+# beside this working copy: tools/fabric/github/actions_health.py. This file
 # only locates it and hands it the arguments untouched, so every
 # documented invocation (tools/gh/actions-health.sh, --quiet, --json,
 # --included N, --org NAME) keeps working.
@@ -32,15 +32,16 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tools/gh/fabric-root.sh
 . "$here/fabric-root.sh"
 fabric="$(interweave_fabric_root "$here")"
-target="$fabric/runtime/github/actions-health.sh"
+target="$fabric/tools/fabric/github/actions_health.py"
 [[ -f "$target" ]] || {
-    echo "actions-health: agent-fabric not found at $fabric (expected beside this working copy, as projects/agent-fabric, carrying runtime/github/actions-health.sh); set AGENT_FABRIC_ROOT or update it. See CLAUDE.md §9, agent-fabric beside the checkout." >&2
+    echo "actions-health: agent-fabric not found at $fabric (expected beside this working copy, as projects/agent-fabric, carrying tools/fabric/github/actions_health.py); set AGENT_FABRIC_ROOT or update it. See CLAUDE.md §9, agent-fabric beside the checkout." >&2
     exit 2
 }
 if [[ -z "${AGENT_FABRIC_ACTIONS_INCLUDED_MINUTES:-}" && -n "${INTERWEAVE_ACTIONS_INCLUDED_MINUTES:-}" ]]; then
     export AGENT_FABRIC_ACTIONS_INCLUDED_MINUTES="$INTERWEAVE_ACTIONS_INCLUDED_MINUTES"
 fi
 export AGENT_FABRIC_ACTIONS_INCLUDED_SETTING=INTERWEAVE_ACTIONS_INCLUDED_MINUTES
-rc=0; bash "$target" "$@" || rc=$?
+py="$(interweave_fabric_python actions-health)" || exit 2
+rc=0; "$py" "$target" "$@" || rc=$?
 [[ $rc -eq 127 ]] && exit 2
 exit "$rc"
