@@ -92,9 +92,12 @@ async fn send_until_routed(
         if sent.is_ok() {
             return;
         }
+        // The refusal itself is not printed: the daemon's log beside it
+        // says why, and the error is the client-api's, generic over every
+        // binding this case could be handed.
         assert!(
             tokio::time::Instant::now() < deadline,
-            "no route to {}: {sent:?}\n{}",
+            "no route to {} within the deadline\n{}",
             to.as_str(),
             log()
         );
