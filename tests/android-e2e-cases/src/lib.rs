@@ -56,9 +56,17 @@ pub mod keys {
 pub mod cases {
     /// The profile's `PeerId`; needs no runtime.
     pub const IDENTITY: &str = "identity";
+    /// Write the profile's `config.yaml` (argument `config`) through the
+    /// runner's own provisioning, for the next start to read; needs no
+    /// runtime.
+    pub const PROVISION: &str = "provision";
     /// One direct message to the desktop and its reply, and the path this
     /// side was told the route began on. Arguments: [`super::PathsArgs`].
     pub const PATHS: &str = "paths";
+
+    /// The cases a runner must have the app's runtime serving for; the
+    /// others run before it starts, as [`PROVISION`] must.
+    pub const NEED_A_RUNTIME: &[&str] = &[PATHS];
 }
 
 /// How long a case waits for a route, a message or a notice when its
@@ -74,7 +82,15 @@ pub struct CaseCtx<B> {
     /// runtime of its own -- the app's service holds the profile's lock,
     /// and a second runtime is not what the app ships.
     pub binding: Option<B>,
+    /// The runner's own provisioning: writes `config.yaml` where the
+    /// runtime's next start reads it, under the profile's private
+    /// directories, as the app's first start does. `None` where the
+    /// runner cannot provision.
+    pub provision: Option<Provision>,
 }
+
+/// How a runner writes the profile's configuration ([`CaseCtx::provision`]).
+pub type Provision = Box<dyn FnOnce(&str) -> Result<(), String> + Send>;
 
 /// Run `case` with `args_json`, and answer the result JSON: [`keys::CASE`],
 /// [`keys::RESULT`], [`keys::DETAIL`] on a failure, and what the case
@@ -122,6 +138,16 @@ fn dispatch<B: DataSessionBinding>(
     match case {
         cases::IDENTITY => {
             out.insert(keys::PEER.to_owned(), ctx.peer.as_str().into());
+        }
+        cases::PROVISION => {
+            let config = args
+                .get("config")
+                .and_then(Value::as_str)
+                .ok_or("argument \"config\" is missing")?;
+            let provision = ctx
+                .provision
+                .ok_or("this runner cannot provision a profile")?;
+            provision(config)?;
         }
         cases::PATHS => {
             let args = PathsArgs::from_json(&args)?;
@@ -499,6 +525,7 @@ mod tests {
                     CaseCtx {
                         peer: peer(),
                         binding: Some(android),
+                        provision: None,
                     },
                 )
             })
@@ -583,6 +610,34 @@ mod tests {
     }
 
     #[test]
+    fn provision_hands_the_runner_exactly_the_config_and_reports_its_refusal() {
+        let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let ctx = |answer: Result<(), String>| {
+            let written = std::sync::Arc::clone(&written);
+            CaseCtx::<FakeNode> {
+                peer: peer(),
+                binding: None,
+                provision: Some(Box::new(move |config: &str| {
+                    written.lock().expect("lock").push(config.to_owned());
+                    answer
+                })),
+            }
+        };
+        let config = "profile:\n  name: \"x\"\n";
+        let args = serde_json::json!({ "config": config }).to_string();
+        let out = result(&run(cases::PROVISION, &args, ctx(Ok(()))));
+        assert_eq!(out[keys::RESULT], keys::PASS, "{out:?}");
+        let out = result(&run(
+            cases::PROVISION,
+            &args,
+            ctx(Err("disk full".to_owned())),
+        ));
+        assert_eq!(out[keys::RESULT], keys::FAIL);
+        assert_eq!(out[keys::DETAIL], "disk full");
+        assert_eq!(*written.lock().expect("lock"), [config, config]);
+    }
+
+    #[test]
     fn identity_answers_the_peer_without_a_runtime() {
         let out = result(&run::<FakeNode>(
             cases::IDENTITY,
@@ -590,6 +645,7 @@ mod tests {
             CaseCtx {
                 peer: peer(),
                 binding: None,
+                provision: None,
             },
         ));
         assert_eq!(out[keys::RESULT], keys::PASS);
@@ -637,6 +693,7 @@ mod tests {
             CaseCtx {
                 peer: peer(),
                 binding: Some(Panics),
+                provision: None,
             },
         ));
         assert_eq!(out[keys::RESULT], keys::FAIL);
@@ -648,6 +705,7 @@ mod tests {
         let ctx = || CaseCtx::<FakeNode> {
             peer: peer(),
             binding: None,
+            provision: None,
         };
         let args = PathsArgs {
             desktop: peer(),
@@ -662,6 +720,8 @@ mod tests {
             (cases::PATHS, "not json", "not JSON"),
             (cases::PATHS, "{}", "\"desktop\" is missing"),
             (cases::PATHS, args.as_str(), "no runtime is serving"),
+            (cases::PROVISION, "{}", "\"config\" is missing"),
+            (cases::PROVISION, r#"{"config":"x"}"#, "cannot provision"),
         ] {
             let out = result(&run(case, args, ctx()));
             assert_eq!(out[keys::RESULT], keys::FAIL, "{case} {args}");
