@@ -25,9 +25,9 @@ use std::rc::Rc;
 
 use interweave_human_client_api::TrustOrigin;
 use interweave_human_ui_model::{
-    ConversationKey, Direction, Intent, ItemKey, ItemStatus, MessageItem, Reply, Retention,
-    SessionNotice, TrustChange, TrustInput, TrustOutcome, UiModel, UiText, fill, placeholder_en,
-    short_peer, visible_destination,
+    ConversationKey, Direction, HostText, Intent, ItemKey, ItemStatus, MessageItem, Reply,
+    Retention, RuntimeHost, SessionNotice, TrustChange, TrustInput, TrustOutcome, UiModel, UiText,
+    fill, placeholder_en, short_peer, visible_destination,
 };
 use interweave_transport_api::TransportIdentity;
 use slint::{Model as _, ModelRc, SharedString, VecModel};
@@ -1003,7 +1003,9 @@ impl View {
 
     fn render_chrome(&self, model: &UiModel) {
         let window = &self.window;
-        window.set_connectivity(placeholder_en::connectivity(model.connectivity()).into());
+        window.set_connectivity(
+            placeholder_en::connectivity(RuntimeHost::Daemon, model.connectivity()).into(),
+        );
         let notice = model.session_notice();
         self.shared.borrow_mut().notice = notice;
         window.set_has_notice(notice.is_some());
@@ -1055,7 +1057,7 @@ impl View {
                         .map(|class| {
                             fill(
                                 placeholder_en::text(UiText::NotSent),
-                                &[("reason", placeholder_en::error(class))],
+                                &[("reason", placeholder_en::error(RuntimeHost::Daemon, class))],
                             )
                         })
                         .unwrap_or_default()
@@ -1468,10 +1470,12 @@ fn outcome_text(outcome: &TrustOutcome) -> String {
             &[("peer", change.peer.as_str())],
         ),
         TrustOutcome::Unconfirmed(change) => fill(
-            placeholder_en::text(UiText::TrustUnconfirmed),
+            placeholder_en::host_text(RuntimeHost::Daemon, HostText::TrustUnconfirmed),
             &[("peer", change.peer.as_str())],
         ),
-        TrustOutcome::Problem(problem) => placeholder_en::trust_problem(*problem).to_owned(),
+        TrustOutcome::Problem(problem) => {
+            placeholder_en::trust_problem(RuntimeHost::Daemon, *problem).to_owned()
+        }
         TrustOutcome::NotReadAgain(_) => placeholder_en::text(UiText::TrustNotReadAgain).to_owned(),
         TrustOutcome::Entry(problem) => placeholder_en::entry_problem(*problem).to_owned(),
     }
@@ -1479,12 +1483,14 @@ fn outcome_text(outcome: &TrustOutcome) -> String {
 
 fn notice_text(notice: SessionNotice) -> String {
     match notice {
-        SessionNotice::NoDaemon => placeholder_en::text(UiText::NoDaemon).to_owned(),
+        SessionNotice::NoDaemon => {
+            placeholder_en::host_text(RuntimeHost::Daemon, HostText::NotRunning).to_owned()
+        }
         SessionNotice::Reconnecting => placeholder_en::text(UiText::Reconnecting).to_owned(),
         SessionNotice::StorageDegraded => placeholder_en::text(UiText::StorageDegraded).to_owned(),
         SessionNotice::Refused(class) => fill(
             placeholder_en::text(UiText::Refused),
-            &[("reason", placeholder_en::error(class))],
+            &[("reason", placeholder_en::error(RuntimeHost::Daemon, class))],
         ),
     }
 }

@@ -23,7 +23,7 @@ use interweave_human_client_api::{
 };
 use interweave_human_core::{AppMessageId, RowId};
 use interweave_human_ui_model::{
-    ConversationKey, Intent, TrustChange, UiModel, UiText, placeholder_en,
+    ConversationKey, Intent, RuntimeHost, TrustChange, UiModel, UiText, placeholder_en,
 };
 use interweave_human_ui_slint::{INPUT_CAP, View, ViewEvent};
 use interweave_profile_identity::ProfileIdentity;
@@ -476,7 +476,7 @@ fn the_tree_labels_message_route_and_connectivity_controls() {
 
     let online = the(
         &view,
-        placeholder_en::connectivity(Connectivity::OnlineDirect),
+        placeholder_en::connectivity(RuntimeHost::Daemon, Connectivity::OnlineDirect),
     );
     assert_eq!(
         online.accessible_live_region(),
@@ -540,7 +540,10 @@ fn unknown_connectivity_is_not_shown_as_offline() {
     let model = UiModel::new();
     assert_eq!(model.connectivity(), Connectivity::Unknown);
     view.render(&model);
-    let shown = the(&view, placeholder_en::connectivity(Connectivity::Unknown));
+    let shown = the(
+        &view,
+        placeholder_en::connectivity(RuntimeHost::Daemon, Connectivity::Unknown),
+    );
     assert!(
         !shown
             .accessible_label()
@@ -548,7 +551,13 @@ fn unknown_connectivity_is_not_shown_as_offline() {
             .to_ascii_lowercase()
             .contains("offline")
     );
-    assert!(labelled(&view, placeholder_en::connectivity(Connectivity::Offline)).is_empty());
+    assert!(
+        labelled(
+            &view,
+            placeholder_en::connectivity(RuntimeHost::Daemon, Connectivity::Offline)
+        )
+        .is_empty()
+    );
 }
 
 /// U5b: every action element exposes a default action, invoked through
@@ -1244,8 +1253,14 @@ fn no_rendered_text_leaves_a_placeholder_unfilled() {
     // The other half: each template the sweep must have covered is in the
     // tree, as its filled text -- so a template that rendered nothing
     // cannot pass the sweep by its absence.
-    let busy = placeholder_en::error(interweave_human_ui_model::ErrorClass::EndpointInUse);
-    let too_large = placeholder_en::error(interweave_human_ui_model::ErrorClass::TooLarge);
+    let busy = placeholder_en::error(
+        RuntimeHost::Daemon,
+        interweave_human_ui_model::ErrorClass::EndpointInUse,
+    );
+    let too_large = placeholder_en::error(
+        RuntimeHost::Daemon,
+        interweave_human_ui_model::ErrorClass::TooLarge,
+    );
     let short = interweave_human_ui_model::short_peer(alice.as_str());
     let unread = placeholder_en::label(interweave_human_ui_model::LabelKey::Unread);
     let unread_count =
@@ -1301,7 +1316,10 @@ fn a_refused_send_is_announced() {
         text(UiText::NotSent),
         &[(
             "reason",
-            placeholder_en::error(interweave_human_ui_model::ErrorClass::TooLarge),
+            placeholder_en::error(
+                RuntimeHost::Daemon,
+                interweave_human_ui_model::ErrorClass::TooLarge,
+            ),
         )],
     );
     assert_eq!(
