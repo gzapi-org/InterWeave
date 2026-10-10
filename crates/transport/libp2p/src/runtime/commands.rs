@@ -1683,18 +1683,20 @@ pub(super) fn dispatch_held(
 }
 
 /// `e` and every source under it, joined by `: `, the empty ones left
-/// out. libp2p's `TransportError::Other` displays as NOTHING and keeps
+/// out and a source whose text the previous part already ends with left
+/// out too: libp2p-dns's `Error::Transport` displays its source AND
+/// returns it, so the same OS error arrived three times. libp2p's `TransportError::Other` displays as NOTHING and keeps
 /// its cause as the source, so a listener that failed to bind --
 /// `socket`, `bind` or `listen` refusing, all synchronous in
 /// `libp2p-tcp`'s `listen_on` -- answered an empty string, and a device
 /// run reported `transport: ` with no cause (2026-10-10). Pinned by
 /// `a_listener_that_cannot_bind_says_why` (`tests/listen_refusal.rs`).
 fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
-    let mut parts = Vec::new();
+    let mut parts: Vec<String> = Vec::new();
     let mut next = Some(e);
     while let Some(err) = next {
         let text = err.to_string();
-        if !text.is_empty() {
+        if !text.is_empty() && !parts.last().is_some_and(|last| last.ends_with(&text)) {
             parts.push(text);
         }
         next = err.source();

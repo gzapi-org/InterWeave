@@ -40,9 +40,10 @@ async fn a_listener_that_cannot_bind_says_why() {
         panic!("a bind to an address this host does not hold is refused: {refused:?}");
     };
     // The socket's own error, as `std::io::Error` displays an OS one.
-    assert!(
-        detail.contains("(os error "),
-        "the refusal carries the socket's own error: {detail:?}"
+    assert_eq!(
+        detail.matches("(os error ").count(),
+        1,
+        "the refusal carries the socket's own error, once: {detail:?}"
     );
 
     // THE CONTROL: the same runtime binds an address it does hold, so the
