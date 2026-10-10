@@ -77,12 +77,17 @@ pub(crate) fn read_private_within(
 /// neither file is written in. Pinned by the array cases of
 /// `a_present_overlay_that_cannot_be_trusted_stops_the_load` and
 /// `a_file_naming_anything_but_the_choice_is_refused`.
+///
+/// The struct is read from the TEXT, not from the parsed value: a
+/// `Value` map keeps the last of a key named twice, which would drop the
+/// first list silently where the derived visitor refuses a duplicate
+/// field (the "named twice" cases of the same two tests).
 pub(crate) fn object_only<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, String> {
     let value: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
     if !value.is_object() {
         return Err("not a JSON object".to_owned());
     }
-    serde_json::from_value(value).map_err(|e| e.to_string())
+    serde_json::from_str(text).map_err(|e| e.to_string())
 }
 
 /// The uid a private file must be owned by, or -- this process's uid
