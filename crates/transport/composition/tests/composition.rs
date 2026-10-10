@@ -22,7 +22,7 @@ use interweave_transport_api::{
     Health, PathReadiness, PeerPath, TransportEvent, TransportIdentity, TransportRuntime,
 };
 use interweave_transport_composition::{
-    ComposedRuntime, CompositionError, CompositionOptions, translate,
+    ComposedRuntime, CompositionError, CompositionOptions, NetworkView, translate,
 };
 
 const PATIENCE: Duration = Duration::from_secs(20);
@@ -751,4 +751,63 @@ async fn the_peer_rows_say_what_holds_a_peer_that_went_away() {
     assert_eq!(gone.quarantined_until_ms, None);
 
     subject.shutdown().await.expect("clean shutdown");
+}
+
+/// Whether `runtime` reports `peer` disconnected within `window`.
+async fn disconnected_within(
+    runtime: &mut ComposedRuntime,
+    peer: &TransportIdentity,
+    window: Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + window;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining, runtime.next_event()).await {
+            Ok(Some(TransportEvent::PeerDisconnected { peer: got, .. })) if &got == peer => {
+                return true;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("the runtime stopped"),
+            Err(_) => return false,
+        }
+    }
+}
+
+/// The platform's view reaches the substrate through the composition
+/// (§20 step 5): a view naming what the listeners bound moves nothing,
+/// and an empty one -- offline -- takes the private IP off the host, so
+/// the connection running from it closes and the consumer is told.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_view_reaches_the_substrate_and_an_empty_one_closes_what_ran_from_the_ip() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let listen = CompositionOptions {
+        listen: vec![format!("/ip4/{ip}/tcp/0")],
+        ..CompositionOptions::default()
+    };
+    let (b_id, b) = id();
+    let (a_id, a) = id();
+    let target = ComposedRuntime::start(&b_id, &profile(&[&a], &[], ""), listen.clone())
+        .await
+        .expect("b composes");
+    let b_addr = format!("{}/p2p/{}", target.listening()[0], b.as_str());
+    let mut subject = ComposedRuntime::start(&a_id, &profile(&[&b], &[b_addr], ""), listen)
+        .await
+        .expect("a composes");
+    wait_connected(&mut subject, &b).await;
+
+    subject.network_changed(NetworkView {
+        addresses: vec![ip.into()],
+    });
+    assert!(
+        !disconnected_within(&mut subject, &b, Duration::from_secs(2)).await,
+        "a view that agrees with the listeners is no change"
+    );
+    subject.network_changed(NetworkView::default());
+    assert!(
+        disconnected_within(&mut subject, &b, PATIENCE).await,
+        "offline: the connection from the departed IP closed"
+    );
+
+    subject.shutdown().await.expect("clean shutdown");
+    target.shutdown().await.expect("clean shutdown");
 }

@@ -64,7 +64,7 @@ endpoints:
       advertise: false
 transport:
   listen:
-    addresses: [\"/ip4/127.0.0.1/tcp/0\"]
+    addresses: [\"/ip4/0.0.0.0/tcp/0\"]
 observability:
   log_level: warn
 "
@@ -121,10 +121,9 @@ fn the_host_serves_under_its_root() {
     assert_eq!(status.peer, peer);
     let listening = host.listening();
     assert_eq!(listening.len(), 1, "{listening:?}");
-    assert!(
-        listening[0].starts_with("/ip4/127.0.0.1/tcp/"),
-        "{listening:?}"
-    );
+    // A wildcard listener, as an embedded profile must name: what it
+    // reports first is one of the host's IPv4 addresses.
+    assert!(listening[0].starts_with("/ip4/"), "{listening:?}");
     assert!(
         !listening[0].ends_with("/tcp/0"),
         "the bound port: {listening:?}"

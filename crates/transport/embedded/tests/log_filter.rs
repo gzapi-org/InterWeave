@@ -105,6 +105,10 @@ fn the_copy_is_the_daemons_construction() {
             "let widest = if level == Level::DEBUG {",
         ),
         (
+            "        tracing::Level::DEBUG\n    } else {",
+            "        Level::DEBUG\n    } else {",
+        ),
+        (
             "        tracing::Level::INFO\n    };",
             "        Level::INFO\n    };",
         ),

@@ -102,8 +102,8 @@ use interweave_transport_libp2p::runtime::DirectEndpoints;
 use interweave_transport_libp2p::runtime::dcutr_driver::DcutrSettings;
 use interweave_transport_libp2p::runtime::relay_driver::{RelayClientSettings, StaticRelay};
 use interweave_transport_libp2p::{
-    HolePunchOutcome, PathChange, PeerPath, RelayReservationOutcome, SubstrateConfig, SwarmEvent,
-    SwarmRuntime,
+    HolePunchOutcome, NetworkView, PathChange, PeerPath, RelayReservationOutcome, SubstrateConfig,
+    SwarmEvent, SwarmRuntime,
 };
 use interweave_transport_runtime::relay::ReservationConfig;
 use interweave_transport_runtime::{DialOrigin, TrustSources};
@@ -2063,10 +2063,15 @@ async fn a_network_change_lifts_the_cooldown_and_keeps_the_reservation() {
         "the dialer is in cooldown"
     );
 
-    // AN ADDITION FIRST: a second private listener joins. Reported --
-    // and it invalidates nothing (section 14 item 1 speaks of REMOVED
+    // AN ADDITION FIRST: the platform's view names an address the
+    // listeners have not bound (a second listener on the bound IP would
+    // be the same network, and this host has one private IP). Reported
+    // -- and it invalidates nothing (section 14 item 1 speaks of REMOVED
     // addresses): the cooldown stands.
-    let second_listener = listening(wire.target, ip).await;
+    let view_only = std::net::IpAddr::from(Ipv4Addr::new(10, 255, 0, 1));
+    wire.target.network_changed(NetworkView {
+        addresses: vec![ip.into(), view_only],
+    });
     let joined = until(&mut wire, "the target to report the addition", |s, e| {
         s == Side::Target && matches!(e, SwarmEvent::NetworkChanged { .. })
     })
@@ -2074,8 +2079,8 @@ async fn a_network_change_lifts_the_cooldown_and_keeps_the_reservation() {
     assert!(
         joined.iter().any(|(s, e)| *s == Side::Target
             && matches!(e, SwarmEvent::NetworkChanged { removed, added }
-                if removed.is_empty() && *added == vec![second_listener.to_string()])),
-        "the joined listener named, nothing removed: {joined:?}"
+                if removed.is_empty() && *added == vec![view_only])),
+        "the joined address named, nothing removed: {joined:?}"
     );
     assert_eq!(
         wire.target
@@ -2086,7 +2091,9 @@ async fn a_network_change_lifts_the_cooldown_and_keeps_the_reservation() {
         "an addition lifts nothing"
     );
 
-    // THE CHANGE: the first private listener goes away.
+    // THE LISTENER GOES while the view still names its IP: the view,
+    // once present, is authoritative for what it names (ADR-0011 A
+    // 2026-10-09), so this is no change and the cooldown stands.
     assert!(
         wire.target
             .stop_listening(private_listener.clone())
@@ -2094,6 +2101,26 @@ async fn a_network_change_lifts_the_cooldown_and_keeps_the_reservation() {
             .expect("the command reaches the task"),
         "the listener was known"
     );
+    let quiet = settle(&mut wire, WINDOW).await;
+    assert!(
+        !quiet
+            .iter()
+            .any(|(s, e)| *s == Side::Target && matches!(e, SwarmEvent::NetworkChanged { .. })),
+        "the view still holds the IP: {quiet:?}"
+    );
+    assert_eq!(
+        wire.target
+            .dcutr_counters()
+            .expect("the target hole punches")
+            .cooldown_peers,
+        1,
+        "nothing departed, nothing lifted"
+    );
+
+    // THE CHANGE: the view drops the private IP, and that is the removal.
+    wire.target.network_changed(NetworkView {
+        addresses: vec![view_only],
+    });
     let mut changed = until(&mut wire, "the target to report the change", |s, e| {
         s == Side::Target && matches!(e, SwarmEvent::NetworkChanged { .. })
     })
@@ -2101,8 +2128,8 @@ async fn a_network_change_lifts_the_cooldown_and_keeps_the_reservation() {
     assert!(
         changed.iter().any(|(s, e)| *s == Side::Target
             && matches!(e, SwarmEvent::NetworkChanged { removed, added }
-                if *removed == vec![private_listener.to_string()] && added.is_empty())),
-        "the departed listener named, nothing added: {changed:?}"
+                if *removed == vec![std::net::IpAddr::from(ip)] && added.is_empty())),
+        "the departed IP named, nothing added: {changed:?}"
     );
     let counters = wire
         .target
@@ -2284,4 +2311,83 @@ async fn a_network_change_keeps_a_given_up_attempts_permit_until_the_crate_is_do
     assert_eq!(counters.attempts_ended.get("abandoned"), Some(&1));
 
     dialer.shutdown().await.expect("shutdown");
+}
+
+/// Read `runtime`'s events until it reports a network change.
+async fn until_network_changed(runtime: &mut SwarmRuntime) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let event = tokio::time::timeout_at(deadline, runtime.next_event())
+            .await
+            .expect("a network change within the patience")
+            .expect("the runtime is alive");
+        if matches!(event, SwarmEvent::NetworkChanged { .. }) {
+            return;
+        }
+    }
+}
+
+/// Read every event `runtime` emits for `window`.
+async fn drain(runtime: &mut SwarmRuntime, window: Duration) {
+    let deadline = tokio::time::Instant::now() + window;
+    while let Ok(Some(_)) = tokio::time::timeout_at(deadline, runtime.next_event()).await {}
+}
+
+/// A listener on an IP the platform's view said departed is bound until
+/// the listener poll catches up, and is not offered AGAIN meanwhile: the
+/// removal clears the wrapper's offered set and the tick's re-offer, like
+/// the bind's own offer, passes only what the host still holds
+/// (`NetworkSet::holds`). What this measures is the wrapper's offered set
+/// (`listeners_offered`); an address offered BEFORE the removal stays in
+/// libp2p-dcutr 0.15.0's own candidate cache (an LRU of 20), which
+/// nothing prunes when its address departs and which every new relayed
+/// handler's CONNECT carries -- a gap that
+/// predates the platform's view, recorded on #250. The control: before
+/// the view, the private listener is offered.
+#[tokio::test]
+async fn a_listener_on_an_ip_the_view_removed_is_not_offered() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let id = ProfileIdentity::generate();
+    let mut subject = SwarmRuntime::start(&id, dialer_config(Some(punching())), trust(&[], &[]))
+        .expect("the subject starts");
+    let _private = listening(&subject, ip).await;
+    let offered = |runtime: &SwarmRuntime| {
+        runtime
+            .dcutr_counters()
+            .expect("the subject hole punches")
+            .listeners_offered
+    };
+    // Past a tick, so the tick's re-offer has run too.
+    drain(&mut subject, Duration::from_secs(2)).await;
+    assert_eq!(offered(&subject), 1, "the control: the private listener");
+
+    // Two views, the first READ before the second is sent: the latest
+    // view replaces one not yet read, and a first view removes nothing it
+    // never named. The first names an address the listeners do not, so
+    // its reading is an event to wait for, not a timed guess.
+    subject.network_changed(NetworkView {
+        addresses: vec![ip.into(), Ipv4Addr::new(10, 255, 0, 3).into()],
+    });
+    until_network_changed(&mut subject).await;
+    subject.network_changed(NetworkView::default());
+    until_network_changed(&mut subject).await;
+    // Past a tick, so the tick's re-offer has run on the new set.
+    drain(&mut subject, Duration::from_secs(2)).await;
+    assert_eq!(
+        offered(&subject),
+        0,
+        "the departed IP's listener is not offered again"
+    );
+    // A SECOND PORT bound on the departed IP: bound, and no candidate --
+    // the bind's own offer runs after the detector has observed it, and
+    // only for an IP the host holds.
+    let _second = listening(&subject, ip).await;
+    drain(&mut subject, Duration::from_secs(2)).await;
+    assert_eq!(
+        offered(&subject),
+        0,
+        "a new listener on the departed IP is not offered"
+    );
+
+    subject.shutdown().await.expect("shutdown");
 }

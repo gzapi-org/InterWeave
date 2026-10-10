@@ -397,6 +397,19 @@ pub(super) enum RelayHandled {
     Passed(Box<Libp2pSwarmEvent<SubstrateBehaviourEvent>>),
 }
 
+/// A network change ADDED an address: every relay backing off is due at
+/// the next tick, its ladder kept
+/// (`ReservationManager::network_added`). Returns how many.
+/// A relay the dial gate still holds off after the same addition is
+/// left on its ladder (`gate_holds`; ADR-0011 A 2026-10-09).
+pub(super) fn network_added(
+    state: &mut RelayState,
+    now_ms: u64,
+    gate_holds: impl Fn(&TransportIdentity) -> bool,
+) -> usize {
+    state.manager.network_added(now_ms, gate_holds)
+}
+
 /// The tick: drop de-authorized learned relays, ask and release as the
 /// manager says, and bring the Swarm's advertised set to the manager's.
 pub(super) fn reconcile(
@@ -1147,7 +1160,11 @@ mod tests {
                 // As production builds it: the root funnel around the
                 // whole composite (ADR-0052 A 2026-09-25 D1).
                 .map(|b| {
-                    crate::root_funnel::RootFunnel::new(b, crate::operator_set::OperatorSet::new())
+                    crate::root_funnel::RootFunnel::new(
+                        b,
+                        crate::operator_set::OperatorSet::new(),
+                        crate::held_listeners::HeldListeners::new(),
+                    )
                 })
                 .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
             })

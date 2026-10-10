@@ -2239,6 +2239,14 @@ pub enum ConfigError {
         /// The field that turns it on.
         field: &'static str,
     },
+    /// `runtime.deployment=embedded-android` with a listener on a
+    /// specific address: it would die with that address and nothing
+    /// issues it again (architect-cto's ruling of 2026-10-09, relay seq
+    /// 33736).
+    AndroidListenerNotWildcard {
+        /// The `transport.listen.addresses` entry, as written.
+        address: String,
+    },
     /// A configured address names a host protocol this build cannot
     /// dial.
     ///
@@ -2538,6 +2546,10 @@ impl core::fmt::Display for ConfigError {
             Self::AndroidServesInfrastructure { field } => write!(
                 f,
                 "{field} runs an infrastructure service, which runtime.deployment=embedded-android forbids"
+            ),
+            Self::AndroidListenerNotWildcard { address } => write!(
+                f,
+                "transport.listen.addresses '{address}' is not a wildcard; runtime.deployment=embedded-android listens on /ip4/0.0.0.0 or /ip6/:: only, since a listener on one address dies with it"
             ),
             Self::KademliaDefaultEnablementGated => write!(
                 f,

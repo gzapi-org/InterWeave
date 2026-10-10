@@ -106,6 +106,7 @@ mod class_gate;
 pub mod direct_codec;
 pub mod endpoints_codec;
 pub mod gated_swarm;
+pub mod held_listeners;
 pub mod hole_punch;
 pub mod hop_gate;
 pub mod mdns_scope;
@@ -129,8 +130,8 @@ pub use preauth_gate::PreAuthAdmission;
 pub use refusals::{DialRefusals, RECENT_CAPACITY, Refusal};
 pub use runtime::{
     BroadcastChannels, DEFAULT_COMMAND_CAPACITY, DEFAULT_EVENT_CAPACITY, DialFailureClass,
-    DialRefusal, HolePunchOutcome, MAX_CONFIGURED_CAPACITY, PathChange, PeerGate, PeerPath,
-    RelayReservationOutcome, RelayServerOutcome, ShutdownReport, SubstrateConfig, SubstrateError,
-    SwarmCommand, SwarmCommander, SwarmEvent, SwarmRuntime,
+    DialRefusal, HolePunchOutcome, MAX_CONFIGURED_CAPACITY, NetworkMonitor, NetworkView,
+    PathChange, PeerGate, PeerPath, RelayReservationOutcome, RelayServerOutcome, ShutdownReport,
+    SubstrateConfig, SubstrateError, SwarmCommand, SwarmCommander, SwarmEvent, SwarmRuntime,
 };
 pub use runtime::{DialGateStatus, IngressStatus, PreAuthStatus, RuntimeStatus};

@@ -72,21 +72,9 @@ Identity backup/restore remains an offline/stopped-runtime operation. Recovery p
 
 ## Android network lifecycle
 
-A small platform bridge observes Android network changes and emits only normalized local events to Rust:
+A small platform bridge observes Android network changes (`ConnectivityManager` callbacks with `LinkProperties`) and hands Rust one thing: `EmbeddedHost::network_changed(NetworkView { addresses })`, a SNAPSHOT of every address of every network the platform reports usable — never a delta, never network ids, interface names or carrier facts (host-specific concepts stop at the bridge, ADR-0001). Non-blocking; the latest view wins; an empty view is offline; before the first view the platform's view is unknown. The Service passes a view when the addresses differ; a reconnect that returns the same addresses is no change at this layer (A 2026-10-09, Stage 17 step 5).
 
-```text
-available / lost / capabilities changed / link changed
-```
-
-On a material network change the Rust runtime:
-
-1. invalidates affected AutoNAT evidence;
-2. removes stale relay-derived assumptions and reconciles reservations;
-3. re-evaluates listener/address registry;
-4. restarts/rebinds mDNS as applicable;
-5. marks old address candidates stale without changing PeerId;
-6. reconnects trusted peers through the normal DialAdmissionGate;
-7. leaves EndpointId/config and ADR-0044 retention state unchanged.
+What the runtime then does is `CONNECTIVITY.md` §14's: the view feeds the one network-change detector beside the listeners' bound set; a removal closes the connections that ran from a departed IP, invalidates AutoNAT evidence and takes the relay ladder; an addition lifts the dial gate's peer backoff for every classified peer (infrastructure peers included), makes the data-plane-trusted peers' unclaimed retries due and the relay reservation ladder due — unless the gate still holds the relay peer after the same lift — once per peer per lift floor (the peer schedule's first step, 30 s; the ladder's `retry_min`), every dial still through the normal dial gate (ADR-0011 A 2026-10-09); PeerId, EndpointId, configuration and ADR-0044 retention state are unchanged. An embedded-android profile listens on wildcard addresses only (`ConfigError::AndroidListenerNotWildcard` otherwise): Android names no stable address.
 
 ## Android discovery/resource profile
 
