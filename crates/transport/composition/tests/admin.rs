@@ -21,7 +21,7 @@ use interweave_transport_api::{
     DirectDestination, DisconnectReason, EndpointId, MessageId, Payload, TransportError,
     TransportEvent, TransportIdentity, TransportRuntime,
 };
-use interweave_transport_composition::{ComposedRuntime, CompositionOptions};
+use interweave_transport_composition::{ComposedRuntime, CompositionOptions, Ended};
 
 const PATIENCE: Duration = Duration::from_secs(20);
 
@@ -804,4 +804,55 @@ async fn the_peer_rows_reach_the_admin_port_under_admin_status() {
         "{gone:?}"
     );
     subject.shutdown().await.expect("clean shutdown");
+}
+
+/// THE OWNER HEARS EITHER WAY (`ComposedRuntime::wait_end`): a runtime
+/// whose driver ends on its own -- the substrate gone -- resolves the
+/// owner's wait as `RuntimeEnded`, where `shutdown_requested` alone
+/// would have waited forever, and an admin port's request resolves it as
+/// that request (the control). Neither is reported before it happens.
+#[tokio::test]
+async fn the_owner_hears_a_runtime_that_ended_on_its_own() {
+    let (identity, _) = id();
+    let ended =
+        ComposedRuntime::start(&identity, &profile(&[], &[]), CompositionOptions::default())
+            .await
+            .expect("composes");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), ended.wait_end())
+            .await
+            .is_err(),
+        "nothing has happened yet"
+    );
+    ended.end_driver().await.expect("the driver ends");
+    assert_eq!(
+        tokio::time::timeout(PATIENCE, ended.wait_end())
+            .await
+            .expect("the owner hears it"),
+        Ended::RuntimeEnded
+    );
+    let _ = ended.stop().await;
+
+    // THE CONTROL: a request, not an end.
+    let (identity, _) = id();
+    let asked =
+        ComposedRuntime::start(&identity, &profile(&[], &[]), CompositionOptions::default())
+            .await
+            .expect("composes");
+    let port = asked
+        .sessions()
+        .admin([AdminCapability::Shutdown].into())
+        .await
+        .expect("a port");
+    port.shutdown(Duration::from_secs(1)).await.expect("asked");
+    assert!(
+        matches!(
+            tokio::time::timeout(PATIENCE, asked.wait_end())
+                .await
+                .expect("the owner hears it"),
+            Ended::ShutdownRequested(request) if request.grace == Duration::from_secs(1)
+        ),
+        "a request is a request"
+    );
+    asked.stop().await.expect("stops");
 }
