@@ -284,6 +284,36 @@ fn each_refusal_names_its_cause() {
         .expect("stops");
 }
 
+/// A listener the platform refuses a socket is `NetworkDenied`, the cause
+/// the Service shows as "grant network access": on this host a wildcard
+/// listener on port 80 without the privilege, refused with EACCES as an
+/// ungranted INTERNET permission is with EPERM on Android 17. The
+/// control: the same profile on port 0 starts. Needs an unprivileged
+/// runner, as the port's refusal does.
+#[test]
+fn a_listener_the_platform_refuses_is_network_denied() {
+    let app = app();
+    provision(
+        &app.dir,
+        &document("embedded-android", false).replacen("/tcp/0", "/tcp/80", 1),
+    );
+    match EmbeddedHost::start(launch(&app.dir)) {
+        Err(EmbeddedRefused::NetworkDenied(detail)) => {
+            assert!(
+                detail.contains("(os error "),
+                "the OS's own words: {detail}"
+            );
+        }
+        Err(other) => panic!("a refused listener is NetworkDenied: {other:?}"),
+        Ok(_) => panic!("port 80 bound: this test needs an unprivileged runner"),
+    }
+    provision(&app.dir, &document("embedded-android", false));
+    EmbeddedHost::start(launch(&app.dir))
+        .expect("the control starts")
+        .stop(Duration::from_secs(1))
+        .expect("stops");
+}
+
 /// The platform stops the Service while a thread of it waits for a
 /// shutdown request: the owner's own request releases that thread with
 /// the grace it named, the host then stops, and a start in the same
