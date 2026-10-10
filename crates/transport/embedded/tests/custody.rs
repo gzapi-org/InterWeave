@@ -970,3 +970,23 @@ fn a_record_from_before_a_restore_no_longer_opens() {
         ))
     );
 }
+
+/// `Seed`'s `Debug` prints nothing of its bytes, so a seed caught in a
+/// `{:?}` -- a log line, a panic message, a refusal formatted for the
+/// platform's log -- leaks none of them. Two seeds that differ print the
+/// same; the bytes are what `expose` gives (the control).
+#[test]
+fn a_seed_formats_without_its_bytes() {
+    let bytes: [u8; 32] = std::array::from_fn(|i| u8::try_from(i).unwrap() ^ 0xA5);
+    let seed = Seed::new(bytes);
+    let shown = format!("{seed:?} {seed:#?}");
+    for b in bytes {
+        assert!(!shown.contains(&b.to_string()), "{b} in {shown}");
+        assert!(
+            !shown.to_lowercase().contains(&format!("{b:02x}")),
+            "{b:02x} in {shown}"
+        );
+    }
+    assert_eq!(format!("{seed:?}"), format!("{:?}", Seed::new([0; 32])));
+    assert_eq!(seed.expose(), &bytes);
+}
