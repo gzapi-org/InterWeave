@@ -32,11 +32,10 @@ use interweave_profile_config::{
     runtime::Deployment,
 };
 use interweave_profile_identity::ProfileIdentity;
-pub use interweave_transport_composition::NetworkView;
 use interweave_transport_composition::{
     AUDIT_TARGET, ComposedRuntime, CompositionError, CompositionOptions, InProcessBinding,
-    ShutdownRequest,
 };
+pub use interweave_transport_composition::{Ended, NetworkView, ShutdownRequest};
 
 /// What the Service starts a host with.
 pub struct EmbeddedLaunch {
@@ -316,21 +315,38 @@ impl EmbeddedHost {
         &self.paths
     }
 
-    /// Wait for a request that the runtime's owner stop it: an admin
-    /// port's (`AdminPort::shutdown`), or the owner's own
-    /// [`request_shutdown`](Self::request_shutdown) from another thread
-    /// -- the way out for a Service the platform stops while a thread of
-    /// it waits here, since [`stop`](Self::stop) cannot be called while
-    /// the host is borrowed. The runtime never stops itself: the Service
-    /// answers by calling `stop` with the grace asked for. While the
-    /// host exists the answer is always `Some`; the `Option` is the
-    /// composition's.
+    /// Wait until the Service should stop the host:
+    /// [`Ended::ShutdownRequested`] for a request -- an admin port's
+    /// (`AdminPort::shutdown`), or the owner's own
+    /// [`request_shutdown`](Self::request_shutdown) from another thread,
+    /// the way out for a Service the platform stops while a thread of it
+    /// waits here, since [`stop`](Self::stop) cannot be called while the
+    /// host is borrowed -- or [`Ended::RuntimeEnded`] when the runtime
+    /// ended on its own, its substrate gone, so a Service does not keep a
+    /// dead runtime in the foreground (`ComposedRuntime::wait_end`). A
+    /// request wins when both hold. The Service answers either by calling
+    /// `stop`, with the grace asked for or its own; after a
+    /// `RuntimeEnded`, `stop` reports the failure and releases the lock,
+    /// and a fresh host may be started.
     ///
     /// BLOCKS; call it off any async context.
     #[must_use]
-    pub fn wait_shutdown_requested(&self) -> Option<ShutdownRequest> {
-        let (executor, composed) = (self.executor.as_ref()?, self.composed.as_ref()?);
-        executor.block_on(composed.shutdown_requested())
+    pub fn wait_shutdown_requested(&self) -> Ended {
+        match (self.executor.as_ref(), self.composed.as_ref()) {
+            (Some(executor), Some(composed)) => executor.block_on(composed.wait_end()),
+            // Only `stop` and `Drop` take them, and both consume the host.
+            _ => Ended::RuntimeEnded,
+        }
+    }
+
+    /// End the runtime's driver as if its substrate had gone, so a test
+    /// reaches [`Ended::RuntimeEnded`] through the host. TEST BUILDS
+    /// ONLY.
+    #[cfg(feature = "test-hooks")]
+    pub fn end_runtime_for_test(&self) {
+        if let (Some(executor), Some(composed)) = (self.executor.as_ref(), self.composed.as_ref()) {
+            let _ = executor.block_on(composed.end_driver());
+        }
     }
 
     /// Ask, as the runtime's owner, that it stop within `grace`: what an

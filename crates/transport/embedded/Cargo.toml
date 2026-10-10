@@ -37,7 +37,17 @@ tokio = { workspace = true }
 # levels. Already in the graph through the composition.
 tracing = { workspace = true }
 
+[features]
+# TEST-ONLY: end the runtime's driver from a test, through the
+# composition's own hook (`EmbeddedHost::end_runtime_for_test`). Enabled
+# by this crate's tests as a dev-dependency feature; nothing that ships
+# turns it on.
+test-hooks = ["interweave-transport-composition/test-hooks"]
+
 [dev-dependencies]
+# TEST-ONLY: this crate with its own `test-hooks` on, for
+# `tests/host.rs`'s runtime that ends on its own.
+interweave-transport-embedded = { path = ".", features = ["test-hooks"] }
 # A runtime of the test's own, to drop a host inside its async context.
 tokio = { workspace = true, features = ["rt"] }
 tempfile = { workspace = true }
