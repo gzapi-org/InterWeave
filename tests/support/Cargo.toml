@@ -36,6 +36,7 @@ interweave-transport-api = { path = "../../crates/api/transport-api", optional =
 interweave-transport-libp2p = { path = "../../crates/transport/libp2p", optional = true }
 interweave-transport-runtime = { path = "../../crates/transport/runtime", optional = true }
 interweave-trust-api = { path = "../../crates/api/trust-api", optional = true }
+jsonschema = { version = "0.49", optional = true }
 tempfile = { workspace = true, optional = true }
 
 [features]
@@ -50,6 +51,7 @@ e2e = [
     "dep:interweave-transport-libp2p",
     "dep:interweave-transport-runtime",
     "dep:interweave-trust-api",
+    "dep:jsonschema",
     "dep:libp2p",
     "dep:tempfile",
     "dep:tokio",

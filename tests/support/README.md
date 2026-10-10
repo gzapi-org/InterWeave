@@ -8,9 +8,7 @@ Package name `interweave-test-support`. Activated by Stage 0 with the two pieces
 |---|---|
 | `fixtures` | loading the frozen vector files under `fixtures/`, by path or by vector name |
 | `hex` | strict lower-case hex, the notation every fixture states its bytes in |
-| `e2e` (feature `e2e`) | the desktop harness the end-to-end suites share: a daemon's XDG home and process, the shipped examples made concrete (`example`, `relayed_example`, `relayed_example_of`), and the test relay (`e2e::relay`, the production relay-server field in a bare Swarm) |
-
-`shared/schema_validator.rs` is the contract schema tree as a validator, included by each suite that needs it (`#[path]`) rather than compiled in here: `jsonschema` pulls in an MIT-0 crate that the licence policy admits only as a dev-dependency.
+| `e2e` (feature `e2e`) | the desktop harness the end-to-end suites share: a daemon's XDG home and process, the shipped examples made concrete (`example`, `relayed_example`, `relayed_example_of`), the schema tree (`schema_validator`), and the test relay (`e2e::relay`, the production relay-server field in a bare Swarm) |
 
 `repo_root()` is derived from this package's own location, not the current directory: `cargo test` runs each suite with its own package as the cwd, so a relative `fixtures/` path would resolve differently per suite.
 
