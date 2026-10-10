@@ -33,6 +33,7 @@
 use std::time::Duration;
 
 use futures::StreamExt;
+use interweave_transport_libp2p::held_listeners::HeldListeners;
 use interweave_transport_libp2p::operator_set::OperatorSet;
 use interweave_transport_libp2p::root_funnel::RootFunnel;
 use libp2p::kad::{self, store::MemoryStore};
@@ -130,7 +131,8 @@ async fn the_control_kademlia_dials_what_its_table_holds() {
 #[tokio::test]
 async fn the_root_funnel_prunes_what_a_behaviour_extends_a_dial_with() {
     let (listener, trapped) = trap().await;
-    let mut swarm = swarm_of(|key| RootFunnel::new(composite(key), OperatorSet::new()));
+    let mut swarm =
+        swarm_of(|key| RootFunnel::new(composite(key), OperatorSet::new(), HeldListeners::new()));
     let counters = swarm.behaviour().counters();
     let peer = PeerId::random();
     let name: Multiaddr = "/dns4/a-name-a-peer-chose.invalid/tcp/4001"
@@ -197,7 +199,8 @@ async fn an_operators_address_passes_the_root_funnel_whatever_its_class() {
     let operator = OperatorSet::new();
     assert!(operator.insert(&trapped));
     let funnel_operator = operator.clone();
-    let mut swarm = swarm_of(move |key| RootFunnel::new(composite(key), funnel_operator));
+    let mut swarm =
+        swarm_of(move |key| RootFunnel::new(composite(key), funnel_operator, HeldListeners::new()));
     let counters = swarm.behaviour().counters();
     let peer = PeerId::random();
     swarm
@@ -231,7 +234,8 @@ async fn an_operators_address_passes_the_root_funnel_whatever_its_class() {
 #[tokio::test]
 async fn an_explicit_address_passes_the_root_funnel_untouched() {
     let (listener, trapped) = trap().await;
-    let mut swarm = swarm_of(|key| RootFunnel::new(composite(key), OperatorSet::new()));
+    let mut swarm =
+        swarm_of(|key| RootFunnel::new(composite(key), OperatorSet::new(), HeldListeners::new()));
     let counters = swarm.behaviour().counters();
 
     swarm
@@ -294,7 +298,8 @@ async fn the_control_tcp_dials_the_last_host_of_a_stacked_address() {
 #[tokio::test]
 async fn the_root_funnel_prunes_a_stacked_address() {
     let (listener, trapped) = trap().await;
-    let mut swarm = swarm_of(|key| RootFunnel::new(composite(key), OperatorSet::new()));
+    let mut swarm =
+        swarm_of(|key| RootFunnel::new(composite(key), OperatorSet::new(), HeldListeners::new()));
     let counters = swarm.behaviour().counters();
     let peer = PeerId::random();
     swarm

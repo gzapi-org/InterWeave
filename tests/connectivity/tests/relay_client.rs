@@ -36,6 +36,7 @@
 #![allow(clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeSet;
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use futures::StreamExt as _;
@@ -45,7 +46,7 @@ use interweave_transport_api::{PathReadiness, TransportIdentity};
 use interweave_transport_libp2p::relay_keepalive::RelayKeepalive;
 use interweave_transport_libp2p::runtime::relay_driver::{RelayClientSettings, StaticRelay};
 use interweave_transport_libp2p::{
-    RelayReservationOutcome, SubstrateConfig, SwarmEvent, SwarmRuntime,
+    NetworkView, RelayReservationOutcome, SubstrateConfig, SwarmEvent, SwarmRuntime,
 };
 use interweave_transport_runtime::relay::{ReservationConfig, Standing};
 use interweave_transport_runtime::{DialOrigin, TrustSources};
@@ -827,5 +828,321 @@ async fn an_authorized_peer_advertising_hop_is_learned_reserved_on_over_its_conn
         relays.observer.as_ref().map(|(_, seen)| seen)
     );
 
+    subject.shutdown().await.expect("shutdown");
+}
+
+/// A NETWORK ADDITION makes a backed-off relay due at once
+/// (`transport/libp2p/CONNECTIVITY.md` §14; architect-cto's ruling of
+/// 2026-10-09, relay seq 55562): the relay was down when the subject
+/// asked, so the subject backs off for the ladder's first step -- a
+/// minute here -- and the relay comes back. Without a change the subject
+/// waits (the control); a platform view that adds an address gets the
+/// reservation asked and accepted within seconds. The relay-only
+/// profile after offline -> online, which otherwise stays unreachable
+/// for the rest of its relay backoff.
+#[tokio::test]
+async fn an_addition_asks_a_backed_off_relay_at_once_and_without_one_it_waits() {
+    const CONTROL: Duration = Duration::from_secs(5);
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let relay_keys = identity::Keypair::generate_ed25519();
+    let relay_peer = identity_of(&relay_keys);
+    // Bound once for its address, then gone: the relay is down.
+    let relay_addr = bound(&mut relay_server(relay_keys.clone())).await;
+
+    let subject_id = ProfileIdentity::generate();
+    let mut relay_settings = settings(
+        vec![StaticRelay {
+            peer: relay_peer.clone(),
+            address: format!("{relay_addr}/p2p/{}", relay_peer.as_str()),
+        }],
+        false,
+    );
+    relay_settings.reservations.retry_min_ms = 60_000;
+    relay_settings.reservations.retry_max_ms = 120_000;
+    let mut subject = SwarmRuntime::start(
+        &subject_id,
+        SubstrateConfig {
+            relay_client: Some(relay_settings),
+            ..SubstrateConfig::default()
+        },
+        infrastructure_only(&[&relay_peer]),
+    )
+    .expect("the runtime starts");
+    // A private listener fills the subject's set of addresses; the view
+    // later adds to it.
+    let _private = subject
+        .listen(format!("/ip4/{ip}/tcp/0").parse().expect("valid"))
+        .await
+        .expect("the subject's private listener");
+
+    let outcome_for = |wanted: RelayReservationOutcome| {
+        let relay_peer = relay_peer.clone();
+        move |e: &SwarmEvent| {
+            matches!(e, SwarmEvent::RelayReservationChanged { relay, outcome, .. }
+                if *relay == relay_peer && *outcome == wanted)
+        }
+    };
+    // THE FAILURE: nobody answers.
+    let failed = outcome_for(RelayReservationOutcome::Failed);
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let event = tokio::time::timeout_at(deadline, subject.next_event())
+            .await
+            .expect("the ask fails within the patience")
+            .expect("the runtime is alive");
+        if failed(&event) {
+            break;
+        }
+    }
+    let failed_at = tokio::time::Instant::now();
+
+    // The relay is back, at the same address.
+    let mut relay = relay_server(relay_keys);
+    relay.listen_on(relay_addr.clone()).expect("listens again");
+    relay.add_external_address(relay_addr.clone());
+    let mut relay_seen = Seen::default();
+    let mut relays = Relays {
+        first: (&mut relay, &mut relay_seen),
+        second: None,
+        observer: None,
+    };
+
+    // THE CONTROL: no change, and the subject waits its backoff.
+    let events = settle(&mut subject, &mut relays, CONTROL).await;
+    let accepted = outcome_for(RelayReservationOutcome::Accepted);
+    assert!(
+        !events.iter().any(&accepted),
+        "without a change the relay waits its backoff: {events:?}"
+    );
+
+    // THE ADDITION: asked at once, and accepted.
+    subject.network_changed(NetworkView {
+        addresses: vec![ip.into(), Ipv4Addr::new(10, 255, 0, 1).into()],
+    });
+    let _ = subject_event(
+        &mut subject,
+        &mut relays,
+        "the reservation to be accepted after the addition",
+        accepted,
+    )
+    .await;
+    assert!(
+        failed_at.elapsed() < Duration::from_secs(60),
+        "accepted inside the backoff, so the change made it due: {:?}",
+        failed_at.elapsed()
+    );
+    assert_eq!(
+        relay_seen.accepted,
+        vec![
+            subject_id
+                .transport_identity()
+                .expect("peer id")
+                .as_str()
+                .parse::<PeerId>()
+                .expect("a libp2p identity")
+        ],
+        "the relay's own side of the acceptance"
+    );
+
+    subject.shutdown().await.expect("shutdown");
+}
+
+/// STARTED OFFLINE (ADR-0011 A 2026-10-09): the subject holds no address
+/// but loopback, so its known set is empty; its relay ask fails, and the
+/// relay backs off for a minute. Coming online is then the FIRST FILL of
+/// the set, which is no change and invalidates nothing -- but runs the
+/// lift, so the reservation is asked and accepted within seconds. The
+/// control, as before: without the view, it waits.
+#[tokio::test]
+async fn coming_online_after_an_offline_start_asks_the_backed_off_relay_at_once() {
+    const CONTROL: Duration = Duration::from_secs(5);
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let relay_keys = identity::Keypair::generate_ed25519();
+    let relay_peer = identity_of(&relay_keys);
+    let relay_addr = bound(&mut relay_server(relay_keys.clone())).await;
+
+    let subject_id = ProfileIdentity::generate();
+    let mut relay_settings = settings(
+        vec![StaticRelay {
+            peer: relay_peer.clone(),
+            address: format!("{relay_addr}/p2p/{}", relay_peer.as_str()),
+        }],
+        false,
+    );
+    relay_settings.reservations.retry_min_ms = 60_000;
+    relay_settings.reservations.retry_max_ms = 120_000;
+    // No listener at all: offline, as far as the known set can tell.
+    let mut subject = SwarmRuntime::start(
+        &subject_id,
+        SubstrateConfig {
+            relay_client: Some(relay_settings),
+            ..SubstrateConfig::default()
+        },
+        infrastructure_only(&[&relay_peer]),
+    )
+    .expect("the runtime starts");
+
+    let outcome_for = |wanted: RelayReservationOutcome| {
+        let relay_peer = relay_peer.clone();
+        move |e: &SwarmEvent| {
+            matches!(e, SwarmEvent::RelayReservationChanged { relay, outcome, .. }
+                if *relay == relay_peer && *outcome == wanted)
+        }
+    };
+    let failed = outcome_for(RelayReservationOutcome::Failed);
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let event = tokio::time::timeout_at(deadline, subject.next_event())
+            .await
+            .expect("the ask fails within the patience")
+            .expect("the runtime is alive");
+        if failed(&event) {
+            break;
+        }
+    }
+    let failed_at = tokio::time::Instant::now();
+
+    let mut relay = relay_server(relay_keys);
+    relay.listen_on(relay_addr.clone()).expect("listens again");
+    relay.add_external_address(relay_addr.clone());
+    let mut relay_seen = Seen::default();
+    let mut relays = Relays {
+        first: (&mut relay, &mut relay_seen),
+        second: None,
+        observer: None,
+    };
+
+    let events = settle(&mut subject, &mut relays, CONTROL).await;
+    let accepted = outcome_for(RelayReservationOutcome::Accepted);
+    assert!(
+        !events.iter().any(&accepted),
+        "without the view the relay waits its backoff: {events:?}"
+    );
+
+    // ONLINE: the first fill.
+    subject.network_changed(NetworkView {
+        addresses: vec![ip.into()],
+    });
+    let (_, _, before) = subject_event(
+        &mut subject,
+        &mut relays,
+        "the reservation to be accepted after coming online",
+        accepted,
+    )
+    .await;
+    assert!(
+        failed_at.elapsed() < Duration::from_secs(60),
+        "accepted inside the backoff: {:?}",
+        failed_at.elapsed()
+    );
+    assert!(
+        !before
+            .iter()
+            .any(|e| matches!(e, SwarmEvent::NetworkChanged { .. })),
+        "the first fill is reported as no change: {before:?}"
+    );
+
+    subject.shutdown().await.expect("shutdown");
+}
+
+/// Whether `subject` reports a failed ask on `relay` within `window`.
+async fn next_failure(
+    subject: &mut SwarmRuntime,
+    relay: &TransportIdentity,
+    window: Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + window;
+    while let Ok(Some(event)) = tokio::time::timeout_at(deadline, subject.next_event()).await {
+        if matches!(&event, SwarmEvent::RelayReservationChanged { relay: r, outcome: RelayReservationOutcome::Failed, .. }
+            if r == relay)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// THE TWO FLOORS MOVE TOGETHER (ADR-0011 A 2026-10-09): the relay stays
+/// down. A first addition lifts the gate and the ladder, and the ask is
+/// made and fails -- the live control -- which puts the relay PEER back
+/// in the gate's backoff for its 30 s floor. A second addition 6 s later
+/// is past the ladder's 5 s floor but inside the gate's: the relay is
+/// not asked, where asking would only be refused at the gate and climb
+/// the ladder a rung.
+#[tokio::test]
+async fn an_addition_inside_the_gates_floor_leaves_the_relay_ladder_alone() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let relay_keys = identity::Keypair::generate_ed25519();
+    let relay_peer = identity_of(&relay_keys);
+    let relay_addr = bound(&mut relay_server(relay_keys)).await;
+    let subject_id = ProfileIdentity::generate();
+    let mut relay_settings = settings(
+        vec![StaticRelay {
+            peer: relay_peer.clone(),
+            address: format!("{relay_addr}/p2p/{}", relay_peer.as_str()),
+        }],
+        false,
+    );
+    relay_settings.reservations.retry_min_ms = 5_000;
+    relay_settings.reservations.retry_max_ms = 600_000;
+    let mut subject = SwarmRuntime::start(
+        &subject_id,
+        SubstrateConfig {
+            relay_client: Some(relay_settings),
+            ..SubstrateConfig::default()
+        },
+        infrastructure_only(&[&relay_peer]),
+    )
+    .expect("the runtime starts");
+    let _private = subject
+        .listen(format!("/ip4/{ip}/tcp/0").parse().expect("valid"))
+        .await
+        .expect("the subject's private listener");
+    assert!(
+        next_failure(&mut subject, &relay_peer, PATIENCE).await,
+        "the first ask fails: the relay is down"
+    );
+
+    // THE FIRST ADDITION: both floors clear, asked, and it fails again.
+    subject.network_changed(NetworkView {
+        addresses: vec![ip.into(), Ipv4Addr::new(10, 255, 0, 1).into()],
+    });
+    assert!(
+        next_failure(&mut subject, &relay_peer, Duration::from_secs(4)).await,
+        "the control: the addition made the relay due and it was asked"
+    );
+
+    // THE SECOND, past the ladder's floor and inside the gate's.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    subject.network_changed(NetworkView {
+        addresses: vec![
+            ip.into(),
+            Ipv4Addr::new(10, 255, 0, 1).into(),
+            Ipv4Addr::new(10, 255, 0, 2).into(),
+        ],
+    });
+    // THE WINDOW OPENS WHEN THE VIEW IS READ -- its change is the proof --
+    // not when it is sent; a failure seen before that counts too. It
+    // closes well short of the ladder's own next step (10 s and up after
+    // the second failure), so only an ask the addition made can fail in it.
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let event = tokio::time::timeout_at(deadline, subject.next_event())
+            .await
+            .expect("the second view's change within the patience")
+            .expect("the runtime is alive");
+        assert!(
+            !matches!(&event, SwarmEvent::RelayReservationChanged { relay, outcome: RelayReservationOutcome::Failed, .. }
+                if *relay == relay_peer),
+            "inside the gate's floor the relay is not asked"
+        );
+        if matches!(event, SwarmEvent::NetworkChanged { .. }) {
+            break;
+        }
+    }
+    assert!(
+        !next_failure(&mut subject, &relay_peer, Duration::from_secs(3)).await,
+        "inside the gate's floor the relay is not asked"
+    );
     subject.shutdown().await.expect("shutdown");
 }

@@ -69,6 +69,7 @@ pub(super) fn handle_command(
     operator: &crate::operator_set::OperatorSet,
     stores: &crate::store_refusals::StoreRefusals,
     held_sends: &mut super::held_sends::HeldSends,
+    network: &super::network_change::NetworkSet,
     command: SwarmCommand,
 ) {
     match command {
@@ -531,8 +532,7 @@ pub(super) fn handle_command(
         } => {
             // Rule 3 asks what this node listens on NOW, as at the
             // Identify learn site, so the listeners are read per command.
-            let own_listeners: Vec<String> =
-                active.values().flatten().map(ToString::to_string).collect();
+            let own_listeners: Vec<String> = network.own_listeners(active.values().flatten());
             let mut boundary = super::dialing::AdvertisedBoundary {
                 own_listeners: &own_listeners,
                 stores,
@@ -1126,7 +1126,7 @@ pub(super) fn handle_command(
                 // and an `OfferRoutingPeer` carries peer-supplied
                 // addresses into the routing table. See
                 // `KademliaState::own_listeners`.
-                state.set_own_listeners(active.values().flatten().map(ToString::to_string));
+                state.set_own_listeners(network.own_listeners(active.values().flatten()));
                 for event in super::kademlia_driver::handle_command(
                     state, behaviour, manager, command, now_ms,
                 ) {

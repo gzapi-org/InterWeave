@@ -18,7 +18,7 @@ use interweave_kademlia_control_api::{
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::TransportIdentity;
 use interweave_transport_libp2p::runtime::kademlia_driver::KademliaSettings;
-use interweave_transport_libp2p::{SubstrateConfig, SwarmEvent, SwarmRuntime};
+use interweave_transport_libp2p::{NetworkView, SubstrateConfig, SwarmEvent, SwarmRuntime};
 use interweave_transport_runtime::{DialDenial, DialOrigin, TrustSources};
 use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 use libp2p::Multiaddr;
@@ -427,6 +427,64 @@ async fn an_exploration_converges_the_star_through_admitted_dials() {
         candidates.admitted >= 1,
         "the result's address crossed the query-candidate hook: {candidates:?}"
     );
+
+    hub.shutdown().await.expect("stops");
+    other.shutdown().await.expect("stops");
+    asker.shutdown().await.expect("stops");
+}
+
+/// ADR-0052 rule 3 (A 2026-10-09) AT THE ROOT FUNNEL, through the
+/// runtime's own wiring: the asker's routing table holds the hub's
+/// private address, admitted while the asker held its private IP. The
+/// platform's view then says that IP departed -- its listener is still
+/// bound, and its connection to the hub closes -- so the walk's dial to
+/// the hub, extended with that address, is pruned by the funnel: no
+/// private listener of the family is held any more. Only the funnel
+/// stands there (the address was admitted long before), so a funnel
+/// built with a handle the detector does not write passes it, and this
+/// fails. The control is `an_exploration_converges_the_star_through_admitted_dials`,
+/// where the same walk's extended dial crosses the funnel.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_walk_after_the_view_departs_the_private_ip_is_pruned_at_the_root_funnel() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let ((hub, _), (other, _), (mut asker, _)) = star(true, ip).await;
+    // The first view is read before the second is sent: it names an
+    // address the listeners do not, so its reading is a change.
+    asker.network_changed(NetworkView {
+        addresses: vec![ip.into(), std::net::Ipv4Addr::new(10, 255, 0, 5).into()],
+    });
+    wait_for(&mut asker, "the first view", |e| {
+        matches!(e, SwarmEvent::NetworkChanged { .. })
+    })
+    .await;
+    asker.network_changed(NetworkView {
+        addresses: vec![std::net::Ipv4Addr::new(10, 255, 0, 5).into()],
+    });
+    let departed = std::net::IpAddr::from(ip);
+    wait_for(
+        &mut asker,
+        "the private IP's departure",
+        |e| matches!(e, SwarmEvent::NetworkChanged { removed, .. } if removed.contains(&departed)),
+    )
+    .await;
+
+    let before = asker.root_funnel_counters();
+    explore(&mut asker).await;
+    let removed = |c: &interweave_transport_libp2p::root_funnel::RootFunnelCounters| {
+        c.candidates_removed.values().sum::<usize>()
+    };
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let now = asker.root_funnel_counters();
+        if removed(&now) > removed(&before) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the walk's extended private address was not pruned: {now:?}"
+        );
+        let _ = tokio::time::timeout(Duration::from_millis(100), asker.next_event()).await;
+    }
 
     hub.shutdown().await.expect("stops");
     other.shutdown().await.expect("stops");

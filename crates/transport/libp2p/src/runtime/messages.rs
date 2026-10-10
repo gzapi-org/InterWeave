@@ -346,6 +346,21 @@ pub enum SwarmCommand {
     },
 }
 
+/// What the platform reports of the networks this host is on
+/// (`human-client-android.md` "network callbacks", §20 step 5): a
+/// SNAPSHOT of every address of every network it reports usable, never
+/// a delta, so a missed or reordered report corrects itself on the
+/// next. Empty means offline. Addresses only: no network id, interface
+/// name or carrier fact: a host-specific concept stops at the bridge,
+/// which hands the runtime normalized local facts (ADR-0001's layering;
+/// `human-client-android.md`). Handed in through
+/// [`super::NetworkMonitor`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NetworkView {
+    /// Every usable address, in any order; duplicates are one.
+    pub addresses: Vec<std::net::IpAddr>,
+}
+
 /// The gate's hold on one peer, on the wall clock (`CONNECTIVITY.md`
 /// §19, A 2026-10-06). Times only: no address leaves the runtime here.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -633,30 +648,34 @@ pub enum SwarmEvent {
         reason: Option<String>,
     },
     /// The network this profile is on changed (`transport/libp2p/
-    /// CONNECTIVITY.md` §14, step 10): the set of addresses its
-    /// listeners have bound -- loopback, unspecified and link-local
-    /// ones aside -- differs from the last observation, after the
-    /// first bind. When an address was REMOVED, what followed inside
-    /// the runtime, in the same turn -- an addition alone is reported
-    /// and offered, and invalidates nothing (§14 item 1):
-    /// the AutoNAT verdict went to `unknown` and was published as a
-    /// `ConnectivityChanged`, which the relay target follows; every
-    /// reachability candidate is due for a re-test within the jitter;
-    /// every DCUtR attempt in flight was given up (it keeps its permit
-    /// while the crate's rounds run and ends `Abandoned`, no cooldown,
-    /// when they do -- or `Succeeded`, if the punch lands after all)
-    /// and every cooldown was lifted. Nothing was closed
-    /// by the runtime:
-    /// a connection that died with its interface is reported as it
-    /// closes, and one that survived is kept (§14 item 5). Nothing is
-    /// replayed (item 7): an exchange the transition failed was
-    /// answered to its caller. Informational; dropped when the outbox
-    /// has no base room.
+    /// CONNECTIVITY.md` §14, step 10): the set of IPs this host is known
+    /// to hold -- from its listeners' bound set and the platform's
+    /// [`NetworkView`], loopback, unspecified and link-local ones aside
+    /// -- moved, after it first filled. When an IP was REMOVED, what
+    /// followed inside the runtime, in the same turn: the AutoNAT verdict
+    /// went to `unknown` and was published as a `ConnectivityChanged`,
+    /// which the relay target follows; every reachability candidate is
+    /// due for a re-test within the jitter; every DCUtR attempt in flight
+    /// was given up (it keeps its permit while the crate's rounds run and
+    /// ends `Abandoned`, no cooldown, when they do -- or `Succeeded`, if
+    /// the punch lands after all) and every cooldown was lifted; and
+    /// every connection running from a removed IP was closed, each
+    /// reported as it closes, while one over an IP still held is kept
+    /// (§14 item 5). When an IP was ADDED, every classified peer held
+    /// off by the dial gate's backoff became dialable, the scheduler's
+    /// retry was made due for the allowlisted ones, and every relay
+    /// reservation backing off became due -- each once per lift floor
+    /// (ADR-0011 A 2026-10-09); an addition alone invalidates nothing
+    /// (§14 item 1). The first fill of an empty set is not reported, but
+    /// runs the same lift. Nothing is replayed (item 7):
+    /// an exchange the transition failed was answered to its caller.
+    /// Informational; dropped when the outbox has no base room.
     NetworkChanged {
-        /// Addresses bound at the last observation and not now.
-        removed: Vec<String>,
-        /// Addresses bound now and not at the last observation.
-        added: Vec<String>,
+        /// IPs this host was known to hold and no longer does: those
+        /// that departed it.
+        removed: Vec<std::net::IpAddr>,
+        /// IPs this host holds now and was not known to before.
+        added: Vec<std::net::IpAddr>,
     },
     /// A LOGICAL peer became connected: its first retained connection
     /// was established and Noise authenticated it. Emitted once per
