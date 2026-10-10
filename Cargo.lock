@@ -3952,6 +3952,7 @@ dependencies = [
  "interweave-profile-config",
  "interweave-profile-identity",
  "interweave-transport-composition",
+ "interweave-transport-embedded",
  "tempfile",
  "tokio",
  "tracing",

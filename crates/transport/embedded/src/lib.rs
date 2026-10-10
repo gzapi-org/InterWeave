@@ -25,6 +25,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use interweave_local_client_api::{AdminBinding as _, AdminCapability, AdminPort as _};
+pub use interweave_profile_config::availability_overlay::StayReachable;
+use interweave_profile_config::availability_overlay::{self, AvailabilityError};
+pub use interweave_profile_config::runtime::AvailabilityMode;
 use interweave_profile_config::sections::LogLevel;
 use interweave_profile_config::trust_overlay::OverlayError;
 use interweave_profile_config::{
@@ -32,11 +35,31 @@ use interweave_profile_config::{
     runtime::Deployment,
 };
 use interweave_profile_identity::ProfileIdentity;
-pub use interweave_transport_composition::NetworkView;
+use interweave_transport_composition::Ended as ComposedEnded;
 use interweave_transport_composition::{
     AUDIT_TARGET, ComposedRuntime, CompositionError, CompositionOptions, InProcessBinding,
-    ShutdownRequest,
 };
+pub use interweave_transport_composition::{NetworkView, ShutdownRequest};
+
+/// Why [`EmbeddedHost::wait_shutdown_requested`] returned. The Service
+/// answers each by stopping the host, and after
+/// [`AvailabilityChanged`](Self::AvailabilityChanged) by starting it
+/// again in the mode it carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ended {
+    /// An admin port, or the owner's own
+    /// [`request_shutdown`](EmbeddedHost::request_shutdown), asked for a
+    /// stop.
+    ShutdownRequested(ShutdownRequest),
+    /// The runtime stopped without being asked, its substrate gone.
+    RuntimeEnded,
+    /// The effective availability mode is no longer the one the host
+    /// started in: the person's choice changed it
+    /// ([`EmbeddedHost::set_availability`]), and the Service restarts in
+    /// this mode rather than waiting for the next start (ADR-0041 A
+    /// 2026-10-10).
+    AvailabilityChanged(AvailabilityMode),
+}
 
 /// What the Service starts a host with.
 pub struct EmbeddedLaunch {
@@ -127,6 +150,20 @@ impl From<LoadError> for EmbeddedRefused {
     }
 }
 
+impl From<AvailabilityError> for EmbeddedRefused {
+    fn from(e: AvailabilityError) -> Self {
+        match e {
+            AvailabilityError::NotPrivate { .. } => Self::DirectoryRefused(e.to_string()),
+            AvailabilityError::Read(io) => Self::from(PersistError::Io(io)),
+            AvailabilityError::Write(persist) => Self::from(persist),
+            AvailabilityError::Config(load) => Self::from(load),
+            AvailabilityError::TooLarge | AvailabilityError::Parse(_) => {
+                Self::ProfileInvalid(e.to_string())
+            }
+        }
+    }
+}
+
 impl From<CompositionError> for EmbeddedRefused {
     fn from(e: CompositionError) -> Self {
         match e {
@@ -204,6 +241,15 @@ pub struct EmbeddedHost {
     sessions: InProcessBinding,
     paths: ProfilePaths,
     log_level: LogLevel,
+    // THE AVAILABILITY CHOICE. `authored` is `config.yaml`'s field,
+    // `started_in` the effective mode at start, and `availability` the
+    // effective mode now, published so a waiter sees it move; writes are
+    // serialised by `availability_writes`, so the file and the published
+    // mode change together.
+    authored: AvailabilityMode,
+    started_in: AvailabilityMode,
+    availability: tokio::sync::watch::Sender<AvailabilityMode>,
+    availability_writes: std::sync::Mutex<()>,
     lock: Option<ProfileLock>,
 }
 
@@ -232,6 +278,18 @@ impl EmbeddedHost {
             return Err(EmbeddedRefused::NotEmbedded);
         }
         let lock = ProfileLock::acquire(&paths, LOCK_WAIT)?;
+        // Read under the lock, so no other host is writing it. A present
+        // overlay that cannot be trusted refuses the start, as the trust
+        // overlay's does: read as absent, it would turn the person's
+        // explicit opt-in off without their knowing.
+        let authored = config.runtime.android.availability_mode;
+        let started_in = availability_overlay::effective(
+            authored,
+            availability_overlay::read_within(
+                &availability_overlay::path_for(&paths),
+                paths.boundary(),
+            )?,
+        );
         let executor = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(WORKERS)
             .thread_name("interweave-embedded")
@@ -250,6 +308,10 @@ impl EmbeddedHost {
             executor: Some(executor),
             paths,
             log_level: config.observability.log_level,
+            authored,
+            started_in,
+            availability: tokio::sync::watch::Sender::new(started_in),
+            availability_writes: std::sync::Mutex::new(()),
             lock: Some(lock),
         })
     }
@@ -302,6 +364,57 @@ impl EmbeddedHost {
         }
     }
 
+    /// The effective availability mode now: the person's choice when
+    /// there is one, else `config.yaml`'s authored mode. What
+    /// `AndroidRuntimeConfig::background_restart_requires_user_authentication`
+    /// and the diagnostic take. Before a host starts, the same reading is
+    /// `availability_overlay::effective_availability_mode`.
+    #[must_use]
+    pub fn availability(&self) -> AvailabilityMode {
+        *self.availability.borrow()
+    }
+
+    /// Record the person's Stay-reachable choice: `Some` writes the
+    /// overlay entry, `None` REMOVES it -- off is the entry's absence,
+    /// never `foreground-only` written down (ADR-0041 A 2026-10-10), and
+    /// [`StayReachable`] is the only value there is to write. The one
+    /// write path; `config.yaml` is never written. When the effective
+    /// mode moves away from the one the host started in,
+    /// [`wait_shutdown_requested`](Self::wait_shutdown_requested) returns
+    /// [`Ended::AvailabilityChanged`]; a choice that leaves it where it
+    /// was -- on, over an authored `stay-reachable` -- changes nothing a
+    /// waiter sees.
+    ///
+    /// BLOCKS on the file write; callable from any thread.
+    ///
+    /// # Errors
+    /// [`EmbeddedRefused`] when the write or the removal failed. What is
+    /// then on disk is read back and is what
+    /// [`availability`](Self::availability) answers: a failure before the rename or the
+    /// unlink leaves the previous choice, one after it (the directory
+    /// sync) leaves the new one, its name perhaps not durable.
+    pub fn set_availability(&self, choice: Option<StayReachable>) -> Result<(), EmbeddedRefused> {
+        let _serial = self
+            .availability_writes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let path = availability_overlay::path_for(&self.paths);
+        let written = availability_overlay::write_within(&path, choice, self.paths.boundary());
+        let on_disk = match &written {
+            Ok(()) => Ok(choice),
+            Err(_) => availability_overlay::read_within(&path, self.paths.boundary()),
+        };
+        if let Ok(chosen) = on_disk {
+            let mode = availability_overlay::effective(self.authored, chosen);
+            self.availability.send_if_modified(|current| {
+                let moved = *current != mode;
+                *current = mode;
+                moved
+            });
+        }
+        written.map_err(EmbeddedRefused::from)
+    }
+
     /// The profile's `observability.log_level`, for [`log_admits`].
     #[must_use]
     pub fn log_level(&self) -> LogLevel {
@@ -316,21 +429,63 @@ impl EmbeddedHost {
         &self.paths
     }
 
-    /// Wait for a request that the runtime's owner stop it: an admin
-    /// port's (`AdminPort::shutdown`), or the owner's own
-    /// [`request_shutdown`](Self::request_shutdown) from another thread
-    /// -- the way out for a Service the platform stops while a thread of
-    /// it waits here, since [`stop`](Self::stop) cannot be called while
-    /// the host is borrowed. The runtime never stops itself: the Service
-    /// answers by calling `stop` with the grace asked for. While the
-    /// host exists the answer is always `Some`; the `Option` is the
-    /// composition's.
+    /// Wait until the Service should stop the host:
+    /// [`Ended::ShutdownRequested`] for a request -- an admin port's
+    /// (`AdminPort::shutdown`), or the owner's own
+    /// [`request_shutdown`](Self::request_shutdown) from another thread,
+    /// the way out for a Service the platform stops while a thread of it
+    /// waits here, since [`stop`](Self::stop) cannot be called while the
+    /// host is borrowed -- or [`Ended::RuntimeEnded`] when the runtime
+    /// ended on its own, its substrate gone, so a Service does not keep a
+    /// dead runtime in the foreground (`ComposedRuntime::wait_end`) -- or
+    /// [`Ended::AvailabilityChanged`] once the effective availability
+    /// mode differs from the one the host started in, at once if it
+    /// already does. A request wins over the other two, and a runtime's
+    /// end over a changed mode, when more than one holds. The Service
+    /// answers any of them by calling `stop`, with the grace asked for or
+    /// its own. `RuntimeEnded` IS the failure's report: `stop` after it
+    /// releases the lock and answers the dropped count as after any other
+    /// end (`a_runtime_that_ends_on_its_own_releases_the_waiter`), and a
+    /// fresh host may be started, in the new mode after an
+    /// `AvailabilityChanged`.
     ///
     /// BLOCKS; call it off any async context.
     #[must_use]
-    pub fn wait_shutdown_requested(&self) -> Option<ShutdownRequest> {
-        let (executor, composed) = (self.executor.as_ref()?, self.composed.as_ref()?);
-        executor.block_on(composed.shutdown_requested())
+    pub fn wait_shutdown_requested(&self) -> Ended {
+        match (self.executor.as_ref(), self.composed.as_ref()) {
+            (Some(executor), Some(composed)) => {
+                let mut availability = self.availability.subscribe();
+                let started_in = self.started_in;
+                executor.block_on(async {
+                    tokio::select! {
+                        biased;
+                        ended = composed.wait_end() => match ended {
+                            ComposedEnded::ShutdownRequested(request) => {
+                                Ended::ShutdownRequested(request)
+                            }
+                            ComposedEnded::RuntimeEnded => Ended::RuntimeEnded,
+                        },
+                        // The sender is the host's own, alive while this
+                        // borrow is: `Err` cannot arrive.
+                        Ok(mode) = availability.wait_for(|mode| *mode != started_in) => {
+                            Ended::AvailabilityChanged(*mode)
+                        }
+                    }
+                })
+            }
+            // Only `stop` and `Drop` take them, and both consume the host.
+            _ => Ended::RuntimeEnded,
+        }
+    }
+
+    /// End the runtime's driver as if its substrate had gone, so a test
+    /// reaches [`Ended::RuntimeEnded`] through the host. TEST BUILDS
+    /// ONLY.
+    #[cfg(feature = "test-hooks")]
+    pub fn end_runtime_for_test(&self) {
+        if let (Some(executor), Some(composed)) = (self.executor.as_ref(), self.composed.as_ref()) {
+            let _ = executor.block_on(composed.end_driver());
+        }
     }
 
     /// Ask, as the runtime's owner, that it stop within `grace`: what an

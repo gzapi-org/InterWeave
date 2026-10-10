@@ -21,7 +21,7 @@ use interweave_transport_api::{
     DirectDestination, DisconnectReason, EndpointId, MessageId, Payload, TransportError,
     TransportEvent, TransportIdentity, TransportRuntime,
 };
-use interweave_transport_composition::{ComposedRuntime, CompositionOptions};
+use interweave_transport_composition::{ComposedRuntime, CompositionOptions, Ended};
 
 const PATIENCE: Duration = Duration::from_secs(20);
 
@@ -804,4 +804,95 @@ async fn the_peer_rows_reach_the_admin_port_under_admin_status() {
         "{gone:?}"
     );
     subject.shutdown().await.expect("clean shutdown");
+}
+
+/// THE OWNER HEARS EITHER WAY (`ComposedRuntime::wait_end`): a runtime
+/// whose driver ends on its own -- the substrate gone -- resolves the
+/// owner's wait as `RuntimeEnded`, where `shutdown_requested` alone
+/// would have waited forever, and an admin port's request resolves it as
+/// that request (the control). Neither is reported before it happens.
+#[tokio::test]
+async fn the_owner_hears_a_runtime_that_ended_on_its_own() {
+    let (identity, _) = id();
+    let ended =
+        ComposedRuntime::start(&identity, &profile(&[], &[]), CompositionOptions::default())
+            .await
+            .expect("composes");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), ended.wait_end())
+            .await
+            .is_err(),
+        "nothing has happened yet"
+    );
+    ended.end_driver().await.expect("the driver ends");
+    assert_eq!(
+        tokio::time::timeout(PATIENCE, ended.wait_end())
+            .await
+            .expect("the owner hears it"),
+        Ended::RuntimeEnded
+    );
+    let _ = ended.stop().await;
+
+    // THE CONTROL: a request, not an end.
+    let (identity, _) = id();
+    let asked =
+        ComposedRuntime::start(&identity, &profile(&[], &[]), CompositionOptions::default())
+            .await
+            .expect("composes");
+    let port = asked
+        .sessions()
+        .admin([AdminCapability::Shutdown].into())
+        .await
+        .expect("a port");
+    port.shutdown(Duration::from_secs(1)).await.expect("asked");
+    assert!(
+        matches!(
+            tokio::time::timeout(PATIENCE, asked.wait_end())
+                .await
+                .expect("the owner hears it"),
+            Ended::ShutdownRequested(request) if request.grace == Duration::from_secs(1)
+        ),
+        "a request is a request"
+    );
+    asked.stop().await.expect("stops");
+}
+
+/// When a request AND the runtime's end both hold, the owner hears the
+/// request -- the grace it asked for -- not the end. Both are made to
+/// hold before any wait, and the wait is asked many times: without the
+/// select's bias the pick between two ready arms is random, so one ask
+/// alone could pass by luck.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_wins_over_the_runtime_ending() {
+    let (identity, _) = id();
+    let both = ComposedRuntime::start(&identity, &profile(&[], &[]), CompositionOptions::default())
+        .await
+        .expect("composes");
+    let port = both
+        .sessions()
+        .admin([AdminCapability::Shutdown].into())
+        .await
+        .expect("a port");
+    both.end_driver().await.expect("the driver ends");
+    // The end has landed: alone, it is what the owner hears.
+    assert_eq!(
+        tokio::time::timeout(PATIENCE, both.wait_end())
+            .await
+            .expect("the owner hears it"),
+        Ended::RuntimeEnded
+    );
+    // A request still lands after the end: it is the owner's to read.
+    port.shutdown(Duration::from_secs(2)).await.expect("asked");
+    for _ in 0..32 {
+        assert!(
+            matches!(
+                tokio::time::timeout(PATIENCE, both.wait_end())
+                    .await
+                    .expect("the owner hears it"),
+                Ended::ShutdownRequested(request) if request.grace == Duration::from_secs(2)
+            ),
+            "the request wins when both hold"
+        );
+    }
+    let _ = both.stop().await;
 }

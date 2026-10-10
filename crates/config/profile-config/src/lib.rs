@@ -34,6 +34,7 @@ use interweave_transport_api::{ChannelId, EndpointId, TransportIdentity};
 use interweave_trust_api::{EndpointTrustPolicy, PeerTrustPolicy};
 use serde::{Deserialize, Serialize};
 
+pub mod availability_overlay;
 pub mod connectivity;
 pub mod ipc;
 pub mod kademlia;
@@ -41,6 +42,8 @@ pub mod load;
 pub mod lock;
 pub mod paths;
 pub mod persist;
+mod private_read;
+pub mod provision;
 pub mod runtime;
 pub mod sections;
 pub mod transport;

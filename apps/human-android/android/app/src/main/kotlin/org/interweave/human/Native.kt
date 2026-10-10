@@ -27,9 +27,21 @@ internal object Native {
      */
     @JvmStatic external fun start(appDataDir: String): Int
 
+    /** waitEnded: nothing runs. */
+    const val ENDED_NOT_RUNNING = 0
+
+    /** waitEnded: an admin port or a stop asked the runtime to stop. */
+    const val ENDED_ASKED = 1
+
+    /** waitEnded: the runtime stopped on its own; no one asked. */
+    const val ENDED_RUNTIME = 2
+
+    /** waitEnded: the effective availability changed; restart in it. */
+    const val ENDED_AVAILABILITY = 3
+
     /**
-     * Wait until the runtime is asked to stop. BLOCKS. 1 when asked, 0
-     * when nothing runs.
+     * Wait until the client ends or must restart. BLOCKS. One of the
+     * ENDED_ values above.
      */
     @JvmStatic external fun waitEnded(): Int
 

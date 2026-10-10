@@ -38,6 +38,9 @@ tokio = { workspace = true, features = ["sync", "time", "macros"] }
 # (src/stand_in.rs). Off by default; the app turns it on for its debug
 # build alone.
 dev-stand-ins = []
+# TEST-ONLY: end the runtime from a test (ServiceHost::end_runtime_for_test),
+# through the embedded host's own hook; this crate's tests turn it on.
+test-hooks = ["interweave-transport-embedded/test-hooks"]
 
 [dev-dependencies]
 interweave-human-chat-protocol = { path = "../chat-protocol" }
@@ -46,5 +49,5 @@ interweave-human-core = { path = "../core" }
 interweave-human-ui-model = { path = "../ui-model" }
 # The stand-ins on for this crate's own tests, as composition's test hooks
 # are: the service is started the way the debug APK starts it.
-interweave-human-android-platform = { path = ".", features = ["dev-stand-ins"] }
+interweave-human-android-platform = { path = ".", features = ["dev-stand-ins", "test-hooks"] }
 tempfile = { workspace = true }

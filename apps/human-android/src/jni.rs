@@ -149,8 +149,11 @@ extern "system" fn Java_org_interweave_human_Native_waitEnded<'caller>(
 ) -> jint {
     env.with_env(|_| -> Result<jint, jni::errors::Error> {
         Ok(match ServiceHost::global().wait_ended() {
-            Ended::ShutdownRequested { .. } => 1,
+            // Native.kt's ENDED_ values.
             Ended::NotRunning => 0,
+            Ended::ShutdownRequested { .. } => 1,
+            Ended::RuntimeEnded => 2,
+            Ended::AvailabilityChanged(_) => 3,
         })
     })
     .resolve::<ThrowRuntimeExAndDefault>()

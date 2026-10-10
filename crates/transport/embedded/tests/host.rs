@@ -20,7 +20,7 @@ use interweave_profile_config::sections::LogLevel;
 use interweave_profile_config::trust_overlay::TrustOverlay;
 use interweave_profile_config::{ProfilePaths, TrustBoundary, create_private_dir_within};
 use interweave_profile_identity::ProfileIdentity;
-use interweave_transport_embedded::{EmbeddedHost, EmbeddedLaunch, EmbeddedRefused};
+use interweave_transport_embedded::{EmbeddedHost, EmbeddedLaunch, EmbeddedRefused, Ended};
 
 const PROFILE: &str = "work";
 
@@ -162,6 +162,35 @@ fn the_host_serves_under_its_root() {
     host.stop(Duration::from_secs(1)).expect("stops");
 }
 
+/// A FRESH INSTALL: nothing has written `config.yaml`, so the start is
+/// refused naming the read -- the control -- until the Service provisions
+/// the profile once (`profile-config`'s `provision_embedded`, the seam
+/// agreed with rust-ui-dev); then the host starts and serves on it.
+#[test]
+fn a_fresh_install_is_provisioned_once_then_starts() {
+    let app = app();
+    assert!(
+        matches!(
+            EmbeddedHost::start(launch(&app.dir)),
+            Err(EmbeddedRefused::ProfileInvalid(_))
+        ),
+        "nothing provisioned: refused"
+    );
+    let paths =
+        ProfilePaths::resolve_embedded(PROFILE, TrustBoundary::new(&app.dir).expect("a boundary"))
+            .expect("paths");
+    interweave_profile_config::provision::provision_embedded(&paths).expect("provisioned");
+    let launched = launch(&app.dir);
+    let peer = launched.identity.transport_identity().expect("peer");
+    let host = EmbeddedHost::start(launched).expect("starts on the provisioned profile");
+    let status = host
+        .runtime()
+        .block_on(admin(&host).status())
+        .expect("status");
+    assert_eq!(status.peer, peer);
+    host.stop(Duration::from_secs(1)).expect("stops");
+}
+
 /// A second start in the same process while a host holds the profile is
 /// refused `LockHeld`, and the first keeps serving; once the first has
 /// stopped, a start succeeds -- the lock went with it.
@@ -199,7 +228,9 @@ fn a_shutdown_request_reaches_the_owner() {
     host.runtime()
         .block_on(port.shutdown(Duration::from_millis(250)))
         .expect("asked");
-    let request = host.wait_shutdown_requested().expect("a request");
+    let Ended::ShutdownRequested(request) = host.wait_shutdown_requested() else {
+        panic!("a request, not an end");
+    };
     assert_eq!(request.grace, Duration::from_millis(250));
     host.runtime()
         .block_on(port.status())
@@ -271,16 +302,51 @@ fn a_platform_stop_releases_the_waiter() {
         .expect("asked");
     // Bounded, so a request that releases nothing fails here rather than
     // hanging the run.
-    let request = rx
+    let Ended::ShutdownRequested(request) = rx
         .recv_timeout(Duration::from_secs(10))
         .expect("the waiter returns within 10 s")
-        .expect("a request");
+    else {
+        panic!("a request, not an end");
+    };
     waiter.join().expect("the waiter ends");
     assert_eq!(request.grace, Duration::from_millis(300));
     let host = std::sync::Arc::into_inner(host).expect("the only holder");
     host.stop(request.grace).expect("stops");
     EmbeddedHost::start(launch(&app.dir))
         .expect("starts again in the same process")
+        .stop(Duration::from_secs(1))
+        .expect("stops");
+}
+
+/// A runtime that ends on its own -- its substrate gone -- releases the
+/// Service's waiter as `RuntimeEnded`, where the request-only wait would
+/// have left a dead runtime in the foreground; `stop` then releases the
+/// lock and a fresh host starts. (`a_platform_stop_releases_the_waiter`
+/// is the control: a request is a request.)
+#[test]
+fn a_runtime_that_ends_on_its_own_releases_the_waiter() {
+    let app = app();
+    provision(&app.dir, &document("embedded-android", false));
+    let host = std::sync::Arc::new(EmbeddedHost::start(launch(&app.dir)).expect("starts"));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let waiting = std::sync::Arc::clone(&host);
+    let waiter = std::thread::spawn(move || {
+        let _ = tx.send(waiting.wait_shutdown_requested());
+    });
+    host.end_runtime_for_test();
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("the waiter returns within 10 s"),
+        Ended::RuntimeEnded
+    );
+    waiter.join().expect("the waiter ends");
+    let host = std::sync::Arc::into_inner(host).expect("the only holder");
+    // `RuntimeEnded` was the failure's report; `stop` after it answers
+    // the dropped count, not an error.
+    host.stop(Duration::from_secs(1))
+        .expect("stop after RuntimeEnded answers Ok");
+    EmbeddedHost::start(launch(&app.dir))
+        .expect("a fresh host starts after the end")
         .stop(Duration::from_secs(1))
         .expect("stops");
 }
