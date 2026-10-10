@@ -6,7 +6,7 @@
 //!
 //! # One attempt is not one dial
 //!
-//! `libp2p-dcutr` 0.14.1 takes a `PeerId` and nothing else: no
+//! `libp2p-dcutr` 0.15.0 takes a `PeerId` and nothing else: no
 //! concurrency cap, no per-peer cap, no cooldown. Its
 //! `MAX_NUMBER_OF_UPGRADE_ATTEMPTS = 3` is a retry count per relayed
 //! connection on the initiating side, and SPIKE-004 measured that one
@@ -53,16 +53,24 @@
 //! the punch.
 //!
 //! THE CRATE'S OWN CACHE. libp2p-dcutr 0.15.0 keeps every candidate it
-//! is offered in a cache nothing here can reach (an LRU of 20), and every
-//! new relayed handler's CONNECT carries it. An address whose IP left
-//! the host is not sent after: a network change builds the crate again
-//! (`network_changed`; recorded as a gap on PR #250, closed after it).
-//! What stays is narrower: a listener CLOSED while its IP is still held
-//! is not offered again (`forget_listener`) but stays in the cache until
-//! the next network change or until newer candidates push it out --
-//! still an address inside the boundary, of a port no longer answering.
-//! Rebuilding there too would drop the crate's punch-dial retries for
-//! attempts still LIVE, which a network change has already given up.
+//! is offered in a cache nothing here can reach (an LRU of 20), and each
+//! relayed handler takes its own copy of it when it is built and puts
+//! that copy in every CONNECT it sends. A relayed connection opened after
+//! a network change carries no address whose IP the change took off the
+//! host: the change builds the crate again (`network_changed`; recorded
+//! as a gap on PR #250, closed after it), and neither door to it passes
+//! an address on a departed IP (`on_departed_ip`). Two things stay:
+//! - a relayed connection KEPT across the change keeps its handler's
+//!   copy, so it may still send a departed address -- answering the
+//!   remote's CONNECT, or in a retry the new crate orders -- for at most
+//!   the crate's three rounds on that connection: the handler is the
+//!   crate's and nothing outside it can rewrite or stop it;
+//! - a listener CLOSED while its IP is still held is not offered again
+//!   (`forget_listener`) but stays in the cache until the next network
+//!   change or until newer candidates push it out -- still an address
+//!   inside the boundary, of a port no longer answering. Rebuilding there
+//!   too would drop the crate's punch-dial retries for attempts still
+//!   LIVE, which a network change has already given up.
 //!
 //! The crate's `Dial` carries its address list in a field the
 //! Swarm crate keeps to itself, so the first place the list is visible
@@ -354,10 +362,9 @@ struct Attempt {
     /// Given up by a network change: the handler on the relayed
     /// connection runs on -- the wrapper cannot stop it -- while the
     /// crate's punch-dial retries end with the crate the change replaced,
-    /// so the attempt keeps its per-peer permit until an outcome the new
-    /// crate reports for the handler's round, the relayed close or the
-    /// horizon ends it, and whatever that is, it ends `Abandoned` with no
-    /// cooldown -- a landed punch excepted, which is `Succeeded`.
+    /// so the attempt keeps its per-peer permit until something ends it,
+    /// and whatever ends it ends it `Abandoned` with no cooldown -- a
+    /// landed punch excepted, which is `Succeeded`.
     abandoned: bool,
 }
 
@@ -381,7 +388,10 @@ const MAX_DEPARTED_IPS: usize = 64;
 fn on_departed_ip(address: &Multiaddr, departed: &VecDeque<IpAddr>) -> bool {
     let ip = match address.iter().next() {
         Some(Protocol::Ip4(ip)) => IpAddr::from(ip),
-        Some(Protocol::Ip6(ip)) => IpAddr::from(ip),
+        // An IPv4 written as IPv4-mapped IPv6 is the same host address.
+        Some(Protocol::Ip6(ip)) => ip
+            .to_ipv4_mapped()
+            .map_or_else(|| IpAddr::from(ip), IpAddr::from),
         _ => return false,
     };
     departed.contains(&ip)
@@ -425,8 +435,8 @@ pub struct HolePunchScope {
     /// The candidates a peer's Identify observed that the boundary let
     /// through to the crate, most recent last, at most
     /// [`CRATE_CANDIDATE_CACHE`] -- the crate's own cache, which a network
-    /// change discards with the crate, kept here so the public ones can
-    /// be given back (`network_changed`).
+    /// change discards with the crate, kept here so the public ones whose
+    /// IP did not depart can be given back (`network_changed`).
     /// `a_public_observation_is_kept_across_a_network_change` pins it.
     observed: VecDeque<Multiaddr>,
     /// The IPs that left this host and have not come back, oldest first,
@@ -622,9 +632,11 @@ impl HolePunchScope {
     /// handler's CONNECT, so an address of the network this profile left
     /// was still sent after its IP departed. A fresh instance holds none;
     /// the runtime re-offers the listeners still bound, and the PUBLIC
-    /// observations the wrapper kept are given back (below) -- a NAT's
-    /// mapping is not named by an interface leaving -- while a private
-    /// one goes and is learned again if it still holds. What the old
+    /// observations the wrapper kept are given back (below) unless their
+    /// IP is one the change took off the host -- a NAT's mapping is not
+    /// named by an interface leaving, an interface's own public address
+    /// is -- while a private one goes and is learned again if it still
+    /// holds. What the old
     /// instance held is either rebuilt or not needed: the direct
     /// connections it was told of are told again from `direct`, since its
     /// close `expect`s each one; its handlers on open relayed connections
@@ -1379,6 +1391,15 @@ mod tests {
             2,
             "back on the host, learned again"
         );
+
+        // An IPv4 that departed is the same IP written IPv4-mapped.
+        let v4: IpAddr = "93.184.216.40".parse().expect("an IP");
+        s.network_changed(&[v4]);
+        let mapped: Multiaddr = "/ip6/::ffff:93.184.216.40/tcp/4001"
+            .parse()
+            .expect("an address");
+        observe(&mut s, &mapped);
+        assert_eq!(snapshot(&s).candidates_withheld.get("departed"), Some(&2));
 
         for n in 0..u32::try_from(MAX_DEPARTED_IPS + 10).expect("small") {
             s.network_changed(&[IpAddr::from(std::net::Ipv4Addr::from(0x0a00_0000 + n))]);

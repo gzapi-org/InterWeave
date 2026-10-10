@@ -148,6 +148,9 @@ fn follow_verdict(
 /// up to five minutes after it is back. And every relay backing off whose
 /// peer the gate does not still hold after that lift is asked again at
 /// the next tick, its ladder kept (`ReservationManager::network_added`).
+/// The DCUtR wrapper stops treating the added IPs as departed, so an
+/// observation on one is forwarded again (`dcutr_driver::network_changed`,
+/// which takes every change, an addition included).
 /// Each once per lift floor
 /// (ADR-0011 A 2026-10-09): a relay-only profile is otherwise unreachable for the
 /// rest of its relay backoff.
