@@ -33,7 +33,7 @@ pub use notices::{MAX_PEER_NOTICES, MAX_ROUTED_PEERS, PeerNoticeDiagnostics};
 #[cfg(feature = "test-hooks")]
 pub use runtime::OverlayFault;
 pub use runtime::{
-    AUDIT_TARGET, ComposedRuntime, CompositionOptions, Diagnostics, ShutdownRequest,
+    AUDIT_TARGET, ComposedRuntime, CompositionOptions, Diagnostics, Ended, ShutdownRequest,
 };
 pub use session::{InProcessAdmin, InProcessBinding, InProcessSession};
 pub use translate::{Composition, CompositionError, DiscoveryPlan, translate};

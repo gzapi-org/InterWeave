@@ -135,6 +135,19 @@ pub struct ShutdownRequest {
     pub grace: Duration,
 }
 
+/// Why the runtime's owner should act: an admin port asked it to stop,
+/// or the runtime ENDED ON ITS OWN -- its driver returned, panicked or
+/// was aborted, the substrate under it gone -- which nothing asked for
+/// and which a waiter must hear of, or a platform Service would keep a
+/// dead runtime in the foreground ([`ComposedRuntime::wait_end`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ended {
+    /// An admin port, or the owner's own request, asked for a stop.
+    ShutdownRequested(ShutdownRequest),
+    /// The runtime stopped without being asked.
+    RuntimeEnded,
+}
+
 /// A path change's class as the session notice and the wire name it:
 /// `PathChangeReason`'s own serialized names.
 const fn reason_class(reason: PathChangeReason) -> &'static str {
@@ -174,6 +187,10 @@ pub(crate) enum Request {
     /// builds only.
     #[cfg(feature = "test-hooks")]
     FailPublishes(usize, oneshot::Sender<()>),
+    /// End the driver as if its substrate had gone: how a test reaches
+    /// a runtime that ends on its own. Test builds only.
+    #[cfg(feature = "test-hooks")]
+    EndDriver(oneshot::Sender<()>),
 }
 
 /// A failure a test makes the next trust overlay write meet, on either
@@ -215,6 +232,9 @@ pub struct ComposedRuntime {
     requests: mpsc::Sender<Request>,
     events: mpsc::Receiver<TransportEvent>,
     task: Option<JoinHandle<()>>,
+    /// Closed once the driver has ended, however it ended: the driver
+    /// holds the only sender, and nothing is ever sent on it.
+    ended: watch::Receiver<()>,
     dropped: Arc<AtomicU64>,
     sessions: InProcessBinding,
     shutdown_requests: watch::Receiver<Option<ShutdownRequest>>,
@@ -399,7 +419,9 @@ impl ComposedRuntime {
         // straight to the substrate's snapshot slot, not through the
         // driver's request queue.
         let network = swarm.network_monitor();
+        let (ended_tx, ended) = watch::channel(());
         let driver = Driver {
+            _ended_on_drop: ended_tx,
             swarm,
             notices,
             discovery,
@@ -438,6 +460,7 @@ impl ComposedRuntime {
             task: Some(task),
             dropped,
             shutdown_requests,
+            ended,
             network,
         })
     }
@@ -499,6 +522,34 @@ impl ComposedRuntime {
             .await
             .ok()
             .and_then(|pending| pending.clone())
+    }
+
+    /// Resolves when the runtime's owner should act: on the first
+    /// shutdown an admin port asked for, as [`Self::shutdown_requested`],
+    /// or when the runtime ended on its own. A request wins when both
+    /// hold. The owner answers either with [`Self::stop`].
+    pub async fn wait_end(&self) -> Ended {
+        let mut requests = self.shutdown_requests.clone();
+        let mut ended = self.ended.clone();
+        tokio::select! {
+            biased;
+            Ok(request) = requests.wait_for(Option::is_some) => {
+                request.clone().map_or(Ended::RuntimeEnded, Ended::ShutdownRequested)
+            }
+            // Nothing is ever sent: this resolves only when the driver's
+            // sender is dropped.
+            _ = ended.changed() => Ended::RuntimeEnded,
+        }
+    }
+
+    /// End the driver as if its substrate had gone, so a test reaches
+    /// [`Ended::RuntimeEnded`]. TEST BUILDS ONLY.
+    ///
+    /// # Errors
+    /// `BackendUnavailable` once the runtime has stopped.
+    #[cfg(feature = "test-hooks")]
+    pub async fn end_driver(&self) -> Result<(), TransportError> {
+        self.ask(Request::EndDriver).await
     }
 
     /// Stop the runtime, returning the neutral events it dropped over its
@@ -656,6 +707,10 @@ struct Driver {
     outcomes: LastOutcomes,
     /// Each allowlisted peer's last reconnect refusal, logged on change.
     refusals: ReconnectRefusals,
+    /// Held for its drop alone: the driver's loop returning, a panic
+    /// unwinding or the task aborted each drops the driver, and with it
+    /// this sender, which closes the owner's `ended` channel.
+    _ended_on_drop: watch::Sender<()>,
 }
 
 impl Driver {
@@ -677,6 +732,11 @@ impl Driver {
                     Some(Request::Shutdown(grace, reply)) => {
                         shutdown_grace = grace;
                         shutdown_reply = Some(reply);
+                        break;
+                    }
+                    #[cfg(feature = "test-hooks")]
+                    Some(Request::EndDriver(reply)) => {
+                        let _ = reply.send(());
                         break;
                     }
                     Some(request) => self.answer(request).await,
@@ -956,6 +1016,12 @@ impl Driver {
             }
             Request::Shutdown(_, reply) => {
                 let _ = reply.send(self.dropped.load(Ordering::Relaxed));
+            }
+            // Handled by `run`, which ends the loop on it; answered here
+            // only for completeness.
+            #[cfg(feature = "test-hooks")]
+            Request::EndDriver(reply) => {
+                let _ = reply.send(());
             }
             Request::Trust(reply) => {
                 let _ = reply.send(TrustAdminView {

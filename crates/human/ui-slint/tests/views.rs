@@ -23,7 +23,7 @@ use interweave_human_client_api::{
 };
 use interweave_human_core::{AppMessageId, RowId};
 use interweave_human_ui_model::{
-    ConversationKey, Intent, TrustChange, UiModel, UiText, placeholder_en,
+    ConversationKey, HostText, Intent, RuntimeHost, TrustChange, UiModel, UiText, placeholder_en,
 };
 use interweave_human_ui_slint::{INPUT_CAP, View, ViewEvent};
 use interweave_profile_identity::ProfileIdentity;
@@ -99,7 +99,7 @@ fn update(model: &mut UiModel, row: i64, id: &AppMessageId, status: OutboundStat
 
 fn view() -> View {
     i_slint_backend_testing::init_no_event_loop();
-    let view = View::new().expect("a window");
+    let view = View::new(RuntimeHost::Daemon).expect("a window");
     view.window().show().expect("shown");
     view
 }
@@ -476,7 +476,7 @@ fn the_tree_labels_message_route_and_connectivity_controls() {
 
     let online = the(
         &view,
-        placeholder_en::connectivity(Connectivity::OnlineDirect),
+        placeholder_en::connectivity(RuntimeHost::Daemon, Connectivity::OnlineDirect),
     );
     assert_eq!(
         online.accessible_live_region(),
@@ -540,7 +540,10 @@ fn unknown_connectivity_is_not_shown_as_offline() {
     let model = UiModel::new();
     assert_eq!(model.connectivity(), Connectivity::Unknown);
     view.render(&model);
-    let shown = the(&view, placeholder_en::connectivity(Connectivity::Unknown));
+    let shown = the(
+        &view,
+        placeholder_en::connectivity(RuntimeHost::Daemon, Connectivity::Unknown),
+    );
     assert!(
         !shown
             .accessible_label()
@@ -548,7 +551,102 @@ fn unknown_connectivity_is_not_shown_as_offline() {
             .to_ascii_lowercase()
             .contains("offline")
     );
-    assert!(labelled(&view, placeholder_en::connectivity(Connectivity::Offline)).is_empty());
+    assert!(
+        labelled(
+            &view,
+            placeholder_en::connectivity(RuntimeHost::Daemon, Connectivity::Offline)
+        )
+        .is_empty()
+    );
+}
+
+/// The not-running notice follows where the view's runtime runs: an
+/// Android view names the app's network service and never a daemon, and
+/// a desktop view, the control, names its transport daemon (relay
+/// 01a12495).
+#[test]
+fn the_not_running_notice_names_the_runtime_the_view_runs_on() {
+    i_slint_backend_testing::init_no_event_loop();
+    let mut model = UiModel::new();
+    model.daemon_seen(Some(false));
+    for (host, other) in [
+        (RuntimeHost::Embedded, RuntimeHost::Daemon),
+        (RuntimeHost::Daemon, RuntimeHost::Embedded),
+    ] {
+        let mut view = View::new(host).expect("a window");
+        view.window().show().expect("shown");
+        view.render(&model);
+        let said = placeholder_en::host_text(host, HostText::NotRunning);
+        the(&view, said);
+        assert!(
+            labelled(
+                &view,
+                placeholder_en::host_text(other, HostText::NotRunning)
+            )
+            .is_empty(),
+            "{host:?} shows only its own text"
+        );
+        assert_eq!(
+            said.contains("daemon"),
+            host == RuntimeHost::Daemon,
+            "{host:?}: {said}"
+        );
+    }
+}
+
+/// A window as narrow as a phone shows one pane at a time (plan section
+/// 20): the list, then the conversation a person opens, with a control
+/// back to the list; at the desktop's width, the control, both panes
+/// show together and there is no way back to press.
+#[test]
+fn a_narrow_window_shows_one_pane_at_a_time_with_a_way_back() {
+    let alice = peer();
+    // The conversation's row, by the title the list gives it.
+    let title = interweave_human_ui_model::fill(
+        text(UiText::DirectTitle),
+        &[
+            (
+                "peer",
+                &interweave_human_ui_model::short_peer(alice.as_str()),
+            ),
+            ("route", human().as_str()),
+        ],
+    );
+    // Whether the conversation's row is in the tree: a folded pane is
+    // not, for a screen reader as for the eye.
+    let row_shown = |view: &View| {
+        labelled(view, &title)
+            .iter()
+            .any(|e| e.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::ListItem))
+    };
+    let back = text(UiText::BackToConversations);
+
+    let mut wide = view();
+    let mut model = UiModel::new();
+    model.received(received(1, &alice, "hello"));
+    open(&mut wide, &mut model, &direct(&alice));
+    assert!(row_shown(&wide), "the desktop keeps the list beside it");
+    assert!(labelled(&wide, back).is_empty(), "and needs no way back");
+
+    let mut narrow = View::new(RuntimeHost::Daemon).expect("a window");
+    narrow.window().show().expect("shown");
+    narrow
+        .window()
+        .window()
+        .set_size(slint::LogicalSize::new(390.0, 800.0));
+    let mut model = UiModel::new();
+    model.received(received(1, &alice, "hello"));
+    narrow.render(&model);
+    assert!(row_shown(&narrow), "the list is shown first");
+    open(&mut narrow, &mut model, &direct(&alice));
+    assert!(
+        !row_shown(&narrow),
+        "the conversation takes the window, the list folded away"
+    );
+    let way_back = the(&narrow, back);
+    assert!(way_back.size().width > 0.0, "with a way back shown");
+    way_back.invoke_accessible_default_action();
+    assert!(row_shown(&narrow), "the way back shows the list again");
 }
 
 /// U5b: every action element exposes a default action, invoked through
@@ -1244,8 +1342,14 @@ fn no_rendered_text_leaves_a_placeholder_unfilled() {
     // The other half: each template the sweep must have covered is in the
     // tree, as its filled text -- so a template that rendered nothing
     // cannot pass the sweep by its absence.
-    let busy = placeholder_en::error(interweave_human_ui_model::ErrorClass::EndpointInUse);
-    let too_large = placeholder_en::error(interweave_human_ui_model::ErrorClass::TooLarge);
+    let busy = placeholder_en::error(
+        RuntimeHost::Daemon,
+        interweave_human_ui_model::ErrorClass::EndpointInUse,
+    );
+    let too_large = placeholder_en::error(
+        RuntimeHost::Daemon,
+        interweave_human_ui_model::ErrorClass::TooLarge,
+    );
     let short = interweave_human_ui_model::short_peer(alice.as_str());
     let unread = placeholder_en::label(interweave_human_ui_model::LabelKey::Unread);
     let unread_count =
@@ -1301,7 +1405,10 @@ fn a_refused_send_is_announced() {
         text(UiText::NotSent),
         &[(
             "reason",
-            placeholder_en::error(interweave_human_ui_model::ErrorClass::TooLarge),
+            placeholder_en::error(
+                RuntimeHost::Daemon,
+                interweave_human_ui_model::ErrorClass::TooLarge,
+            ),
         )],
     );
     assert_eq!(

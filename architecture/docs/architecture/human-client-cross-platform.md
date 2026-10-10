@@ -1,6 +1,6 @@
 # First-party human client — cross-platform architecture
 
-Status: the shared crates and the desktop client are built (Stages 14 and 15, closed 2026-10-03 and 2026-10-06; `apps/human-desktop` over `crates/human/*`); the Android binding is Stage 17's, open as of 2026-10-07, with `apps/human-android` and `crates/human/android-platform` as landing zones. The design below is the one the build followed; where the built layout differs from the first blueprint, the built one is named.
+Status: the shared crates and the desktop client are built (Stages 14 and 15, closed 2026-10-03 and 2026-10-06; `apps/human-desktop` over `crates/human/*`); the Android binding is Stage 17's, open as of 2026-10-07; `apps/human-android` (the cdylib and its Gradle project) and `crates/human/android-platform` (the Service's runtime, store and facade host and the view hub) have code since 2026-10-10 (rust-ui-dev's `feat/android-app-shell`), the embedded runtime beneath them since step 1 (#241). The design below is the one the build followed; where the built layout differs from the first blueprint, the built one is named.
 
 ## Selected product architecture
 
@@ -45,7 +45,7 @@ crates/human/app-core/           # the headless application root the windows bin
 crates/human/ui-slint/           # the reference Slint views; the only crate naming slint
 crates/human/android-platform/   # tiny OS glue surface only (Stage 17; a landing zone today)
 apps/human-desktop/              # the desktop executable: app-core + ui-slint over ipc-client
-apps/human-android/              # the Android host (Stage 17; a landing zone today)
+apps/human-android/              # the Android host (Stage 17; the cdylib and Gradle project, built from 2026-10-10)
 ```
 
 `core`, `chat-protocol`, `store`, `transport-client` and `ui-model` name nothing under `crates/transport/*`, no libp2p and no Slint, and `ui-slint` is the only crate under `crates/human/*` that reaches Slint and the only workspace member that declares it (`apps/human-desktop` reaches it through `ui-slint`); `tools/checks/check_human_layering.sh` enforces it (built as the first blueprint's `human-*` names with the directory layout of `implementation-repository-layout.md`).

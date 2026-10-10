@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# The Android human client's platform side (plan section 20 steps 2-4):
+# the Service's hold on the embedded runtime, the store and the facade,
+# and the hub the Activity's view and the notifications meet it at. No
+# Android, JNI or Slint type, so it is built and tested on the host; the
+# JNI entry points and the views are apps/human-android's.
+[package]
+name = "interweave-human-android-platform"
+version = "0.0.0"
+publish = false
+description = "The InterWeave Android human client's Service side: runtime, store and facade, host-testable."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+interweave-human-app-core = { path = "../app-core" }
+interweave-human-store = { path = "../store" }
+interweave-human-transport-client = { path = "../transport-client" }
+interweave-local-client-api = { path = "../../api/local-client-api" }
+interweave-profile-config = { path = "../../config/profile-config" }
+interweave-profile-identity = { path = "../../identity/profile-identity" }
+interweave-transport-api = { path = "../../api/transport-api" }
+interweave-transport-embedded = { path = "../../transport/embedded" }
+# The facade's command channel and its turn timer, on the embedded
+# runtime's executor.
+tokio = { workspace = true, features = ["sync", "time", "macros"] }
+
+[features]
+# The first-run profile and in-memory identity steps 2-4 run on until
+# profile-config's provisioning and step 6's Keystore key land
+# (src/stand_in.rs). Off by default; the app turns it on for its debug
+# build alone.
+dev-stand-ins = []
+# TEST-ONLY: end the runtime from a test (ServiceHost::end_runtime_for_test),
+# through the embedded host's own hook; this crate's tests turn it on.
+test-hooks = ["interweave-transport-embedded/test-hooks"]
+
+[dev-dependencies]
+interweave-human-chat-protocol = { path = "../chat-protocol" }
+interweave-human-client-api = { path = "../client-api" }
+interweave-human-core = { path = "../core" }
+interweave-human-ui-model = { path = "../ui-model" }
+# The stand-ins on for this crate's own tests, as composition's test hooks
+# are: the service is started the way the debug APK starts it.
+interweave-human-android-platform = { path = ".", features = ["dev-stand-ins", "test-hooks"] }
+tempfile = { workspace = true }
