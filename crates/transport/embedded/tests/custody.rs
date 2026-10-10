@@ -927,3 +927,46 @@ fn racing_first_provisions_leave_one_record_that_opens() {
         won[0]
     );
 }
+
+/// A restore re-seals under a NEW key, so a copy of the record taken
+/// before it -- a stolen or backed-up `identity.iwk1` -- no longer opens:
+/// recovery retires the old envelope, not only replaces the file. The
+/// restored record opens (the control).
+#[test]
+fn a_record_from_before_a_restore_no_longer_opens() {
+    let (mnemonic, frozen) = vectors().remove(0);
+    let app = new_app();
+    let cipher = SoftCipher::default();
+    custody::provision(
+        &app.paths,
+        &cipher,
+        &identity(&mnemonic),
+        KeyUnlockPolicy::UserPresence,
+    )
+    .expect("stored");
+    let old = record(&app);
+    custody::unlock(&app.paths, &cipher).expect("the old record opens before the restore");
+
+    custody::restore(
+        &app.paths,
+        &cipher,
+        &RecoveryPhrase::parse(&mnemonic).expect("phrase"),
+        &TransportIdentity::parse(frozen.clone()).expect("peer"),
+        KeyUnlockPolicy::UserPresence,
+    )
+    .expect("restored");
+    let restored = record(&app);
+    assert_ne!(restored[..ENVELOPE_LEN], old[..ENVELOPE_LEN]);
+    assert_eq!(
+        peer_of(&custody::unlock(&app.paths, &cipher).expect("opens")),
+        frozen
+    );
+
+    put(&app, &old);
+    assert_eq!(
+        custody::unlock(&app.paths, &cipher).err(),
+        Some(UnlockRefused::RecoveryRequired(
+            RecoveryCause::Authentication
+        ))
+    );
+}
