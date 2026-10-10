@@ -142,14 +142,17 @@ pub(super) fn network_changed(
     change: &super::network_change::NetworkChange,
 ) {
     if let Some(gated) = field.as_mut() {
-        let scope = gated.inner_mut().inner_mut();
-        // THE WHOLE CHANGE, not two lists a caller could get wrong: the
-        // IPs that joined stop being departed, and a removal builds the
-        // crate again with the IPs that left.
-        scope.network_added(&change.added);
-        if change.invalidates() {
-            scope.network_changed(&change.removed);
-        }
+        apply_change(gated.inner_mut().inner_mut(), change);
+    }
+}
+
+/// THE WHOLE CHANGE, not two lists a caller could get wrong: the IPs that
+/// joined stop being departed, and a removal builds the crate again with
+/// the IPs that left. Pinned by `a_change_reaches_the_wrapper_whole`.
+fn apply_change(scope: &mut HolePunchScope, change: &super::network_change::NetworkChange) {
+    scope.network_added(&change.added);
+    if change.invalidates() {
+        scope.network_changed(&change.removed);
     }
 }
 
@@ -237,6 +240,55 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::*;
+
+    /// A change's removed IPs reach the wrapper as departed -- an
+    /// observation on one is then withheld -- and its added ones lift
+    /// that again.
+    #[test]
+    fn a_change_reaches_the_wrapper_whole() {
+        use super::super::network_change::NetworkChange;
+        let local = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let mut scope = HolePunchScope::new(local, DcutrSettings::default().budgets());
+        let ip: std::net::IpAddr = "2001:4860::7".parse().expect("an IP");
+        let own: Multiaddr = "/ip6/2001:4860::7/tcp/4001".parse().expect("an address");
+        let observe = |scope: &mut HolePunchScope| {
+            libp2p::swarm::NetworkBehaviour::on_swarm_event(
+                scope,
+                libp2p::swarm::FromSwarm::NewExternalAddrCandidate(
+                    libp2p::swarm::behaviour::NewExternalAddrCandidate { addr: &own },
+                ),
+            );
+        };
+        let withheld = |scope: &HolePunchScope| {
+            scope
+                .counter_handle()
+                .snapshot()
+                .candidates_withheld
+                .get("departed")
+                .copied()
+        };
+        apply_change(
+            &mut scope,
+            &NetworkChange {
+                removed: vec![ip],
+                added: Vec::new(),
+            },
+        );
+        observe(&mut scope);
+        assert_eq!(withheld(&scope), Some(1), "the removed IP is departed");
+        apply_change(
+            &mut scope,
+            &NetworkChange {
+                removed: Vec::new(),
+                added: vec![ip],
+            },
+        );
+        observe(&mut scope);
+        assert_eq!(withheld(&scope), Some(1), "the added IP is not");
+        assert_eq!(scope.counter_handle().snapshot().observed_kept, 1);
+    }
 
     #[test]
     fn the_profile_block_translates_field_for_field_and_the_rules_refuse() {
