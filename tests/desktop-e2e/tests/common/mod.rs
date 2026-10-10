@@ -8,3 +8,12 @@
 #![allow(unused_imports)]
 
 pub(crate) use interweave_test_support::e2e::*;
+
+// The schema validator stays out of the support crate (its file says why).
+#[path = "../../../support/shared/schema_validator.rs"]
+#[allow(
+    dead_code,
+    reason = "each test binary includes it; not every one validates"
+)]
+mod schema;
+pub(crate) use schema::schema_validator;

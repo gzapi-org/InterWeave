@@ -3772,7 +3772,6 @@ dependencies = [
  "interweave-transport-libp2p",
  "interweave-transport-runtime",
  "interweave-trust-api",
- "jsonschema",
  "libp2p",
  "serde_json",
  "tempfile",

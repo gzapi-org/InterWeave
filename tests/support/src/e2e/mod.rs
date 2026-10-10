@@ -2,8 +2,9 @@
 // Copyright 2026 Andrea Benetton
 //! The desktop processes the end-to-end suites drive (plan §17 (7), the
 //! harness extraction): a daemon's own XDG tree, the daemon and
-//! `transportctl` started in it, the shipped examples made concrete, the
-//! schema tree, and the test relay. Lifted out of `tests/desktop-e2e`'s
+//! `transportctl` started in it, the shipped examples made concrete, and
+//! the test relay. The schema tree is `shared/schema_validator.rs`, kept
+//! out of this crate for its licence (that file says why). Lifted out of `tests/desktop-e2e`'s
 //! `daemon.rs` when `human_chat.rs` became its second user, and out of
 //! that package when `tests/android-e2e` became its second consumer
 //! (plan §20 gate (c)), rather than copied -- two copies of `Home` would
@@ -463,44 +464,4 @@ pub fn free_port(ip: std::net::Ipv4Addr) -> u16 {
         .local_addr()
         .expect("an address")
         .port()
-}
-
-/// `relative` under `architecture/contracts/schemas`, its `urn:`
-/// references resolved against the whole tree.
-pub fn schema_validator(relative: &str) -> jsonschema::Validator {
-    let root = crate::repo_root().join("architecture/contracts/schemas");
-    let mut docs = Vec::new();
-    let mut stack = vec![root.clone()];
-    while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir).expect("a schema directory") {
-            let path = entry.expect("an entry").path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.extension().is_some_and(|e| e == "json")
-                && path.file_name().is_some_and(|n| n != "manifest.json")
-            {
-                let text = std::fs::read_to_string(&path).expect("read");
-                docs.push(serde_json::from_str::<serde_json::Value>(&text).expect("json"));
-            }
-        }
-    }
-    let pairs: Vec<(String, jsonschema::Resource)> = docs
-        .into_iter()
-        .filter_map(|doc| {
-            let id = doc.get("$id")?.as_str()?.to_owned();
-            Some((id, jsonschema::Resource::from_contents(doc)))
-        })
-        .collect();
-    let registry = jsonschema::Registry::new()
-        .extend(pairs)
-        .expect("register")
-        .prepare()
-        .expect("prepare");
-    let schema: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(root.join(relative)).expect("the schema"))
-            .expect("json");
-    jsonschema::options()
-        .with_registry(&registry)
-        .build(&schema)
-        .expect("compiles")
 }

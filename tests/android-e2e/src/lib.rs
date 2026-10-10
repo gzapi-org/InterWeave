@@ -33,7 +33,7 @@ use interweave_transport_composition::InProcessBinding;
 use interweave_transport_embedded::{EmbeddedHost, EmbeddedLaunch};
 
 pub use interweave_test_support::e2e::{
-    PATIENCE, free_port, human, lease_request, relay::Relay, relayed_example_of, schema_validator,
+    PATIENCE, free_port, human, lease_request, relay::Relay, relayed_example_of,
 };
 
 /// How long a stand-in's stop lets exchanges in flight settle.
