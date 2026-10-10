@@ -617,12 +617,16 @@ mod tests {
 
     #[test]
     fn the_crate_reaches_no_libp2p_harness_daemon_or_runtime() {
+        // The graph as the phone's target resolves it -- the build the
+        // claim is about -- which also keeps cargo from needing crates no
+        // Android build uses (an iOS-only one is not in CI's cache).
         let out = std::process::Command::new(env!("CARGO"))
             .args([
                 "metadata",
                 "--format-version",
                 "1",
-                "--offline",
+                "--filter-platform",
+                "aarch64-linux-android",
                 "--manifest-path",
             ])
             .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
