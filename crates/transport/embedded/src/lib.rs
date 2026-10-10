@@ -445,7 +445,7 @@ impl EmbeddedHost {
     /// answers any of them by calling `stop`, with the grace asked for or
     /// its own. `RuntimeEnded` IS the failure's report: `stop` after it
     /// releases the lock and answers the dropped count as after any other
-    /// end -- only a driver that panicked makes `stop` an error -- and a
+    /// end (`a_runtime_that_ends_on_its_own_releases_the_waiter`), and a
     /// fresh host may be started, in the new mode after an
     /// `AvailabilityChanged`.
     ///

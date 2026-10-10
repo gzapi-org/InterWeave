@@ -40,9 +40,9 @@ tracing = { workspace = true }
 [features]
 # TEST-ONLY: end the runtime's driver from a test, through the
 # composition's own hook (`EmbeddedHost::end_runtime_for_test`). Enabled
-# by this crate's tests as a dev-dependency feature, so it is on only in
-# builds that compile dev targets; no normal dependency names it (`cargo
-# tree -e normal,features`).
+# by this crate's tests as a dev-dependency feature, which builds that
+# compile dev targets unify in; no normal dependency names it, as
+# `cargo tree -e normal,features` showed on 2026-10-10.
 test-hooks = ["interweave-transport-composition/test-hooks"]
 
 [dev-dependencies]
