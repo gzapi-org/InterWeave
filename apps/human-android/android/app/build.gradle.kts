@@ -63,11 +63,15 @@ listOf("Debug", "Release").forEach { variant ->
             )
         }
         val profile = if (variant == "Release") listOf("--release") else emptyList()
+        // --locked: the library is built from the reviewed Cargo.lock, as
+        // every other cargo build here is (CI's `cargo check --locked` for
+        // this target included); a lockfile the build would rewrite is a
+        // failure, not a silent new dependency set in the APK.
         commandLine(
             listOf(
                 "cargo", "ndk", "-t", "arm64-v8a", "-P", "30",
                 "-o", rustJniLibs.get().asFile.path,
-                "build", "-p", "interweave-human-android",
+                "build", "--locked", "-p", "interweave-human-android",
             ) + profile,
         )
     }
