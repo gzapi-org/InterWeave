@@ -34,15 +34,24 @@ class NetworkService : Service() {
     private val binder = Binder()
     private val main = Handler(Looper.getMainLooper())
     @Volatile private var alive = false
-    // -1 until the start answers.
-    @Volatile private var mode = -1
+    // UNANSWERED until the start answers: no answer, refusal or mode, is
+    // ever this value (review of #255: -1 was also NO_IDENTITY).
+    @Volatile private var mode = UNANSWERED
 
     override fun onCreate() {
         super.onCreate()
         alive = true
         channels()
         lifecycle.execute {
-            val answer = Native.start(dataDir.absolutePath)
+            // A start that throws counts as a refusal: it must still end
+            // the foreground state below, not leave it to nobody.
+            val answer =
+                try {
+                    Native.start(dataDir.absolutePath)
+                } catch (e: RuntimeException) {
+                    Log.e(TAG, "start threw", e)
+                    START_THREW
+                }
             mode = answer
             Log.i(TAG, "start answered $answer")
             if (answer == Native.STAY_REACHABLE) {
@@ -77,7 +86,7 @@ class NetworkService : Service() {
         // The platform requires startForeground once a foreground start was
         // asked, so it goes up first either way.
         val answer = mode
-        if (answer != -1 && answer != Native.STAY_REACHABLE) {
+        if (answer != UNANSWERED && answer != Native.STAY_REACHABLE) {
             leaveForeground()
             return START_NOT_STICKY
         }
@@ -177,6 +186,12 @@ class NetworkService : Service() {
         private const val ONGOING_ID = 1
         private const val MESSAGES_ID = 2
         private const val NOTICE_WAIT_MS = 1000L
+
+        /** `mode` before the start answers; never an answer. */
+        private const val UNANSWERED = Int.MIN_VALUE
+
+        /** A start that threw, read as a refusal. */
+        private const val START_THREW = Int.MIN_VALUE + 1
 
         /** Start and stop, in order, one at a time, for the process. */
         private val lifecycle: ExecutorService = Executors.newSingleThreadExecutor()
