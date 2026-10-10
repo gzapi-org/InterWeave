@@ -357,6 +357,64 @@ mod tests {
         assert!(!second.lost());
     }
 
+    fn arrival() -> Update {
+        use interweave_human_chat_protocol::{HumanChatV2, MessageKind};
+        use interweave_human_client_api::{Origin, Received};
+        let peer = interweave_profile_identity::ProfileIdentity::generate()
+            .transport_identity()
+            .expect("a peer id");
+        Update::Received(Received {
+            row: interweave_human_core::RowId::from_stored(1),
+            origin: Origin::Direct {
+                peer,
+                endpoint: interweave_transport_api::EndpointId::parse("human")
+                    .expect("an endpoint"),
+            },
+            envelope: HumanChatV2 {
+                v: 2,
+                kind: MessageKind::Text,
+                app_message_id: format!("{:032x}", 1),
+                text: "hello".to_owned(),
+                reply_to: None,
+                sent_at_ms: None,
+                from_endpoint: None,
+            },
+            received_at: 1,
+        })
+    }
+
+    /// human-client-android.md, "Notifications": an arrival no focused
+    /// window reads asks a notice; one a focused window reads does not;
+    /// and focus withdraws what waited (review F4).
+    #[test]
+    fn an_arrival_asks_a_notice_only_while_no_window_has_focus() {
+        let now = std::time::Duration::ZERO;
+        let hub = Hub::new();
+        hub.update(arrival());
+        assert_eq!(
+            hub.notices().wait_change(now),
+            Some(1),
+            "unfocused: noticed"
+        );
+
+        hub.set_focused(true);
+        assert_eq!(
+            hub.notices().wait_change(now),
+            Some(0),
+            "focus withdraws it"
+        );
+        hub.update(arrival());
+        assert_eq!(hub.notices().wait_change(now), None, "focused: read there");
+
+        hub.set_focused(false);
+        hub.update(Update::Diagnostics(Diagnostics::default()));
+        assert_eq!(
+            hub.notices().wait_change(now),
+            None,
+            "the control: an update that is no arrival asks nothing"
+        );
+    }
+
     #[test]
     fn a_command_goes_nowhere_while_no_facade_runs() {
         let hub = Hub::new();
