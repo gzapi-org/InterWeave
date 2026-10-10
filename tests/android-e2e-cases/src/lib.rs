@@ -15,8 +15,12 @@
 //! each case with its own half -- D replying to what the Android side
 //! sends, and reading the path D was told.
 //!
-//! TEST-ONLY: the release APK's dependency graph must name this crate
-//! nowhere.
+//! TEST-ONLY. Its normal dependencies reach no libp2p, test harness,
+//! daemon or transport runtime, so it can be built for the phone
+//! (`the_crate_reaches_no_libp2p_harness_daemon_or_runtime` below). That
+//! the release APK's graph names it nowhere is DECISION 01a12770's
+//! invariant, checked by the packaging batch's check, which does not
+//! exist yet.
 
 use std::fmt::Write as _;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -504,7 +508,22 @@ mod tests {
     /// side runs the case on a thread of its own, as the instrumentation
     /// does, while this test is the desktop's half, answering and then
     /// reporting the route as `told` from the Android side's view.
+    /// What the fake tells the Android side about its route to the
+    /// desktop, once the route exists.
+    #[derive(Clone, Copy)]
+    enum Notice {
+        /// A first connection on this path: `route_established`, no
+        /// previous path.
+        Connected(PeerPath),
+        /// A `route_established` that nonetheless names a previous path.
+        WithPrevious(PeerPath, PeerPath),
+    }
+
     fn paths_on_the_fake(want: PeerPath, told: PeerPath) -> Map<String, Value> {
+        paths_told(want, Notice::Connected(told))
+    }
+
+    fn paths_told(want: PeerPath, told: Notice) -> Map<String, Value> {
         let (android, desktop) = FakeNetwork::pair(config(peer()), config(other_peer()));
         // The pair starts connected directly, and a first route would be
         // announced on that path; with none, it waits for `connected`.
@@ -534,7 +553,7 @@ mod tests {
         result(&case.join().expect("the case thread"))
     }
 
-    async fn desktop_half(android: &FakeNode, desktop: &FakeNode, told: PeerPath) {
+    async fn desktop_half(android: &FakeNode, desktop: &FakeNode, told: Notice) {
         let session = desktop.open(lease_request()).await.expect("D leases");
         let (_, text) = to_desktop(3);
         Told::default()
@@ -543,7 +562,12 @@ mod tests {
             .expect("the Android side's message");
         // The Android side has sent, so its session holds the route the
         // notice is owed on.
-        android.connected(&other_peer(), told);
+        match told {
+            Notice::Connected(path) => android.connected(&other_peer(), path),
+            Notice::WithPrevious(previous, current) => {
+                android.path_changed(&other_peer(), previous, current, ROUTE_ESTABLISHED, 0);
+            }
+        }
         let (id, answer) = to_android(3);
         send_until_routed(&session, &peer(), id, &answer, Duration::from_secs(5))
             .await
@@ -564,6 +588,98 @@ mod tests {
             detail.contains("Direct") && detail.contains("Relayed"),
             "{detail}"
         );
+    }
+
+    #[test]
+    fn paths_fails_when_its_route_began_with_a_previous_path_even_the_right_one() {
+        let out = paths_told(
+            PeerPath::Relayed,
+            Notice::WithPrevious(PeerPath::Direct, PeerPath::Relayed),
+        );
+        assert_eq!(out[keys::RESULT], keys::FAIL, "{out:?}");
+        let detail = out[keys::DETAIL].as_str().expect("a detail");
+        assert!(detail.contains("Some(Direct)"), "{detail}");
+    }
+
+    /// The packages this crate must never reach through a normal
+    /// dependency: they do not build for the phone, or would put a second
+    /// runtime or the test harness into the instrumentation.
+    const NEVER: &[&str] = &[
+        "interweave-test-support",
+        "interweave-transport-daemon",
+        "interweave-transport-libp2p",
+        "interweave-transport-runtime",
+        "interweave-transport-composition",
+        "interweave-transport-embedded",
+    ];
+
+    #[test]
+    fn the_crate_reaches_no_libp2p_harness_daemon_or_runtime() {
+        let out = std::process::Command::new(env!("CARGO"))
+            .args([
+                "metadata",
+                "--format-version",
+                "1",
+                "--offline",
+                "--manifest-path",
+            ])
+            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
+            .output()
+            .expect("cargo metadata");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let meta: Value = serde_json::from_slice(&out.stdout).expect("metadata JSON");
+        let name_of = |id: &str| {
+            meta["packages"]
+                .as_array()
+                .expect("packages")
+                .iter()
+                .find(|p| p["id"] == id)
+                .and_then(|p| p["name"].as_str())
+                .expect("a package's name")
+                .to_owned()
+        };
+        let nodes = meta["resolve"]["nodes"].as_array().expect("nodes");
+        let me = nodes
+            .iter()
+            .find(|n| name_of(n["id"].as_str().expect("id")) == env!("CARGO_PKG_NAME"))
+            .expect("this crate's node");
+        // The normal-dependency closure: a dev or build edge never ships.
+        let mut seen = std::collections::BTreeSet::new();
+        let mut todo = vec![me["id"].as_str().expect("id").to_owned()];
+        while let Some(id) = todo.pop() {
+            let node = nodes
+                .iter()
+                .find(|n| n["id"] == id.as_str())
+                .expect("a node");
+            for dep in node["deps"].as_array().expect("deps") {
+                let normal = dep["dep_kinds"]
+                    .as_array()
+                    .expect("dep_kinds")
+                    .iter()
+                    .any(|k| k["kind"].is_null());
+                let pkg = dep["pkg"].as_str().expect("pkg").to_owned();
+                if normal && seen.insert(name_of(&pkg)) {
+                    todo.push(pkg);
+                }
+            }
+        }
+        // The walk is live: what the crate does depend on is in it.
+        for wanted in [
+            "interweave-local-client-api",
+            "interweave-transport-api",
+            "tokio",
+        ] {
+            assert!(seen.contains(wanted), "{wanted} missing from {seen:?}");
+        }
+        let forbidden: Vec<&String> = seen
+            .iter()
+            .filter(|n| n.starts_with("libp2p") || NEVER.contains(&n.as_str()))
+            .collect();
+        assert!(forbidden.is_empty(), "reached: {forbidden:?}");
     }
 
     #[test]
