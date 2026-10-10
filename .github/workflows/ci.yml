@@ -21,7 +21,9 @@
 #      job runs, reports, and gates nothing at all until its name is
 #      added to the ruleset's required_status_checks.
 #
-# Contexts reported here: `rust`, `tree checks`, `tool self-tests`.
+# Contexts reported here: `rust`, `tree checks`, `tool self-tests`,
+# `android check (aarch64-linux-android)`, and the advisory one CLAUDE.md
+# §9 names apart, `android apk (assembleDebug)`.
 #
 # Deliberately NOT conditional-per-surface. The run is ~8.5 minutes wall
 # clock, and all of it is `rust` (tree checks and tool self-tests ~2.7
@@ -235,40 +237,86 @@ jobs:
         run: git diff --exit-code -- Cargo.lock
 
   android-check:
-    # CONTEXT NAME: `android check (aarch64-linux-android)`. Advisory, not in
-    # the ruleset: Stage 17 §20 step 1 cites it as the record that the
-    # phone's crates build for their target (architect-cto-01, relay
-    # 01a12048). No account on develop-qzapp has an Android std, so this
-    # job is the only place they are compiled for aarch64-linux-android.
+    # CONTEXT NAME: `android check (aarch64-linux-android)`. Required (the
+    # ruleset; CLAUDE.md §9): Stage 17 §20 step 1 cites it as the record
+    # that the phone's crates build for their target (architect-cto-01,
+    # relay 01a12048). No account on develop-qzapp has an Android std, so
+    # this job is the only place they are compiled for aarch64-linux-android.
     # Every version is tools/host/android/android-toolchain.pins' — the
-    # script reads them there; this job only installs what it names.
+    # scripts read them there; this job only says which components it needs.
     name: android check (aarch64-linux-android)
     runs-on: ubuntu-latest
-    # Not yet measured: a cold `cargo check` of profile-config's closure
-    # plus an NDK install. The cap is for a hang.
-    timeout-minutes: 20
+    # Not yet measured with interweave-human-android in the set (Slint's
+    # closure, cold). The cap is for a hang.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Install the pinned toolchain and the Android target
-        run: |
-          rustup show active-toolchain || rustup toolchain install
-          target="$(awk -F= '$1=="RUST_ANDROID_TARGET"{print $2}' tools/host/android/android-toolchain.pins)"
-          rustup target add "$target"
-
-      # The runner image carries an SDK with sdkmanager; the NDK the host
-      # pins is installed into it, so the clang the check uses is the
-      # host's, not whatever NDK the image happens to ship.
-      - name: Install the pinned NDK
-        run: |
-          ndk="$(grep -oE '^PKG_[0-9]+=ndk;[0-9.]+@' tools/host/android/android-toolchain.pins | head -n1 | sed 's/.*ndk;//; s/@$//')"
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$ndk" >/dev/null
-          test -d "$ANDROID_HOME/ndk/$ndk"
+      # The JDK and the SDK's build-tools and platforms are for Slint's
+      # Android build script (javac, d8, android.jar); the NDK for the
+      # target's clang. All at the pins' versions, not the runner image's.
+      - name: Install the pinned JDK, SDK packages and Rust target
+        run: bash tools/ci/android_ci_toolchain.sh jdk sdk rust
 
       - name: cargo check for aarch64-linux-android
         run: bash tools/ci/check_android_target.sh
+
+  android-apk:
+    # CONTEXT NAME: `android apk (assembleDebug)`. ADVISORY (CLAUDE.md §9's
+    # advisory sentence): the APK the Gradle build packages, with the native
+    # library cargo-ndk builds into it. It joins the ruleset by hand once
+    # the Gradle project is on main and a run time is measured.
+    name: android apk (assembleDebug)
+    runs-on: ubuntu-latest
+    # Not yet measured: a cold cargo build of interweave-human-android for
+    # the target plus Gradle's first resolution. The cap is for a hang.
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: apps/human-android/android
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned JDK, SDK packages, Rust target and cargo-ndk
+        working-directory: .
+        run: bash tools/ci/android_ci_toolchain.sh jdk sdk rust cargo-ndk
+
+      - name: Restore Gradle's dependency and wrapper caches
+        id: gradle-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper/dists
+          key: gradle-${{ runner.os }}-${{ hashFiles('apps/human-android/android/**/*.gradle.kts', 'apps/human-android/android/gradle/libs.versions.toml', 'apps/human-android/android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      # The wrapper fetches Gradle at the checksum gradle-wrapper.properties
+      # carries (the pins file's); app/build.gradle.kts runs cargo-ndk for
+      # arm64-v8a before packaging.
+      - name: ./gradlew assembleDebug
+        run: ./gradlew --no-daemon --stacktrace assembleDebug
+
+      - name: What was built
+        run: |
+          apk=app/build/outputs/apk/debug/app-debug.apk
+          test -f "$apk" || { echo "::error::no $apk after assembleDebug"; exit 1; }
+          echo "built $apk, $(stat -c %s "$apk") bytes; native libraries in it:"
+          unzip -l "$apk" 'lib/*' | sed -n '4,$p' | head -n -2
+
+      - name: Save Gradle's caches (main only)
+        if: success() && github.event_name == 'push' && steps.gradle-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper/dists
+          key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
 
   tree-checks:
     name: tree checks
