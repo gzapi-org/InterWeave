@@ -78,13 +78,13 @@ async fn the_android_side_crosses_a_relayed_and_a_direct_path_to_a_desktop_both_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "needs a device with the app's androidTest build: ANDROID_SERIAL and INTERWEAVE_ANDROID_INSTRUMENTATION (src/adb.rs)"]
+#[ignore = "needs a device with the app's androidTest build: ANDROID_SERIAL and INTERWEAVE_ANDROID_INSTRUMENTATION (src/adb.rs); one phone, so --test-threads 1"]
 async fn on_a_device_the_phone_crosses_the_relayed_path_with_a_stand_in_as_the_control() {
     relayed_and_direct(AdbDevice::connect(), HostStandIn::new()).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "needs a device with the app's androidTest build: ANDROID_SERIAL and INTERWEAVE_ANDROID_INSTRUMENTATION (src/adb.rs)"]
+#[ignore = "needs a device with the app's androidTest build: ANDROID_SERIAL and INTERWEAVE_ANDROID_INSTRUMENTATION (src/adb.rs); one phone, so --test-threads 1"]
 async fn on_a_device_the_phone_crosses_the_direct_path_beside_a_relayed_stand_in() {
     relayed_and_direct(HostStandIn::new(), AdbDevice::connect()).await;
 }
@@ -158,27 +158,30 @@ async fn relayed_and_direct<R: Device, C: Device>(mut r: R, mut c: C) {
     // R -> D over the circuit and back; C -> D over D's address and back.
     // Each Android side asserts, in its own process, the path its route
     // to D began on.
-    for (side, peer, path, serial, what) in [
-        (
-            &r as &dyn Device,
-            &r_peer,
-            PeerPath::Relayed,
-            1,
-            "R of D: relayed",
-        ),
-        (
-            &c as &dyn Device,
-            &c_peer,
-            PeerPath::Direct,
-            2,
-            "C of D, the control: direct",
-        ),
-    ] {
-        let run = side.run_case(cases::PATHS, &args(&d_peer, path, serial));
-        desktop_answers(&d_session, &mut d_told, peer, serial, || d.log()).await;
-        let out = run.passed(|| d.log());
-        assert_eq!(out[keys::PATH], path.label(), "{what}");
-    }
+    let log = |side: &dyn Device| format!("{}\n{}", d.log(), side.log());
+    let run = r.run_case(cases::PATHS, &args(&d_peer, PeerPath::Relayed, 1));
+    desktop_answers(&d_session, &mut d_told, &r_peer, 1, || log(&r)).await;
+    // The baseline for R's death is taken HERE, while R is known alive:
+    // D's answer was just accepted on R's route, and R's case has not
+    // returned. On a device R's process ends with its case
+    // (`src/adb.rs`), so a baseline taken any later could already hold
+    // that death, and the check below would look for a second one.
+    let (told_before, gone_before) = (d_told.paths.len(), d_told.gone.len());
+    let circuits_before = relay.seen().await.circuits.len();
+    let out = run.passed(|| log(&r));
+    assert_eq!(
+        out[keys::PATH],
+        PeerPath::Relayed.label(),
+        "R of D: relayed"
+    );
+    let run = c.run_case(cases::PATHS, &args(&d_peer, PeerPath::Direct, 2));
+    desktop_answers(&d_session, &mut d_told, &c_peer, 2, || log(&c)).await;
+    let out = run.passed(|| log(&c));
+    assert_eq!(
+        out[keys::PATH],
+        PeerPath::Direct.label(),
+        "C of D, the control: direct"
+    );
 
     // D was told each route began on the path the relay's record says.
     for (peer, want, what) in [
@@ -208,16 +211,15 @@ async fn relayed_and_direct<R: Device, C: Device>(mut r: R, mut c: C) {
     );
 
     // R's process dies and returns: D is told the disconnect, then R's
-    // return over a new circuit, relayed with nothing before it.
-    let before = seen.circuits.len();
-    d_told.read(&d_session, &r_peer, "").await.expect("D reads");
-    let (told_before, gone_before) = (d_told.paths.len(), d_told.gone.len());
+    // return over a new circuit, relayed with nothing before it. On the
+    // stand-in the death is `kill`; on a device it is the end of R's
+    // first case's process, and `kill` makes sure of it.
     r.kill();
     r.restart();
     let run = r.run_case(cases::PATHS, &args(&d_peer, PeerPath::Relayed, 3));
-    desktop_answers(&d_session, &mut d_told, &r_peer, 3, || d.log()).await;
+    desktop_answers(&d_session, &mut d_told, &r_peer, 3, || log(&r)).await;
     assert_eq!(
-        run.passed(|| d.log())[keys::PATH],
+        run.passed(|| log(&r))[keys::PATH],
         PeerPath::Relayed.label(),
         "R of D after R's restart: relayed again"
     );
@@ -240,7 +242,7 @@ async fn relayed_and_direct<R: Device, C: Device>(mut r: R, mut c: C) {
         d_told.gone
     );
     assert!(
-        relay.seen().await.circuits.len() > before,
+        relay.seen().await.circuits.len() > circuits_before,
         "the return took a new circuit"
     );
 

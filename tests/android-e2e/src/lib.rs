@@ -2,10 +2,12 @@
 // Copyright 2026 Andrea Benetton
 //! The orchestration `tests/android-e2e` runs between an Android peer and
 //! a desktop one (plan §20 gate (c)), behind a seam the device swaps in at:
-//! [`Device`]. The host never holds a binding to the Android side
-//! (architect-cto's DECISION of 2026-10-10): it drives the lifecycle and
-//! names a case of `interweave-android-e2e-cases` for the Android side to
-//! run in its own process, and reads the result back. The desktop's half
+//! [`Device`]. No method of the seam yields a binding to the Android side
+//! (architect-cto's DECISION of 2026-10-10), since on a phone no host
+//! process can hold one: it drives the lifecycle and names a case of
+//! `interweave-android-e2e-cases` for the Android side to run in its own
+//! process, and reads the result back. The stand-in exposes its own
+//! binding beside the seam, for the host-only cases (`human_chat.rs`). The desktop's half
 //! of each case is here.
 //!
 //! Two runners implement the seam. [`HostStandIn`] -- the embedded
@@ -89,6 +91,13 @@ pub trait Device {
     /// Android side, in its own process, while the caller plays the
     /// desktop's half.
     fn run_case(&self, case: &str, args: &Value) -> CaseRun;
+
+    /// What the Android side logged, for a failing case to show beside
+    /// the desktop's. The stand-in's runtime logs into this test's own
+    /// output, so it has nothing more to add.
+    fn log(&self) -> String {
+        String::new()
+    }
 }
 
 /// A case running on the Android side; [`passed`](Self::passed) waits

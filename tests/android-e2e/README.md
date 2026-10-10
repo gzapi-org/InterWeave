@@ -2,7 +2,7 @@
 
 Android ↔ desktop interoperability (plan §20 gate (c)): the orchestration between an Android peer and real desktop peers, a relay, process death and network transitions.
 
-The Android side sits behind a seam, the `Device` trait in `src/lib.rs`: the lifecycle, and a named case run in the Android side's own process. The host never holds a binding to the Android side (architect-cto's DECISION of 2026-10-10). The cases are `interweave-android-e2e-cases` (`tests/android-e2e-cases`), one body for two runners:
+The Android side sits behind a seam, the `Device` trait in `src/lib.rs`: the lifecycle, and a named case run in the Android side's own process. No method of the seam yields a binding to the Android side (architect-cto's DECISION of 2026-10-10); the stand-in exposes its own beside it, which `human_chat.rs` drives on the host until its body moves into the cases crate. The cases are `interweave-android-e2e-cases` (`tests/android-e2e-cases`), one body for two runners:
 
 - `HostStandIn` runs them on a thread over the embedded runtime the app's foreground service hosts (`interweave-transport-embedded`), started on this host under an app data directory of its own. It proves a case body before a phone runs it.
 - `adb::AdbDevice` runs them in the app's instrumentation on a real device and reads the result from its status. Every case is a fresh app process; the phone reaches the relay and the desktop on this host's loopback through `adb reverse`; and the app's identity must survive a force-stop, which `AdbDevice::connect` checks. `src/adb.rs` says what such a run is and is not.

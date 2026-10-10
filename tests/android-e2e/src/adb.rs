@@ -29,6 +29,7 @@
 //! component (`<test package>/<runner>`), which the app's androidTest
 //! build defines.
 
+use std::fmt::Write as _;
 use std::process::{Command, Output};
 
 use interweave_android_e2e_cases::{cases, keys};
@@ -74,7 +75,8 @@ impl AdbDevice {
             assert_eq!(
                 out.get(keys::RESULT).and_then(Value::as_str),
                 Some(keys::PASS),
-                "the identity case: {out:?}"
+                "the identity case: {out:?}\n{}",
+                logcat()
             );
             out.get(keys::PEER)
                 .and_then(Value::as_str)
@@ -94,31 +96,14 @@ impl AdbDevice {
             reversed: Vec::new(),
         }
     }
+}
 
-    /// The device's recent log, for a failing case to show.
-    #[must_use]
-    pub fn log() -> String {
-        adb(&["logcat", "-d", "-t", "300"]).map_or_else(
-            |e| format!("(no logcat: {e})"),
-            |o| String::from_utf8_lossy(&o.stdout).into_owned(),
-        )
-    }
-
-    /// The bytes of `path` under the app's private directories, through
-    /// `run-as` -- how a case's captured payloads come back.
-    ///
-    /// # Panics
-    /// If `adb` cannot read it.
-    #[must_use]
-    pub fn pull(path: &str) -> Vec<u8> {
-        let out = adb(&["exec-out", "run-as", PACKAGE, "cat", path]).expect("adb");
-        assert!(
-            out.status.success(),
-            "run-as cat {path}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        out.stdout
-    }
+/// The device's recent log.
+fn logcat() -> String {
+    adb(&["logcat", "-d", "-t", "300"]).map_or_else(
+        |e| format!("(no logcat: {e})"),
+        |o| String::from_utf8_lossy(&o.stdout).into_owned(),
+    )
 }
 
 impl Device for AdbDevice {
@@ -141,7 +126,8 @@ impl Device for AdbDevice {
         assert_eq!(
             out.get(keys::RESULT).and_then(Value::as_str),
             Some(keys::PASS),
-            "provisioning the app: {out:?}"
+            "provisioning the app: {out:?}\n{}",
+            logcat()
         );
     }
 
@@ -155,6 +141,10 @@ impl Device for AdbDevice {
 
     /// Nothing to do: the next case's instrumentation starts the process.
     fn restart(&mut self) {}
+
+    fn log(&self) -> String {
+        logcat()
+    }
 
     fn run_case(&self, case: &str, args: &Value) -> CaseRun {
         let (instrumentation, name, args) =
@@ -199,9 +189,26 @@ fn instrument(instrumentation: &str, case: &str, args: &Value) -> String {
     let command = instrument_argv(instrumentation, case, args);
     let command: Vec<&str> = command.iter().map(String::as_str).collect();
     match adb(&command) {
-        Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
+        Ok(out) => outcome(&out),
         Err(e) => format!("INSTRUMENTATION_FAILED: adb: {e}"),
     }
+}
+
+/// What a run printed, and -- when `adb` itself failed (no device, more
+/// than one, an unauthorized one), which it says on stderr with nothing
+/// on stdout -- its exit and what it said, so a result-less run's detail
+/// names the cause.
+fn outcome(out: &Output) -> String {
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    if !out.status.success() || !out.stderr.is_empty() {
+        let _ = write!(
+            text,
+            "\nINSTRUMENTATION_FAILED: adb exited {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim_end()
+        );
+    }
+    text
 }
 
 /// The `adb` arguments that run `case`: the arguments travel base64, so
@@ -376,6 +383,35 @@ INSTRUMENTATION_CODE: -1
         );
         assert_eq!(out[keys::RESULT], keys::PASS);
         assert_eq!(out[keys::PATH], "relayed");
+    }
+
+    #[test]
+    fn when_adb_itself_fails_the_detail_carries_its_exit_and_what_it_said() {
+        use std::os::unix::process::ExitStatusExt as _;
+        let out = Output {
+            // Exit code 1, as a wait status.
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stdout: Vec::new(),
+            stderr: b"adb: no devices/emulators found\n".to_vec(),
+        };
+        let result = parse(&outcome(&out));
+        assert_eq!(result[keys::RESULT], keys::FAIL);
+        let detail = result[keys::DETAIL].as_str().expect("a detail");
+        assert!(
+            detail.contains("no devices/emulators found") && detail.contains("exit status: 1"),
+            "{detail}"
+        );
+        // A run that succeeded and said nothing on stderr is passed
+        // through as it printed.
+        let ok = Output {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: b"INSTRUMENTATION_STATUS: interweave.result=pass\n".to_vec(),
+            stderr: Vec::new(),
+        };
+        assert_eq!(
+            outcome(&ok),
+            "INSTRUMENTATION_STATUS: interweave.result=pass\n"
+        );
     }
 
     #[test]
