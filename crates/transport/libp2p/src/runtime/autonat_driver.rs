@@ -1033,7 +1033,8 @@ pub(super) fn reconcile(
         now_ms,
     } = tick;
     // A NETWORK CHANGE is not noticed here: the runtime's detector
-    // (`network_change.rs`) sees the bound set change and calls
+    // (`network_change.rs`) sees the host's known IP set move -- the
+    // listeners' bound set or the platform's view -- and calls
     // `network_changed` below, whether or not this client is on (step
     // 10; until then the comparison lived in this tick, and with the
     // client off a change was seen by nothing).
@@ -1649,7 +1650,11 @@ mod tests {
                 // As production builds it: the root funnel around the
                 // whole composite (ADR-0052 A 2026-09-25 D1).
                 .map(|b| {
-                    crate::root_funnel::RootFunnel::new(b, crate::operator_set::OperatorSet::new())
+                    crate::root_funnel::RootFunnel::new(
+                        b,
+                        crate::operator_set::OperatorSet::new(),
+                        crate::held_listeners::HeldListeners::new(),
+                    )
                 })
                 .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
             })

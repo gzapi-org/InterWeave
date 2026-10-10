@@ -46,7 +46,7 @@ use interweave_transport_runtime::{
     ConnectionManager, ConnectionPolicy, DialDenial, DialOrigin, TrustSources,
 };
 use libp2p::{PeerId, noise, tcp, yamux};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::attribution::{Attributing, DialAttribution, always};
 use crate::behaviour::SubstrateBehaviour;
@@ -94,9 +94,9 @@ pub use direct::{DirectEndpoints, DirectState};
 pub use endpoints::DirectoryResult;
 pub use status::{DialGateStatus, IngressStatus, PreAuthStatus, RuntimeStatus};
 
-pub use handle::{ShutdownReport, SwarmCommander};
+pub use handle::{NetworkMonitor, ShutdownReport, SwarmCommander};
 pub use messages::{
-    DialFailureClass, DialRefusal, HolePunchOutcome, PathChange, PeerGate, PeerPath,
+    DialFailureClass, DialRefusal, HolePunchOutcome, NetworkView, PathChange, PeerGate, PeerPath,
     RelayReservationOutcome, RelayServerOutcome, SwarmCommand, SwarmEvent,
 };
 
@@ -123,6 +123,128 @@ fn follow_verdict(
         let mut relay_events = Vec::new();
         relay_driver::set_direct_inbound(state, swarm, *direct_inbound, now_ms, &mut relay_events);
         buffer_informational(outbox, event_capacity, relay_events);
+    }
+}
+
+/// One NETWORK CHANGE (section 14, step 10), from either source -- the
+/// listeners' bound set or the platform's view -- told to every
+/// subsystem holding network-dependent state in the same turn, whether
+/// or not the AutoNAT client is on.
+///
+/// ONLY A REMOVAL INVALIDATES (§14 item 1): the AutoNAT verdict goes to
+/// unknown (published, so the relay target follows it now) and its
+/// candidates are re-tested within the jitter, the DCUtR wrapper's
+/// attempts are given up and its cooldowns lifted -- and every
+/// connection running from an IP the change took off this host is
+/// CLOSED (item 5, the rule since 2026-09-26): as first built nothing
+/// was closed, on the belief that what died with its interface would
+/// close on its own, and SPIKE-004 phase B's `ifchange` row measured it
+/// standing for minutes. What is over an address still held is kept.
+/// AN ADDITION -- and the first fill of an empty set, which is reported
+/// as no change -- lifts the dial gate's backoff of every classified
+/// peer and makes the allowlisted ones' retry due, each dialled through
+/// the root gate like any dial (`ConnectionManager::network_added`): a
+/// peer that failed while this host was offline would otherwise wait out
+/// up to five minutes after it is back. And every relay backing off whose
+/// peer the gate does not still hold after that lift is asked again at
+/// the next tick, its ladder kept (`ReservationManager::network_added`).
+/// Each once per lift floor
+/// (ADR-0011 A 2026-10-09): a relay-only profile is otherwise unreachable for the
+/// rest of its relay backoff.
+/// Pinned by `tests/connectivity/tests/network_change.rs` and `dcutr.rs`'s
+/// `a_network_change_lifts_the_cooldown_and_keeps_the_reservation`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the Swarm task's state a change reaches, borrowed for one call from two arms"
+)]
+fn on_network_change(
+    change: Option<network_change::NetworkChange>,
+    network: &mut network_change::NetworkSet,
+    now: u64,
+    swarm: &mut GatedSwarm,
+    manager: &mut ConnectionManager,
+    autonat_state: Option<&mut autonat_driver::AutonatState>,
+    mut relay_state: Option<&mut relay_driver::RelayState>,
+    active: &dialing::ActiveListeners,
+    open: &HashMap<libp2p::swarm::ConnectionId, OpenConnection>,
+    outbox: &mut VecDeque<SwarmEvent>,
+    event_capacity: usize,
+) {
+    // THE FIRST FILL is no change, but a runtime started offline failed
+    // its first dials before it: the lift runs (ADR-0011 A 2026-10-09).
+    let filled = network.take_filled();
+    let Some(change) = change else {
+        if filled {
+            lift_held_off(now, manager, relay_state);
+        }
+        return;
+    };
+    if change.invalidates() {
+        if let Some(state) = autonat_state {
+            let mut autonat_events = Vec::new();
+            autonat_driver::network_changed(
+                state,
+                swarm,
+                active.values().flatten().filter(|a| network.holds(a)),
+                now,
+                &mut autonat_events,
+            );
+            for event in autonat_events {
+                follow_verdict(
+                    &event,
+                    relay_state.as_deref_mut(),
+                    swarm,
+                    now,
+                    outbox,
+                    event_capacity,
+                );
+                if matches!(event, SwarmEvent::ConnectivityChanged { .. })
+                    || may_buffer_delivery(outbox.len(), event_capacity)
+                {
+                    outbox.push_back(event);
+                }
+            }
+        }
+        dcutr_driver::network_changed(swarm.dcutr_mut());
+        let departed: std::collections::BTreeSet<std::net::IpAddr> =
+            change.removed.iter().copied().collect();
+        for (id, connection) in open {
+            if network_change::closes(connection.local_ip, connection.path, &departed) {
+                // The close is a request; the `ConnectionClosed` it
+                // raises is what settles the record and tells the
+                // consumer, as for any close.
+                swarm.close_connection(*id);
+            }
+        }
+    }
+    if change.adds() || filled {
+        lift_held_off(now, manager, relay_state);
+    }
+    dcutr_driver::offer_listeners(
+        swarm.dcutr_mut(),
+        active.values().flatten().filter(|a| network.holds(a)),
+    );
+    if may_buffer_delivery(outbox.len(), event_capacity) {
+        outbox.push_back(SwarmEvent::NetworkChanged {
+            removed: change.removed,
+            added: change.added,
+        });
+    }
+}
+
+/// An addition's lift, or the first fill's: every held-off peer and
+/// every backing-off relay due once, within the lift floor.
+fn lift_held_off(
+    now: u64,
+    manager: &mut ConnectionManager,
+    relay_state: Option<&mut relay_driver::RelayState>,
+) {
+    let _ = manager.network_added(now);
+    if let Some(state) = relay_state {
+        // AFTER the gate's lift, reading what it left standing: a relay
+        // peer the gate still holds off is not asked, or the ask would
+        // be refused and the ladder climb for nothing.
+        let _ = relay_driver::network_added(state, now, |relay| manager.holds_off(relay, now));
     }
 }
 
@@ -634,13 +756,16 @@ fn mdns_tick<P: libp2p::mdns::Provider>(
     >,
     build: impl FnOnce() -> std::io::Result<crate::mdns_scope::MdnsScope<libp2p::mdns::Behaviour<P>>>,
     listening: &[(libp2p::core::transport::ListenerId, libp2p::Multiaddr)],
+    own: &[String],
     counts: &mdns_driver::DropCountsCell,
     at: std::time::Instant,
     now_ms: u64,
     outbox: &mut VecDeque<SwarmEvent>,
     event_capacity: usize,
 ) {
-    let own: Vec<String> = listening.iter().map(|(_, a)| a.to_string()).collect();
+    // `own` is rule 3's -- the bound listeners on an IP the host still
+    // holds (ADR-0052 A 2026-10-09); `listening` is every bound one, which
+    // a rebuilt behaviour must be told of whatever the host holds.
     if let Some(mdns) = field.as_ref() {
         let records: Vec<(PeerId, libp2p::Multiaddr, std::time::Instant)> = mdns
             .inner()
@@ -831,6 +956,8 @@ const MAX_OUTBOUND_DIRECT_PER_PEER: usize = 8;
 #[derive(Debug)]
 pub struct SwarmRuntime {
     commands: mpsc::Sender<SwarmCommand>,
+    /// Where the platform's view is handed in ([`NetworkMonitor`]).
+    network_view: watch::Sender<NetworkView>,
     events: mpsc::Receiver<SwarmEvent>,
     task: Option<tokio::task::JoinHandle<()>>,
     local_peer: TransportIdentity,
@@ -1206,6 +1333,10 @@ impl SwarmRuntime {
         };
         let preauth = config.preauth;
         let funnel_operator = operator.clone();
+        // Which bound listeners are on an IP the host still holds (ADR-0052
+        // rule 3, A 2026-10-09): written by the detector, read by the funnel.
+        let held_listeners = crate::held_listeners::HeldListeners::new();
+        let funnel_held = held_listeners.clone();
         let make_behaviour =
             move |key: &libp2p::identity::Keypair, relay_client: relay_driver::ClientField| {
                 SubstrateBehaviour::new(
@@ -1232,7 +1363,11 @@ impl SwarmRuntime {
                 // only from what the root returns, and the root is this.
                 // `tests/root_funnel.rs` measured that on real sockets.
                 .map(|behaviour| {
-                    crate::root_funnel::RootFunnel::new(behaviour, funnel_operator.clone())
+                    crate::root_funnel::RootFunnel::new(
+                        behaviour,
+                        funnel_operator.clone(),
+                        funnel_held.clone(),
+                    )
                 })
                 .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
             };
@@ -1346,9 +1481,9 @@ impl SwarmRuntime {
         // Sends waiting for the dial they started (relay seq 13444),
         // bounded with the exchanges in flight by `admit_outbound`.
         let mut held_sends = held_sends::HeldSends::default();
-        // The bound set as last observed, for section 14's network
-        // change (step 10).
-        let mut network = network_change::NetworkSet::default();
+        // The IP set this host is known to hold, for section 14's
+        // network change (step 10): the listeners' and the platform's.
+        let mut network = network_change::NetworkSet::publishing_to(held_listeners);
         let head_start_ms = config
             .relay_client
             .as_ref()
@@ -1425,6 +1560,9 @@ impl SwarmRuntime {
         > = HashMap::new();
 
         let (command_tx, mut command_rx) = mpsc::channel(config.command_capacity);
+        // The platform's view: a snapshot slot, so a report never blocks
+        // and never queues -- the latest one is the one that counts.
+        let (network_view_tx, mut network_view) = watch::channel(NetworkView::default());
         let (event_tx, event_rx) = mpsc::channel(config.event_capacity);
         // What `shutdown` keeps of the events nobody read: the backlog at
         // that moment is the channel plus the outbox, each the event
@@ -1665,6 +1803,29 @@ impl SwarmRuntime {
                             }
                         }
                     }
+                    // THE PLATFORM'S VIEW of this host's addresses
+                    // (§20 step 5): the latest snapshot the host's
+                    // network monitor handed in, into the same detector
+                    // as the listeners' bound set. A sender that is gone
+                    // -- the runtime's handle dropped -- disables the arm
+                    // for this turn only, and nothing is reported.
+                    Ok(()) = network_view.changed() => {
+                        let view = network_view.borrow_and_update().clone();
+                        let change = network.observe_view(&view.addresses);
+                        on_network_change(
+                            change,
+                            &mut network,
+                            now_ms(started),
+                            &mut swarm,
+                            &mut manager,
+                            autonat_state.as_mut(),
+                            relay_state.as_mut(),
+                            &active,
+                            &open,
+                            &mut outbox,
+                            config.event_capacity,
+                        );
+                    }
                     // THE mDNS REFRESH TICK: what the crate's store still
                     // holds goes out again, and a rebuild that is due runs
                     // (`mdns_tick`).
@@ -1686,6 +1847,7 @@ impl SwarmRuntime {
                                 swarm.mdns_mut(),
                                 || mdns_driver::build_behaviour(settings, local_pid),
                                 &listening,
+                                &network.own_listeners(active.values().flatten()),
                                 counts,
                                 std::time::Instant::now(),
                                 now_ms(started),
@@ -1976,7 +2138,13 @@ impl SwarmRuntime {
                         // listeners this profile bound are candidates for
                         // its CONNECT (each offered once).
                         dcutr_driver::tick(swarm.dcutr_mut(), now);
-                        dcutr_driver::offer_listeners(swarm.dcutr_mut(), active.values().flatten());
+                        // Only what the host still holds: a listener on
+                        // an IP the platform's view said departed stays
+                        // bound until the poll catches up.
+                        dcutr_driver::offer_listeners(
+                            swarm.dcutr_mut(),
+                            active.values().flatten().filter(|a| network.holds(a)),
+                        );
 
                         // THE STABILITY GATE AND THE RETIREMENT (step 9).
                         // A punched direct connection becomes the peer's
@@ -2052,7 +2220,12 @@ impl SwarmRuntime {
                                 autonat_driver::AutonatTick {
                                     in_flight: &in_flight,
                                     open: &open,
-                                    listeners: active.values().flatten().cloned().collect(),
+                                    listeners: active
+                                        .values()
+                                        .flatten()
+                                        .filter(|a| network.holds(a))
+                                        .cloned()
+                                        .collect(),
                                     now_ms: now,
                                 },
                                 &mut autonat_events,
@@ -2264,6 +2437,7 @@ impl SwarmRuntime {
                                     &task_operator,
                                     &task_stores,
                                     &mut held_sends,
+                                    &network,
                                     command,
                                 );
                                 // A revocation names connections; this
@@ -2395,7 +2569,7 @@ impl SwarmRuntime {
                             // through this dispatch. See
                             // `KademliaState::own_listeners`.
                             state.set_own_listeners(
-                                active.values().flatten().map(ToString::to_string),
+                                network.own_listeners(active.values().flatten()),
                             );
                             let handled = kademlia_driver::handle_kademlia(
                                 event,
@@ -2441,7 +2615,7 @@ impl SwarmRuntime {
                             // Rule 3 at the learned-server hook asks
                             // what this node listens on NOW.
                             state.set_own_listeners(
-                                active.values().flatten().map(ToString::to_string),
+                                network.own_listeners(active.values().flatten()),
                             );
                             let handled = autonat_driver::handle_autonat(
                                 event,
@@ -2480,7 +2654,7 @@ impl SwarmRuntime {
                             // Rule 3 at the learned-relay hook asks
                             // what this node listens on NOW.
                             state.set_own_listeners(
-                                active.values().flatten().map(ToString::to_string),
+                                network.own_listeners(active.values().flatten()),
                             );
                             let handled = relay_driver::handle_relay(
                                 event,
@@ -2546,8 +2720,7 @@ impl SwarmRuntime {
                         ) = event
                         {
                             if let Some(state) = mdns_state.as_mut() {
-                                let own: Vec<String> =
-                                    active.values().flatten().map(ToString::to_string).collect();
+                                let own: Vec<String> = network.own_listeners(active.values().flatten());
                                 deliver_mdns(
                                     state,
                                     heard,
@@ -2626,8 +2799,7 @@ impl SwarmRuntime {
                         // binds a private interface between two Identify
                         // messages must judge the second against the
                         // listeners it has then.
-                        let own_listeners: Vec<String> =
-                            active.values().flatten().map(ToString::to_string).collect();
+                        let own_listeners: Vec<String> = network.own_listeners(active.values().flatten());
                         let mut advertised = dialing::AdvertisedBoundary {
                             own_listeners: &own_listeners,
                             stores: &task_stores,
@@ -2796,13 +2968,19 @@ impl SwarmRuntime {
                                 // the next tick: a circuit can arrive
                                 // between the two, and its CONNECT would
                                 // carry only what a peer had observed.
-                                match &event {
+                                // Offered below, AFTER the detector has
+                                // observed the bind, and only if the host
+                                // holds its IP: a second port on an IP the
+                                // platform's view said departed is bound,
+                                // and is no candidate (ADR-0052 A
+                                // 2026-10-09).
+                                let just_bound = match &event {
                                     libp2p::swarm::SwarmEvent::NewListenAddr { address, .. } => {
-                                        dcutr_driver::offer_listeners(
-                                            swarm.dcutr_mut(),
-                                            std::iter::once(address),
-                                        );
+                                        Some(address.clone())
                                     }
+                                    _ => None,
+                                };
+                                match &event {
                                     // And forgotten as they go, so the
                                     // offered set holds what is bound.
                                     libp2p::swarm::SwarmEvent::ExpiredListenAddr {
@@ -2832,71 +3010,30 @@ impl SwarmRuntime {
                                 let translated =
                                     translate(event, &mut listens, &mut active, &mut abandoned);
                                 // A NETWORK CHANGE (section 14, step 10)
-                                // is a change in the bound set, seen
+                                // the listeners' bound set made, seen
                                 // here, once, as the listener event that
-                                // made it lands -- and told to every
-                                // subsystem holding network-dependent
-                                // state in the same turn, whether or not
-                                // the AutoNAT client is on: its verdict
-                                // to unknown (published, so the relay
-                                // target follows it now), its candidates
-                                // re-tested within the jitter, the DCUtR
-                                // wrapper's attempts given up and its
-                                // cooldowns lifted -- and every
-                                // connection running from an IP the
-                                // change took off this host CLOSED
-                                // (item 5, the rule since 2026-09-26):
-                                // as first built nothing was closed, on
-                                // the belief that what died with its
-                                // interface would close on its own, and
-                                // SPIKE-004 phase B's `ifchange` row
-                                // measured it standing for minutes. What
-                                // is over an address still bound is
-                                // kept. Pinned by `tests/connectivity/
-                                // tests/network_change.rs` and `dcutr.rs`'s
-                                // `a_network_change_lifts_the_cooldown_and_keeps_the_reservation`.
-                                if listener_event
-                                    && let Some(change) = network.observe(active.values().flatten())
-                                {
-                                    let now = now_ms(started);
-                                    // ONLY A REMOVAL INVALIDATES (§14 item
-                                    // 1): an address joining is reported
-                                    // and offered; what was known about
-                                    // the addresses still held stands.
-                                    if change.invalidates()
-                                        && let Some(state) = autonat_state.as_mut()
-                                    {
-                                        let mut autonat_events = Vec::new();
-                                        autonat_driver::network_changed(state, &mut swarm, active.values().flatten(), now, &mut autonat_events);
-                                        for event in autonat_events {
-                                            follow_verdict(&event, relay_state.as_mut(), &mut swarm, now, &mut outbox, config.event_capacity);
-                                            if matches!(event, SwarmEvent::ConnectivityChanged { .. })
-                                                || may_buffer_delivery(outbox.len(), config.event_capacity)
-                                            {
-                                                outbox.push_back(event);
-                                            }
-                                        }
-                                    }
-                                    if change.invalidates() {
-                                        dcutr_driver::network_changed(swarm.dcutr_mut());
-                                        let departed = network_change::departed_ips(&change, active.values().flatten());
-                                        for (id, connection) in &open {
-                                            if network_change::closes(connection.local_ip, connection.path, &departed) {
-                                                // The close is a request; the
-                                                // `ConnectionClosed` it raises is
-                                                // what settles the record and tells
-                                                // the consumer, as for any close.
-                                                swarm.close_connection(*id);
-                                            }
-                                        }
-                                    }
-                                    dcutr_driver::offer_listeners(swarm.dcutr_mut(), active.values().flatten());
-                                    if may_buffer_delivery(outbox.len(), config.event_capacity) {
-                                        outbox.push_back(SwarmEvent::NetworkChanged {
-                                            removed: change.removed,
-                                            added: change.added,
-                                        });
-                                    }
+                                // made it lands (`on_network_change`).
+                                if listener_event {
+                                    let change = network.observe_listeners(active.values().flatten());
+                                    on_network_change(
+                                        change,
+                                        &mut network,
+                                        now_ms(started),
+                                        &mut swarm,
+                                        &mut manager,
+                                        autonat_state.as_mut(),
+                                        relay_state.as_mut(),
+                                        &active,
+                                        &open,
+                                        &mut outbox,
+                                        config.event_capacity,
+                                    );
+                                }
+                                if let Some(address) = just_bound.filter(|a| network.holds(a)) {
+                                    dcutr_driver::offer_listeners(
+                                        swarm.dcutr_mut(),
+                                        std::iter::once(&address),
+                                    );
                                 }
                                 translated
                             }
@@ -3040,6 +3177,7 @@ impl SwarmRuntime {
 
         Ok(Self {
             commands: command_tx,
+            network_view: network_view_tx,
             events: event_rx,
             unread_capacity,
             task: Some(task),
@@ -3835,6 +3973,7 @@ mod backpressure_tests {
             &mut field,
             || panic!("built with no rebuild due"),
             &[],
+            &[],
             &cell,
             std::time::Instant::now(),
             0,
@@ -3866,6 +4005,7 @@ mod backpressure_tests {
             &mut field,
             || Ok(fresh),
             &[],
+            &[],
             &cell,
             std::time::Instant::now(),
             0,
@@ -3895,6 +4035,7 @@ mod backpressure_tests {
             &mut field,
             || panic!("rebuilt twice"),
             &[],
+            &[],
             &cell,
             std::time::Instant::now(),
             0,
@@ -3921,6 +4062,7 @@ mod backpressure_tests {
                 &mut state,
                 &mut field,
                 || Err(std::io::Error::other("no netlink")),
+                &[],
                 &[],
                 &cell,
                 std::time::Instant::now(),

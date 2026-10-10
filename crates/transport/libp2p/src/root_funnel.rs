@@ -65,6 +65,7 @@ use libp2p::{Multiaddr, PeerId};
 
 use interweave_transport_runtime::reachability::literal_host;
 
+use crate::held_listeners::HeldListeners;
 use crate::operator_set::OperatorSet;
 
 /// What the funnel has done, by class.
@@ -176,6 +177,9 @@ pub struct RootFunnel<B> {
     /// listeners admit private candidates (#111 review P2-1).
     /// `a_relay_reservation_listener_is_not_this_nodes_listener` pins it.
     own_listeners: BTreeSet<Multiaddr>,
+    /// Which of them are on an IP the host still holds (ADR-0052 rule 3,
+    /// A 2026-10-09): the runtime's detector publishes the departed ones.
+    held: HeldListeners,
     counters: RootFunnelCounterHandle,
     /// What came in by the operator's door, admitted whatever its class
     /// (rule 9): the runtime's one set, shared.
@@ -193,10 +197,15 @@ impl<B> RootFunnel<B> {
     /// review P2-4). A clone of the runtime's set, not a copy of its
     /// contents: an address the operator adds after the Swarm is built
     /// is admitted here from that moment.
-    pub fn new(inner: B, operator: OperatorSet) -> Self {
+    ///
+    /// `held` is the runtime's record of which bound listeners are on an
+    /// IP the host still holds, a constructor argument for the same
+    /// reason as `operator`.
+    pub fn new(inner: B, operator: OperatorSet, held: HeldListeners) -> Self {
         Self {
             inner,
             own_listeners: BTreeSet::new(),
+            held,
             counters: RootFunnelCounterHandle::default(),
             operator,
         }
@@ -226,7 +235,15 @@ impl<B> RootFunnel<B> {
     /// operator's circuit to P passes, a circuit to anyone else meets the
     /// floor (#246 re-review N1).
     fn prune(&self, extended: Vec<Multiaddr>, peer: Option<PeerId>) -> (Vec<Multiaddr>, bool) {
-        let listeners: Vec<String> = self.own_listeners.iter().map(ToString::to_string).collect();
+        // RULE 3 COUNTS ONLY WHAT THE HOST HOLDS: a listener still bound
+        // on an IP the platform's view said departed is no listener of
+        // its family here.
+        let listeners: Vec<String> = self
+            .own_listeners
+            .iter()
+            .filter(|a| self.held.holds(a))
+            .map(ToString::to_string)
+            .collect();
         let mut counts = self.counters.lock();
         let mut removed_any = false;
         let kept = extended
@@ -429,6 +446,7 @@ mod tests {
                 offered: addrs(offered),
             },
             OperatorSet::new(),
+            HeldListeners::new(),
         )
     }
 
@@ -479,6 +497,31 @@ mod tests {
             addrs(&["/ip4/10.0.0.9/tcp/4001"]),
             "the control: beside a real private listener it passes"
         );
+    }
+
+    /// ADR-0052 rule 3, A 2026-10-09: a private listener still bound on
+    /// an IP the host no longer holds is not a listener of its family
+    /// here, so a private candidate is refused beside it -- and admitted
+    /// again once the IP is held (the control, both sides of one funnel).
+    #[test]
+    fn a_listener_on_a_departed_ip_admits_no_private_candidate() {
+        let held = HeldListeners::new();
+        let mut f = RootFunnel::new(
+            Offering {
+                offered: addrs(&["/ip4/10.0.0.9/tcp/4001"]),
+            },
+            OperatorSet::new(),
+            held.clone(),
+        );
+        listen(&mut f, "/ip4/10.0.0.2/tcp/4001");
+        assert!(dial(&mut f, &[]).is_ok(), "the control: held, admitted");
+        held.set_unheld(BTreeSet::from(["10.0.0.2".parse().expect("an ip")]));
+        assert!(
+            dial(&mut f, &[]).is_err(),
+            "the listener's IP departed: the private candidate is refused"
+        );
+        held.set_unheld(BTreeSet::new());
+        assert!(dial(&mut f, &[]).is_ok(), "held again");
     }
 
     /// #111 review P2-5: each narrowing condition of the denial, alone.

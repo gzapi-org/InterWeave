@@ -32,6 +32,7 @@ use interweave_profile_config::{
     runtime::Deployment,
 };
 use interweave_profile_identity::ProfileIdentity;
+pub use interweave_transport_composition::NetworkView;
 use interweave_transport_composition::{
     AUDIT_TARGET, ComposedRuntime, CompositionError, CompositionOptions, InProcessBinding,
     ShutdownRequest,
@@ -275,6 +276,30 @@ impl EmbeddedHost {
             .as_ref()
             .map(|composed| composed.listening().to_vec())
             .unwrap_or_default()
+    }
+
+    /// What the platform's network callbacks hand in
+    /// (`human-client-android.md` "network callbacks", §20 step 5): a
+    /// SNAPSHOT of every usable address the platform reports, never a
+    /// delta, and an empty view when it reports none -- offline. Pass a
+    /// view when the addresses change; a new network whose addresses
+    /// equal the old ones is no change, and the connections that
+    /// survived it prove themselves by their own keepalives. Until the
+    /// first view the runtime knows the host's addresses from its
+    /// wildcard listeners alone, which on Android poll every 10 s and may
+    /// see nothing at all; with a view, a hand-over is seen at once.
+    ///
+    /// Callable from any thread, and does not wait: it is
+    /// `ComposedRuntime::network_changed`, a snapshot slot where the
+    /// latest view replaces one the runtime has not yet read
+    /// (`the_latest_view_replaces_one_not_yet_read` pins the slot). After
+    /// [`stop`](Self::stop) there is no
+    /// host to call it on; while the runtime is stopping, a view goes
+    /// nowhere.
+    pub fn network_changed(&self, view: NetworkView) {
+        if let Some(composed) = self.composed.as_ref() {
+            composed.network_changed(view);
+        }
     }
 
     /// The profile's `observability.log_level`, for [`log_admits`].
