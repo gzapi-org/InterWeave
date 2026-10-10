@@ -38,4 +38,8 @@ target="$fabric/bin/fabric-pr"
     echo "arm: agent-fabric not found at $fabric (expected beside this working copy, as projects/agent-fabric); set AGENT_FABRIC_ROOT or check it out. See CLAUDE.md §9, agent-fabric beside the checkout." >&2
     exit 2
 }
+# InterWeave's arm.json by name, not by the fabric recognising this clone's
+# remote: a clone under another remote (a fork, a mirror, an org move)
+# resolves to no project, and arm would refuse for want of its rules.
+export AGENT_FABRIC_ARM_CONFIG="${AGENT_FABRIC_ARM_CONFIG:-$fabric/projects/interweave/integration/gh/arm.json}"
 exec bash "$target" arm "$@"

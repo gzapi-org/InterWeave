@@ -42,6 +42,7 @@ cat > "$STUB" <<'STUB'
 [[ "${1:-}" == arm ]] || { echo "stub fabric-pr: verb '${1:-}', not arm" >&2; exit 99; }; shift
 printf '%s\n' "$#" > "$RECORD.argc"
 printf '%s\0' "$@" > "$RECORD.argv"
+printf '%s\n' "${AGENT_FABRIC_ARM_CONFIG:-}" > "$RECORD.config"
 cat > "$RECORD.stdin"
 echo "stub ran"
 exit 7
@@ -58,6 +59,7 @@ out="$(printf '%s' "$body" | RECORD="$RECORD" AGENT_FABRIC_ROOT="$FABRIC" bash "
 [[ "$(cat "$RECORD.argc")" == 3 ]] && pass "three arguments handed over" || fail "argc" "$(cat "$RECORD.argc")"
 mapfile -d '' argv < "$RECORD.argv"
 [[ "${argv[0]}" == "PRRT_x" && "${argv[1]}" == "--flag" && "${argv[2]}" == "two words" ]] && pass "arguments intact, a space-containing one still one argument" || fail "argv" "$(printf '[%s]' "${argv[@]}")"
+[[ "$(cat "$RECORD.config")" == "$FABRIC/projects/interweave/integration/gh/arm.json" ]] && pass "InterWeave's arm.json is named, whatever remote this clone has" || fail "arm config" "$(cat "$RECORD.config")"
 [[ "$(cat "$RECORD.stdin")" == "$body" ]] && pass "stdin byte-for-byte: backticks, \$vars, quotes and the newline survive" || fail "stdin" "$(cat "$RECORD.stdin")"
 
 echo "resolution: AGENT_FABRIC_ROOT wins; otherwise the sibling of this working copy"
