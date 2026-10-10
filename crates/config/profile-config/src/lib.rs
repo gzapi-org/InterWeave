@@ -41,6 +41,7 @@ pub mod load;
 pub mod lock;
 pub mod paths;
 pub mod persist;
+pub mod provision;
 pub mod runtime;
 pub mod sections;
 pub mod transport;
