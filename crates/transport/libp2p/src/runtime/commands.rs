@@ -1706,7 +1706,11 @@ pub(super) fn dispatch_held(
 /// 13, .. }))) })`). So a refused TCP listen also asks the OS the same
 /// question -- a plain bind of `address`'s socket address, released at
 /// once -- and a `PermissionDenied` there is the platform's answer too.
-/// `address` is `None` where no socket call failed, so nothing is asked.
+/// `address` is `None` where there is nothing to ask about: libp2p
+/// refused the address before any socket (`MultiaddrNotSupported`), or
+/// the error came from a listener already created (`ListenerError`),
+/// whose address the caller does not hold -- there only the error's own
+/// chain decides.
 /// Pinned by `a_listener_the_platform_refuses_is_denied`
 /// (`tests/listen_refusal.rs`, real sockets) and the unit tests beside
 /// this.
