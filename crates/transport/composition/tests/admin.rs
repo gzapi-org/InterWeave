@@ -856,3 +856,43 @@ async fn the_owner_hears_a_runtime_that_ended_on_its_own() {
     );
     asked.stop().await.expect("stops");
 }
+
+/// When a request AND the runtime's end both hold, the owner hears the
+/// request -- the grace it asked for -- not the end. Both are made to
+/// hold before any wait, and the wait is asked many times: without the
+/// select's bias the pick between two ready arms is random, so one ask
+/// alone could pass by luck.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_wins_over_the_runtime_ending() {
+    let (identity, _) = id();
+    let both = ComposedRuntime::start(&identity, &profile(&[], &[]), CompositionOptions::default())
+        .await
+        .expect("composes");
+    let port = both
+        .sessions()
+        .admin([AdminCapability::Shutdown].into())
+        .await
+        .expect("a port");
+    both.end_driver().await.expect("the driver ends");
+    // The end has landed: alone, it is what the owner hears.
+    assert_eq!(
+        tokio::time::timeout(PATIENCE, both.wait_end())
+            .await
+            .expect("the owner hears it"),
+        Ended::RuntimeEnded
+    );
+    // A request still lands after the end: it is the owner's to read.
+    port.shutdown(Duration::from_secs(2)).await.expect("asked");
+    for _ in 0..32 {
+        assert!(
+            matches!(
+                tokio::time::timeout(PATIENCE, both.wait_end())
+                    .await
+                    .expect("the owner hears it"),
+                Ended::ShutdownRequested(request) if request.grace == Duration::from_secs(2)
+            ),
+            "the request wins when both hold"
+        );
+    }
+    let _ = both.stop().await;
+}
