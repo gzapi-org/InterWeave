@@ -143,7 +143,7 @@ pub fn read_within(
     };
     let OnDisk {
         availability_mode: OnlyStayReachable::StayReachable,
-    } = serde_json::from_str(&text).map_err(|e| AvailabilityError::Parse(e.to_string()))?;
+    } = private_read::object_only(&text).map_err(AvailabilityError::Parse)?;
     Ok(Some(StayReachable))
 }
 

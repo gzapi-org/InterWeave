@@ -70,6 +70,21 @@ pub(crate) fn read_private_within(
     Ok(Some(text))
 }
 
+/// `text` parsed as `T` from a JSON OBJECT and nothing else. serde's
+/// derived struct visitor also accepts a sequence -- the fields in
+/// order -- so `from_str` alone would read `[[],[]]` as a trust overlay
+/// and `["stay-reachable"]` as the availability choice: a second shape
+/// neither file is written in. Pinned by the array cases of
+/// `a_present_overlay_that_cannot_be_trusted_stops_the_load` and
+/// `a_file_naming_anything_but_the_choice_is_refused`.
+pub(crate) fn object_only<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, String> {
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    if !value.is_object() {
+        return Err("not a JSON object".to_owned());
+    }
+    serde_json::from_value(value).map_err(|e| e.to_string())
+}
+
 /// The uid a private file must be owned by, or -- this process's uid
 /// unreadable -- a refusal on READ: the owner cannot be checked, so the
 /// file cannot be trusted; never a write failure (#215 review P3).

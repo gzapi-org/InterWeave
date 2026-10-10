@@ -212,8 +212,7 @@ impl TrustOverlay {
         else {
             return Ok(None);
         };
-        let overlay: Self =
-            serde_json::from_str(&text).map_err(|e| OverlayError::Parse(e.to_string()))?;
+        let overlay: Self = private_read::object_only(&text).map_err(OverlayError::Parse)?;
         if overlay.added.len() > PeerTrustPolicy::MAX_ALLOWED_PEERS
             || overlay.revoked.len() > PeerTrustPolicy::MAX_ALLOWED_PEERS
         {

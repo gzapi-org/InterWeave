@@ -136,6 +136,8 @@ fn a_file_naming_anything_but_the_choice_is_refused() {
         br#"{"availability_mode":"stay-reachable","pinned":true}"#,
         br"{}",
         br"not json",
+        // A derived struct also deserialises from a sequence.
+        br#"["stay-reachable"]"#,
     ] {
         plant(&paths, text, 0o600);
         let read = read_within(&path, paths.boundary());

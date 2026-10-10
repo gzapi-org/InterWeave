@@ -261,6 +261,9 @@ fn a_present_overlay_that_cannot_be_trusted_stops_the_load() {
         ),
         ("a missing list", r#"{"added":[]}"#),
         ("not a peer id", r#"{"added":["nobody"],"revoked":[]}"#),
+        // serde's derived struct visitor also takes a sequence, so the
+        // two lists in order would otherwise read as the overlay.
+        ("an array, not the object", r"[[],[]]"),
     ] {
         let (_dir, path) = state();
         put(&path, text);
