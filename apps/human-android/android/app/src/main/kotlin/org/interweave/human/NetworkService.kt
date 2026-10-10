@@ -10,7 +10,9 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Binder
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -30,6 +32,7 @@ import java.util.concurrent.Executors
  */
 class NetworkService : Service() {
     private val binder = Binder()
+    private val main = Handler(Looper.getMainLooper())
     @Volatile private var alive = false
     @Volatile private var mode = -1
 
@@ -44,6 +47,12 @@ class NetworkService : Service() {
             if (answer == Native.STAY_REACHABLE) {
                 // Started, so that it outlives the Activity's binding.
                 startForegroundService(Intent(this, NetworkService::class.java))
+            } else {
+                // Not Stay reachable, or nothing runs: no foreground service
+                // and no "Stay reachable is on" -- a sticky restart posts it
+                // before the answer is known (review F1). A bound Activity
+                // keeps the Service; nothing else does.
+                main.post { leaveForeground() }
             }
             if (answer >= 0) {
                 Thread({ awaitEnd() }, "interweave-end").start()
@@ -72,6 +81,12 @@ class NetworkService : Service() {
         // waits for the grace, and a start after it finds the lock free.
         lifecycle.execute { Log.i(TAG, "stop answered ${Native.stop()}") }
         super.onDestroy()
+    }
+
+    /** Withdraw the Stay-reachable notification and the started state. */
+    private fun leaveForeground() {
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
     /** The runtime was asked to stop (its admin port, or a stop): end. */
