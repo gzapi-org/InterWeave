@@ -7,7 +7,24 @@
 #![allow(clippy::expect_used, clippy::panic)]
 #![cfg(target_os = "linux")]
 
+use std::collections::BTreeSet;
+
 use interweave_android_e2e_tests::{Device as _, HostStandIn};
+use interweave_local_client_api::{AdminBinding as _, AdminCapability, AdminPort as _};
+use interweave_transport_api::TransportIdentity;
+
+/// The `PeerId` the running runtime serves as, read over its admin port --
+/// not the stand-in's record of what it launched.
+fn serving(device: &HostStandIn) -> TransportIdentity {
+    device.host().runtime().block_on(async {
+        let port = device
+            .binding()
+            .admin(BTreeSet::from([AdminCapability::Status]))
+            .await
+            .expect("an admin port");
+        port.status().await.expect("status").peer
+    })
+}
 
 /// The shipped `human-android.yaml`, with every placeholder a peer that
 /// does not exist; it listens on the wildcard, as the device does.
@@ -35,6 +52,11 @@ fn a_killed_stand_in_restarts_as_the_same_peer() {
     device.start(&shipped());
     let peer = device.peer();
     assert_eq!(
+        serving(&device),
+        peer,
+        "the control: the first start serves it"
+    );
+    assert_eq!(
         device.host().paths().boundary().runtime_root(),
         Some(device.app_data_dir().join("interweave").as_path()),
         "the runtime root sits in the app data directory"
@@ -44,7 +66,11 @@ fn a_killed_stand_in_restarts_as_the_same_peer() {
 
     device.kill();
     device.restart();
-    assert_eq!(device.peer(), peer, "the same profile identity");
+    assert_eq!(
+        serving(&device),
+        peer,
+        "the runtime serves the same identity"
+    );
     let after = device.listening();
     assert_eq!(after.len(), 1, "{after:?}");
     assert!(!after[0].ends_with("/tcp/0"), "a bound port: {after:?}");

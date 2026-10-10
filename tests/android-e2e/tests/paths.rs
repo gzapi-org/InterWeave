@@ -25,8 +25,12 @@
 //! build, its process lifecycle, its network callbacks, SELinux-confined
 //! app data (the stand-in's limits, `src/lib.rs`); a daemon acting as the
 //! relay (the relay is a bare Swarm carrying the production relay-server
-//! field, `interweave_test_support::e2e::relay`); any NAT; more than one
-//! host. The `HumanChatV2` cases ride this seam in `human_chat.rs`.
+//! field, `interweave_test_support::e2e::relay`); anything off loopback --
+//! the relay and D listen on 127.0.0.1; any NAT; more than one
+//! host; a host whose interfaces carry a public address, where D could
+//! learn a direct address for R -- the case assumes this host's interface
+//! addresses are private. The `HumanChatV2` cases are to ride this seam in
+//! their own file.
 
 #![cfg(target_os = "linux")]
 #![allow(clippy::expect_used, clippy::panic)]
@@ -34,7 +38,7 @@
 use std::time::Duration;
 
 use interweave_android_e2e_tests::{
-    Desktop, Device as _, HostStandIn, PATIENCE, Relay, free_port, human, lease_request,
+    Desktop, Device, HostStandIn, PATIENCE, Relay, free_port, human, lease_request,
     relayed_example_of,
 };
 use interweave_local_client_api::{
@@ -193,7 +197,12 @@ impl Told {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_android_side_crosses_a_relayed_and_a_direct_path_to_a_desktop_both_ways() {
-    let (mut d, mut r, mut c) = (Desktop::new(), HostStandIn::new(), HostStandIn::new());
+    relayed_and_direct(HostStandIn::new(), HostStandIn::new()).await;
+}
+
+/// The case over any [`Device`]: R and C unstarted, their `PeerId`s known.
+async fn relayed_and_direct<A: Device>(mut r: A, mut c: A) {
+    let mut d = Desktop::new();
     let (d_peer, r_peer, c_peer) = (d.peer.clone(), r.peer(), c.peer());
     let relay = Relay::start(&[&d_peer, &r_peer, &c_peer]).await;
     let d_listen = loopback();

@@ -40,16 +40,25 @@ pub use interweave_test_support::e2e::{
 const GRACE: Duration = Duration::from_secs(1);
 
 /// The Android side of a case, as the orchestration drives it. The host
-/// stand-in implements it now; the adb-driven device implements the same
-/// trait, so a case written against it runs unchanged on either.
+/// stand-in implements it now; the adb-driven device is to implement the
+/// same trait, so a case generic over it (`paths.rs`) needs no change to
+/// run on either.
 pub trait Device {
     /// The data and admin binding the app's clients open their sessions
     /// on: what `interweave-human-transport-client`'s `TransportClient`
     /// is built on, as on the desktop.
     type Binding: DataSessionBinding + AdminBinding + Clone + Send + Sync + 'static;
 
-    /// The profile's `PeerId`; it survives [`restart`](Self::restart).
+    /// The profile's `PeerId`, known before the first start; it survives
+    /// [`restart`](Self::restart).
     fn peer(&self) -> TransportIdentity;
+
+    /// Provision `config` as the app does before its first start, and
+    /// start the runtime on it.
+    fn start(&mut self, config: &str);
+
+    /// Stop the runtime with its grace, as the platform's stop does.
+    fn stop(&mut self);
 
     /// Where the runtime listens, for a peer that must be told.
     fn listening(&self) -> Vec<String>;
@@ -122,16 +131,6 @@ impl HostStandIn {
         }
     }
 
-    /// Provision `config` (an `embedded-android` profile) as the app does
-    /// before its first start, and start the runtime on it.
-    ///
-    /// # Panics
-    /// If provisioning or the start fails: the case cannot run.
-    pub fn start(&mut self, config: &str) {
-        provision(&self.app_data_dir, config);
-        self.restart();
-    }
-
     /// The app data directory: the trust boundary the platform supplies.
     #[must_use]
     pub fn app_data_dir(&self) -> &Path {
@@ -146,16 +145,6 @@ impl HostStandIn {
     pub fn host(&self) -> &EmbeddedHost {
         self.host.as_ref().expect("the runtime is up")
     }
-
-    /// Stop the runtime with its grace, as the platform's stop does.
-    ///
-    /// # Panics
-    /// If the runtime's driver failed.
-    pub fn stop(&mut self) {
-        if let Some(host) = self.host.take() {
-            off_runtime(|| host.stop(GRACE)).expect("stops");
-        }
-    }
 }
 
 impl Device for HostStandIn {
@@ -163,6 +152,17 @@ impl Device for HostStandIn {
 
     fn peer(&self) -> TransportIdentity {
         self.peer.clone()
+    }
+
+    fn start(&mut self, config: &str) {
+        provision(&self.app_data_dir, config);
+        self.restart();
+    }
+
+    fn stop(&mut self) {
+        if let Some(host) = self.host.take() {
+            off_runtime(|| host.stop(GRACE)).expect("stops");
+        }
     }
 
     fn listening(&self) -> Vec<String> {

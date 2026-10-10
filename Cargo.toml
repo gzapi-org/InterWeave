@@ -626,6 +626,7 @@ planned_test_packages = [
   "tests/human-retention",
   "tests/security",
   "tests/desktop-e2e",
+  "tests/android-e2e",
   "tests/interoperability",
 ]
 

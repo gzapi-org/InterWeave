@@ -372,7 +372,19 @@ pub fn relayed_example_of(
     relay: &relay::Relay,
     route: Option<&str>,
 ) -> String {
-    let mut raw = example_text(name).replace("/ip4/0.0.0.0/tcp/0\"", &format!("{listen}\""));
+    let mut raw = example_text(name);
+    // The Android example's ephemeral listener, which `concrete` does not
+    // know; asserted, so a changed example fails here rather than
+    // listening somewhere `listen` did not say.
+    let ephemeral = "\"/ip4/0.0.0.0/tcp/0\"";
+    if name == "human-android.yaml" {
+        assert_eq!(
+            raw.matches(ephemeral).count(),
+            1,
+            "the example still listens on {ephemeral}"
+        );
+        raw = raw.replace(ephemeral, &format!("\"{listen}\""));
+    }
     let allowed = allow
         .iter()
         .map(|p| format!("\"{}\"", p.as_str()))
