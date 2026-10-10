@@ -608,6 +608,9 @@ impl View {
 
     /// Select a conversation, as a click on its row does.
     pub fn select(&self, key: ConversationKey) {
+        // In a narrow window the conversation is the pane shown, as when
+        // the person picks it from the list.
+        self.window.set_list_shown(false);
         let _ = self.shared.borrow_mut().push(Input::Select(key));
     }
 

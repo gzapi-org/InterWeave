@@ -594,6 +594,61 @@ fn the_not_running_notice_names_the_runtime_the_view_runs_on() {
     }
 }
 
+/// A window as narrow as a phone shows one pane at a time (plan section
+/// 20): the list, then the conversation a person opens, with a control
+/// back to the list; at the desktop's width, the control, both panes
+/// show together and there is no way back to press.
+#[test]
+fn a_narrow_window_shows_one_pane_at_a_time_with_a_way_back() {
+    let alice = peer();
+    // The conversation's row, by the title the list gives it.
+    let title = interweave_human_ui_model::fill(
+        text(UiText::DirectTitle),
+        &[
+            (
+                "peer",
+                &interweave_human_ui_model::short_peer(alice.as_str()),
+            ),
+            ("route", human().as_str()),
+        ],
+    );
+    // Whether the conversation's row is in the tree: a folded pane is
+    // not, for a screen reader as for the eye.
+    let row_shown = |view: &View| {
+        labelled(view, &title)
+            .iter()
+            .any(|e| e.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::ListItem))
+    };
+    let back = text(UiText::BackToConversations);
+
+    let mut wide = view();
+    let mut model = UiModel::new();
+    model.received(received(1, &alice, "hello"));
+    open(&mut wide, &mut model, &direct(&alice));
+    assert!(row_shown(&wide), "the desktop keeps the list beside it");
+    assert!(labelled(&wide, back).is_empty(), "and needs no way back");
+
+    let mut narrow = View::new(RuntimeHost::Daemon).expect("a window");
+    narrow.window().show().expect("shown");
+    narrow
+        .window()
+        .window()
+        .set_size(slint::LogicalSize::new(390.0, 800.0));
+    let mut model = UiModel::new();
+    model.received(received(1, &alice, "hello"));
+    narrow.render(&model);
+    assert!(row_shown(&narrow), "the list is shown first");
+    open(&mut narrow, &mut model, &direct(&alice));
+    assert!(
+        !row_shown(&narrow),
+        "the conversation takes the window, the list folded away"
+    );
+    let way_back = the(&narrow, back);
+    assert!(way_back.size().width > 0.0, "with a way back shown");
+    way_back.invoke_accessible_default_action();
+    assert!(row_shown(&narrow), "the way back shows the list again");
+}
+
 /// U5b: every action element exposes a default action, invoked through
 /// the tree, and it gives the expected intent.
 #[test]
