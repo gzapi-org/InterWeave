@@ -145,6 +145,18 @@ allow = [
     "BSD-2-Clause",
     "ISC",
     "Zlib",
+    # MIT-0 -- added 2026-10-10 for `borrow-or-share` 0.2.4, which entered
+    # through `fluent-uri` and `referencing` under `jsonschema` 0.49 once
+    # that became `interweave-test-support`'s optional dependency (its `e2e`
+    # feature, the shared end-to-end harness's schema validator, #252).
+    #
+    # MIT No Attribution: OSI-approved, MIT with the notice duty removed,
+    # so strictly more permissive than MIT, which this list admits; nothing
+    # about it constrains shipping an Apache-2.0 project. Decided by
+    # architect-cto with the network lane (01a12514), on the rule for this
+    # list: observed in the graph, a sentence, a commit. A term that is not
+    # plainly a subset of one already admitted goes to the owner first.
+    "MIT-0",
 ]
 # A dual-licensed crate is resolved by taking the allowed side. `r-efi` is
 # `Apache-2.0 OR LGPL-2.1-or-later` and resolves to Apache-2.0; this
