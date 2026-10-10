@@ -4,7 +4,7 @@
 # tools/gh/test_actions-health.sh
 #
 # Behavioural tests for actions-health.sh — the hand-off to agent-fabric's
-# runtime/github/actions-health.sh. What it decides about GitHub is the
+# tools/fabric/github/actions_health.py. What it decides about GitHub is the
 # fabric's and is tested there (tests/test_actions_health_cli.py); what
 # this file promises is:
 #
@@ -39,12 +39,15 @@ fail() { echo "  FAIL $1"; [[ -n "${2:-}" ]] && printf '%s\n' "$2" | sed 's/^/  
 
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
+printf '#!/bin/sh\nexec bash "$@"\n' > "$SANDBOX/fake-python"; chmod +x "$SANDBOX/fake-python"
+export AGENT_FABRIC_PYTHON="$SANDBOX/fake-python"
 
 # A fake agent-fabric whose actions-health.sh records argv and the two
 # variables it reads.
 FABRIC="$SANDBOX/agent-fabric"
 mkdir -p "$FABRIC/runtime/github"
-STUB="$FABRIC/runtime/github/actions-health.sh"
+STUB="$FABRIC/tools/fabric/github/actions_health.py"
+mkdir -p "$(dirname "$FABRIC/tools/fabric/github/actions_health.py")"
 cat > "$STUB" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$#" > "$RECORD.argc"
@@ -86,7 +89,8 @@ echo "resolution: AGENT_FABRIC_ROOT wins; otherwise the sibling of this working 
 SIB="$SANDBOX/projects"; mkdir -p "$SIB/interweave/tools/gh" "$SIB/agent-fabric/runtime/github"
 cp "$UNDER_TEST" "$SCRIPT_DIR/fabric-root.sh" "$SIB/interweave/tools/gh/"
 git -C "$SIB/interweave" init -q 2>/dev/null
-printf '#!/usr/bin/env bash\necho "sibling copy"\n' > "$SIB/agent-fabric/runtime/github/actions-health.sh"
+mkdir -p "$(dirname "$SIB/agent-fabric/tools/fabric/github/actions_health.py")"
+printf '#!/usr/bin/env bash\necho "sibling copy"\n' > "$SIB/agent-fabric/tools/fabric/github/actions_health.py"
 out="$(cd "$SIB/interweave" && env -u AGENT_FABRIC_ROOT bash tools/gh/actions-health.sh 2>&1)"
 [[ "$out" == "sibling copy" ]] && pass "with no AGENT_FABRIC_ROOT, ../agent-fabric beside the working copy is used" || fail "sibling default" "$out"
 out="$(cd "$SIB/interweave" && RECORD="$SANDBOX/r6" AGENT_FABRIC_ROOT="$FABRIC" bash tools/gh/actions-health.sh 2>&1 </dev/null)"
@@ -94,7 +98,8 @@ out="$(cd "$SIB/interweave" && RECORD="$SANDBOX/r6" AGENT_FABRIC_ROOT="$FABRIC" 
 
 echo "the fabric's pinned Python missing (its wrapper's 127) is exit 2"
 F127="$SANDBOX/fabric127"; mkdir -p "$F127/runtime/github"
-printf '#!/usr/bin/env bash\necho "fabric-python is not installed" >&2\nexit 127\n' > "$F127/runtime/github/actions-health.sh"
+mkdir -p "$(dirname "$F127/tools/fabric/github/actions_health.py")"
+printf '#!/usr/bin/env bash\necho "fabric-python is not installed" >&2\nexit 127\n' > "$F127/tools/fabric/github/actions_health.py"
 out="$(AGENT_FABRIC_ROOT="$F127" bash "$UNDER_TEST" 2>&1 </dev/null)"; rc=$?
 [[ $rc -eq 2 ]] && pass "exit 2, not 127" || fail "127 passed through" "rc=$rc"
 grep -q "not installed" <<<"$out" && pass "  and the wrapper's message is kept" || fail "  message lost" "$out"

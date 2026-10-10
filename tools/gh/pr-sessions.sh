@@ -5,7 +5,7 @@
 #
 # >>> help
 # pr-sessions lives in agent-fabric, the control plane checked out beside this
-# working copy: runtime/github/pr-sessions.sh. It lists which SESSION owns
+# working copy: bin/fabric-pr. It lists which SESSION owns
 # which PR, and what each still owes.
 #
 # InterWeave kept its own copy until 2026-09-25. It named this session
@@ -26,9 +26,9 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tools/gh/fabric-root.sh
 . "$here/fabric-root.sh"
 fabric="$(interweave_fabric_root "$here")"
-target="$fabric/runtime/github/pr-sessions.sh"
+target="$fabric/bin/fabric-pr"
 [[ -f "$target" ]] || {
     echo "pr-sessions: agent-fabric not found at $fabric (expected beside this working copy, as projects/agent-fabric); set AGENT_FABRIC_ROOT or check it out. See CLAUDE.md §9, agent-fabric beside the checkout." >&2
     exit 2
 }
-exec bash "$target" "$@"
+exec bash "$target" sessions "$@"

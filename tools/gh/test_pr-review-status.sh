@@ -6,7 +6,7 @@
 # Behavioural tests for pr-review-status.sh — the hand-off to agent-fabric's copy (runtime/github/).
 # The script itself decides nothing about PRs; what it promises is:
 #
-#   1. it runs agent-fabric's runtime/github/pr-review-status.sh
+#   1. it runs agent-fabric's bin/fabric-pr
 #      with the arguments untouched: the PR number and the owner/repo
 #      positional, and --wait / --interval durations, reach it verbatim.
 #      The test hands it an argument with a space in it only as a probe
@@ -41,9 +41,11 @@ trap 'rm -rf "$SANDBOX"' EXIT
 # A fake agent-fabric whose pr-review-status.sh records argv and stdin verbatim.
 FABRIC="$SANDBOX/agent-fabric"
 mkdir -p "$FABRIC/runtime/github"
-STUB="$FABRIC/runtime/github/pr-review-status.sh"
+STUB="$FABRIC/bin/fabric-pr"
+mkdir -p "$(dirname "$FABRIC/bin/fabric-pr")"
 cat > "$STUB" <<'STUB'
 #!/usr/bin/env bash
+[[ "${1:-}" == review-status ]] || { echo "stub fabric-pr: verb '${1:-}', not review-status" >&2; exit 99; }; shift
 printf '%s\n' "$#" > "$RECORD.argc"
 printf '%s\0' "$@" > "$RECORD.argv"
 cat > "$RECORD.stdin"
@@ -69,7 +71,8 @@ RECORD="$SANDBOX/rec2"
 SIB="$SANDBOX/projects"; mkdir -p "$SIB/interweave/tools/gh" "$SIB/agent-fabric/runtime/github"
 cp "$UNDER_TEST" "$SCRIPT_DIR/fabric-root.sh" "$SIB/interweave/tools/gh/"
 git -C "$SIB/interweave" init -q 2>/dev/null
-printf '#!/usr/bin/env bash\necho "sibling copy"\n' > "$SIB/agent-fabric/runtime/github/pr-review-status.sh"
+mkdir -p "$(dirname "$SIB/agent-fabric/bin/fabric-pr")"
+printf '#!/usr/bin/env bash\necho "sibling copy"\n' > "$SIB/agent-fabric/bin/fabric-pr"
 out="$(cd "$SIB/interweave" && env -u AGENT_FABRIC_ROOT bash tools/gh/pr-review-status.sh 2>&1)"
 [[ "$out" == "sibling copy" ]] && pass "with no AGENT_FABRIC_ROOT, ../agent-fabric beside the working copy is used" || fail "sibling default" "$out"
 out="$(cd "$SIB/interweave" && RECORD="$RECORD" AGENT_FABRIC_ROOT="$FABRIC" bash tools/gh/pr-review-status.sh 2>&1 </dev/null)"

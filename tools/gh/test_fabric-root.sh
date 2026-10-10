@@ -33,9 +33,12 @@ trap 'rm -rf "$SANDBOX"' EXIT
 # A clone with the real fabric-root.sh and actions-health.sh,
 # agent-fabric beside it, and a worktree of it somewhere else entirely.
 P="$SANDBOX/projects"; C="$P/interweave"
-mkdir -p "$C/tools/gh" "$P/agent-fabric/runtime/github"
+mkdir -p "$C/tools/gh" "$P/agent-fabric/tools/fabric/github"
 cp "$UNDER_TEST" "$SCRIPT_DIR/actions-health.sh" "$C/tools/gh/"
-printf '#!/usr/bin/env bash\necho "the sibling fabric"\n' > "$P/agent-fabric/runtime/github/actions-health.sh"
+printf '#!/usr/bin/env bash\necho "the sibling fabric"\n' > "$P/agent-fabric/tools/fabric/github/actions_health.py"
+# The module stub is a shell script; a fake interpreter runs it with bash.
+printf '#!/bin/sh\nexec bash "$@"\n' > "$SANDBOX/fake-python"; chmod +x "$SANDBOX/fake-python"
+export AGENT_FABRIC_PYTHON="$SANDBOX/fake-python"
 git -C "$C" init -q && git -C "$C" -c user.name=t -c user.email=t@t add -A && git -C "$C" -c user.name=t -c user.email=t@t commit -qm init
 mkdir -p "$C/.claude/worktrees"
 git -C "$C" worktree add -q --detach "$C/.claude/worktrees/agent-x" HEAD

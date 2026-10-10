@@ -5,7 +5,7 @@
 #
 # >>> help
 # pr-review-status lives in agent-fabric, the control plane checked out
-# beside this working copy: runtime/github/pr-review-status.sh. It answers
+# beside this working copy: bin/fabric-pr. It answers
 # whether THE HEAD of a PR has been reviewed — by the review class's blind
 # review (a review object whose first line is `<!-- agent-fabric-review v1 -->`,
 # posted by post-review.sh) or by an independent reviewer — and assumes no
@@ -31,9 +31,9 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tools/gh/fabric-root.sh
 . "$here/fabric-root.sh"
 fabric="$(interweave_fabric_root "$here")"
-target="$fabric/runtime/github/pr-review-status.sh"
+target="$fabric/bin/fabric-pr"
 [[ -f "$target" ]] || {
     echo "pr-review-status: agent-fabric not found at $fabric (expected beside this working copy, as projects/agent-fabric); set AGENT_FABRIC_ROOT or check it out. See CLAUDE.md §9, agent-fabric beside the checkout." >&2
     exit 2
 }
-exec bash "$target" "$@"
+exec bash "$target" review-status "$@"

@@ -25,6 +25,7 @@ bad()  { echo "  FAIL: $1" >&2; printf '%s\n' "${2:-}" | sed 's/^/        /' >&2
 
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
+# The stub fabric's module is a shell script; a fake interpreter runs it with bash.
 mkdir -p "$SANDBOX/repo/.github/workflows" "$SANDBOX/bin" "$SANDBOX/dist"
 printf 'on: push\n' > "$SANDBOX/repo/.github/workflows/ci.yml"
 
@@ -140,8 +141,12 @@ mv "$SANDBOX/shellcheck.away" "$SANDBOX/bin/shellcheck"
 # what the hand-over itself promises, against a recording stub.
 hcheck() { if eval "$2"; then pass "$1"; else bad "$1" "$hout"; fi; }
 hstub="$(mktemp -d)"
+# The module stub is a shell script; a fake interpreter runs it with bash.
+printf '#!/bin/sh\nexec bash "$@"\n' > "$hstub/fake-python"; chmod +x "$hstub/fake-python"
+export AGENT_FABRIC_PYTHON="$hstub/fake-python"
 mkdir -p "$hstub/fabric/runtime/github" "$hstub/fabric/projects/interweave/integration/gh"
-cat > "$hstub/fabric/runtime/github/check-workflows-lint.sh" <<'STUB'
+mkdir -p "$(dirname "$hstub/fabric/tools/fabric/github/workflows_lint.py")"
+cat > "$hstub/fabric/tools/fabric/github/workflows_lint.py" <<'STUB'
 #!/usr/bin/env bash
 printf 'config=%s cache=%s' "${NONE-<unset>}" "${AGENT_FABRIC_TOOL_CACHE-<unset>}"; printf ' [%s]' "$@"; echo
 exit 3

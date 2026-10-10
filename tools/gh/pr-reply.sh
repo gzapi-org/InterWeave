@@ -5,7 +5,7 @@
 #
 # >>> help
 # pr-reply lives in agent-fabric, the control plane checked out beside this
-# working copy: runtime/github/pr-reply.sh. It replies to ONE review thread
+# working copy: bin/fabric-pr. It replies to ONE review thread
 # and resolves it, body on stdin (never interpolated by a shell), and
 # refuses a PR another session opened.
 #
@@ -27,9 +27,9 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tools/gh/fabric-root.sh
 . "$here/fabric-root.sh"
 fabric="$(interweave_fabric_root "$here")"
-target="$fabric/runtime/github/pr-reply.sh"
+target="$fabric/bin/fabric-pr"
 [[ -f "$target" ]] || {
     echo "pr-reply: agent-fabric not found at $fabric (expected beside this working copy, as projects/agent-fabric); set AGENT_FABRIC_ROOT or check it out. See CLAUDE.md §9, agent-fabric beside the checkout." >&2
     exit 2
 }
-exec bash "$target" "$@"
+exec bash "$target" reply "$@"
