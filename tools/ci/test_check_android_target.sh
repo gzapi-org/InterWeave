@@ -117,8 +117,11 @@ rm -f "$S/log"; out="$(FAKE_PKGS="interweave-profile-config interweave-human-and
 [[ $rc -eq 0 ]] && grep -q -- '-p interweave-human-android-platform --features interweave-human-android-platform/dev-stand-ins$' "$S/log" \
     && grep -qx "ANDROID_JAR " "$S/log" \
     && ok "the platform crate alone needs no JDK, and gets no ANDROID_JAR" || bad "rc $rc" "$(cat "$S/log" 2>/dev/null; echo "$out")"
-rm -f "$S/log"; out="$(FAKE_PKGS="interweave-profile-config interweave-transport-embedded" run)"
-grep -q -- '--features' "$S/log" && bad "features passed with no featured package" "$(cat "$S/log")" || ok "no --features when no listed package is checked"
+rm -f "$S/log"; out="$(FAKE_PKGS="interweave-profile-config interweave-transport-embedded" run)"; rc=$?
+# The run must reach cargo, or an absent log would pass the grep below.
+if [[ $rc -ne 0 || ! -f "$S/log" ]]; then bad "no cargo check ran (rc $rc)" "$out"
+elif grep -q -- '--features' "$S/log"; then bad "features passed with no featured package" "$(cat "$S/log")"
+else ok "no --features when no listed package is checked"; fi
 out="$(FAKE_PKGS="$ALL" NDK="" SDK="$S/sdk" run)"; rc=$?
 [[ $rc -eq 2 && "$out" == *"interweave-human-android needs a JDK"* ]] && ok "human-android without JAVA_HOME: exit 2" || bad "rc $rc" "$out"
 out="$(FAKE_PKGS="$ALL" NDK="" SDK="$S/sdk" run JAVA_HOME="$S/nowhere")"; rc=$?
