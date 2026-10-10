@@ -31,7 +31,7 @@
 # to fix.
 #
 # The scan lives in agent-fabric, the control plane checked out beside
-# this working copy: runtime/github/scan-semantic-collisions.sh, the same for every
+# this working copy: tools/fabric/github/semantic_collisions.py, the same for every
 # project, run with InterWeave's rules there
 # (projects/interweave/integration/gh/collisions.json), which this file names. InterWeave's own copy lived here until then; its
 # suite, test_scan_semantic_collisions.sh, was the port's oracle. This file prints this
@@ -59,13 +59,14 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tools/gh/fabric-root.sh
 . "$here/../gh/fabric-root.sh"
 fabric="$(interweave_fabric_root "$here")"
-target="$fabric/runtime/github/scan-semantic-collisions.sh"
+target="$fabric/tools/fabric/github/semantic_collisions.py"
 rules="$fabric/projects/interweave/integration/gh/collisions.json"
 [[ -f "$target" && -f "$rules" ]] || {
-    echo "scan_semantic_collisions: agent-fabric not found at $fabric (expected beside this working copy, as projects/agent-fabric, carrying runtime/github/scan-semantic-collisions.sh and InterWeave's collisions.json); set AGENT_FABRIC_ROOT or update it. See CLAUDE.md §9, agent-fabric beside the checkout." >&2
+    echo "scan_semantic_collisions: agent-fabric not found at $fabric (expected beside this working copy, as projects/agent-fabric, carrying tools/fabric/github/semantic_collisions.py and InterWeave's collisions.json); set AGENT_FABRIC_ROOT or update it. See CLAUDE.md §9, agent-fabric beside the checkout." >&2
     exit 2
 }
 # The rules are named rather than found from the working copy's remote: a
 # test's sandbox has none the fabric knows. An explicit AGENT_FABRIC_COLLISIONS_CONFIG wins.
 export AGENT_FABRIC_COLLISIONS_CONFIG="${AGENT_FABRIC_COLLISIONS_CONFIG:-$rules}"
-exec bash "$target" --root "$(cd -- "$here/../.." && pwd)" "$@"
+py="$(interweave_fabric_python scan_semantic_collisions)" || exit 127
+exec "$py" "$target" --root "$(cd -- "$here/../.." && pwd)" "$@"

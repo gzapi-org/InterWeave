@@ -158,13 +158,17 @@ assert_rc       "no argument exits 2"            2
 RUN_OUT="$(bash "$UNDER_TEST" "$SANDBOX/nope.sh" 2>&1)"; RUN_RC=$?
 assert_rc       "unreadable suite exits 2"       2
 
-# The hand-over to agent-fabric's run-suite.sh: every case above ran the
+# The hand-over to agent-fabric's tools/fabric/github module for run-suite: every case above ran the
 # real one (CI points AGENT_FABRIC_ROOT at its pinned checkout); these pin
 # what the hand-over itself promises, against a recording stub.
 hcheck() { if eval "$2"; then pass "$1"; else fail "$1" "$hout"; fi; }
 hstub="$(mktemp -d)"
-mkdir -p "$hstub/fabric/runtime/github" "$hstub/fabric/projects/interweave/integration/gh"
-cat > "$hstub/fabric/runtime/github/run-suite.sh" <<'STUB'
+# The module stub is a shell script; a fake interpreter runs it with bash.
+printf '#!/bin/sh\nexec bash "$@"\n' > "$hstub/fake-python"; chmod +x "$hstub/fake-python"
+export AGENT_FABRIC_PYTHON="$hstub/fake-python"
+mkdir -p "$hstub/fabric/projects/interweave/integration/gh"
+mkdir -p "$(dirname "$hstub/fabric/tools/fabric/github/run_suite.py")"
+cat > "$hstub/fabric/tools/fabric/github/run_suite.py" <<'STUB'
 #!/usr/bin/env bash
 printf 'config=%s cache=%s' "${NONE-<unset>}" "${AGENT_FABRIC_TOOL_CACHE-<unset>}"; printf ' [%s]' "$@"; echo
 exit 3

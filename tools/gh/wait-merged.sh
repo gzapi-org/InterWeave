@@ -17,8 +17,7 @@
 #
 # wait-merged lives in agent-fabric, the control plane checked out beside
 # this working copy: `bin/fabric-pr wait-merged`, the same for every
-# project (its runtime/github/wait-merged.sh shim is deprecated and says so
-# on every call). InterWeave's own copy lived here until then. This file only
+# project. InterWeave's own copy lived here until then. This file only
 # locates it and hands it the arguments untouched, naming InterWeave's
 # arm.json (the arm command its lines suggest) and passing
 # INTERWEAVE_ACTIONS_INCLUDED_MINUTES on as the fabric's

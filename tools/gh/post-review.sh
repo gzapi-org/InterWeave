@@ -5,7 +5,7 @@
 #
 # >>> help
 # post-review lives in agent-fabric, the control plane checked out beside
-# this working copy: runtime/github/post-review.sh. It posts THE review
+# this working copy: bin/fabric-pr. It posts THE review
 # of a PR — the review class's blind review — as a review object at the
 # head whose first line is `<!-- agent-fabric-review v1 -->`, which
 # pr-review-status.sh counts. New here on 2026-09-25, with the retirement
@@ -24,9 +24,9 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tools/gh/fabric-root.sh
 . "$here/fabric-root.sh"
 fabric="$(interweave_fabric_root "$here")"
-target="$fabric/runtime/github/post-review.sh"
+target="$fabric/bin/fabric-pr"
 [[ -f "$target" ]] || {
     echo "post-review: agent-fabric not found at $fabric (expected beside this working copy, as projects/agent-fabric); set AGENT_FABRIC_ROOT or check it out. See CLAUDE.md §9, agent-fabric beside the checkout." >&2
     exit 2
 }
-exec bash "$target" "$@"
+exec bash "$target" post-review "$@"

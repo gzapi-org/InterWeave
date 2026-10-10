@@ -5,7 +5,7 @@
 #
 # >>> help
 # arm lives in agent-fabric, the control plane checked out beside
-# this working copy: runtime/github/arm.sh. It arms auto-merge on a PR
+# this working copy: bin/fabric-pr. It arms auto-merge on a PR
 # with the gates CLAUDE.md §9 puts before the arming applied by the
 # tool, not by memory: open and not a draft, this session's branch, no
 # AWAITING-SUPPLY without its range line, a security-boundary change
@@ -33,9 +33,13 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tools/gh/fabric-root.sh
 . "$here/fabric-root.sh"
 fabric="$(interweave_fabric_root "$here")"
-target="$fabric/runtime/github/arm.sh"
+target="$fabric/bin/fabric-pr"
 [[ -f "$target" ]] || {
     echo "arm: agent-fabric not found at $fabric (expected beside this working copy, as projects/agent-fabric); set AGENT_FABRIC_ROOT or check it out. See CLAUDE.md §9, agent-fabric beside the checkout." >&2
     exit 2
 }
-exec bash "$target" "$@"
+# InterWeave's arm.json by name, not by the fabric recognising this clone's
+# remote: a clone under another remote (a fork, a mirror, an org move)
+# resolves to no project, and arm would refuse for want of its rules.
+export AGENT_FABRIC_ARM_CONFIG="${AGENT_FABRIC_ARM_CONFIG:-$fabric/projects/interweave/integration/gh/arm.json}"
+exec bash "$target" arm "$@"
