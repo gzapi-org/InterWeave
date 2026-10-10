@@ -420,10 +420,17 @@ fn parse(record: &[u8]) -> Result<Parsed, RecordRefused> {
         .ok()
         .and_then(|text| TransportIdentity::parse(text).ok())
         .ok_or(RecordRefused::PeerId)?;
-    let mut iv = [0u8; IV_LEN];
-    iv.copy_from_slice(&record[HEADER_LEN..HEADER_LEN + IV_LEN]);
-    let mut sealed = [0u8; SEALED_LEN];
-    sealed.copy_from_slice(&record[HEADER_LEN + IV_LEN..ENVELOPE_LEN]);
+    // Taken from the record's own bytes, never a buffer filled in after:
+    // the IV is the one the cipher chose at seal time, and a zeroed array
+    // standing in for it, even for a line, is what a reader -- or an
+    // analysis -- would take for a fixed IV. The length check above makes
+    // both conversions infallible; a failure is still refused, not unwrapped.
+    let iv: [u8; IV_LEN] = record[HEADER_LEN..HEADER_LEN + IV_LEN]
+        .try_into()
+        .map_err(|_| RecordRefused::Length)?;
+    let sealed: [u8; SEALED_LEN] = record[HEADER_LEN + IV_LEN..ENVELOPE_LEN]
+        .try_into()
+        .map_err(|_| RecordRefused::Length)?;
     Ok(Parsed {
         policy,
         iv,
