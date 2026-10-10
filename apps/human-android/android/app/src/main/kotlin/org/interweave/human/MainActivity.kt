@@ -19,14 +19,6 @@ import android.os.IBinder
  * runs on.
  */
 class MainActivity : NativeActivity() {
-    private val connection =
-        object : ServiceConnection {
-            override fun onServiceConnected(name: ComponentName?, service: IBinder?) = Unit
-
-            override fun onServiceDisconnected(name: ComponentName?) = Unit
-        }
-    private var bound = false
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // API 33+: a notification is posted only with the person's leave.
@@ -39,18 +31,35 @@ class MainActivity : NativeActivity() {
 
     override fun onStart() {
         super.onStart()
-        bound = bindService(
-            Intent(this, NetworkService::class.java),
-            connection,
-            Context.BIND_AUTO_CREATE,
-        )
+        if (!bound) {
+            bound = applicationContext.bindService(
+                Intent(applicationContext, NetworkService::class.java),
+                connection,
+                Context.BIND_AUTO_CREATE,
+            )
+        }
     }
 
     override fun onStop() {
-        if (bound) {
-            unbindService(connection)
+        // A recreation for a configuration change keeps the binding: the
+        // next instance finds it held, and foreground-only mode's runtime
+        // and lease survive it (review F2). Any other stop lets go.
+        if (bound && !isChangingConfigurations) {
+            applicationContext.unbindService(connection)
             bound = false
         }
         super.onStop()
+    }
+
+    companion object {
+        // The binding is the application's, not an Activity instance's,
+        // so it can outlive one instance and pass to the next.
+        private var bound = false
+        private val connection =
+            object : ServiceConnection {
+                override fun onServiceConnected(name: ComponentName?, service: IBinder?) = Unit
+
+                override fun onServiceDisconnected(name: ComponentName?) = Unit
+            }
     }
 }
