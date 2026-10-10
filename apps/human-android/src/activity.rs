@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use interweave_human_android_platform::{ServiceHost, ToView, ViewLink};
+use interweave_human_android_platform::{ServiceHost, ViewLink, ViewSide};
 use interweave_human_app_core::{ModelSide, Opener, Problem, Surface};
 use interweave_human_ui_model::{RuntimeHost, UiModel, ViewEvent};
 use interweave_human_ui_slint::{
@@ -44,7 +44,7 @@ impl Opener for AndroidOpener {
 
 struct Root {
     view: Rc<RefCell<View>>,
-    side: ModelSide<AndroidSurface, AndroidOpener>,
+    side: ViewSide<AndroidSurface, AndroidOpener>,
     link: ViewLink,
 }
 
@@ -53,8 +53,11 @@ impl Root {
         let link = ServiceHost::global().hub().attach(Arc::new(|| {
             invoke_on_window(turn);
         }));
+        let surface = Rc::clone(&view);
         Self {
-            side: ModelSide::new(AndroidSurface(Rc::clone(&view)), AndroidOpener),
+            side: ViewSide::new(move || {
+                ModelSide::new(AndroidSurface(Rc::clone(&surface)), AndroidOpener)
+            }),
             view,
             link,
         }
@@ -65,18 +68,10 @@ impl Root {
     fn pump(&mut self) {
         let hub = ServiceHost::global().hub();
         for message in self.link.take() {
-            match message {
-                ToView::Running(running) => {
-                    if running {
-                        // The listing that follows is a new runtime's:
-                        // nothing the last one showed carries over.
-                        self.side =
-                            ModelSide::new(AndroidSurface(Rc::clone(&self.view)), AndroidOpener);
-                    }
-                    self.side.daemon_seen(Some(running));
-                }
-                ToView::Update(update) => self.side.apply(*update),
-                ToView::ListingFailed => log("the message store could not be listed"),
+            // A change of the service's running state starts a fresh model
+            // either way (android-platform's ViewSide says why).
+            if self.side.apply(message).is_err() {
+                log("the message store could not be listed");
             }
         }
         if self.link.lost() {
@@ -86,12 +81,12 @@ impl Root {
             defer(turn);
             return;
         }
-        for command in self.side.turn() {
+        for command in self.side.side_mut().turn() {
             if !hub.command(command) {
                 log("a command found no running network service");
             }
         }
-        for problem in self.side.take_problems() {
+        for problem in self.side.side_mut().take_problems() {
             match problem {
                 Problem::Command { why, .. } => log(&format!("a command failed: {why:?}")),
                 Problem::UnreadNotListed(why) => {

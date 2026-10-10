@@ -3463,9 +3463,12 @@ version = "0.0.0"
 dependencies = [
  "interweave-human-android-platform",
  "interweave-human-app-core",
+ "interweave-human-chat-protocol",
  "interweave-human-client-api",
+ "interweave-human-core",
  "interweave-human-store",
  "interweave-human-transport-client",
+ "interweave-human-ui-model",
  "interweave-local-client-api",
  "interweave-profile-config",
  "interweave-profile-identity",
