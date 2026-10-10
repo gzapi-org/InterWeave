@@ -576,7 +576,10 @@ fn an_invalidated_or_missing_key_requires_recovery_and_mints_nothing() {
         ));
         assert_eq!(cipher.seals(), 1, "a refused provision sealed nothing");
 
-        cipher.fail_with(None);
+        // The key stays invalidated (or missing) through the restore, as on
+        // a device: restore's try-open answers the failure, and the seal
+        // proceeds -- recovery is never refused for the very failure it
+        // exists for.
         let expected = TransportIdentity::parse(frozen.clone()).expect("peer");
         let phrase = RecoveryPhrase::parse(&mnemonic).expect("phrase");
         let restored = custody::restore(
@@ -587,6 +590,8 @@ fn an_invalidated_or_missing_key_requires_recovery_and_mints_nothing() {
             KeyUnlockPolicy::UserPresence,
         )
         .expect("restored from its phrase");
+        assert_eq!(cipher.seals(), 2, "the restore sealed a new key");
+        cipher.fail_with(None);
         assert_eq!(peer_of(&restored), frozen);
         assert_eq!(
             peer_of(&custody::unlock(&app.paths, &cipher).expect("unlocks")),
@@ -961,10 +966,11 @@ fn racing_first_provisions_leave_one_record_that_opens() {
 /// A restore of a record whose key is gone re-seals under a NEW key at
 /// the same alias, so a copy of the record taken before it -- a stolen or
 /// backed-up `identity.iwk1` -- does not open under the key that replaced
-/// the lost one: recovery retires the old envelope, not only replaces the
-/// file. The restored record opens (the control). (A record that still
-/// opens is kept rather than re-sealed:
-/// `a_same_policy_restore_keeps_a_record_that_still_opens`.)
+/// the lost one: a restore that re-seals retires the old envelope, not
+/// only replaces the file. The restored record opens (the control). A
+/// record that still opens is kept rather than re-sealed, so its earlier
+/// copies -- the same seed, under the same key -- still open
+/// (`a_same_policy_restore_keeps_a_record_that_still_opens`).
 #[test]
 fn a_record_from_before_a_restore_no_longer_opens() {
     let (mnemonic, frozen) = vectors().remove(0);
@@ -1527,4 +1533,59 @@ fn provision_retires_a_stale_key_of_the_other_policy() {
         custody::unlock(&app.paths, &cipher).err(),
         Some(UnlockRefused::RecoveryRequired(RecoveryCause::KeyMissing))
     );
+}
+
+/// Every answer restore's try-open can give, pinned: `Authentication` (a
+/// key at the alias that is not the record's) and a seed for another
+/// identity let the seal proceed, the restored record opening;
+/// `Unavailable`, like `UserNotAuthenticated`, writes nothing.
+#[test]
+fn restore_seals_past_a_key_that_opens_nothing_and_writes_nothing_when_it_cannot_ask() {
+    let (mnemonic, frozen) = vectors().remove(0);
+    let expected = TransportIdentity::parse(frozen.clone()).expect("peer");
+    let phrase = RecoveryPhrase::parse(&mnemonic).expect("phrase");
+    let policy = KeyUnlockPolicy::BackgroundCompatible;
+
+    // Another key at the alias: authentication fails, the seal proceeds.
+    let app = new_app();
+    let cipher = SoftCipher::default();
+    custody::provision(&app.paths, &cipher, &identity(&mnemonic), policy).expect("stored");
+    cipher.plant(&app.paths, policy);
+    assert_eq!(
+        custody::unlock(&app.paths, &cipher).err(),
+        Some(UnlockRefused::RecoveryRequired(
+            RecoveryCause::Authentication
+        ))
+    );
+    custody::restore(&app.paths, &cipher, &phrase, &expected, policy).expect("re-sealed");
+    assert_eq!(cipher.seals(), 2);
+    assert_eq!(
+        peer_of(&custody::unlock(&app.paths, &cipher).expect("opens")),
+        frozen
+    );
+
+    // The platform cannot be asked: nothing sealed, nothing written.
+    let before = record(&app);
+    cipher.fail_with(Some(CipherFailure::Unavailable("busy".to_owned())));
+    assert!(matches!(
+        custody::restore(&app.paths, &cipher, &phrase, &expected, policy),
+        Err(CustodyRefused::Cipher(CipherFailure::Unavailable(_)))
+    ));
+    cipher.fail_with(None);
+    assert_eq!(record(&app), before);
+    assert_eq!(cipher.seals(), 2);
+
+    // The record opens to another identity's seed: the seal proceeds.
+    let other = ProfileIdentity::generate()
+        .recovery_phrase()
+        .expect("phrase")
+        .expose_entropy()
+        .expect("seed");
+    let substituting = Substituting(Seed::new(other));
+    // `Substituting` refuses every seal with "not used": that answer is
+    // the proof the flow reached the seal rather than keeping the record.
+    assert!(matches!(
+        custody::restore(&app.paths, &substituting, &phrase, &expected, policy),
+        Err(CustodyRefused::Cipher(CipherFailure::Unavailable(ref why))) if why == "not used"
+    ));
 }

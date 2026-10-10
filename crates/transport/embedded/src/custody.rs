@@ -718,7 +718,8 @@ fn custody_present(paths: &ProfilePaths) -> Result<bool, CustodyRefused> {
 }
 
 /// Re-store the identity `phrase` restores, sealed for `policy` under a
-/// fresh wrapping key -- ONLY if it restores `expected` (ADR-0033's
+/// fresh wrapping key -- unless a record under `policy` already opens to
+/// `expected`, which is kept (below) -- ONLY if it restores `expected` (ADR-0033's
 /// mandatory expected `PeerId`), and only over a record whose `PeerId`
 /// field names `expected` or holds no `PeerId` at all -- whatever its
 /// mode, header or ciphertext, since those say nothing about whose it
