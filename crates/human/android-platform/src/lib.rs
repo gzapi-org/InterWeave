@@ -15,6 +15,7 @@
 pub mod facade;
 pub mod hub;
 pub mod notice;
+pub mod offline;
 pub mod service;
 #[cfg(feature = "dev-stand-ins")]
 pub mod stand_in;

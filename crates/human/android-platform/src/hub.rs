@@ -34,6 +34,11 @@ pub enum ToView {
     /// desktop's "a daemon serves this profile". A view seeing `false`
     /// shows that, and holds no rows until a listing arrives.
     Running(bool),
+    /// Whether the platform gives this app network access: `false` in
+    /// the network-denied posture, where the store is shown and nothing
+    /// is sent. Sent at an attach and at every change; it outlives a
+    /// change of [`ToView::Running`].
+    NetworkAccess(bool),
     /// An update for the model side, the first after an attach or a start
     /// being `Update::Listed`.
     Update(Box<Update>),
@@ -69,10 +74,22 @@ impl Viewer {
     }
 }
 
-#[derive(Default)]
 struct Slot {
     viewer: Option<Viewer>,
     running: bool,
+    /// Whether the platform gives this app network access, as the
+    /// Service last said; access is assumed until it says otherwise.
+    network: bool,
+}
+
+impl Default for Slot {
+    fn default() -> Self {
+        Self {
+            viewer: None,
+            running: false,
+            network: true,
+        }
+    }
 }
 
 /// The process's one meeting point between the facade and the view.
@@ -124,6 +141,7 @@ impl Hub {
         // A new viewer starts from what runs now; the listing follows from
         // the facade's next turn.
         viewer.send(ToView::Running(slot.running));
+        viewer.send(ToView::NetworkAccess(slot.network));
         slot.viewer = Some(viewer);
         ViewLink {
             from,
@@ -183,6 +201,21 @@ impl Hub {
             if !viewer.send(ToView::Running(running)) {
                 slot.viewer = None;
             }
+        }
+    }
+
+    /// Whether the platform gives this app network access, as the
+    /// Service sees it: said to the attached view, and to each later one.
+    pub(crate) fn set_network_access(&self, allowed: bool) {
+        let mut slot = self.slot();
+        if slot.network == allowed {
+            return;
+        }
+        slot.network = allowed;
+        if let Some(viewer) = slot.viewer.as_ref()
+            && !viewer.send(ToView::NetworkAccess(allowed))
+        {
+            slot.viewer = None;
         }
     }
 
@@ -285,7 +318,10 @@ mod tests {
         let hub = Hub::new();
         let (_, wake) = counting();
         let mut link = hub.attach(wake);
-        assert!(matches!(link.take()[..], [ToView::Running(false)]));
+        assert!(matches!(
+            link.take()[..],
+            [ToView::Running(false), ToView::NetworkAccess(true)]
+        ));
         assert!(!hub.wants_listing(), "nothing to list while none runs");
 
         let (commands, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -346,6 +382,26 @@ mod tests {
     }
 
     #[test]
+    fn a_view_hears_a_change_of_network_access_once_and_a_later_view_hears_it_too() {
+        let hub = Hub::new();
+        let (_, wake) = counting();
+        let mut link = hub.attach(wake);
+        let _ = link.take();
+        hub.set_network_access(false);
+        hub.set_network_access(false);
+        assert!(
+            matches!(link.take()[..], [ToView::NetworkAccess(false)]),
+            "said once, at the change"
+        );
+        let (_, wake) = counting();
+        let mut later = hub.attach(wake);
+        assert!(matches!(
+            later.take()[..],
+            [ToView::Running(false), ToView::NetworkAccess(false)]
+        ));
+    }
+
+    #[test]
     fn a_second_view_replaces_the_first() {
         let hub = Hub::new();
         let (_, wake) = counting();
@@ -353,7 +409,10 @@ mod tests {
         let mut second = hub.attach(wake);
         let _ = first.take();
         assert!(first.lost());
-        assert!(matches!(second.take()[..], [ToView::Running(false)]));
+        assert!(matches!(
+            second.take()[..],
+            [ToView::Running(false), ToView::NetworkAccess(true)]
+        ));
         assert!(!second.lost());
     }
 

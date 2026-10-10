@@ -15,8 +15,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use interweave_human_app_core::FacadeSide;
 use interweave_human_store::{HumanStore, StoreError, StoreOptions};
 use interweave_human_transport_client::{ClientConfig, TransportClient};
-use interweave_profile_config::ProfileConfig;
 pub use interweave_profile_config::runtime::AvailabilityMode;
+use interweave_profile_config::{ProfileConfig, ProfilePaths, TrustBoundary};
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::MAX_PAYLOAD_BYTES;
 use interweave_transport_embedded::{
@@ -25,6 +25,7 @@ use interweave_transport_embedded::{
 
 use crate::facade::{FacadeLoop, SpawnError};
 use crate::hub::Hub;
+use crate::offline::offline_embedded;
 
 /// The client kind the session declares, as on the desktop: the profile's
 /// endpoint entry must allow it.
@@ -50,7 +51,9 @@ pub struct ServiceLaunch {
 /// own message; every detail is for the log only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartRefused {
-    /// The embedded runtime refused, naming why.
+    /// The embedded runtime refused, naming why -- or, with no network
+    /// access, the profile or its directories were refused for the same
+    /// reasons the runtime would have named.
     Runtime(EmbeddedRefused),
     /// The endpoint the profile names for the Android service
     /// (`runtime.android.endpoint`) is not an enabled entry open to this
@@ -100,7 +103,11 @@ pub struct Stopped {
 }
 
 struct Running {
-    host: Arc<EmbeddedHost>,
+    /// `None` in the network-denied posture: no runtime, no lease.
+    host: Option<Arc<EmbeddedHost>>,
+    /// The posture's own executor for the facade's turns; `None` when
+    /// the host's drives them.
+    executor: Option<tokio::runtime::Runtime>,
     facade: FacadeLoop,
 }
 
@@ -196,15 +203,7 @@ impl ServiceHost {
         // The endpoint the Android profile names for its service
         // (`runtime.android.endpoint`, `human` by default), which must be
         // an enabled entry open to this client's kind.
-        let Some(endpoint) = config.runtime.android.endpoint().filter(|id| {
-            config.endpoints.entries.iter().any(|e| {
-                &e.id == id
-                    && e.enabled
-                    && e.allowed_client_kinds
-                        .iter()
-                        .any(|k| k.as_str() == CLIENT_KIND)
-            })
-        }) else {
+        let Some(endpoint) = human_endpoint(&config) else {
             return refuse(host, StartRefused::NoHumanEndpoint);
         };
         let store = match HumanStore::open_profile(host.paths(), StoreOptions::default()) {
@@ -212,12 +211,7 @@ impl ServiceHost {
             Err(e) => return refuse(host, classify(&e)),
         };
         let binding = host.binding();
-        let client_config = ClientConfig {
-            client_kind: CLIENT_KIND.to_owned(),
-            endpoint: Some(endpoint.clone()),
-            channels: config.channels.desired.clone(),
-            max_payload_bytes: MAX_PAYLOAD_BYTES,
-        };
+        let client_config = client_config(&config, endpoint.clone());
         let make = move || {
             let client = TransportClient::new(
                 binding.clone(),
@@ -234,11 +228,84 @@ impl ServiceHost {
             Err(SpawnError::Store(e)) => return refuse(host, classify(&e)),
             Err(SpawnError::Thread(e)) => return refuse(host, StartRefused::Thread(e.to_string())),
         };
+        self.hub.set_network_access(true);
         *running = Some(Running {
-            host: Arc::new(host),
+            host: Some(Arc::new(host)),
+            executor: None,
             facade,
         });
         Ok(())
+    }
+
+    /// Start the network-denied posture (human-client-android.md,
+    /// "Runtime permissions and the network-denied state"): the platform
+    /// withholds network access, so no runtime starts and no lease is
+    /// held, but the profile's store opens and the facade runs over a
+    /// binding with nothing behind it ([`crate::offline`]). Reading, Keep
+    /// and Unkeep go on as the store defines them; nothing is sent or
+    /// joined. The view is told access is withheld. A start while the
+    /// client runs, in either posture, does nothing and succeeds; the
+    /// Service stops the posture before a full [`start`](Self::start).
+    ///
+    /// BLOCKS; call it off the Service's main thread.
+    ///
+    /// # Errors
+    /// [`StartRefused`]; nothing is left running.
+    pub fn start_without_network(
+        &self,
+        app_data_dir: &std::path::Path,
+        profile: &str,
+    ) -> Result<(), StartRefused> {
+        let mut running = self.lock();
+        if running.is_some() {
+            return Ok(());
+        }
+        let refused = |e: EmbeddedRefused| StartRefused::Runtime(e);
+        let boundary = TrustBoundary::new(app_data_dir).map_err(|e| refused(e.into()))?;
+        let paths =
+            ProfilePaths::resolve_embedded(profile, boundary).map_err(|e| refused(e.into()))?;
+        let config = ProfileConfig::load(&paths).map_err(|e| refused(e.into()))?;
+        let endpoint = human_endpoint(&config).ok_or(StartRefused::NoHumanEndpoint)?;
+        let store =
+            HumanStore::open_profile(&paths, StoreOptions::default()).map_err(|e| classify(&e))?;
+        let executor = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("interweave-offline")
+            .enable_time()
+            .build()
+            .map_err(|e| StartRefused::Thread(e.to_string()))?;
+        let client_config = client_config(&config, endpoint.clone());
+        let make = move || {
+            let client = TransportClient::new(
+                offline_embedded(),
+                offline_embedded(),
+                store,
+                client_config,
+                Box::new(wall_ms),
+                0,
+            )?;
+            Ok(FacadeSide::new(client, Some(endpoint), wall_ms))
+        };
+        // Said before the facade runs, so a view never shows this posture
+        // as a service that can send.
+        self.hub.set_network_access(false);
+        let facade = match FacadeLoop::spawn(executor.handle().clone(), make, &self.hub) {
+            Ok(facade) => facade,
+            Err(SpawnError::Store(e)) => return Err(classify(&e)),
+            Err(SpawnError::Thread(e)) => return Err(StartRefused::Thread(e.to_string())),
+        };
+        *running = Some(Running {
+            host: None,
+            executor: Some(executor),
+            facade,
+        });
+        Ok(())
+    }
+
+    /// Whether the client runs in the network-denied posture.
+    #[must_use]
+    pub fn is_network_denied(&self) -> bool {
+        self.lock().as_ref().is_some_and(|r| r.host.is_none())
     }
 
     /// The profile's effective availability while the client runs:
@@ -249,7 +316,10 @@ impl ServiceHost {
     /// runs.
     #[must_use]
     pub fn availability(&self) -> Option<AvailabilityMode> {
-        self.lock().as_ref().map(|r| r.host.availability())
+        self.lock()
+            .as_ref()
+            .and_then(|r| r.host.as_ref())
+            .map(|host| host.availability())
     }
 
     /// Record the person's Stay-reachable choice: `Some` turns it on,
@@ -263,7 +333,7 @@ impl ServiceHost {
     /// The host's, when the choice could not be written (the entry is
     /// then as it was); [`EmbeddedRefused::Internal`] when nothing runs.
     pub fn set_availability(&self, choice: Option<StayReachable>) -> Result<(), EmbeddedRefused> {
-        let Some(host) = self.lock().as_ref().map(|r| Arc::clone(&r.host)) else {
+        let Some(host) = self.lock().as_ref().and_then(|r| r.host.clone()) else {
             return Err(EmbeddedRefused::Internal(
                 "the network service is not running".to_owned(),
             ));
@@ -275,18 +345,19 @@ impl ServiceHost {
     /// [`Ended::RuntimeEnded`]. TEST BUILDS ONLY.
     #[cfg(feature = "test-hooks")]
     pub fn end_runtime_for_test(&self) {
-        if let Some(running) = self.lock().as_ref() {
-            running.host.end_runtime_for_test();
+        if let Some(host) = self.lock().as_ref().and_then(|r| r.host.as_ref()) {
+            host.end_runtime_for_test();
         }
     }
 
-    /// Wait until the client is asked to stop. Returns at once when
-    /// nothing runs.
+    /// Wait until the client is asked to stop. Returns
+    /// [`Ended::NotRunning`] at once when no runtime runs: nothing, or
+    /// the network-denied posture, which only a stop ends.
     ///
     /// BLOCKS; call it from a thread of the Service's own.
     #[must_use]
     pub fn wait_ended(&self) -> Ended {
-        let Some(host) = self.lock().as_ref().map(|r| Arc::clone(&r.host)) else {
+        let Some(host) = self.lock().as_ref().and_then(|r| r.host.clone()) else {
             return Ended::NotRunning;
         };
         match host.wait_shutdown_requested() {
@@ -301,8 +372,8 @@ impl ServiceHost {
     /// Hand the platform's view of the network to the runtime: every
     /// change, a Wi-Fi reconnect included (plan section 20 step 5).
     pub fn network_changed(&self, view: NetworkView) {
-        if let Some(running) = self.lock().as_ref() {
-            running.host.network_changed(view);
+        if let Some(host) = self.lock().as_ref().and_then(|r| r.host.as_ref()) {
+            host.network_changed(view);
         }
     }
 
@@ -313,7 +384,23 @@ impl ServiceHost {
     /// BLOCKS; call it off the Service's main thread.
     #[must_use]
     pub fn stop(&self, grace: Duration) -> Option<Stopped> {
-        let Running { host, facade, .. } = self.lock().take()?;
+        let Running {
+            host,
+            executor,
+            facade,
+        } = self.lock().take()?;
+        let Some(host) = host else {
+            // The network-denied posture: the facade and its executor are
+            // all there is. Access is said again at the next start.
+            let session_closed = facade.close(FACADE_CLOSE);
+            if let Some(executor) = executor {
+                executor.shutdown_timeout(FACADE_CLOSE);
+            }
+            return Some(Stopped {
+                session_closed,
+                runtime: Ok(0),
+            });
+        };
         // Releases a thread parked in `wait_ended` with this request: it
         // holds the host until it returns.
         let _ = host.request_shutdown(grace);
@@ -343,6 +430,33 @@ impl ServiceHost {
             session_closed,
             runtime,
         })
+    }
+}
+
+/// The endpoint the Android profile names for its service
+/// (`runtime.android.endpoint`, `human` by default), if it is an enabled
+/// entry open to this client's kind.
+fn human_endpoint(config: &ProfileConfig) -> Option<interweave_transport_api::EndpointId> {
+    config.runtime.android.endpoint().filter(|id| {
+        config.endpoints.entries.iter().any(|e| {
+            &e.id == id
+                && e.enabled
+                && e.allowed_client_kinds
+                    .iter()
+                    .any(|k| k.as_str() == CLIENT_KIND)
+        })
+    })
+}
+
+fn client_config(
+    config: &ProfileConfig,
+    endpoint: interweave_transport_api::EndpointId,
+) -> ClientConfig {
+    ClientConfig {
+        client_kind: CLIENT_KIND.to_owned(),
+        endpoint: Some(endpoint),
+        channels: config.channels.desired.clone(),
+        max_payload_bytes: MAX_PAYLOAD_BYTES,
     }
 }
 

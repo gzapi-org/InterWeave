@@ -23,6 +23,8 @@ pub struct ListingFailed;
 pub struct ViewSide<S: Surface, O: Opener> {
     side: ModelSide<S, O>,
     fresh: Box<dyn FnMut() -> ModelSide<S, O>>,
+    /// Network access as the hub last said it.
+    network: bool,
 }
 
 impl<S: Surface, O: Opener> ViewSide<S, O> {
@@ -32,6 +34,7 @@ impl<S: Surface, O: Opener> ViewSide<S, O> {
         Self {
             side: fresh(),
             fresh: Box::new(fresh),
+            network: true,
         }
     }
 
@@ -45,6 +48,13 @@ impl<S: Surface, O: Opener> ViewSide<S, O> {
             ToView::Running(running) => {
                 self.side = (self.fresh)();
                 self.side.daemon_seen(Some(running));
+                // Access is the platform's, not the service's: a fresh
+                // model keeps what the hub last said of it.
+                self.side.network_access(self.network);
+            }
+            ToView::NetworkAccess(allowed) => {
+                self.network = allowed;
+                self.side.network_access(allowed);
             }
             ToView::Update(update) => self.side.apply(*update),
             ToView::ListingFailed => return Err(ListingFailed),
@@ -162,6 +172,33 @@ mod tests {
         assert!(
             model(&side).conversations().is_empty(),
             "nothing carries over"
+        );
+    }
+
+    #[test]
+    fn withheld_network_access_outlives_a_fresh_model() {
+        let mut side = view_side();
+        side.apply(ToView::Running(true)).expect("applied");
+        assert_eq!(
+            model(&side).session_notice(),
+            Some(SessionNotice::Reconnecting),
+            "the control: access held"
+        );
+        side.apply(ToView::NetworkAccess(false)).expect("applied");
+        assert_eq!(
+            model(&side).session_notice(),
+            Some(SessionNotice::NetworkDenied)
+        );
+        side.apply(ToView::Running(true)).expect("applied");
+        assert_eq!(
+            model(&side).session_notice(),
+            Some(SessionNotice::NetworkDenied),
+            "a fresh model still knows access is withheld"
+        );
+        side.apply(ToView::NetworkAccess(true)).expect("applied");
+        assert_eq!(
+            model(&side).session_notice(),
+            Some(SessionNotice::Reconnecting)
         );
     }
 

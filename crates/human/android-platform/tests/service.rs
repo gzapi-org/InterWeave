@@ -376,3 +376,85 @@ fn the_stand_in_profile_is_written_once_and_never_rewritten() {
         changed
     );
 }
+
+/// The network-denied posture (human-client-android.md, "Runtime
+/// permissions and the network-denied state"): the store opens and a view
+/// gets its listing, told access is withheld; no runtime runs, so there is
+/// no availability and no wait, and no session ever opens. A stop, then a
+/// full start, is how a grant is answered: the view hears access again
+/// and the session opens.
+#[test]
+fn without_network_the_store_opens_and_no_runtime_runs() {
+    let app = app();
+    stand_in::provision(&app.dir, PROFILE).expect("provisioned");
+    let service = ServiceHost::new();
+    service
+        .start_without_network(&app.dir, PROFILE)
+        .expect("the posture starts");
+    assert!(service.is_running());
+    assert!(service.is_network_denied());
+    assert_eq!(service.availability(), None, "no runtime: no availability");
+    assert_eq!(
+        service.wait_ended(),
+        Ended::NotRunning,
+        "no runtime to wait on"
+    );
+    assert_eq!(
+        service.start_without_network(&app.dir, PROFILE),
+        Ok(()),
+        "a second start changes nothing"
+    );
+
+    let mut link = attach(&service);
+    let mut held = Vec::new();
+    until(&mut link, &mut held, "running", |m| {
+        matches!(m, ToView::Running(true))
+    });
+    until(&mut link, &mut held, "access withheld", |m| {
+        matches!(m, ToView::NetworkAccess(false))
+    });
+    until(&mut link, &mut held, "the listing", is_listing);
+    // Long enough for a facade with a runtime behind it to be Ready (the
+    // first test's start reaches it well inside this).
+    let watched = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < watched {
+        held.extend(link.take());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !held.iter().any(is_ready),
+        "no session opens without a runtime: {held:?}"
+    );
+
+    let stopped = service.stop(GRACE).expect("it ran");
+    assert_eq!(stopped.runtime, Ok(0), "no runtime to stop");
+    assert!(!service.is_running());
+
+    service
+        .start(launch(&app))
+        .expect("the full start after a grant");
+    assert!(!service.is_network_denied(), "the control: a runtime runs");
+    let mut held = Vec::new();
+    until(&mut link, &mut held, "access again", |m| {
+        matches!(m, ToView::NetworkAccess(true))
+    });
+    until(&mut link, &mut held, "a ready session", is_ready);
+    let _ = service.stop(GRACE);
+}
+
+/// The posture refuses what the runtime would have refused, before it
+/// opens anything: here a profile that was never written.
+#[test]
+fn without_network_a_missing_profile_is_refused_and_nothing_runs() {
+    let app = app();
+    let service = ServiceHost::new();
+    let refused = service.start_without_network(&app.dir, PROFILE);
+    assert!(
+        matches!(
+            refused,
+            Err(StartRefused::Runtime(EmbeddedRefused::ProfileInvalid(_)))
+        ),
+        "{refused:?}"
+    );
+    assert!(!service.is_running());
+}
