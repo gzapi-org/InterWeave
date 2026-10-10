@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# Every plugin and library version of the Gradle build, in one place
+# (plan section 20, "Dependency hygiene for the Gradle build").
+# AGP 9.4 is what tools/host/android/android-toolchain.pins was chosen for:
+# JDK 17, Gradle 9.6.0, build-tools 36.0.0, NDK 28.2.13676358.
+
+[versions]
+agp = "9.4.1"
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }

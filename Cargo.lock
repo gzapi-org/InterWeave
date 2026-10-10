@@ -3429,6 +3429,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "interweave-human-android"
+version = "0.0.0"
+dependencies = [
+ "interweave-human-ui-model",
+ "interweave-human-ui-slint",
+]
+
+[[package]]
 name = "interweave-human-app-core"
 version = "0.0.0"
 dependencies = [

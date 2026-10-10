@@ -44,6 +44,9 @@ members = [
     "tests/desktop-e2e",
     # Stage 15 batch 2: the desktop human client (plan section 18).
     "apps/human-desktop",
+    # Stage 17 (plan section 20 steps 2-4): the Android human client's
+    # native library; its Gradle project is apps/human-android/android.
+    "apps/human-android",
     "crates/human/app-core",
     "crates/human/client-api",
     "crates/human/chat-protocol",
