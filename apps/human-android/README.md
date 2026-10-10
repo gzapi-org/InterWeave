@@ -8,9 +8,13 @@ its Service side hosts the embedded transport runtime
 (`crates/transport/embedded`) through `crates/human/android-platform`. It
 names no Slint crate itself: the toolkit is reached through ui-slint.
 
-**Current status:** Stage 17 steps 2-4 in progress. The APK builds and
-draws the views on a device; the Service, its runtime and notifications
-are not wired yet.
+**Current status:** Stage 17 steps 2-4, first batch. The network
+service hosts the runtime, store and facade; the Activity attaches to it;
+unread arrivals raise a count-only notification. On a device the APK
+draws the views and the service starts, and the embedded runtime does not
+yet bind its listener there, so no session has run on a phone. The debug
+APK runs on a stand-in profile and in-memory identity; a release build
+starts nothing until step 6's Keystore key lands.
 
 Build, on a host set up by `tools/host/android` (its README):
 
