@@ -524,6 +524,51 @@ mod tests {
         assert!(dial(&mut f, &[]).is_ok(), "held again");
     }
 
+    /// The operator's circuit route to P passes the funnel on a dial to P,
+    /// extended bare -- the form a behaviour hands over -- and the same
+    /// relay's circuit on a dial to X is refused as a peer's (#246
+    /// re-review P3 1). THE CONTROL is a funnel whose operator set is
+    /// empty, which refuses the circuit to P too, so the pass is the
+    /// probe's doing and not a floor that stopped refusing circuits.
+    #[test]
+    fn the_operators_circuit_passes_the_funnel_on_a_dial_to_its_own_peer_only() {
+        let (relay, p, x) = (PeerId::random(), PeerId::random(), PeerId::random());
+        let bare = format!("/ip4/203.0.113.7/tcp/4001/p2p/{relay}/p2p-circuit");
+        let to = |f: &mut RootFunnel<Offering>, peer: PeerId| {
+            f.handle_pending_outbound_connection(
+                ConnectionId::new_unchecked(1),
+                Some(peer),
+                &[],
+                Endpoint::Dialer,
+            )
+        };
+
+        let mut control = funnel(&[&bare]);
+        assert!(
+            to(&mut control, p).is_err(),
+            "the control: no operator entry, the circuit is refused"
+        );
+
+        let operator = OperatorSet::new();
+        assert!(operator.insert(&format!("{bare}/p2p/{p}").parse().expect("valid")));
+        let mut f = RootFunnel::new(
+            Offering {
+                offered: addrs(&[&bare]),
+            },
+            operator,
+            HeldListeners::new(),
+        );
+        assert_eq!(
+            to(&mut f, p).expect("the operator's route to P"),
+            addrs(&[&bare]),
+            "the operator's circuit, extended for P, passes"
+        );
+        assert!(
+            to(&mut f, x).is_err(),
+            "the same relay's circuit on a dial to X is a peer's"
+        );
+    }
+
     /// #111 review P2-5: each narrowing condition of the denial, alone.
     /// Denied only when the funnel removed something, nothing survived
     /// AND the dial named no address of its own.

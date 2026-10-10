@@ -4641,6 +4641,39 @@ mod tests {
         assert_eq!(got.len(), 2, "the misattributed route is dropped");
     }
 
+    /// The operator's circuit route to P survives a query result for P,
+    /// held bare -- the form a walk returns -- and the same relay's
+    /// circuit in a result for X is dropped as a peer's (#246 re-review
+    /// P3 1). THE CONTROL is an empty operator set, which drops the
+    /// circuit for P too.
+    #[test]
+    fn the_operators_circuit_survives_a_query_result_for_its_own_peer_only() {
+        let (relay, p, x) = (PeerId::random(), PeerId::random(), PeerId::random());
+        let bare = format!("/ip4/203.0.113.7/tcp/4001/p2p/{relay}/p2p-circuit");
+        let result = |peer_id: PeerId| kad::PeerInfo {
+            peer_id,
+            addrs: vec![bare.parse().expect("valid")],
+        };
+        let stores = crate::store_refusals::StoreRefusals::new();
+
+        let empty = crate::operator_set::OperatorSet::new();
+        assert!(
+            candidate_addresses(&result(p), &empty, &[], &stores).is_empty(),
+            "the control: no operator entry, the circuit is dropped"
+        );
+
+        let operator = crate::operator_set::OperatorSet::new();
+        assert!(operator.insert(&format!("{bare}/p2p/{p}").parse().expect("valid")));
+        assert!(
+            candidate_addresses(&result(p), &operator, &[], &stores).contains(&bare),
+            "the operator's route to P, in a result for P"
+        );
+        assert!(
+            candidate_addresses(&result(x), &operator, &[], &stores).is_empty(),
+            "the same relay's circuit in a result for X is a peer's"
+        );
+    }
+
     #[test]
     fn the_driver_caps_concurrent_queries_and_settles_the_refusal() {
         let settings = KademliaSettings {
