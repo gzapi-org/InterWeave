@@ -316,7 +316,9 @@ pub enum CustodyRefused {
     RecordNamesOther,
     /// The identity or the phrase could not give its seed or `PeerId`.
     Identity(String),
-    /// The cipher refused to seal.
+    /// The cipher refused to seal; or, for [`restore`], could not say
+    /// whether the record already on disk still opens
+    /// (`UserNotAuthenticated`, `Unavailable`), so nothing was sealed.
     Cipher(CipherFailure),
     /// The cipher returned an IV or sealed bytes of another length.
     CipherShape,
@@ -648,7 +650,10 @@ fn seal_record(
 /// # Errors
 /// [`CustodyRefused::AlreadyProvisioned`] when a record exists,
 /// [`CustodyRefused::ProfileLocked`] while another holds the profile;
-/// the others as named.
+/// the others as named. [`CustodyRefused::OldKeyRemains`] arrives AFTER
+/// the record is written: the profile is provisioned and unlocks, and a
+/// stale key of its other policy is still there -- [`reseal`] retries
+/// the deletion; provisioning again answers `AlreadyProvisioned`.
 pub fn provision(
     paths: &ProfilePaths,
     cipher: &dyn SeedCipher,
@@ -722,11 +727,20 @@ fn custody_present(paths: &ProfilePaths) -> Result<bool, CustodyRefused> {
 /// comes from is the recovery flow's (step 7). Under the profile's
 /// lock, as [`provision`]: refused while a host runs.
 ///
+/// A record already sealed under `policy` is TRIED first, because the
+/// seal would replace the very key it opens under: one that opens to
+/// `expected` is kept -- nothing sealed, its bytes rewritten owner-only
+/// if they were not -- so a write that fails cannot strand it; one whose
+/// key is invalidated, missing or another loses nothing to the seal.
+///
 /// # Errors
 /// [`CustodyRefused::OtherIdentity`] for a phrase restoring another
 /// `PeerId`; [`CustodyRefused::RecordNamesOther`] when the record names
 /// another; [`CustodyRefused::Unreadable`] when it cannot be read;
-/// nothing is written in any of these.
+/// [`CustodyRefused::Cipher`] when the record's own key cannot be asked
+/// whether it still opens; nothing is written in any of these.
+/// [`CustodyRefused::OldKeyRemains`] arrives after the record is written,
+/// as for [`reseal`].
 pub fn restore(
     paths: &ProfilePaths,
     cipher: &dyn SeedCipher,
@@ -742,17 +756,55 @@ pub fn restore(
     // read whatever the file's mode or the envelope's state; only a record
     // with no PeerId there names nobody. One that cannot be read at all may
     // name another, so nothing is written over it.
-    match read_record(paths) {
-        Ok(Read::Absent) => {}
-        Ok(Read::Bytes { bytes, .. }) => {
+    let existing = match read_record(paths) {
+        Ok(Read::Absent) => None,
+        Ok(Read::Bytes { bytes, private }) => {
             if named_peer(&bytes).is_some_and(|named| named.as_str() != expected.as_str()) {
                 return Err(CustodyRefused::RecordNamesOther);
             }
+            Some((bytes, private))
         }
         Err(e) => return Err(CustodyRefused::Unreadable(e.to_string())),
-    }
+    };
     let identity = ProfileIdentity::from_phrase(phrase)
         .map_err(|e| CustodyRefused::Identity(e.to_string()))?;
+    if let Some((bytes, private)) = existing
+        && let Ok(parsed) = parse(&bytes)
+        && parsed.policy == policy
+    {
+        let opened = cipher.open(
+            &KeyRef::new(paths, policy),
+            &parsed.iv,
+            &parsed.sealed,
+            &aad(policy, &parsed.peer),
+        );
+        match opened {
+            Ok(seed)
+                if identity_of(&seed)
+                    .is_some_and(|(_, peer)| peer.as_str() == expected.as_str()) =>
+            {
+                if !private {
+                    write_private_atomic_within(&custody_file(paths), &bytes, paths.boundary())
+                        .map_err(CustodyRefused::Storage)?;
+                }
+                retire_others(paths, cipher, policy)?;
+                return Ok(identity);
+            }
+            Err(
+                failure @ (CipherFailure::UserNotAuthenticated | CipherFailure::Unavailable(_)),
+            ) => {
+                return Err(CustodyRefused::Cipher(failure));
+            }
+            // Opens to another seed, or its key is invalidated, missing
+            // or another: the seal below replaces a key that opens nothing.
+            Ok(_)
+            | Err(
+                CipherFailure::KeyInvalidated
+                | CipherFailure::KeyMissing
+                | CipherFailure::Authentication,
+            ) => {}
+        }
+    }
     let (_, record) = seal_record(paths, cipher, policy, &identity)?;
     write_private_atomic_within(&custody_file(paths), &record, paths.boundary())
         .map_err(CustodyRefused::Storage)?;

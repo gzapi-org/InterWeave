@@ -958,10 +958,13 @@ fn racing_first_provisions_leave_one_record_that_opens() {
     );
 }
 
-/// A restore re-seals under a NEW key, so a copy of the record taken
-/// before it -- a stolen or backed-up `identity.iwk1` -- no longer opens:
-/// recovery retires the old envelope, not only replaces the file. The
-/// restored record opens (the control).
+/// A restore of a record whose key is gone re-seals under a NEW key at
+/// the same alias, so a copy of the record taken before it -- a stolen or
+/// backed-up `identity.iwk1` -- does not open under the key that replaced
+/// the lost one: recovery retires the old envelope, not only replaces the
+/// file. The restored record opens (the control). (A record that still
+/// opens is kept rather than re-sealed:
+/// `a_same_policy_restore_keeps_a_record_that_still_opens`.)
 #[test]
 fn a_record_from_before_a_restore_no_longer_opens() {
     let (mnemonic, frozen) = vectors().remove(0);
@@ -976,6 +979,7 @@ fn a_record_from_before_a_restore_no_longer_opens() {
     .expect("stored");
     let old = record(&app);
     custody::unlock(&app.paths, &cipher).expect("the old record opens before the restore");
+    cipher.forget(&app.paths, KeyUnlockPolicy::UserPresence);
 
     custody::restore(
         &app.paths,
@@ -1172,7 +1176,9 @@ fn restore_asks_whose_record_it_is_whatever_its_mode_or_header() {
             .file_type()
             .is_symlink()
     );
-    assert_eq!(cipher.seals(), 3, "the two controls sealed, nothing else");
+    // The provision, and the restore over the damaged header (whose record
+    // cannot open); the restore over the 0644 record kept it, opening.
+    assert_eq!(cipher.seals(), 2, "nothing sealed but those two");
 }
 
 /// One alias per profile and policy: two profiles' aliases never meet,
@@ -1431,6 +1437,92 @@ fn an_old_key_that_cannot_be_retired_is_said_and_reseal_retries_it() {
         .expect("the same policy: nothing sealed, the old key retired")
     );
     put(&app, &old);
+    assert_eq!(
+        custody::unlock(&app.paths, &cipher).err(),
+        Some(UnlockRefused::RecoveryRequired(RecoveryCause::KeyMissing))
+    );
+}
+
+/// A restore under the policy the record already has tries that record
+/// first: one that opens to the expected identity is kept -- nothing
+/// sealed, so a write that fails cannot strand it, and a record readable
+/// by others is rewritten owner-only from its own bytes. Unable to ask
+/// the key (the user absent), it writes nothing; with the key gone, it
+/// seals (the control).
+#[test]
+fn a_same_policy_restore_keeps_a_record_that_still_opens() {
+    let (mnemonic, frozen) = vectors().remove(0);
+    let expected = TransportIdentity::parse(frozen.clone()).expect("peer");
+    let phrase = RecoveryPhrase::parse(&mnemonic).expect("phrase");
+    let policy = KeyUnlockPolicy::UserPresence;
+    let app = new_app();
+    let cipher = SoftCipher::default();
+    custody::provision(&app.paths, &cipher, &identity(&mnemonic), policy).expect("stored");
+    let good = record(&app);
+    let dir = app.paths.identity_dir();
+    let path = custody::custody_file(&app.paths);
+
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o500)).expect("chmod");
+    custody::restore(&app.paths, &cipher, &phrase, &expected, policy)
+        .expect("a record that opens is kept, nothing to write");
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+    assert_eq!(record(&app), good);
+    assert_eq!(cipher.seals(), 1, "nothing sealed over a record that opens");
+    assert_eq!(
+        peer_of(&custody::unlock(&app.paths, &cipher).expect("opens")),
+        frozen
+    );
+
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+    custody::restore(&app.paths, &cipher, &phrase, &expected, policy).expect("kept, made private");
+    let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+    assert_eq!(record(&app), good);
+    assert_eq!(cipher.seals(), 1);
+
+    cipher.fail_with(Some(CipherFailure::UserNotAuthenticated));
+    assert!(matches!(
+        custody::restore(&app.paths, &cipher, &phrase, &expected, policy),
+        Err(CustodyRefused::Cipher(CipherFailure::UserNotAuthenticated))
+    ));
+    cipher.fail_with(None);
+    assert_eq!(cipher.seals(), 1);
+
+    cipher.forget(&app.paths, policy);
+    custody::restore(&app.paths, &cipher, &phrase, &expected, policy)
+        .expect("the key gone: re-sealed");
+    assert_eq!(cipher.seals(), 2);
+    assert_eq!(
+        peer_of(&custody::unlock(&app.paths, &cipher).expect("opens")),
+        frozen
+    );
+}
+
+/// Provisioning deletes a stale key of the profile's other policy -- one a
+/// previous incarnation of the profile left -- so a copy of that
+/// incarnation's record cannot open as this profile.
+#[test]
+fn provision_retires_a_stale_key_of_the_other_policy() {
+    let vectors = two();
+    let app = new_app();
+    let cipher = SoftCipher::default();
+    custody::provision(
+        &app.paths,
+        &cipher,
+        &identity(&vectors[0].0),
+        KeyUnlockPolicy::BackgroundCompatible,
+    )
+    .expect("the first incarnation");
+    let stale = record(&app);
+    std::fs::remove_file(custody::custody_file(&app.paths)).expect("the profile removed");
+    custody::provision(
+        &app.paths,
+        &cipher,
+        &identity(&vectors[1].0),
+        KeyUnlockPolicy::UserPresence,
+    )
+    .expect("the second incarnation");
+    put(&app, &stale);
     assert_eq!(
         custody::unlock(&app.paths, &cipher).err(),
         Some(UnlockRefused::RecoveryRequired(RecoveryCause::KeyMissing))
