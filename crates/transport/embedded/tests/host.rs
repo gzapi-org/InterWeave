@@ -341,7 +341,10 @@ fn a_runtime_that_ends_on_its_own_releases_the_waiter() {
     );
     waiter.join().expect("the waiter ends");
     let host = std::sync::Arc::into_inner(host).expect("the only holder");
-    let _ = host.stop(Duration::from_secs(1));
+    // `RuntimeEnded` was the failure's report; `stop` after it answers
+    // the dropped count, not an error.
+    host.stop(Duration::from_secs(1))
+        .expect("stop after RuntimeEnded answers Ok");
     EmbeddedHost::start(launch(&app.dir))
         .expect("a fresh host starts after the end")
         .stop(Duration::from_secs(1))

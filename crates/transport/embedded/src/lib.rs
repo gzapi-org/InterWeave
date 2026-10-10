@@ -443,9 +443,11 @@ impl EmbeddedHost {
     /// already does. A request wins over the other two, and a runtime's
     /// end over a changed mode, when more than one holds. The Service
     /// answers any of them by calling `stop`, with the grace asked for or
-    /// its own; after a `RuntimeEnded`, `stop` reports the failure and
-    /// releases the lock, and a fresh host may be started, in the new
-    /// mode after an `AvailabilityChanged`.
+    /// its own. `RuntimeEnded` IS the failure's report: `stop` after it
+    /// releases the lock and answers the dropped count as after any other
+    /// end -- only a driver that panicked makes `stop` an error -- and a
+    /// fresh host may be started, in the new mode after an
+    /// `AvailabilityChanged`.
     ///
     /// BLOCKS; call it off any async context.
     #[must_use]
