@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# Stage 17 (plan §20 gate (c)): the Android half of tests/android-e2e's
+# cases, one body for two runners (architect-cto's DECISION of
+# 2026-10-10) -- the host stand-in, which proves the body first, and the
+# app's instrumentation, which runs it in the app's own process over the
+# binding of the runtime its service started. The instrumentation
+# builds it for the phone, so its normal dependencies reach no libp2p,
+# test harness, daemon or transport runtime -- src/lib.rs's
+# the_crate_reaches_no_libp2p_harness_daemon_or_runtime fails if one
+# does. TEST-ONLY; that the release APK's graph names it nowhere is the
+# packaging batch's check (DECISION 01a12770), not yet built.
+[package]
+name = "interweave-android-e2e-cases"
+version = "0.0.0"
+publish = false
+description = "The Android half of InterWeave's Android-to-desktop cases, run on the host stand-in and in the app's instrumentation."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+interweave-local-client-api = { path = "../../crates/api/local-client-api" }
+interweave-transport-api = { path = "../../crates/api/transport-api" }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt", "time"] }
+
+[dev-dependencies]
+# The cases' third runner: the in-memory fake pair (plan §17 (2)), where
+# the body's own checks are proved without a socket.
+interweave-local-client-fake = { path = "../local-client-fake" }
