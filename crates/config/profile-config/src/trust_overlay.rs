@@ -21,13 +21,13 @@
 //! expect and no stale entry undoes that edit.
 
 use std::collections::BTreeSet;
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use interweave_transport_api::TransportIdentity;
 use interweave_trust_api::PeerTrustPolicy;
 use serde::{Deserialize, Serialize};
 
+use crate::private_read::{self, PrivateReadError};
 use crate::{PersistError, ProfilePaths, TrustBoundary, persist};
 
 /// The overlay's file name in the profile's state directory.
@@ -128,6 +128,16 @@ impl core::error::Error for OverlayError {
     }
 }
 
+impl From<PrivateReadError> for OverlayError {
+    fn from(e: PrivateReadError) -> Self {
+        match e {
+            PrivateReadError::Read(e) => Self::Read(e),
+            PrivateReadError::NotPrivate { detail } => Self::NotPrivate { detail },
+            PrivateReadError::TooLarge => Self::TooLarge,
+        }
+    }
+}
+
 impl OverlayError {
     /// Whether the failed write had already put the new overlay in place:
     /// the rename landed and syncing the directory failed. A caller that
@@ -197,40 +207,11 @@ impl TrustOverlay {
 
     /// The overlay as it is on disk, unnormalised: `None` when absent.
     fn read(path: &Path, boundary: &TrustBoundary) -> Result<Option<Self>, OverlayError> {
-        // Read under the state directory AS RESOLVED (ADR-0028 A
-        // 2026-10-08), as the overlay's write is: `ProfileLock` judged the
-        // same directory before load, and this resolves it once more so
-        // the read opens where that judgement led. An absent directory
-        // holds no overlay.
-        let dir = match persist::resolve_private_dir_within(persist::parent_dir(path), boundary) {
-            Ok(dir) => dir,
-            Err(PersistError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(None);
-            }
-            Err(PersistError::Io(e)) => return Err(OverlayError::Read(e)),
-            Err(e) => {
-                return Err(OverlayError::NotPrivate {
-                    detail: e.to_string(),
-                });
-            }
+        let Some(text) =
+            private_read::read_private_within(path, boundary, MAX_TRUST_OVERLAY_BYTES)?
+        else {
+            return Ok(None);
         };
-        let resolved = dir.join(persist::file_name(path).map_err(|_| {
-            OverlayError::Read(std::io::Error::from(std::io::ErrorKind::InvalidInput))
-        })?);
-        let file = match open_private(&resolved) {
-            Ok(file) => file,
-            Err(OverlayError::Read(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(None);
-            }
-            Err(e) => return Err(e),
-        };
-        let mut text = String::new();
-        file.take(MAX_TRUST_OVERLAY_BYTES + 1)
-            .read_to_string(&mut text)
-            .map_err(OverlayError::Read)?;
-        if text.len() as u64 > MAX_TRUST_OVERLAY_BYTES {
-            return Err(OverlayError::TooLarge);
-        }
         let overlay: Self =
             serde_json::from_str(&text).map_err(|e| OverlayError::Parse(e.to_string()))?;
         if overlay.added.len() > PeerTrustPolicy::MAX_ALLOWED_PEERS
@@ -344,94 +325,5 @@ impl TrustOverlay {
         let text = serde_json::to_vec_pretty(self)
             .map_err(|e| OverlayError::Write(PersistError::Io(std::io::Error::other(e))))?;
         persist::write_private_atomic_within(path, &text, boundary).map_err(OverlayError::Write)
-    }
-}
-
-/// The uid an overlay must be owned by, or -- this process's uid
-/// unreadable -- a refusal on READ: the owner cannot be checked, so the
-/// file cannot be trusted; never a write failure (#215 review P3).
-/// `an_unreadable_uid_refuses_the_overlay_on_read`.
-#[cfg(any(target_os = "linux", target_os = "android"))]
-fn owner_uid(read: Result<u32, PersistError>) -> Result<u32, OverlayError> {
-    read.map_err(|_| OverlayError::NotPrivate {
-        detail: "its owner cannot be checked: this process's uid is unreadable".to_owned(),
-    })
-}
-
-/// Open `path` for reading only if it is a regular file, not a link,
-/// owned by this process's uid and readable or writable by nobody else
-/// -- the identity key's rule. Judged on the OPENED file, so the file
-/// checked is the file read.
-///
-/// Its DIRECTORY is judged and resolved by the caller (`read`), which
-/// hands this the path under the directory as resolved.
-fn open_private(path: &Path) -> Result<std::fs::File, OverlayError> {
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    {
-        use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
-        // O_NONBLOCK so a FIFO in its place opens at once and is refused
-        // below as not a regular file, rather than holding start until a
-        // writer appears; it changes nothing for a regular file
-        // (`an_overlay_that_is_a_fifo_is_refused_without_waiting`).
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(path)
-            .map_err(|e| {
-                // ELOOP is O_NOFOLLOW meeting a link.
-                if e.raw_os_error() == Some(libc::ELOOP) {
-                    OverlayError::NotPrivate {
-                        detail: "it is a symbolic link".to_owned(),
-                    }
-                } else {
-                    OverlayError::Read(e)
-                }
-            })?;
-        let meta = file.metadata().map_err(OverlayError::Read)?;
-        let uid = owner_uid(persist::effective_uid())?;
-        if !meta.file_type().is_file() {
-            return Err(OverlayError::NotPrivate {
-                detail: "it is not a regular file".to_owned(),
-            });
-        }
-        if meta.uid() != uid {
-            return Err(OverlayError::NotPrivate {
-                detail: format!("owned by uid {}, not {uid}", meta.uid()),
-            });
-        }
-        let mode = meta.mode() & 0o777;
-        if mode & 0o077 != 0 {
-            return Err(OverlayError::NotPrivate {
-                detail: format!("mode is {mode:04o}, wider than 0600"),
-            });
-        }
-        Ok(file)
-    }
-    // Elsewhere ownership and mode cannot be checked here, so a present
-    // overlay is refused -- but an absent one is still the empty overlay,
-    // not a reason not to start.
-    #[cfg(not(any(target_os = "linux", target_os = "android")))]
-    {
-        match std::fs::symlink_metadata(path) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(OverlayError::Read(e)),
-            _ => Err(OverlayError::NotPrivate {
-                detail: "owner-only permissions cannot be checked on this platform".to_owned(),
-            }),
-        }
-    }
-}
-
-#[cfg(all(test, any(target_os = "linux", target_os = "android")))]
-mod tests {
-    use super::{OverlayError, PersistError, owner_uid};
-
-    #[test]
-    fn an_unreadable_uid_refuses_the_overlay_on_read() {
-        assert!(matches!(
-            owner_uid(Err(PersistError::UnsupportedPlatform)),
-            Err(OverlayError::NotPrivate { .. })
-        ));
-        // The control: a uid read is the owner checked against.
-        assert_eq!(owner_uid(Ok(1000)).ok(), Some(1000));
     }
 }

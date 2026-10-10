@@ -102,9 +102,18 @@ impl AndroidRuntimeConfig {
     /// whose key needs the user present cannot come back on its own
     /// after a restart. A derived status, not a refusal -- the
     /// combination is legal.
+    ///
+    /// Judged on the EFFECTIVE mode the caller read
+    /// ([`effective_availability_mode`](crate::availability_overlay::effective_availability_mode)),
+    /// never on `availability_mode` alone: that field is only the
+    /// authored default, and the person's choice overrides it (ADR-0041
+    /// A 2026-10-10).
     #[must_use]
-    pub fn background_restart_requires_user_authentication(&self) -> bool {
-        self.availability_mode == AvailabilityMode::StayReachable
+    pub fn background_restart_requires_user_authentication(
+        &self,
+        effective: AvailabilityMode,
+    ) -> bool {
+        effective == AvailabilityMode::StayReachable
             && self.key_unlock_policy == KeyUnlockPolicy::UserPresence
     }
 }
@@ -335,13 +344,19 @@ mod tests {
                 false,
             ),
         ] {
+            // The AUTHORED field says the opposite of the effective mode,
+            // so a status read from the field answers wrong.
+            let authored = match mode {
+                AvailabilityMode::StayReachable => AvailabilityMode::ForegroundOnly,
+                AvailabilityMode::ForegroundOnly => AvailabilityMode::StayReachable,
+            };
             let android = AndroidRuntimeConfig {
-                availability_mode: mode,
+                availability_mode: authored,
                 key_unlock_policy: policy,
                 ..AndroidRuntimeConfig::default()
             };
             assert_eq!(
-                android.background_restart_requires_user_authentication(),
+                android.background_restart_requires_user_authentication(mode),
                 expected,
                 "{mode:?} + {policy:?}"
             );

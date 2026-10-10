@@ -361,6 +361,33 @@ pub fn write_private_atomic_within(
     write_atomic_with_mode(path, contents, Some(OWNER_ONLY_FILE), boundary)
 }
 
+/// Remove the private file at `path`, its directory resolved under
+/// `boundary` as a private write's is, then sync the directory so the
+/// removal survives a crash. Whether there was a file to remove: an
+/// absent file, or an absent directory, is `Ok(false)`.
+///
+/// # Errors
+/// [`PersistError`] from judging the directory or from the unlink, after
+/// which nothing changed; [`PersistError::Unsynced`] when the directory
+/// sync after the unlink fails -- the file is gone, its absence perhaps
+/// not durable.
+pub fn remove_private_within(path: &Path, boundary: &TrustBoundary) -> Result<bool, PersistError> {
+    let parent = match resolve_private_dir_within(parent_dir(path), boundary) {
+        Ok(parent) => parent,
+        Err(PersistError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(false);
+        }
+        Err(e) => return Err(e),
+    };
+    match fs::remove_file(parent.join(file_name(path)?)) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(PersistError::Io(e)),
+    }
+    fsync_dir(&parent)?;
+    Ok(true)
+}
+
 /// Write `contents` to `path` atomically with default permissions.
 ///
 /// For configuration, which is not secret. The identity key must use
