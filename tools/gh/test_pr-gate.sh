@@ -3,10 +3,10 @@
 # Copyright 2026 Andrea Benetton
 # tools/gh/test_pr-gate.sh
 #
-# Behavioural tests for pr-gate.sh — the hand-off to agent-fabric's copy (runtime/github/).
+# Behavioural tests for pr-gate.sh — the hand-off to agent-fabric's `fabric-pr gate`.
 # The script itself decides nothing about PRs; what it promises is:
 #
-#   1. it runs agent-fabric's runtime/github/pr-gate.sh
+#   1. it runs agent-fabric's bin/fabric-pr
 #      with the arguments and stdin untouched (the gates themselves are
 #      tested in agent-fabric, where they live)
 #   2. AGENT_FABRIC_ROOT wins over the sibling-checkout default
@@ -33,12 +33,13 @@ fail() { echo "  FAIL $1"; [[ -n "${2:-}" ]] && printf '%s\n' "$2" | sed 's/^/  
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
 
-# A fake agent-fabric whose pr-gate.sh records argv and stdin verbatim.
+# A fake agent-fabric whose fabric-pr records argv and stdin verbatim.
 FABRIC="$SANDBOX/agent-fabric"
-mkdir -p "$FABRIC/runtime/github"
-STUB="$FABRIC/runtime/github/pr-gate.sh"
+STUB="$FABRIC/bin/fabric-pr"
+mkdir -p "$(dirname "$FABRIC/bin/fabric-pr")"
 cat > "$STUB" <<'STUB'
 #!/usr/bin/env bash
+[[ "${1:-}" == gate ]] || { echo "stub fabric-pr: verb '${1:-}', not gate" >&2; exit 99; }; shift
 printf '%s\n' "$#" > "$RECORD.argc"
 printf '%s\0' "$@" > "$RECORD.argv"
 cat > "$RECORD.stdin"
@@ -61,10 +62,11 @@ mapfile -d '' argv < "$RECORD.argv"
 
 echo "resolution: AGENT_FABRIC_ROOT wins; otherwise the sibling of this working copy"
 RECORD="$SANDBOX/rec2"
-SIB="$SANDBOX/projects"; mkdir -p "$SIB/interweave/tools/gh" "$SIB/agent-fabric/runtime/github"
+SIB="$SANDBOX/projects"; mkdir -p "$SIB/interweave/tools/gh"
 cp "$UNDER_TEST" "$SCRIPT_DIR/fabric-root.sh" "$SIB/interweave/tools/gh/"
 git -C "$SIB/interweave" init -q 2>/dev/null
-printf '#!/usr/bin/env bash\necho "sibling copy"\n' > "$SIB/agent-fabric/runtime/github/pr-gate.sh"
+mkdir -p "$(dirname "$SIB/agent-fabric/bin/fabric-pr")"
+printf '#!/usr/bin/env bash\necho "sibling copy"\n' > "$SIB/agent-fabric/bin/fabric-pr"
 out="$(cd "$SIB/interweave" && env -u AGENT_FABRIC_ROOT bash tools/gh/pr-gate.sh 2>&1)"
 [[ "$out" == "sibling copy" ]] && pass "with no AGENT_FABRIC_ROOT, ../agent-fabric beside the working copy is used" || fail "sibling default" "$out"
 out="$(cd "$SIB/interweave" && RECORD="$RECORD" AGENT_FABRIC_ROOT="$FABRIC" bash tools/gh/pr-gate.sh 2>&1 </dev/null)"

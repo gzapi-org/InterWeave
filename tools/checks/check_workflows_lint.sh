@@ -14,7 +14,7 @@
 # and zizmor (the workflow security audit), with the release of each
 # pinned ONCE, in agent-fabric's tools/fabric/github/workflows_lint.py at
 # the fabric-ref this repository pins: this script forwards there
-# (runtime/github/check-workflows-lint.sh), for tree checks and for
+# (tools/fabric/github/workflows_lint.py), for tree checks and for
 # `cargo xtask checks` before a push.
 #
 # WHY ONE SCRIPT. The two tools used to be downloaded inline in
@@ -43,7 +43,7 @@
 # its script pass SILENTLY without one, so its absence is exit 2.
 #
 # The check lives in agent-fabric, the control plane checked out beside
-# this working copy: runtime/github/check-workflows-lint.sh, the same for every
+# this working copy: tools/fabric/github/workflows_lint.py, the same for every
 # project. InterWeave's own copy lived here until then; its
 # suite, test_check_workflows_lint.sh, was the port's oracle. This file prints this
 # help itself, and otherwise only locates the check, names this working
@@ -72,12 +72,13 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tools/gh/fabric-root.sh
 . "$here/../gh/fabric-root.sh"
 fabric="$(interweave_fabric_root "$here")"
-target="$fabric/runtime/github/check-workflows-lint.sh"
+target="$fabric/tools/fabric/github/workflows_lint.py"
 [[ -f "$target" ]] || {
-    echo "check_workflows_lint: agent-fabric not found at $fabric (expected beside this working copy, as projects/agent-fabric, carrying runtime/github/check-workflows-lint.sh); set AGENT_FABRIC_ROOT or update it. See CLAUDE.md §9, agent-fabric beside the checkout." >&2
+    echo "check_workflows_lint: agent-fabric not found at $fabric (expected beside this working copy, as projects/agent-fabric, carrying tools/fabric/github/workflows_lint.py); set AGENT_FABRIC_ROOT or update it. See CLAUDE.md §9, agent-fabric beside the checkout." >&2
     exit 2
 }
 # InterWeave's name for the cache (CI's step sets it) under the fabric's;
 # an explicit AGENT_FABRIC_TOOL_CACHE wins.
 [[ -z "${AGENT_FABRIC_TOOL_CACHE:-}" && -n "${INTERWEAVE_TOOL_CACHE:-}" ]] && export AGENT_FABRIC_TOOL_CACHE="$INTERWEAVE_TOOL_CACHE"
-exec bash "$target" --root "$(cd -- "$here/../.." && pwd)" "$@"
+py="$(interweave_fabric_python check_workflows_lint)" || exit 127
+exec "$py" "$target" --root "$(cd -- "$here/../.." && pwd)" "$@"

@@ -1002,7 +1002,7 @@ worktree shares its `.git` with):
 `tools/gh/pr-review-status.sh`,
 `tools/gh/post-review.sh`, `tools/gh/pr-reply.sh`,
 `tools/gh/pr-sessions.sh`, `tools/gh/pr-gate.sh` and `tools/gh/arm.sh`
-forward to `../agent-fabric/runtime/github/`,
+forward to `../agent-fabric/bin/fabric-pr <verb>`,
 and the `PreToolUse` Agent hook in `.claude/settings.json` runs
 `../agent-fabric/runtime/claude-code/hooks/agent-dispatch-guard.sh`
 (`AGENT_FABRIC_ROOT` overrides the sibling path for the forwarders only
@@ -1021,15 +1021,15 @@ clone has no fabric context and no inbox; the empty status line and that
 orphaned instruction are the two visible signs. `actions-health.sh` and
 `wait-merged.sh` (to `fabric-pr wait-merged`) forward too. So do five
 tools/checks scripts: `run_suite.sh`, `scan_semantic_collisions.sh`,
-`check_guards_are_wired.sh` and `check_workflows_lint.sh` to the fabric's
-runtime/github implementations with InterWeave's root and configuration,
-and `check_actions_pinned_by_sha.sh` to its
+`check_guards_are_wired.sh` and `check_workflows_lint.sh` to their
+`tools/fabric/github` modules with InterWeave's root and configuration,
+and `check_actions_pinned_by_sha.sh` to the fabric's
 `policies/check_actions_pinned_by_sha.py`. All run on the fleet's pinned
 Python, `/usr/local/bin/fabric-python` (`AGENT_FABRIC_PYTHON` overrides
 it), so `cargo xtask checks` needs both. A host without that Python gets
-the fabric's install message and exit 127 from the four runtime/github
-forwarders, and `check_actions_pinned_by_sha.sh`'s own message and exit 2. Their logic and pins live
-in the fabric now: a fix or a pin bump goes there, never into the
+the install message and exit 127 from the four module forwarders, and
+`check_actions_pinned_by_sha.sh`'s own message and exit 2. Their logic
+and pins live in the fabric now: a fix or a pin bump goes there, never into the
 forwarder. In CI the tree-checks and tool-suites jobs check agent-fabric
 out at `.agent-fabric/fabric-ref`. A clone with no
 sibling is not a working development setup; the fabric's `bootstrap.sh`

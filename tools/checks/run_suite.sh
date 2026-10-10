@@ -18,7 +18,7 @@
 # and fails the run.
 #
 # The runner lives in agent-fabric, the control plane checked out beside
-# this working copy: runtime/github/run-suite.sh, the same for every
+# this working copy: tools/fabric/github/run_suite.py, the same for every
 # project (its help and tools/fabric/github/run_suite.py carry the full
 # reasoning, including why a static scan of the suites was abandoned).
 # InterWeave's own copy lived here until then; test_run_suite.sh runs
@@ -39,9 +39,10 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tools/gh/fabric-root.sh
 . "$here/../gh/fabric-root.sh"
 fabric="$(interweave_fabric_root "$here")"
-target="$fabric/runtime/github/run-suite.sh"
+target="$fabric/tools/fabric/github/run_suite.py"
 [[ -f "$target" ]] || {
-    echo "run_suite: agent-fabric not found at $fabric (expected beside this working copy, as projects/agent-fabric, carrying runtime/github/run-suite.sh); set AGENT_FABRIC_ROOT or update it. See CLAUDE.md §9, agent-fabric beside the checkout." >&2
+    echo "run_suite: agent-fabric not found at $fabric (expected beside this working copy, as projects/agent-fabric, carrying tools/fabric/github/run_suite.py); set AGENT_FABRIC_ROOT or update it. See CLAUDE.md §9, agent-fabric beside the checkout." >&2
     exit 2
 }
-exec bash "$target" "$@"
+py="$(interweave_fabric_python run_suite)" || exit 127
+exec "$py" "$target" "$@"

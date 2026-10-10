@@ -135,13 +135,17 @@ out="$(env PATH="$SANDBOX/bin:$SANDBOX/noshell" INTERWEAVE_TOOL_CACHE="$SANDBOX/
     || bad "no shellcheck — wanted 2 naming shellcheck, got $got" "$out"
 mv "$SANDBOX/shellcheck.away" "$SANDBOX/bin/shellcheck"
 
-# The hand-over to agent-fabric's check-workflows-lint.sh: every case above ran the
+# The hand-over to agent-fabric's tools/fabric/github module for check-workflows-lint: every case above ran the
 # real one (CI points AGENT_FABRIC_ROOT at its pinned checkout); these pin
 # what the hand-over itself promises, against a recording stub.
 hcheck() { if eval "$2"; then pass "$1"; else bad "$1" "$hout"; fi; }
 hstub="$(mktemp -d)"
-mkdir -p "$hstub/fabric/runtime/github" "$hstub/fabric/projects/interweave/integration/gh"
-cat > "$hstub/fabric/runtime/github/check-workflows-lint.sh" <<'STUB'
+# The module stub is a shell script; a fake interpreter runs it with bash.
+printf '#!/bin/sh\nexec bash "$@"\n' > "$hstub/fake-python"; chmod +x "$hstub/fake-python"
+export AGENT_FABRIC_PYTHON="$hstub/fake-python"
+mkdir -p "$hstub/fabric/projects/interweave/integration/gh"
+mkdir -p "$(dirname "$hstub/fabric/tools/fabric/github/workflows_lint.py")"
+cat > "$hstub/fabric/tools/fabric/github/workflows_lint.py" <<'STUB'
 #!/usr/bin/env bash
 printf 'config=%s cache=%s' "${NONE-<unset>}" "${AGENT_FABRIC_TOOL_CACHE-<unset>}"; printf ' [%s]' "$@"; echo
 exit 3
