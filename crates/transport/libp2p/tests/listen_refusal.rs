@@ -52,3 +52,29 @@ async fn a_listener_that_cannot_bind_says_why() {
     runtime.listen(held).await.expect("loopback binds");
     runtime.shutdown().await.expect("stops");
 }
+
+/// A listener whose socket the platform refuses is `ListenDenied`, not
+/// a generic transport failure, so the embedded host can tell the person
+/// to grant access. A port below 1024 without the privilege is refused
+/// with EACCES here, the error kind an ungranted INTERNET permission
+/// gives on Android 17 as EPERM. The control is the test above: an
+/// address this host does not hold stays `Transport`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_listener_the_platform_refuses_is_denied() {
+    let runtime = runtime();
+    let privileged: Multiaddr = "/ip4/127.0.0.1/tcp/80".parse().expect("multiaddr");
+    match runtime.listen(privileged).await {
+        Err(SubstrateError::ListenDenied(detail)) => {
+            assert!(
+                detail.contains("(os error "),
+                "the OS's own words: {detail:?}"
+            );
+        }
+        // Run with the privilege (root, or a lowered
+        // `ip_unprivileged_port_start`) the bind succeeds and the case
+        // cannot be reached: said, not passed silently.
+        Ok(bound) => panic!("bound {bound}: this test needs an unprivileged runner"),
+        Err(other) => panic!("a refused socket is ListenDenied: {other:?}"),
+    }
+    runtime.shutdown().await.expect("stops");
+}

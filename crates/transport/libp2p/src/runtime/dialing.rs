@@ -1823,7 +1823,8 @@ pub(super) fn retirable<'a>(
 }
 
 /// Listen commands whose bound address has not arrived yet.
-pub(super) type PendingListens = HashMap<ListenerId, oneshot::Sender<Result<Multiaddr, String>>>;
+pub(super) type PendingListens =
+    HashMap<ListenerId, oneshot::Sender<Result<Multiaddr, super::SubstrateError>>>;
 
 /// Listeners that have bound and are still serving.
 ///
