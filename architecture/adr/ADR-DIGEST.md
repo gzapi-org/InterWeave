@@ -346,6 +346,7 @@ A peer's trust authorizes its protocol, never where this host opens sockets: Aut
 
 ### 0042 — Android protects the portable seed with Keystore wrapping (Accepted)
 - Rules: the Ed25519 secret is stored only as versioned authenticated ciphertext wrapped by an AES-256-GCM key generated in `AndroidKeyStore`, preferring hardware backing; explicit `background-compatible` and `user-presence` unlock policies; **never** silently substitute a different Android-native key algorithm.
+- The IWK1 v1 envelope is the record's format and the platform cipher a seam with a closed failure set (Amendment 2026-10-10): 66-byte authenticated envelope with the PeerId in the associated data and re-derived on unwrap; one owner-only `identity.iwk1` = envelope | PeerId, exclusive-create at provisioning; `SeedCipher` failures `KeyInvalidated | KeyMissing | UserNotAuthenticated | Authentication | Unavailable` (the last decides nothing); unlock → identity or `Unprovisioned | RecoveryRequired | UserNotAuthenticated | Unavailable`, only `RecoveryRequired` entering recovery, none minting; SPIKE-009 reads as closed, its client-side clauses steps 7–8's tests.
 - Keywords: android keystore, aes-gcm wrapping, user-presence, hardware backed
 
 ### 0043 — Concurrent human devices use distinct transport PeerIds (Accepted)

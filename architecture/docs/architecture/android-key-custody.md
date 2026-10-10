@@ -18,6 +18,8 @@ Do not generate a different Android-native signing identity. Instead:
 6. unwrap into process memory only while the Rust transport service needs the identity;
 7. zeroize best-effort temporary secret buffers after import/runtime shutdown.
 
+**The envelope, the record and the seam (ADR-0042 A 2026-10-10; built in `crates/transport/embedded/src/custody.rs`, §20 step 6).** The ciphertext is the IWK1 v1 envelope — `IWK1 (4) | version 0x01 (1) | policy (1) | iv (12) | ciphertext (32) | tag (16)`, 66 bytes, associated data `magic | version | policy | PeerId (UTF-8)`; the header is checked in SPIKE-009's order before any cipher call and never trusted. The record is one owner-only file, `<identity dir>/identity.iwk1` = envelope `|` PeerId (UTF-8, at most 128 bytes), written with an exclusive create at provisioning; a second provisioning is refused. The platform cipher is the `SeedCipher` seam (seal, open; `Send + Sync`, calls may block) with a CLOSED failure set — `KeyInvalidated`, `KeyMissing`, `UserNotAuthenticated`, `Authentication`, `Unavailable(String)` — the Keystore implementing it in the app's platform crate; `seal` deletes the policy's key and generates a new one, so a restore after invalidation never reuses the invalidated alias. Zeroizing the seed is best-effort: the plaintext lives in the Java heap as a byte array for one call, a limit, not a zeroization claim.
+
 The Android Keystore wrapping key is non-exportable; the Ed25519 secret necessarily becomes available to the Rust process after unwrap because rust-libp2p needs the exact portable key material. Therefore this improves at-rest extraction resistance but is **not** an HSM/non-exportable Ed25519 identity claim.
 
 ## Unlock policies
@@ -66,8 +68,9 @@ Standard v1 does **not** use Android Auto Backup, cloud backup, or device-to-dev
 - ciphertext/authentication failure -> fail closed;
 - expected PeerId mismatch after unwrap -> fail closed;
 - user-presence denied/cancelled -> remain offline;
-- hardware-backed capability absent -> use Android Keystore software/TEE availability per platform policy, report protection level diagnostically; do not change PeerId.
+- hardware-backed capability absent -> use Android Keystore software/TEE availability per platform policy, report protection level diagnostically; do not change PeerId;
+- any other platform error (`Unavailable`) -> returned to the caller for its log, decides nothing: unlock answers "try again", never recovery; the record is untouched (ADR-0042 A 2026-10-10).
 
 ## Spike requirement
 
-SPIKE-009 must verify the exact Android Keystore AES-GCM wrapping flow, key invalidation/device-lock behavior, hardware-backed capability reporting, lifecycle restart paths, the `user-presence + stay-reachable` diagnostic, secure recovery-screen/IME/clipboard behavior, backup/device-transfer exclusion, and that rust-libp2p receives exactly the same 32-byte seed used by desktop/recovery fixtures.
+SPIKE-009 closed PASS on 2026-10-09 (`SPIKES.md`) within the bounds its Result records; the sentence below is what it was asked, and what it did not establish — the recovery screen's exfiltration controls, the restart diagnostic, the stage gate's client-side clauses (enters recovery, never mints, restores from the phrase), StrongBox and API 34+ reporting, the D6b re-run; `SPIKES.md` lists all — is carried to §20 steps 7–8's instrumented tests by name (ADR-0042 A 2026-10-10). SPIKE-009 was to verify the exact Android Keystore AES-GCM wrapping flow, key invalidation/device-lock behavior, hardware-backed capability reporting, lifecycle restart paths, the `user-presence + stay-reachable` diagnostic, secure recovery-screen/IME/clipboard behavior, backup/device-transfer exclusion, and that rust-libp2p receives exactly the same 32-byte seed used by desktop/recovery fixtures.
