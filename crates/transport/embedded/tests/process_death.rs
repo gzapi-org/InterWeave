@@ -17,6 +17,7 @@ use std::collections::BTreeSet;
 use std::io::{BufRead as _, BufReader};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
+use std::process::Child;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -78,7 +79,8 @@ fn admin_trust(host: &EmbeddedHost) -> impl interweave_local_client_api::AdminPo
 }
 
 /// The child's side: host the profile, trust the peer, lease the
-/// endpoint, say so, and wait to be killed.
+/// endpoint, say so, and wait to be killed -- or, should the parent die
+/// first, for its stdin to close, so no child outlives the run.
 #[test]
 fn child_hosts_trusts_and_leases_when_asked() {
     let Some(app) = std::env::var_os(CHILD_APP) else {
@@ -92,7 +94,23 @@ fn child_hosts_trusts_and_leases_when_asked() {
         .expect("trusted and persisted");
     lease(&host).expect("the child leases the endpoint");
     println!("SERVING");
-    std::thread::sleep(Duration::from_secs(120));
+    let mut line = String::new();
+    while std::io::stdin()
+        .read_line(&mut line)
+        .is_ok_and(|read| read > 0)
+    {}
+}
+
+/// The child, killed and reaped however the test ends: a panic before
+/// the kill must not leave a host holding a profile whose directory the
+/// unwinding test is about to delete. Its stdin closes with it.
+struct Supervised(Child);
+
+impl Drop for Supervised {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 fn app() -> (tempfile::TempDir, PathBuf) {
@@ -115,24 +133,37 @@ fn a_killed_host_leaves_a_profile_a_fresh_host_starts_on() {
     provision_embedded(&paths).expect("provisioned");
     let peer = trusted_peer().transport_identity().expect("a peer");
 
-    let mut child = Command::new(std::env::current_exe().expect("this test binary"))
-        .args([
-            "child_hosts_trusts_and_leases_when_asked",
-            "--exact",
-            "--nocapture",
-            "--test-threads",
-            "1",
-        ])
-        .env(CHILD_APP, &app)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("the child starts");
-    let mut lines = BufReader::new(child.stdout.take().expect("piped")).lines();
+    let mut child = Supervised(
+        Command::new(std::env::current_exe().expect("this test binary"))
+            .args([
+                "child_hosts_trusts_and_leases_when_asked",
+                "--exact",
+                "--nocapture",
+                "--test-threads",
+                "1",
+            ])
+            .env(CHILD_APP, &app)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the child starts"),
+    );
+    // Read on a thread, so the deadline bounds a child that hangs before
+    // it writes anything, not only one that writes the wrong thing.
+    let stdout = child.0.stdout.take().expect("piped");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        assert!(Instant::now() < deadline, "the child never served");
-        let line = lines.next().expect("the child writes").expect("utf-8");
+        let left = deadline.saturating_duration_since(Instant::now());
+        let line = rx.recv_timeout(left).expect("the child serves within 30 s");
         // `contains`: libtest prints the test's name before the line.
         if line.contains("SERVING") {
             break;
@@ -148,8 +179,8 @@ fn a_killed_host_leaves_a_profile_a_fresh_host_starts_on() {
         "refused while the child lives"
     );
 
-    child.kill().expect("killed");
-    child.wait().expect("reaped");
+    child.0.kill().expect("killed");
+    child.0.wait().expect("reaped");
 
     let host = EmbeddedHost::start(launch(&app)).expect("a fresh host starts after the kill");
     let port = admin_trust(&host);
@@ -161,6 +192,9 @@ fn a_killed_host_leaves_a_profile_a_fresh_host_starts_on() {
         view.allowed.iter().any(|row| row.peer == peer),
         "the trust the dead process set persisted: {view:?}"
     );
+    // Leases are held in memory today, so this cannot fail now: it guards
+    // a lease that is ever made to persist, which a dead holder must not
+    // keep.
     lease(&host).expect("the endpoint the dead process leased is free");
     drop(port);
     host.stop(Duration::from_secs(1)).expect("stops");
