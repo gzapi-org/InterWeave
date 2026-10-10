@@ -29,11 +29,12 @@
 
 use std::io::Read as _;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use interweave_profile_config::runtime::KeyUnlockPolicy;
 use interweave_profile_config::{
-    PersistError, ProfilePaths, create_private_exclusive_within, resolve_owned_private_dir_within,
-    write_private_atomic_within,
+    PersistError, ProfileLock, ProfilePaths, create_private_exclusive_within,
+    resolve_owned_private_dir_within, write_private_atomic_within,
 };
 use interweave_profile_identity::{ProfileIdentity, RecoveryPhrase};
 use interweave_transport_api::TransportIdentity;
@@ -220,6 +221,9 @@ pub enum UnlockRefused {
 pub enum CustodyRefused {
     /// [`provision`] found a record: the profile has an identity.
     AlreadyProvisioned,
+    /// Another holder has the profile -- a running host, or a provision
+    /// or restore in flight -- so nothing was sealed.
+    ProfileLocked,
     /// [`restore`]'s phrase restores another `PeerId` than the one asked.
     OtherIdentity,
     /// [`restore`] was asked for one `PeerId` and the record names another.
@@ -258,6 +262,7 @@ impl std::fmt::Display for CustodyRefused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::AlreadyProvisioned => f.write_str("the profile already has a stored identity"),
+            Self::ProfileLocked => f.write_str("the profile is held by another host or flow"),
             Self::OtherIdentity => f.write_str("the phrase restores another identity"),
             Self::RecordNamesOther => f.write_str("the stored record names another identity"),
             Self::Identity(detail) => write!(f, "the identity is unusable: {detail}"),
@@ -500,19 +505,22 @@ fn seal_record(
 }
 
 /// Store a NEW profile's identity: sealed for `policy` and written
-/// owner-only, refusing if the profile already has a record -- the
-/// filesystem decides, in the operation that installs it, so two first
-/// runs cannot both win.
+/// owner-only under the profile's lock ([`hold`]), refusing if the
+/// profile already has a record. The lock keeps a second first run from
+/// sealing at all; the exclusive create is what refuses a record that
+/// appeared anyway.
 ///
 /// # Errors
-/// [`CustodyRefused::AlreadyProvisioned`] when a record exists; the
-/// others as named.
+/// [`CustodyRefused::AlreadyProvisioned`] when a record exists,
+/// [`CustodyRefused::ProfileLocked`] while another holds the profile;
+/// the others as named.
 pub fn provision(
     paths: &ProfilePaths,
     cipher: &dyn SeedCipher,
     identity: &ProfileIdentity,
     policy: KeyUnlockPolicy,
 ) -> Result<TransportIdentity, CustodyRefused> {
+    let _held = hold(paths)?;
     // Checked before sealing as well, because a seal replaces the
     // policy's wrapping key: sealing first would leave the existing
     // record unopenable even though the write is then refused.
@@ -525,6 +533,21 @@ pub fn provision(
         Err(PersistError::AlreadyExists) => Err(CustodyRefused::AlreadyProvisioned),
         Err(e) => Err(CustodyRefused::Storage(e)),
     }
+}
+
+/// The profile's lock, taken without waiting, for the whole of a flow
+/// that seals. A seal rotates the policy's key, so check-seal-create is
+/// not atomic by itself: two first runs could both pass the check, the
+/// second seal replacing the key the first's record -- the one the
+/// exclusive create keeps -- was sealed under, and BOTH lose. Held, the
+/// second is refused before it seals; and a running host holds it, so
+/// recovery runs with the profile exclusively locked, as the custody
+/// doc requires. A kernel lock: a flow that dies releases it.
+fn hold(paths: &ProfilePaths) -> Result<ProfileLock, CustodyRefused> {
+    ProfileLock::acquire(paths, Duration::ZERO).map_err(|e| match e {
+        PersistError::ProfileLocked { .. } => CustodyRefused::ProfileLocked,
+        e => CustodyRefused::Storage(e),
+    })
 }
 
 /// Whether a record entry exists, whatever it holds.
@@ -540,7 +563,8 @@ fn custody_present(paths: &ProfilePaths) -> Result<bool, CustodyRefused> {
 /// fresh wrapping key -- ONLY if it restores `expected` (ADR-0033's
 /// mandatory expected `PeerId`), and only over a record that names
 /// `expected` or that cannot be read as naming anyone. Where `expected`
-/// comes from is the recovery flow's (step 7).
+/// comes from is the recovery flow's (step 7). Under the profile's
+/// lock, as [`provision`]: refused while a host runs.
 ///
 /// # Errors
 /// [`CustodyRefused::OtherIdentity`] for a phrase restoring another
@@ -556,6 +580,7 @@ pub fn restore(
     if ProfileIdentity::verify_phrase(phrase, expected).is_err() {
         return Err(CustodyRefused::OtherIdentity);
     }
+    let _held = hold(paths)?;
     // A record that parses names its PeerId, and only `expected`'s may be
     // replaced; one refused for its own shape -- the damage recovery
     // exists for -- names nobody. A record that could not be READ is

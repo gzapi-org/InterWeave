@@ -21,11 +21,12 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use interweave_profile_config::runtime::KeyUnlockPolicy;
-use interweave_profile_config::{ProfilePaths, TrustBoundary};
+use interweave_profile_config::{ProfileLock, ProfilePaths, TrustBoundary};
 use interweave_profile_identity::{ProfileIdentity, RecoveryPhrase};
 use interweave_transport_api::TransportIdentity;
 use interweave_transport_embedded::custody::{
@@ -820,4 +821,109 @@ fn a_record_under_a_loosened_directory_is_neither_used_nor_replaced() {
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).expect("chmod");
     assert_eq!(record(&app), before);
     custody::unlock(&app.paths, &cipher).expect("the control unlocks");
+}
+
+/// While another holds the profile -- a running host, or another flow --
+/// provision and restore are refused before they seal, since a seal
+/// rotates the key a live record needs; released, both proceed (the
+/// control).
+#[test]
+fn provision_and_restore_refuse_a_held_profile_before_sealing() {
+    let (mnemonic, frozen) = vectors().remove(0);
+    let app = new_app();
+    let cipher = SoftCipher::default();
+    let held = ProfileLock::acquire(&app.paths, Duration::ZERO).expect("the test holds it");
+    assert!(matches!(
+        custody::provision(
+            &app.paths,
+            &cipher,
+            &identity(&mnemonic),
+            KeyUnlockPolicy::BackgroundCompatible,
+        ),
+        Err(CustodyRefused::ProfileLocked)
+    ));
+    assert!(!custody::custody_file(&app.paths).exists());
+    assert_eq!(cipher.seals(), 0);
+    drop(held);
+
+    custody::provision(
+        &app.paths,
+        &cipher,
+        &identity(&mnemonic),
+        KeyUnlockPolicy::BackgroundCompatible,
+    )
+    .expect("released, it provisions");
+    let before = record(&app);
+    let held = ProfileLock::acquire(&app.paths, Duration::ZERO).expect("the test holds it");
+    let expected = TransportIdentity::parse(frozen).expect("peer");
+    let phrase = RecoveryPhrase::parse(&mnemonic).expect("phrase");
+    assert!(matches!(
+        custody::restore(
+            &app.paths,
+            &cipher,
+            &phrase,
+            &expected,
+            KeyUnlockPolicy::BackgroundCompatible
+        ),
+        Err(CustodyRefused::ProfileLocked)
+    ));
+    assert_eq!(record(&app), before);
+    assert_eq!(cipher.seals(), 1);
+    custody::unlock(&app.paths, &cipher).expect("the record still opens");
+    drop(held);
+    custody::restore(
+        &app.paths,
+        &cipher,
+        &phrase,
+        &expected,
+        KeyUnlockPolicy::BackgroundCompatible,
+    )
+    .expect("released, it restores");
+}
+
+/// Racing first runs for one policy: one stores its identity, every
+/// other is refused without sealing, and the stored record opens -- not
+/// a record sealed under a key a loser's seal replaced.
+#[test]
+fn racing_first_provisions_leave_one_record_that_opens() {
+    const RUNS: usize = 8;
+    let app = new_app();
+    let cipher = SoftCipher::default();
+    let identities: Vec<ProfileIdentity> = (0..RUNS).map(|_| ProfileIdentity::generate()).collect();
+    let start = std::sync::Barrier::new(RUNS);
+    let outcomes: Vec<Result<String, String>> = std::thread::scope(|scope| {
+        let runs: Vec<_> = identities
+            .iter()
+            .map(|id| {
+                let (app, cipher, start) = (&app, &cipher, &start);
+                scope.spawn(move || {
+                    start.wait();
+                    custody::provision(
+                        &app.paths,
+                        cipher,
+                        id,
+                        KeyUnlockPolicy::BackgroundCompatible,
+                    )
+                    .map(|peer| peer.as_str().to_owned())
+                    .map_err(|e| format!("{e:?}"))
+                })
+            })
+            .collect();
+        runs.into_iter()
+            .map(|run| run.join().expect("joined"))
+            .collect()
+    });
+    let won: Vec<&String> = outcomes.iter().filter_map(|o| o.as_ref().ok()).collect();
+    assert_eq!(won.len(), 1, "{outcomes:?}");
+    for lost in outcomes.iter().filter_map(|o| o.as_ref().err()) {
+        assert!(
+            lost == "ProfileLocked" || lost == "AlreadyProvisioned",
+            "{lost}"
+        );
+    }
+    assert_eq!(cipher.seals(), 1, "only the winner sealed");
+    assert_eq!(
+        &peer_of(&custody::unlock(&app.paths, &cipher).expect("the record opens")),
+        won[0]
+    );
 }
