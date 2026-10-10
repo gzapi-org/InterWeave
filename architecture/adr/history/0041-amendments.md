@@ -1,0 +1,9 @@
+# ADR-0041 — amendment history
+
+### Amendment 2026-10-10 — The person's stay-reachable choice is a persisted overlay in the state directory; config.yaml stays the authored default
+
+**Trigger.** Stage 17 steps 2–4 (rust-ui-dev's `feat/android-app-shell`): the Service reads `runtime.android.availability_mode` at start, and the person's switch had three candidate homes — rewriting `config.yaml`, a platform preference with the profile field as its first value, or an overlay as trust has (rust-ui-dev's question of 2026-10-10).
+
+**Ruled.** The overlay, for the reason trust got one (ADR-0028 A 2026-10-07): the daemon and the host never rewrite an authored file, and a platform preference beside a profile field is two sources that disagree exactly where this record's "explicit user opt-in" must be provable. `config.yaml`'s field stays the authored default (foreground-only when absent); the person's act writes an overlay entry in the profile's state directory under the trust boundary, owner-only, the profile's state under ADR-0044; one write path — the embedded host's API on the lifecycle seam, which an administrative IPC method would call if a desktop surface ever had the mode (none does, so no method and no minor now); one effective reading in `profile-config` (overlay, else config) that the Service's start decision, `background_restart_requires_user_authentication` and the diagnostic all use; off removes the entry, absence being the default; the host signals a change and the Service restarts in the new mode. The file's name and the signal are the implementer's on the seam (p2p-network-dev-01 and rust-ui-dev); the note names them when built.
+
+**Not ruled.** A profile that forbids persistent reachability (the config field as a ceiling an operator sets): today it is a default. Raised when a deployment needs it.
