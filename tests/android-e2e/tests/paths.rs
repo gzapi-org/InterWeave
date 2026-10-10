@@ -166,7 +166,7 @@ async fn relayed_and_direct<R: Device, C: Device>(mut r: R, mut c: C) {
     // returned. On a device R's process ends with its case
     // (`src/adb.rs`), so a baseline taken any later could already hold
     // that death, and the check below would look for a second one.
-    let (told_before, gone_before) = (d_told.paths.len(), d_told.gone.len());
+    let gone_before = d_told.gone.len();
     let circuits_before = relay.seen().await.circuits.len();
     let out = run.passed(|| log(&r));
     assert_eq!(
@@ -223,6 +223,11 @@ async fn relayed_and_direct<R: Device, C: Device>(mut r: R, mut c: C) {
             .count()
     };
     let r_circuits_at_death = r_to_d(&relay.seen().await);
+    // Every notice D holds at the death is read first, so the return's
+    // `reconnected` is looked for only among what D is told after it: one
+    // told before the death cannot stand in for the return.
+    d_told.read(&d_session, &r_peer, "").await.expect("D reads");
+    let told_before = d_told.paths.len();
     r.kill();
     r.restart();
     let run = r.run_case(cases::PATHS, &args(&d_peer, PeerPath::Relayed, 3));
