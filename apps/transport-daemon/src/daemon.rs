@@ -149,16 +149,27 @@ pub(crate) async fn run(args: Args) -> Result<(), Refused> {
     unlink(&sockets);
     // Released, never unlinked (ADR-0028, A 2026-09-28).
     drop(lock);
-    server_outcome.map_err(|e| refused("the IPC server")(&e))?;
-    // A RUNTIME THAT ENDED ON ITS OWN is a failure, reported as one, not
-    // a clean shutdown: the daemon stopped serving because nothing was
-    // left to serve.
+    let dropped = stopped_outcome(server_outcome, runtime_ended, stopped)?;
+    tracing::info!(events_dropped = dropped, "stopped");
+    Ok(())
+}
+
+/// What the daemon answers once everything is stopped, in order: the IPC
+/// server's failure; then a RUNTIME THAT ENDED ON ITS OWN, a failure
+/// reported as one and not a clean shutdown, however cleanly its stop
+/// went -- the daemon stopped serving because nothing was left to serve
+/// (`a_runtime_that_ended_is_a_failure_however_its_stop_went`); then the
+/// stop's own result, the dropped-event count.
+fn stopped_outcome(
+    server: Result<Arc<Counters>, tokio::task::JoinError>,
+    runtime_ended: bool,
+    stopped: Result<u64, impl fmt::Debug>,
+) -> Result<u64, Refused> {
+    server.map_err(|e| refused("the IPC server")(&e))?;
     if runtime_ended {
         return Err(Refused("the transport runtime ended on its own".into()));
     }
-    let dropped = stopped.map_err(|e| Refused(format!("the runtime's stop: {e:?}")))?;
-    tracing::info!(events_dropped = dropped, "stopped");
-    Ok(())
+    stopped.map_err(|e| Refused(format!("the runtime's stop: {e:?}")))
 }
 
 /// Load the key, or create it when asked and none exists: never a silent
@@ -397,5 +408,23 @@ discovery:
         assert!(server_outcome.is_none(), "the server did not end");
         server.abort();
         let _ = runtime.stop().await;
+    }
+
+    /// The exit after the stop: a runtime that ended on its own is the
+    /// daemon's failure even when the server and the stop both went
+    /// cleanly -- and, the control, the same clean stop with the runtime
+    /// asked to stop is success.
+    #[test]
+    fn a_runtime_that_ended_is_a_failure_however_its_stop_went() {
+        let clean = || Ok::<_, tokio::task::JoinError>(Arc::new(Counters::default()));
+        let ended = stopped_outcome(clean(), true, Ok::<u64, ()>(0));
+        assert!(
+            matches!(&ended, Err(Refused(text)) if text == "the transport runtime ended on its own"),
+            "{ended:?}"
+        );
+        assert_eq!(
+            stopped_outcome(clean(), false, Ok::<u64, ()>(3)).ok(),
+            Some(3)
+        );
     }
 }
