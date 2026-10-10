@@ -61,10 +61,13 @@
 //! as a gap on PR #250, closed after it), and neither door to it passes
 //! an address on a departed IP (`on_departed_ip`). Two things stay:
 //! - a relayed connection KEPT across the change keeps its handler's
-//!   copy, so it may still send a departed address -- answering the
-//!   remote's CONNECT, or in a retry the new crate orders -- for at most
-//!   the crate's three rounds on that connection: the handler is the
-//!   crate's and nothing outside it can rewrite or stop it;
+//!   copy, so it may still send a departed address for as long as the
+//!   connection lives: in answer to every CONNECT the remote opens on it
+//!   (the crate's handler answers each inbound stream from that copy and
+//!   counts its rounds only for keep-alive), and in a retry the new crate
+//!   orders. The handler is the crate's, and nothing outside it can
+//!   rewrite or stop it; closing such a connection is what would end it,
+//!   and a relayed connection is the peer's path until a punch lands;
 //! - a listener CLOSED while its IP is still held is not offered again
 //!   (`forget_listener`) but stays in the cache until the next network
 //!   change or until newer candidates push it out -- still an address
@@ -515,7 +518,8 @@ impl HolePunchScope {
     /// IPs that joined this host: no longer departed, so an observation
     /// of one is forwarded again.
     pub fn network_added(&mut self, added: &[IpAddr]) {
-        self.departed.retain(|ip| !added.contains(ip));
+        self.departed
+            .retain(|ip| !added.iter().any(|joined| joined.to_canonical() == *ip));
     }
 
     /// Whether `address` is inside the boundary, given the listeners
@@ -647,8 +651,11 @@ impl HolePunchScope {
     /// (`tests/connectivity/tests/dcutr.rs`).
     pub fn network_changed(&mut self, removed: &[IpAddr]) {
         for ip in removed {
-            if !self.departed.contains(ip) {
-                self.departed.push_back(*ip);
+            // Canonical, as the observation side reads its address
+            // (`on_departed_ip`), so a mapped form matches either way.
+            let ip = ip.to_canonical();
+            if !self.departed.contains(&ip) {
+                self.departed.push_back(ip);
             }
         }
         while self.departed.len() > MAX_DEPARTED_IPS {
@@ -1400,6 +1407,13 @@ mod tests {
             .expect("an address");
         observe(&mut s, &mapped);
         assert_eq!(snapshot(&s).candidates_withheld.get("departed"), Some(&2));
+        // And the other way: a departure reported in the mapped form
+        // withholds the plain IPv4.
+        let reported: IpAddr = "::ffff:93.184.216.41".parse().expect("an IP");
+        s.network_changed(&[reported]);
+        let plain: Multiaddr = "/ip4/93.184.216.41/tcp/4001".parse().expect("an address");
+        observe(&mut s, &plain);
+        assert_eq!(snapshot(&s).candidates_withheld.get("departed"), Some(&3));
 
         for n in 0..u32::try_from(MAX_DEPARTED_IPS + 10).expect("small") {
             s.network_changed(&[IpAddr::from(std::net::Ipv4Addr::from(0x0a00_0000 + n))]);
