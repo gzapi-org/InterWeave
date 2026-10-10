@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 
 use interweave_human_android_platform::stand_in;
 use interweave_human_android_platform::{
-    AvailabilityMode, Ended, ServiceHost, ServiceLaunch, StartRefused, ToView, ViewLink,
+    AvailabilityMode, Ended, ServiceHost, ServiceLaunch, StartRefused, StayReachable, ToView,
+    ViewLink,
 };
 use interweave_human_app_core::Update;
 use interweave_human_client_api::{ClientEvent, SessionState};
@@ -276,6 +277,77 @@ fn the_availability_is_the_profiles() {
         Some(AvailabilityMode::StayReachable)
     );
     let _ = service.stop(GRACE);
+}
+
+/// A runtime that ends on its own releases the Service's wait with that
+/// outcome, not as a request; the stop after it releases the profile.
+#[test]
+fn a_runtime_that_ends_on_its_own_is_said_as_its_end() {
+    let app = app();
+    let service = Arc::new(started(&app));
+    let waiting = Arc::clone(&service);
+    let waiter = std::thread::spawn(move || waiting.wait_ended());
+    std::thread::sleep(Duration::from_millis(200));
+    service.end_runtime_for_test();
+    assert_eq!(
+        waiter.join().expect("the waiter returned"),
+        Ended::RuntimeEnded
+    );
+    let stopped = service.stop(GRACE).expect("it ran");
+    assert!(stopped.runtime.is_ok(), "{:?}", stopped.runtime);
+    service
+        .start(launch(&app))
+        .expect("a fresh start after the end");
+    let _ = service.stop(GRACE);
+}
+
+/// The person's Stay-reachable choice moves the effective availability,
+/// and the Service's wait answers the new mode; removing the choice
+/// brings the authored default back (ADR-0041 A 2026-10-10).
+#[test]
+fn the_persons_choice_changes_the_availability_and_says_so() {
+    let app = app();
+    let service = Arc::new(started(&app));
+    assert_eq!(
+        service.availability(),
+        Some(AvailabilityMode::ForegroundOnly)
+    );
+
+    let waiting = Arc::clone(&service);
+    let waiter = std::thread::spawn(move || waiting.wait_ended());
+    std::thread::sleep(Duration::from_millis(200));
+    service
+        .set_availability(Some(StayReachable))
+        .expect("the choice is written");
+    assert_eq!(
+        waiter.join().expect("the waiter returned"),
+        Ended::AvailabilityChanged(AvailabilityMode::StayReachable)
+    );
+    assert_eq!(
+        service.availability(),
+        Some(AvailabilityMode::StayReachable)
+    );
+
+    // The Service restarts in the new mode; removing the choice there
+    // returns to the authored default, said again.
+    let _ = service.stop(GRACE);
+    service.start(launch(&app)).expect("restarted");
+    assert_eq!(
+        service.availability(),
+        Some(AvailabilityMode::StayReachable)
+    );
+    service
+        .set_availability(None)
+        .expect("the choice is removed");
+    assert_eq!(
+        service.wait_ended(),
+        Ended::AvailabilityChanged(AvailabilityMode::ForegroundOnly)
+    );
+    let _ = service.stop(GRACE);
+    assert!(
+        service.set_availability(None).is_err(),
+        "nothing to record a choice against while nothing runs"
+    );
 }
 
 #[test]

@@ -34,6 +34,7 @@ class NetworkService : Service() {
     private val binder = Binder()
     private val main = Handler(Looper.getMainLooper())
     @Volatile private var alive = false
+    @Volatile private var relaying = false
     // UNANSWERED until the start answers: no answer, refusal or mode, is
     // ever this value (review of #255: -1 was also NO_IDENTITY).
     @Volatile private var mode = UNANSWERED
@@ -42,6 +43,11 @@ class NetworkService : Service() {
         super.onCreate()
         alive = true
         channels()
+        startClient()
+    }
+
+    /** Start the client on the lifecycle executor, and act on its answer. */
+    private fun startClient() {
         lifecycle.execute {
             // A start that throws counts as a refusal: it must still end
             // the foreground state below, not leave it to nobody.
@@ -66,7 +72,11 @@ class NetworkService : Service() {
             }
             if (answer >= 0) {
                 Thread({ awaitEnd() }, "interweave-end").start()
-                Thread({ relayNotices() }, "interweave-notices").start()
+                if (!relaying) {
+                    // Once per Service: a restart keeps the one loop.
+                    relaying = true
+                    Thread({ relayNotices() }, "interweave-notices").start()
+                }
             }
         }
     }
@@ -111,9 +121,26 @@ class NetworkService : Service() {
 
     /** The runtime was asked to stop (its admin port, or a stop): end. */
     private fun awaitEnd() {
-        if (Native.waitEnded() == 1 && alive) {
-            Log.i(TAG, "the runtime was asked to stop")
-            stopSelf()
+        val ended = Native.waitEnded()
+        if (!alive) return
+        when (ended) {
+            Native.ENDED_ASKED, Native.ENDED_RUNTIME -> {
+                // Asked to stop, or the runtime ended on its own (not a
+                // request, but the same answer): stop it, release what it
+                // held, and end the started state; a bound Activity then
+                // shows the service as not running.
+                Log.i(TAG, if (ended == Native.ENDED_ASKED) "asked to stop" else "the runtime ended on its own")
+                lifecycle.execute { Native.stop() }
+                main.post { leaveForeground() }
+            }
+            Native.ENDED_AVAILABILITY -> {
+                // The person's Stay-reachable choice moved the mode:
+                // restart in it rather than wait for the next start
+                // (ADR-0041 A 2026-10-10).
+                Log.i(TAG, "the availability changed: restarting")
+                lifecycle.execute { Native.stop() }
+                startClient()
+            }
         }
     }
 
