@@ -27,6 +27,13 @@ pub trait Surface {
 pub trait Opener {
     /// Open `destination`, which is an allowlisted link.
     fn open(&mut self, destination: &str);
+
+    /// Ask the person for the network access the platform withholds: its
+    /// prompt while it still offers one, else the app's settings page
+    /// (human-client-android.md, "Runtime permissions and the
+    /// network-denied state"). Raised only after the root said access is
+    /// withheld ([`ModelSide::network_access`]).
+    fn ask_network_access(&mut self);
 }
 
 /// An action still being carried out, so a second press of the same one
@@ -102,6 +109,12 @@ impl<S: Surface, O: Opener> ModelSide<S, O> {
     /// open, the root can.
     pub fn daemon_seen(&mut self, present: Option<bool>) {
         self.model.daemon_seen(present);
+    }
+
+    /// Whether the platform gives this app network access, as the root
+    /// sees it ([`UiModel::network_access`]).
+    pub fn network_access(&mut self, allowed: bool) {
+        self.model.network_access(allowed);
     }
 
     /// What did not happen since the last call, oldest first.
@@ -273,6 +286,12 @@ impl<S: Surface, O: Opener> ModelSide<S, O> {
                 }
                 return None;
             }
+            Intent::AllowNetwork => {
+                // The platform's to carry out, as a link is: the facade
+                // has no part in it.
+                self.opener.ask_network_access();
+                return None;
+            }
             Intent::Send { key, draft } => Command::Send { key, draft },
             Intent::MarkRead(row) => Command::MarkRead(row),
             Intent::Keep { item, from } => Command::Keep { item, from },
@@ -313,6 +332,7 @@ mod tests {
 
     impl Opener for Nothing {
         fn open(&mut self, _destination: &str) {}
+        fn ask_network_access(&mut self) {}
     }
 
     #[test]

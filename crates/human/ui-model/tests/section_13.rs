@@ -73,7 +73,8 @@ fn reaches_trust_admin_or_recovery(intent: &Intent) -> bool {
         | Intent::Send { .. }
         | Intent::OpenLink(_)
         | Intent::Reopen
-        | Intent::RecheckStorage => false,
+        | Intent::RecheckStorage
+        | Intent::AllowNetwork => false,
         Intent::ReadTrust | Intent::SetTrust(_) => true,
     }
 }
@@ -280,6 +281,7 @@ fn s13_4_trust_is_mutated_only_by_confirming_a_change_that_names_the_exact_peer_
         Intent::Cancel(RowId::from_stored(1)),
         Intent::Reopen,
         Intent::RecheckStorage,
+        Intent::AllowNetwork,
         Intent::OpenLink("https://example.invalid".to_owned()),
     ] {
         assert!(!reaches_trust_admin_or_recovery(&intent));

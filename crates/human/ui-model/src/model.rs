@@ -222,6 +222,12 @@ pub enum SessionNotice {
     StorageDegraded,
     /// Opening was refused; [`Intent::Reopen`] tries again.
     Refused(ErrorClass),
+    /// The platform gives this app no network access: reading and
+    /// keeping go on, as local writes, and nothing is sent
+    /// (human-client-android.md, "Runtime permissions and the
+    /// network-denied state"); [`Intent::AllowNetwork`] asks the person
+    /// for it.
+    NetworkDenied,
 }
 
 impl SessionNotice {
@@ -232,6 +238,7 @@ impl SessionNotice {
             Self::NoDaemon | Self::Reconnecting => None,
             Self::StorageDegraded => Some(Intent::RecheckStorage),
             Self::Refused(_) => Some(Intent::Reopen),
+            Self::NetworkDenied => Some(Intent::AllowNetwork),
         }
     }
 }
@@ -272,6 +279,10 @@ pub enum Intent {
     Reopen,
     /// Re-check storage now.
     RecheckStorage,
+    /// Ask the person for the network access the platform withholds: its
+    /// prompt while it still offers one, else the app's settings. Carried
+    /// out by the platform, never by the facade.
+    AllowNetwork,
     /// Read the trust allowlist: the trust settings opened, or a change's
     /// list was not read back ([`crate::TrustSettings::take_reread`]).
     ReadTrust,
@@ -426,6 +437,8 @@ pub struct UiModel {
     edits: BTreeMap<ConversationKey, Edits>,
     /// No daemon serves the profile, as the root last saw it.
     daemon_absent: bool,
+    /// The platform withholds network access, as the root last saw it.
+    network_denied: bool,
     connectivity: Connectivity,
     /// The path to each peer a direct conversation is with, once the
     /// runtime has said: the route indicator's (`human-client-ui.md` §7).
@@ -460,6 +473,7 @@ impl UiModel {
             composers: BTreeMap::new(),
             edits: BTreeMap::new(),
             daemon_absent: false,
+            network_denied: false,
             connectivity: Connectivity::Unknown,
             paths: HashMap::new(),
             session: SessionState::Reconnecting {
@@ -645,6 +659,21 @@ impl UiModel {
         self.daemon_absent = present == Some(false);
     }
 
+    /// Whether the platform gives this app network access, as the root
+    /// sees it. While it does not, the session's notice is
+    /// [`SessionNotice::NetworkDenied`] whatever the facade reports, and
+    /// no draft is offered for sending; reading and keeping go on.
+    pub fn network_access(&mut self, allowed: bool) {
+        self.network_denied = !allowed;
+    }
+
+    /// Whether a person may send now: false while the platform withholds
+    /// network access, so the view offers no composer.
+    #[must_use]
+    pub const fn sending_offered(&self) -> bool {
+        !self.network_denied
+    }
+
     /// The person edited a draft.
     pub fn draft_changed(&mut self, key: ConversationKey, draft: String) {
         self.edits.entry(key.clone()).or_default().revision += 1;
@@ -813,6 +842,9 @@ impl UiModel {
     /// The send intent for a conversation's draft, if there is one.
     #[must_use]
     pub fn send_draft(&self, key: &ConversationKey) -> Option<Intent> {
+        if !self.sending_offered() {
+            return None;
+        }
         let draft = &self.composers.get(key)?.draft;
         (!draft.is_empty()).then(|| Intent::Send {
             key: key.clone(),
@@ -839,6 +871,11 @@ impl UiModel {
     /// The session state a person can act on, if any.
     #[must_use]
     pub const fn session_notice(&self) -> Option<SessionNotice> {
+        // Before what the facade says: with no network access it can only
+        // ever be re-opening, and the person can act on the cause.
+        if self.network_denied {
+            return Some(SessionNotice::NetworkDenied);
+        }
         match &self.session {
             SessionState::Ready { .. } | SessionState::Closed => None,
             // In place of "reconnecting" only: re-opening cannot succeed

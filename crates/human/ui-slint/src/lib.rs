@@ -1464,6 +1464,7 @@ fn action_text(intent: &Intent) -> Option<&'static str> {
         Intent::Unkeep(_) => UiText::Unkeep,
         Intent::Reopen => UiText::TryAgain,
         Intent::RecheckStorage => UiText::RecheckStorage,
+        Intent::AllowNetwork => UiText::AllowNetwork,
         Intent::MarkRead(_)
         | Intent::Send { .. }
         | Intent::OpenLink(_)
@@ -1499,6 +1500,7 @@ fn notice_text(host: RuntimeHost, notice: SessionNotice) -> String {
         SessionNotice::NoDaemon => placeholder_en::host_text(host, HostText::NotRunning).to_owned(),
         SessionNotice::Reconnecting => placeholder_en::text(UiText::Reconnecting).to_owned(),
         SessionNotice::StorageDegraded => placeholder_en::text(UiText::StorageDegraded).to_owned(),
+        SessionNotice::NetworkDenied => placeholder_en::text(UiText::NetworkDenied).to_owned(),
         SessionNotice::Refused(class) => fill(
             placeholder_en::text(UiText::Refused),
             &[("reason", placeholder_en::error(host, class))],

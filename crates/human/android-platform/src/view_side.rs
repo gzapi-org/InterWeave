@@ -88,6 +88,7 @@ mod tests {
 
     impl Opener for Blank {
         fn open(&mut self, _destination: &str) {}
+        fn ask_network_access(&mut self) {}
     }
 
     fn view_side() -> ViewSide<Blank, Blank> {

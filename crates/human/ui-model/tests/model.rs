@@ -393,6 +393,51 @@ fn no_daemon_is_said_in_place_of_reconnecting_only() {
     assert_eq!(model.session_notice(), Some(SessionNotice::Reconnecting));
 }
 
+/// With no network access the window says so whatever the facade
+/// reports, offers the person the way to allow it, and offers no send;
+/// reading and keeping stay local and go on (human-client-android.md,
+/// "Runtime permissions and the network-denied state").
+#[test]
+fn network_denied_is_said_first_and_offers_no_send() {
+    let mut model = UiModel::new();
+    let k = key(&peer());
+    model.draft_changed(k.clone(), "yes".to_owned());
+    assert!(model.sending_offered(), "the control: access by default");
+    assert!(model.send_draft(&k).is_some(), "the control: a draft sends");
+
+    model.network_access(false);
+    assert_eq!(model.session_notice(), Some(SessionNotice::NetworkDenied));
+    assert_eq!(
+        SessionNotice::NetworkDenied.resolution(),
+        Some(Intent::AllowNetwork)
+    );
+    assert!(!model.sending_offered());
+    assert_eq!(model.send_draft(&k), None, "no send while denied");
+    assert_eq!(model.composer(&k).draft, "yes", "the draft is kept");
+    for state in [
+        SessionState::Ready { endpoint: None },
+        SessionState::StorageDegraded,
+        SessionState::Reconnecting {
+            attempt: 1,
+            next_at: 0,
+        },
+    ] {
+        model.client_event(ClientEvent::Session(state.clone()));
+        assert_eq!(
+            model.session_notice(),
+            Some(SessionNotice::NetworkDenied),
+            "said over {state:?}"
+        );
+    }
+    model.daemon_seen(Some(false));
+    assert_eq!(model.session_notice(), Some(SessionNotice::NetworkDenied));
+
+    model.network_access(true);
+    model.daemon_seen(Some(true));
+    assert_eq!(model.session_notice(), Some(SessionNotice::Reconnecting));
+    assert!(model.send_draft(&k).is_some(), "allowed again, it sends");
+}
+
 #[test]
 fn unknown_connectivity_stays_unknown() {
     let mut model = UiModel::new();

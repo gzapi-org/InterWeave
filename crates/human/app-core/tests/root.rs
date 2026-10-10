@@ -100,13 +100,22 @@ impl Surface for Scripted {
     }
 }
 
-/// Records what it was asked to open.
+/// Records what it was asked to open; a network-access ask as
+/// [`NETWORK_ASKED`].
 #[derive(Clone, Default)]
 struct Opened(Rc<RefCell<Vec<String>>>);
+
+/// What [`Opened`] records for an ask for network access: no link has
+/// this shape.
+const NETWORK_ASKED: &str = "<network access>";
 
 impl Opener for Opened {
     fn open(&mut self, destination: &str) {
         self.0.borrow_mut().push(destination.to_owned());
+    }
+
+    fn ask_network_access(&mut self) {
+        self.0.borrow_mut().push(NETWORK_ASKED.to_owned());
     }
 }
 
@@ -395,6 +404,33 @@ async fn a_link_is_opened_only_when_allowlisted_and_never_reaches_the_facade() {
     alice.pump(0).await;
     assert_eq!(*opened.0.borrow(), ["https://example.org/a"]);
     assert!(alice.commands.is_empty(), "{:?}", alice.commands);
+}
+
+/// The ask for network access is the platform's, as a link is: it reaches
+/// the opener and never the facade, and while access is withheld a draft
+/// is not sent.
+#[tokio::test]
+async fn an_ask_for_network_access_reaches_the_platform_and_never_the_facade() {
+    let (a, b) = FakeNetwork::pair(node(), node());
+    let (mut alice, opened) = Root::new(facade(&a, memory()));
+    alice.pump(0).await;
+    let to_bob = direct(b.peer());
+    alice.model.network_access(false);
+    alice.will(vec![
+        ViewEvent::DraftChanged {
+            key: to_bob.clone(),
+            draft: "typed".to_owned(),
+        },
+        ViewEvent::Intent(Intent::AllowNetwork),
+    ]);
+    alice.pump(1).await;
+    assert_eq!(*opened.0.borrow(), [NETWORK_ASKED]);
+    assert!(alice.commands.is_empty(), "{:?}", alice.commands);
+    assert_eq!(
+        alice.model().send_draft(&to_bob),
+        None,
+        "nothing to send while access is withheld"
+    );
 }
 
 #[tokio::test]

@@ -40,6 +40,10 @@ impl Opener for AndroidOpener {
     fn open(&mut self, _destination: &str) {
         log("a link was pressed: opening links is not built yet on Android");
     }
+
+    fn ask_network_access(&mut self) {
+        log("network access was asked for: the ask is not built yet on Android");
+    }
 }
 
 struct Root {

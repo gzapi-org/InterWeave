@@ -90,6 +90,13 @@ impl Opener for DesktopOpener {
             Err(e) => (self.report)(&format!("a link could not be opened: {}", e.kind())),
         }
     }
+
+    fn ask_network_access(&mut self) {
+        // The desktop root does not report access withheld, so the model
+        // raises no such ask here; if one came, there is no platform
+        // prompt to show, and the report says so.
+        (self.report)("network access was asked for: the desktop has no prompt for it");
+    }
 }
 
 /// The window's side of the root.

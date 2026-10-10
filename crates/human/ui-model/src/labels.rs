@@ -214,6 +214,14 @@ ui_texts! {
     TryAgain => "Try again",
     /// Re-check storage now.
     RecheckStorage => "Check storage again",
+    /// The platform gives this app no network access: the person's
+    /// messages stay readable, and nothing can be sent until it is
+    /// allowed. Android only (human-client-android.md, "Runtime
+    /// permissions and the network-denied state").
+    // PLACEHOLDER (en)
+    NetworkDenied => "Network access is off for this app. You can read your messages, but you cannot send or receive until you allow it.",
+    /// Ask for the network access the platform withholds.
+    AllowNetwork => "Allow network access", // PLACEHOLDER (en)
     /// The control that opens the trust settings, at the foot of the
     /// conversation list: a short button label.
     TrustSettings => "Trust settings",
@@ -286,6 +294,16 @@ ui_texts! {
     NewMessage => "New message",
     /// ANDROID: the notice for more than one. `{count}` is a number.
     NewMessages => "New messages: {count}",
+    /// ANDROID: the one notice a Service set to stay reachable posts
+    /// when it restarts without network access, and then ends: the
+    /// person chose reachability and it no longer holds
+    /// (human-client-android.md, "Runtime permissions and the
+    /// network-denied state", step 5).
+    NetworkOffTitle => "InterWeave cannot stay reachable", // PLACEHOLDER (en)
+    /// ANDROID: its text: what is off, and that opening the app is how to
+    /// turn it back on.
+    // PLACEHOLDER (en)
+    NetworkOffBody => "Network access is off for this app. Open InterWeave to allow it.",
     /// The list a made or possibly made change left to read again could
     /// not be read: it may not show that change. Never says that nothing
     /// changed. Opening the settings again reads it.
