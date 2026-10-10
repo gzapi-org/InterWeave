@@ -75,7 +75,11 @@ pub struct AndroidRuntimeConfig {
     /// [`DEFAULT_ANDROID_ENDPOINT`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<EndpointId>,
-    /// Whether the service keeps the node reachable in the background.
+    /// The AUTHORED default for whether the service keeps the node
+    /// reachable in the background. The person's choice overrides it
+    /// (ADR-0041 A 2026-10-10), so what decides is the effective mode,
+    /// [`effective_availability_mode`](crate::availability_overlay::effective_availability_mode),
+    /// never this field alone.
     #[serde(default)]
     pub availability_mode: AvailabilityMode,
     /// `literal[remoteMessaging]`.
