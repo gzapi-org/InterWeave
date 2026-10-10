@@ -236,7 +236,7 @@ out="$(run "$R")"
 help_out="$(bash "$CHECK" --help 2>/dev/null)"
 [[ "$help_out" == *"passes silently-green"* ]] && ok "--help prints the help block" || bad "--help should print help"
 
-# The hand-over to agent-fabric's check-guards-are-wired.sh: every case above ran the
+# The hand-over to agent-fabric's tools/fabric/github module for check-guards-are-wired: every case above ran the
 # real one (CI points AGENT_FABRIC_ROOT at its pinned checkout); these pin
 # what the hand-over itself promises, against a recording stub.
 hcheck() { if eval "$2"; then ok "$1"; else bad "$1" "$hout"; fi; }
@@ -244,7 +244,7 @@ hstub="$(mktemp -d)"
 # The module stub is a shell script; a fake interpreter runs it with bash.
 printf '#!/bin/sh\nexec bash "$@"\n' > "$hstub/fake-python"; chmod +x "$hstub/fake-python"
 export AGENT_FABRIC_PYTHON="$hstub/fake-python"
-mkdir -p "$hstub/fabric/runtime/github" "$hstub/fabric/projects/interweave/integration/gh"
+mkdir -p "$hstub/fabric/projects/interweave/integration/gh"
 printf '{}' > "$hstub/fabric/projects/interweave/integration/gh/guards.json"
 mkdir -p "$(dirname "$hstub/fabric/tools/fabric/github/guards_wired.py")"
 cat > "$hstub/fabric/tools/fabric/github/guards_wired.py" <<'STUB'

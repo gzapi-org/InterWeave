@@ -13,7 +13,7 @@
 # LOGIN (<host>/<login>/..., bin/fabric-whoami) — so it refused the
 # opener's own PR as "another session's" (architect-cto-01 on #114). The
 # fabric's copy knows both prefixes. The call goes straight to
-# runtime/github/: InterWeave injects no settings (fabric-coordinator).
+# `fabric-pr sessions`: InterWeave injects no settings (fabric-coordinator).
 #
 # This file only locates that script and hands it the arguments and
 # stdin untouched. It refuses, loudly, when agent-fabric is not beside

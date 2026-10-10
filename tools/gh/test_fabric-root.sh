@@ -66,6 +66,24 @@ echo "fabric-root: outside a repository, two above the script"
 mkdir -p "$SANDBOX/plain/tools/gh"
 [[ "$(root_from "$SANDBOX/plain/tools/gh")" == "$SANDBOX/agent-fabric" ]] && pass "no repository: <dir>/../.. stands for the top level" || fail "no repo" "$(root_from "$SANDBOX/plain/tools/gh")"
 
+echo "fabric-root: without the pinned Python, each module hand-over says how to install it"
+# Every forwarder that runs a tools/fabric/github module gets its Python from
+# interweave_fabric_python. A fabric carrying each module and its rules, and
+# AGENT_FABRIC_PYTHON at a file that does not exist: the install message, and
+# the exit the forwarder documents (127; actions-health 2, "could not find out").
+NOPY="$SANDBOX/nopy-fabric"; mkdir -p "$NOPY/tools/fabric/github" "$NOPY/projects/interweave/integration/gh"
+for m in actions_health run_suite guards_wired workflows_lint semantic_collisions; do : > "$NOPY/tools/fabric/github/$m.py"; done
+printf '{}' > "$NOPY/projects/interweave/integration/gh/guards.json"
+printf '{}' > "$NOPY/projects/interweave/integration/gh/collisions.json"
+REPO="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
+for case in tools/gh/actions-health.sh:2 tools/checks/run_suite.sh:127 tools/checks/check_guards_are_wired.sh:127 \
+            tools/checks/check_workflows_lint.sh:127 tools/checks/scan_semantic_collisions.sh:127; do
+    f="${case%%:*}"; want="${case##*:}"
+    out="$(AGENT_FABRIC_ROOT="$NOPY" AGENT_FABRIC_PYTHON="$SANDBOX/no-such-python" bash "$REPO/$f" x 2>&1 </dev/null)"; rc=$?
+    [[ $rc -eq $want && "$out" == *"pinned Python is not installed at $SANDBOX/no-such-python"* ]] \
+        && pass "$f: exit $want, the install message" || fail "$f without the Python (want $want)" "rc=$rc $out"
+done
+
 echo
 if (( failures )); then echo "test_fabric-root: $failures assertion(s) FAILED"; exit 1; fi
 echo "test_fabric-root: OK — all assertions passed."

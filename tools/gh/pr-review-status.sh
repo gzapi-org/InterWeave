@@ -16,7 +16,7 @@
 # ADR-020): that copy counted
 # only the retired reviewer, so the review class's reviews read as "head
 # reviewed? : no" (#113). `--automated-only` and the decline paths went
-# with it. The call goes straight to runtime/github/ — InterWeave injects
+# with it. The call goes straight to `fabric-pr review-status` — InterWeave injects
 # no settings, so it has no integration entry (fabric-coordinator's
 # ruling); the day it needs one, this file is repointed in that change.
 #

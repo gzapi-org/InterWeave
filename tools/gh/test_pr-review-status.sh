@@ -3,7 +3,7 @@
 # Copyright 2026 Andrea Benetton
 # tools/gh/test_pr-review-status.sh
 #
-# Behavioural tests for pr-review-status.sh — the hand-off to agent-fabric's copy (runtime/github/).
+# Behavioural tests for pr-review-status.sh — the hand-off to agent-fabric's `fabric-pr review-status`.
 # The script itself decides nothing about PRs; what it promises is:
 #
 #   1. it runs agent-fabric's bin/fabric-pr
@@ -38,9 +38,8 @@ fail() { echo "  FAIL $1"; [[ -n "${2:-}" ]] && printf '%s\n' "$2" | sed 's/^/  
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
 
-# A fake agent-fabric whose pr-review-status.sh records argv and stdin verbatim.
+# A fake agent-fabric whose fabric-pr records argv and stdin verbatim.
 FABRIC="$SANDBOX/agent-fabric"
-mkdir -p "$FABRIC/runtime/github"
 STUB="$FABRIC/bin/fabric-pr"
 mkdir -p "$(dirname "$FABRIC/bin/fabric-pr")"
 cat > "$STUB" <<'STUB'
@@ -68,7 +67,7 @@ mapfile -d '' argv < "$RECORD.argv"
 
 echo "resolution: AGENT_FABRIC_ROOT wins; otherwise the sibling of this working copy"
 RECORD="$SANDBOX/rec2"
-SIB="$SANDBOX/projects"; mkdir -p "$SIB/interweave/tools/gh" "$SIB/agent-fabric/runtime/github"
+SIB="$SANDBOX/projects"; mkdir -p "$SIB/interweave/tools/gh"
 cp "$UNDER_TEST" "$SCRIPT_DIR/fabric-root.sh" "$SIB/interweave/tools/gh/"
 git -C "$SIB/interweave" init -q 2>/dev/null
 mkdir -p "$(dirname "$SIB/agent-fabric/bin/fabric-pr")"
