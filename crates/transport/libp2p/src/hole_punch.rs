@@ -115,7 +115,9 @@ use libp2p::swarm::{
 };
 use libp2p::{Multiaddr, PeerId};
 
-use interweave_transport_runtime::reachability::{CandidateRefusal, is_punchable_address};
+use interweave_transport_runtime::reachability::{
+    CandidateRefusal, is_probeable_address, is_punchable_address,
+};
 
 /// How long an attempt may stay in flight before it is counted failed
 /// and its permit returned: the crate's handler bounds each stream at
@@ -297,6 +299,9 @@ pub struct HolePunchCounters {
     /// candidates right now -- the `offered` set's size, which follows
     /// the bound listeners.
     pub listeners_offered: usize,
+    /// Observed candidates the wrapper holds to give back to the crate
+    /// after a network change -- the public ones survive it.
+    pub observed_kept: usize,
     /// Candidates the far end named that were removed from a punch dial
     /// by the boundary, by [`CandidateRefusal::label`] -- apart from
     /// `refused_by_class`, which is the attempt-level outcome when
@@ -341,14 +346,21 @@ impl HolePunchCounterHandle {
 struct Attempt {
     peer: PeerId,
     started_ms: u64,
-    /// Given up by a network change: the crate's rounds on the relayed
-    /// connection run on regardless -- the wrapper cannot stop them --
-    /// so the attempt keeps its per-peer permit until the crate's
-    /// outcome, the relayed close or the horizon ends it, and whatever
-    /// that is, it ends `Abandoned` with no cooldown -- a landed punch
-    /// excepted, which is `Succeeded`.
+    /// Given up by a network change: the handler on the relayed
+    /// connection runs on -- the wrapper cannot stop it -- while the
+    /// crate's punch-dial retries end with the crate the change replaced,
+    /// so the attempt keeps its per-peer permit until an outcome the new
+    /// crate reports for the handler's round, the relayed close or the
+    /// horizon ends it, and whatever that is, it ends `Abandoned` with no
+    /// cooldown -- a landed punch excepted, which is `Succeeded`.
     abandoned: bool,
 }
+
+/// The crate's own candidate cache, libp2p-dcutr 0.15.0's
+/// `LruCache::new(20)`: the most the wrapper's record of observed
+/// candidates (`HolePunchScope::observed`) holds, so a replay gives the
+/// rebuilt crate no more than the old one could have held.
+const CRATE_CANDIDATE_CACHE: usize = 20;
 
 /// The pinned DCUtR behaviour under §13's attempt lifecycle.
 pub struct HolePunchScope {
@@ -385,6 +397,13 @@ pub struct HolePunchScope {
     /// `a_bound_listener_is_offered_once_and_forgotten_with_its_listener`
     /// pins the set.
     offered: HashSet<Multiaddr>,
+    /// The candidates a peer's Identify observed that the boundary let
+    /// through to the crate, most recent last, at most
+    /// [`CRATE_CANDIDATE_CACHE`] -- the crate's own cache, which a network
+    /// change discards with the crate, kept here so the public ones can
+    /// be given back (`network_changed`).
+    /// `a_public_observation_is_kept_across_a_network_change` pins it.
+    observed: VecDeque<Multiaddr>,
     /// Direct connections whose establishment ended an attempt -- the
     /// punched ones -- until the runtime reads them (`take_punched`),
     /// which it does for every connection it is told of. Bounded by
@@ -438,6 +457,7 @@ impl HolePunchScope {
             events: VecDeque::new(),
             counters: HolePunchCounterHandle::default(),
             offered: HashSet::new(),
+            observed: VecDeque::new(),
             punched: HashSet::new(),
             stabilising: HashMap::new(),
             punch_dials: HashMap::new(),
@@ -536,12 +556,13 @@ impl HolePunchScope {
     /// rebuilt after a network change). Every attempt in flight is
     /// GIVEN UP -- its CONNECT carried addresses of a network this
     /// profile has left, and a failure it would now meet is not the far
-    /// end's -- but not removed: the crate's rounds on the relayed
-    /// connection run on -- the runtime closes only a connection that ran
-    /// from an IP the change took off the host, and a relayed one records
-    /// no local IP of its own, so it stands unless its relay's connection
-    /// is closed under it -- and the wrapper cannot stop a handler, so
-    /// the attempt keeps its per-peer
+    /// end's -- but not removed: the handler on the relayed connection
+    /// runs on -- the runtime closes only a connection that ran from an
+    /// IP the change took off the host, and a relayed one records no
+    /// local IP of its own, so it stands unless its relay's connection is
+    /// closed under it -- and the wrapper cannot stop a handler, though
+    /// the crate's punch-dial retries end with the crate replaced below,
+    /// so the attempt keeps its per-peer
     /// permit (a second circuit from the peer is `PeerBusy`, as
     /// before) and ends `Abandoned`, with no cooldown, when the crate's
     /// outcome, the relayed close or the horizon reaches it -- or
@@ -560,9 +581,10 @@ impl HolePunchScope {
     /// LRU of twenty) and puts the whole cache in every new relayed
     /// handler's CONNECT, so an address of the network this profile left
     /// was still sent after its IP departed. A fresh instance holds none;
-    /// the runtime re-offers the listeners still bound, and a peer's
-    /// Identify reports the observed addresses again -- an observation made
-    /// on the old network named a mapping that is gone. What the old
+    /// the runtime re-offers the listeners still bound, and the PUBLIC
+    /// observations the wrapper kept are given back (below) -- a NAT's
+    /// mapping is not named by an interface leaving -- while a private
+    /// one goes and is learned again if it still holds. What the old
     /// instance held is either rebuilt or not needed: the direct
     /// connections it was told of are told again from `direct`, since its
     /// close `expect`s each one; its handlers on open relayed connections
@@ -587,6 +609,23 @@ impl HolePunchScope {
                 );
             }
         }
+        // A PUBLIC OBSERVATION IS GIVEN BACK. What a peer's Identify saw
+        // this profile on from outside is a NAT's mapping, which a local
+        // interface leaving does not name -- the AutoNAT client keeps its
+        // observations across a change for the same reason -- and without
+        // it every CONNECT until Identify's next round would carry no
+        // address a peer outside the LAN could reach, and the failed
+        // punch would cool the peer down. A private or special-use
+        // observation names an interface, so it goes with the change and
+        // is learned again if it still holds.
+        self.observed
+            .retain(|address| is_probeable_address(&address.to_string()));
+        for address in &self.observed {
+            fresh.on_swarm_event(FromSwarm::NewExternalAddrCandidate(
+                libp2p::swarm::behaviour::NewExternalAddrCandidate { addr: address },
+            ));
+        }
+        self.counters.lock().observed_kept = self.observed.len();
         self.inner = fresh;
         for attempt in self.attempts.values_mut() {
             attempt.abandoned = true;
@@ -1010,6 +1049,14 @@ impl NetworkBehaviour for HolePunchScope {
                 }
             }
         }
+        if let FromSwarm::NewExternalAddrCandidate(candidate) = &event {
+            self.observed.retain(|known| known != candidate.addr);
+            self.observed.push_back(candidate.addr.clone());
+            if self.observed.len() > CRATE_CANDIDATE_CACHE {
+                self.observed.pop_front();
+            }
+            self.counters.lock().observed_kept = self.observed.len();
+        }
         self.inner.on_swarm_event(event);
     }
 
@@ -1171,6 +1218,38 @@ mod tests {
             cause: None,
             remaining_established: 0,
         })
+    }
+
+    /// The wrapper keeps the candidates a peer's Identify observed that it
+    /// let through to the crate -- at most the crate's own cache -- and a
+    /// network change keeps the PUBLIC ones to give back to the rebuilt
+    /// crate, while a private one goes with the interface it named.
+    #[test]
+    fn a_public_observation_is_kept_across_a_network_change() {
+        let mut s = scope(HolePunchBudgets::default());
+        let observe = |s: &mut HolePunchScope, address: &Multiaddr| {
+            s.on_swarm_event(FromSwarm::NewExternalAddrCandidate(
+                libp2p::swarm::behaviour::NewExternalAddrCandidate { addr: address },
+            ));
+        };
+        let kept = |s: &HolePunchScope| s.counter_handle().snapshot().observed_kept;
+        // A private observation passes the boundary beside a private
+        // listener of its family.
+        let private_listener: Multiaddr = "/ip4/192.168.7.1/tcp/4001".parse().expect("an address");
+        let _ = s.offer_listener(&private_listener);
+        observe(&mut s, &direct());
+        observe(&mut s, &lan());
+        assert_eq!(kept(&s), 2, "both reached the crate");
+        s.network_changed();
+        assert_eq!(kept(&s), 1, "the public one is kept, the private one goes");
+        // Bounded by the crate's cache: the oldest leave first.
+        for port in 0..30u16 {
+            let address: Multiaddr = format!("/ip4/93.184.216.34/tcp/{}", 5000 + port)
+                .parse()
+                .expect("an address");
+            observe(&mut s, &address);
+        }
+        assert_eq!(kept(&s), CRATE_CANDIDATE_CACHE);
     }
 
     /// The crate built again by a network change is told of the direct
