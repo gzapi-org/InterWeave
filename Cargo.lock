@@ -3258,7 +3258,6 @@ name = "interweave-desktop-e2e-tests"
 version = "0.0.0"
 dependencies = [
  "atspi",
- "futures",
  "futures-util",
  "interweave-human-chat-protocol",
  "interweave-human-store",
@@ -3268,13 +3267,8 @@ dependencies = [
  "interweave-ipc-protocol",
  "interweave-local-client-api",
  "interweave-local-client-conformance-tests",
- "interweave-profile-config",
- "interweave-profile-identity",
  "interweave-test-support",
  "interweave-transport-api",
- "interweave-transport-libp2p",
- "interweave-transport-runtime",
- "interweave-trust-api",
  "jsonschema",
  "libp2p",
  "rusqlite",
@@ -3766,8 +3760,18 @@ name = "interweave-test-support"
 version = "0.0.0"
 dependencies = [
  "futures",
+ "interweave-ipc-client",
+ "interweave-local-client-api",
+ "interweave-profile-config",
+ "interweave-profile-identity",
+ "interweave-transport-api",
+ "interweave-transport-libp2p",
+ "interweave-transport-runtime",
+ "interweave-trust-api",
+ "jsonschema",
  "libp2p",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 
