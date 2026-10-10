@@ -108,7 +108,7 @@ pub(super) fn handle_command(
                     listens.insert(id, reply);
                 }
                 Err(e) => {
-                    let _ = reply.send(Err(e.to_string()));
+                    let _ = reply.send(Err(error_chain(&e)));
                 }
             }
         }
@@ -1417,7 +1417,7 @@ pub(super) fn translate(
         }
         Libp2pSwarmEvent::ListenerError { listener_id, error } => {
             if let Some(reply) = listens.remove(&listener_id) {
-                let _ = reply.send(Err(error.to_string()));
+                let _ = reply.send(Err(error_chain(&error)));
             }
             None
         }
@@ -1680,6 +1680,26 @@ pub(super) fn dispatch_held(
             let _ = reply.send(Err(DirectError::PeerUnreachable));
         }
     }
+}
+
+/// `e` and every source under it, joined by `: `, the empty ones left
+/// out. libp2p's `TransportError::Other` displays as NOTHING and keeps
+/// its cause as the source, so a listener that failed to bind --
+/// `socket`, `bind` or `listen` refusing, all synchronous in
+/// `libp2p-tcp`'s `listen_on` -- answered an empty string, and a device
+/// run reported `transport: ` with no cause (2026-10-10). Pinned by
+/// `a_listener_that_cannot_bind_says_why` (`tests/listen_refusal.rs`).
+fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut parts = Vec::new();
+    let mut next = Some(e);
+    while let Some(err) = next {
+        let text = err.to_string();
+        if !text.is_empty() {
+            parts.push(text);
+        }
+        next = err.source();
+    }
+    parts.join(": ")
 }
 
 #[cfg(test)]
