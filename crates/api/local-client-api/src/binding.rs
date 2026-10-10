@@ -39,6 +39,7 @@ pub struct SessionRequest {
     client_kind: String,
     endpoint: Option<EndpointId>,
     capabilities: BTreeSet<DataCapability>,
+    route_notices: bool,
 }
 
 impl SessionRequest {
@@ -69,7 +70,28 @@ impl SessionRequest {
             client_kind,
             endpoint,
             capabilities,
+            route_notices: true,
         })
+    }
+
+    /// The same request for a session that takes no `PeerPathChanged`
+    /// without a `previous` -- no route-begin and no return notice
+    /// (`LOCAL-CLIENT.md` item 12, A 2026-10-09). A binding opens such a
+    /// session for a client that cannot read that shape, the IPC server
+    /// for a connection below minor 2.4: owed none, it is owed every path
+    /// change as it was before them, `previous` included, rather than a
+    /// change merged into a notice the binding then has to drop.
+    #[must_use]
+    pub const fn without_route_notices(mut self) -> Self {
+        self.route_notices = false;
+        self
+    }
+
+    /// Whether the session takes route-begin and return notices (true
+    /// unless [`Self::without_route_notices`] said otherwise).
+    #[must_use]
+    pub const fn route_notices(&self) -> bool {
+        self.route_notices
     }
 
     /// The local label, a hygiene label and never authority.

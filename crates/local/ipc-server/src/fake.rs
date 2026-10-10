@@ -41,6 +41,8 @@ pub(crate) struct Script {
     pub(crate) leased: BTreeSet<String>,
     /// Sessions closed.
     pub(crate) closed: usize,
+    /// Each opened session's `SessionRequest::route_notices`, in order.
+    pub(crate) route_notices: Vec<bool>,
     /// When set, `send_direct` waits for this before answering.
     pub(crate) hold_send: Option<Arc<tokio::sync::Notify>>,
     /// The status `admin.status` reports.
@@ -101,6 +103,7 @@ impl DataSessionBinding for Fake {
     type Session = FakeSession;
 
     async fn open(&self, request: SessionRequest) -> Result<FakeSession, TransportError> {
+        self.script().route_notices.push(request.route_notices());
         let lease = match request.endpoint() {
             None => None,
             Some(endpoint) => {

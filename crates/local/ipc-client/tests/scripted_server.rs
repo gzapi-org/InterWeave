@@ -952,7 +952,7 @@ async fn a_path_change_reads_back_as_the_sessions_notice() {
         matches!(
             taken.as_slice(),
             [SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
-                previous: PeerPath::Relayed,
+                previous: Some(PeerPath::Relayed),
                 current: PeerPath::Direct,
                 observed_at: 7,
                 reason_class,
@@ -987,6 +987,30 @@ async fn a_path_change_on_a_2_0_connection_is_the_servers_violation() {
 }
 
 /// A session opened with events, the server selecting IPC 2.`minor`.
+/// A request that declines route notices asks for the minor below them,
+/// so the server opens it without them; the control asks for the
+/// client's maximum (#245 re-review N5).
+#[tokio::test]
+async fn a_request_declining_route_notices_proposes_the_minor_below_them() {
+    use interweave_ipc_protocol::{IPC_MAX_MINOR, ROUTE_NOTICE_SINCE_MINOR};
+    for (declines, minor) in [(false, IPC_MAX_MINOR), (true, ROUTE_NOTICE_SINCE_MINOR - 1)] {
+        let script = Script::new();
+        let request = if declines {
+            request().without_route_notices()
+        } else {
+            request()
+        };
+        let (_, proposed) = tokio::join!(script.binding.open(request), async {
+            let mut server = Server::accept(&script.listener).await;
+            let Some(Frame::Hello(hello)) = server.read().await else {
+                panic!("a hello first");
+            };
+            hello.ipc_version.minor
+        });
+        assert_eq!(proposed, minor, "declines: {declines}");
+    }
+}
+
 async fn opened_at(script: &Script, minor: u64) -> (interweave_ipc_client::IpcSession, Server) {
     let (session, server) = tokio::join!(script.binding.open(request()), async {
         let mut server = Server::accept(&script.listener).await;

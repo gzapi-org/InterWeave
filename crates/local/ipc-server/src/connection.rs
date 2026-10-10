@@ -32,8 +32,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use interweave_ipc_protocol::{
-    Admission, AuthorityDomain, Close, Event, EventType, Frame, IpcVersion, Refusal, Request,
-    RequestFrame, RequestId, ResponseFrame, ServerState,
+    Admission, AuthorityDomain, Close, Event, Frame, IpcVersion, Refusal, Request, RequestFrame,
+    RequestId, ResponseFrame, ServerState, available_to,
 };
 use interweave_local_client_api::{
     AdminBinding, AdminPort, DataCapability, DataSessionBinding, DataSessionPort,
@@ -524,12 +524,13 @@ where
         // catch it here.
         debug_assert!(events.len() <= reserved, "the port returned more than max");
         for event in events {
-            // Minors are additive: a type introduced above the negotiated
+            // Minors are additive: a type -- or a shape, the path notice
+            // with no `previous` (2.4) -- introduced above the negotiated
             // minor is not this client's to see, so it is skipped without
             // a number -- a gap would read as a loss (#151 re-review, 2).
             // Judged BEFORE the shape, so a refused one of such a type
             // leaves no gap either (#184 review F4).
-            if EventType::of_session(&event).is_some_and(|kind| !kind.available_at(self.version)) {
+            if !available_to(&event, self.version) {
                 continue;
             }
             // One the protocol refuses takes a number, so it leaves a gap

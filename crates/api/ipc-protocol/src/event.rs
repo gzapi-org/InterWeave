@@ -38,8 +38,36 @@ pub enum Event {
     /// `peer.disconnected`: to every connection with `events`.
     PeerDisconnected(PeerDisconnected),
     /// `peer.path_changed` (2.1): to every connection with `events` that
-    /// has a route to the peer.
+    /// has a route to the peer; without `previous` from 2.4 only
+    /// ([`available_to`]).
     PathChanged(PathChanged),
+}
+
+/// The minor from which a `peer.path_changed` with no `previous` -- a
+/// route's begin, a routed peer's reconnect -- is sent (`ipc.path-changed`
+/// 1.1.0, A 2026-10-09). Below it the connection is sent nothing at those
+/// moments, so a client that knows only 1.0.0's shape never meets one it
+/// cannot decode.
+pub const ROUTE_NOTICE_SINCE_MINOR: u64 = 4;
+
+/// Whether a connection at `version` may be sent `event` at all: its
+/// catalogue type's minor ([`EventType::available_at`]), and for a path
+/// notice with no `previous`, [`ROUTE_NOTICE_SINCE_MINOR`]. ONE predicate,
+/// judged before the shape, so a skipped event takes no sequence number
+/// whichever rule skipped it (the server's send loop).
+#[must_use]
+pub fn available_to(event: &SessionEvent, version: IpcVersion) -> bool {
+    let Some(kind) = EventType::of_session(event) else {
+        // The runtime's state is the `server_state` frame's, on every minor.
+        return true;
+    };
+    if !kind.available_at(version) {
+        return false;
+    }
+    !matches!(
+        event,
+        SessionEvent::Local(LocalSessionEvent::PeerPathChanged { previous: None, .. })
+    ) || version.minor >= ROUTE_NOTICE_SINCE_MINOR
 }
 
 /// The event types, as the catalogue names them.
@@ -230,7 +258,14 @@ pub struct PathChanged {
     /// Which peer.
     pub peer: TransportIdentity,
     /// The path before: the pending notice's, when one was replaced.
-    pub previous: PeerPath,
+    /// ABSENT, never `null`, when the route began or the routed peer
+    /// connected again (1.1.0, sent from [`ROUTE_NOTICE_SINCE_MINOR`]).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::frame::absent_or"
+    )]
+    pub previous: Option<PeerPath>,
     /// The path now.
     pub current: PeerPath,
     /// The runtime's class for the change, 1..=128 characters.
@@ -321,8 +356,10 @@ impl Event {
     /// catalogue, one introduced above `version`'s minor (LOCAL-IPC.md
     /// §Version negotiation: a type is accepted only at or above the
     /// minor that introduced it), a missing `data`, or data not of the
-    /// type's shape: the catalogue is closed, so each is the server's
-    /// fault (`an_event_above_the_negotiated_minor_is_the_servers_violation`).
+    /// type's shape -- a `peer.path_changed` without `previous` below
+    /// [`ROUTE_NOTICE_SINCE_MINOR`] included: the catalogue is closed, so
+    /// each is the server's fault
+    /// (`an_event_above_the_negotiated_minor_is_the_servers_violation`).
     pub fn decode(
         event_type: &str,
         data: Option<&RawValue>,
@@ -340,7 +377,13 @@ impl Event {
             EventType::MessageBroadcast => Self::MessageBroadcast(typed(data)?),
             EventType::LeaseChanged => Self::LeaseChanged(typed(data)?),
             EventType::PeerDisconnected => Self::PeerDisconnected(typed(data)?),
-            EventType::PathChanged => Self::PathChanged(typed(data)?),
+            EventType::PathChanged => {
+                let changed: PathChanged = typed(data)?;
+                if changed.previous.is_none() && version.minor < ROUTE_NOTICE_SINCE_MINOR {
+                    return Err(TransportError::ProtocolViolation);
+                }
+                Self::PathChanged(changed)
+            }
         })
     }
 
@@ -504,7 +547,7 @@ mod tests {
             }),
             SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
                 peer: peer(),
-                previous: interweave_transport_api::PeerPath::Relayed,
+                previous: Some(interweave_transport_api::PeerPath::Relayed),
                 current: interweave_transport_api::PeerPath::Direct,
                 reason_class: "dcutr".into(),
                 observed_at: 9,

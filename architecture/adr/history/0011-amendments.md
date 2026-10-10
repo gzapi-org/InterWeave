@@ -229,3 +229,52 @@ still refuses a peer in backoff, except once for a non-empty address
 with no record — the retry schedule and the gate's peer backoff are two
 tables, and both had to yield. The limit of "once" was then measured (01a0f6d9): a peer in dial-failure backoff, two Manual admissions of one untried address before either settles, both admitted — the snapshot the gate decides against carries no in-flight marker. Ruled as a recorded limit, not a defect: the pending-dial ceiling bounds what is in flight (`connection_manager.rs::the_pending_ceiling_holds_against_concurrent_admissions`), dials already admitted are not recalled, the first failure to settle writes the record that refuses later admissions (a success clears the backoff), and marking the attempt in the snapshot is a design change not ruled; the body reads "once per settled attempt". The code and its tests are p2p-network-dev's, in
 the composition-hardening pull request this note lands on.
+
+
+### Amendment 2026-10-09 — A circuit that never reached its relay is the relay hop's: ranked down, no peer backoff, the route kept, the retry due when the relay connects
+
+p2p-network-dev's #245 (the first live relayed path between two daemons)
+measured, after a daemon restart, a `/p2p-circuit` dial failing before
+the relay was reached — the relay client had parked the circuit request
+on its own dial to the relay, that dial was refused on the Swarm's peer
+condition because the reservation's connection to the same relay was
+still in flight, and the request was dropped unsent — while the relay
+connected milliseconds later (rust-ui-dev's measurement, j6). Scored by
+`record_failure` as an address failure, the circuit was the peer's only
+route, so the peer went into punitive dial-failure backoff and every
+`DialPeer` for the next thirty seconds was refused.
+
+§Address-scoped failure gains a paragraph recording what the code on
+#247 (`record_relay_hop_unreached`, `relay_reached`, `unreached_relay`)
+does: a circuit that fails AT ITS RELAY HOP — this node holds no direct
+connection to the relay, or the relay client answered with its canceled
+request — says nothing about the destination and is settled as the relay
+hop's, a third class beside the address failure and the identity
+mismatch: the address is ranked down (so a circuit through a relay that
+is up sorts ahead), the peer is not backed off, the route is kept. What
+qualifies is a transport failure read off the connection table at
+settlement: with no direct connection to the relay, any transport failure
+is the hop's; with the relay connected, only the client's canceled
+request is; a failure the relay or the destination answered, and any
+non-transport error, `WrongPeerId` included, is scored as before
+(`unreached_relay`'s two shapes, pinned by its unit test). The reconnect is scheduled at the ordinary delay and
+marked as waiting on the relay; the first direct connection to that
+relay makes every retry waiting on it due now (a claimed entry is left
+alone), and a direct connection to the relay established after the dial
+was admitted and before its failure settled makes it due at once — the
+measured restart race, where the relay's `ConnectionEstablished` is
+delivered before the circuit's failure. A relay already up when the dial
+was admitted keeps the ordinary delay: a cancel that persists with the
+relay up would otherwise loop. Once per failure, the gate still judging
+the dial; a relay that stays down costs the ordinary cadence. The first
+draft of this note recorded a gap — the retry made due only by a
+connection establishing after the settlement — and a wider trigger
+("a relay already connected at settlement"); before the note landed,
+p2p-network-dev closed the gap on #247 with the narrower trigger above
+(dbf94001, 5444a3f2: `OpenConnection.since_ms` against the ticket's
+admission) and tightened both shapes to `DialError::Transport`, so a
+`WrongPeerId` keeps its quarantine whatever the connection table says
+(5444a3f2); the body reads as built. The paragraph is the second retry trigger beside
+"A new address makes the retry due" (A 2026-10-01), and the body says
+so. The code and its tests are p2p-network-dev's, on the pull request
+this note lands on; the raised finding was its blind review's F4.

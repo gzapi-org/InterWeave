@@ -207,7 +207,7 @@ Returns normalized peer diagnostics: identity, trust state, connection state, pr
 
 ```text
 PeerConnected { peer, path: direct | relayed, observed_at }
-PeerPathChanged { peer, previous: direct | relayed, current: direct | relayed, reason_class, observed_at }
+PeerPathChanged { peer, previous: direct | relayed, current: direct | relayed, reason_class, observed_at }   -- the runtime's event always carries previous; the SESSION projection (LOCAL-CLIENT.md section 2, ipc/path-changed 1.1.0) omits it when the route begins (reason_class route_established) or a routed peer connects again (reconnected), a route being a session notion, A 2026-10-09
 PeerDisconnected { peer, reason_class, observed_at }
 ConnectivityChanged { summary: ConnectivitySummary }
 MessageReceived {
