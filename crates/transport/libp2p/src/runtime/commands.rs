@@ -109,7 +109,13 @@ pub(super) fn handle_command(
                     listens.insert(id, reply);
                 }
                 Err(e) => {
-                    let _ = reply.send(Err(listen_refusal(&e, Some(&address))));
+                    // The OS is asked only when a socket call failed:
+                    // `MultiaddrNotSupported` is refused before any
+                    // socket, the profile's fault, never the platform's
+                    // (`an_address_libp2p_cannot_listen_on_is_not_denied`).
+                    let probe = matches!(e, libp2p::core::transport::TransportError::Other(_))
+                        .then_some(&address);
+                    let _ = reply.send(Err(listen_refusal(&e, probe)));
                 }
             }
         }
@@ -1700,6 +1706,7 @@ pub(super) fn dispatch_held(
 /// 13, .. }))) })`). So a refused TCP listen also asks the OS the same
 /// question -- a plain bind of `address`'s socket address, released at
 /// once -- and a `PermissionDenied` there is the platform's answer too.
+/// `address` is `None` where no socket call failed, so nothing is asked.
 /// Pinned by `a_listener_the_platform_refuses_is_denied`
 /// (`tests/listen_refusal.rs`, real sockets) and the unit tests beside
 /// this.
@@ -1819,6 +1826,21 @@ mod listen_refusal_tests {
             TransportError::Other(std::io::Error::from(std::io::ErrorKind::AddrNotAvailable));
         assert!(matches!(
             listen_refusal(&not_held, Some(&udp())),
+            SubstrateError::Transport(_)
+        ));
+    }
+
+    /// `MultiaddrNotSupported` is refused before any socket -- the
+    /// profile's fault -- so the caller passes no address to probe, and
+    /// a port the OS would refuse does not make it `ListenDenied`. Fed as
+    /// the Listen arm feeds it, through the same `matches!`.
+    #[test]
+    fn an_address_libp2p_cannot_listen_on_is_not_denied() {
+        let ws: libp2p::Multiaddr = "/ip4/127.0.0.1/tcp/80/ws".parse().expect("multiaddr");
+        let e: TransportError<std::io::Error> = TransportError::MultiaddrNotSupported(ws.clone());
+        let probe = matches!(e, TransportError::Other(_)).then_some(&ws);
+        assert!(matches!(
+            listen_refusal(&e, probe),
             SubstrateError::Transport(_)
         ));
     }

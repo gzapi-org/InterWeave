@@ -78,3 +78,20 @@ async fn a_listener_the_platform_refuses_is_denied() {
     }
     runtime.shutdown().await.expect("stops");
 }
+
+/// An address the TCP transport cannot listen on at all is refused before
+/// any socket -- the profile's fault, not the platform's -- so it stays
+/// `Transport` even on a port the OS would refuse this process. The
+/// control is `a_listener_the_platform_refuses_is_denied`: the same port,
+/// a plain TCP address, is `ListenDenied`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_address_libp2p_cannot_listen_on_is_not_denied() {
+    let runtime = runtime();
+    let unsupported: Multiaddr = "/ip4/127.0.0.1/tcp/80/ws".parse().expect("multiaddr");
+    let refused = runtime.listen(unsupported).await;
+    assert!(
+        matches!(refused, Err(SubstrateError::Transport(_))),
+        "the profile's address, not the platform: {refused:?}"
+    );
+    runtime.shutdown().await.expect("stops");
+}
