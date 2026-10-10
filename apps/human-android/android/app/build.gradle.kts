@@ -7,8 +7,11 @@ plugins {
 
 // The repository's root, where the native library's cargo build runs.
 val workspace: File = rootDir.resolve("../../..").canonicalFile
-// Where that build's libraries land, one directory per ABI, for packaging.
-val rustJniLibs: Provider<Directory> = layout.buildDirectory.dir("rustJniLibs")
+// Where that build's libraries land, one directory per variant and in it
+// one per ABI: a variant's own, so a release APK can never package the
+// debug library, which carries the stand-in identity (review of #255).
+fun rustJniLibs(variant: String): Provider<Directory> =
+    layout.buildDirectory.dir("rustJniLibs/${variant.lowercase()}")
 
 android {
     namespace = "org.interweave.human"
@@ -33,8 +36,10 @@ android {
     }
 
     sourceSets {
-        getByName("main") {
-            jniLibs.directories += rustJniLibs.get().asFile.path
+        listOf("Debug", "Release").forEach { variant ->
+            getByName(variant.lowercase()) {
+                jniLibs.directories += rustJniLibs(variant).get().asFile.path
+            }
         }
     }
 
@@ -75,7 +80,7 @@ listOf("Debug", "Release").forEach { variant ->
         commandLine(
             listOf(
                 "cargo", "ndk", "-t", "arm64-v8a", "-P", "30",
-                "-o", rustJniLibs.get().asFile.path,
+                "-o", rustJniLibs(variant).get().asFile.path,
                 "build", "--locked", "-p", "interweave-human-android",
             ) + profile,
         )
