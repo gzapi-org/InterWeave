@@ -109,7 +109,11 @@ impl FacadeLoop {
                             // A view attaching to a facade that has run
                             // for a while missed the events that set its
                             // state: they went out with no view to take
-                            // them. It is told the state as it is now.
+                            // them. It is told the session, connectivity
+                            // and counters as they are now. NOT a peer's
+                            // path: the facade keeps no current path to
+                            // replay, so a route indicator shows nothing
+                            // until the path next changes (carried).
                             for update in snapshot(&side) {
                                 hub.update(update);
                             }
