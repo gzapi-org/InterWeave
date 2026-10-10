@@ -113,7 +113,8 @@ impl FacadeLoop {
                             // and counters as they are now. NOT a peer's
                             // path: the facade keeps no current path to
                             // replay, so a route indicator shows nothing
-                            // until the path next changes (carried).
+                            // until the path next changes (carried to the
+                            // Android client's batch 2).
                             for update in snapshot(&side) {
                                 hub.update(update);
                             }
