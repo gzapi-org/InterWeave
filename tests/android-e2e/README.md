@@ -6,6 +6,7 @@ The Android side sits behind a seam, the `Device` trait in `src/lib.rs`. Until a
 
 - `tests/stand_in.rs`: the stand-in itself. A kill releases the profile, and the restart serves the same `PeerId`.
 - `tests/paths.rs`: a relayed and a direct path to a desktop daemon, both directions, the route-begin notices on each side, and the relayed side's process death and return. Its module note lists, by name, what it does not prove.
+- `tests/human_chat.rs` (rust-ui-dev's cases): HumanChatV2 through each side's client, store and ui-model on the same topology, both directions on both paths, plain and `;ce=br`, the captured payloads validated against the envelope schema and the route indicator read at the ui-model. Its module note lists what it does not prove.
 
 A run against the stand-in is evidence about the embedded composition, never about a phone.
 

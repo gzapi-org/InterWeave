@@ -29,8 +29,8 @@
 //! the relay and D listen on 127.0.0.1; any NAT; more than one
 //! host; a host whose interfaces carry a public address, where D could
 //! learn a direct address for R -- the case assumes this host's interface
-//! addresses are private. The `HumanChatV2` cases are to ride this seam in
-//! their own file.
+//! addresses are private. The `HumanChatV2` cases ride the same seam and
+//! topology in `human_chat.rs`.
 
 #![cfg(target_os = "linux")]
 #![allow(clippy::expect_used, clippy::panic)]
@@ -92,9 +92,11 @@ async fn send_until_routed(
         if sent.is_ok() {
             return;
         }
-        // The refusal itself is not printed: the daemon's log beside it
-        // says why, and the error is the client-api's, generic over every
-        // binding this case could be handed.
+        // The refusal itself is not printed: CodeQL traces it, through a
+        // helper generic over every binding, to the in-memory fake's
+        // trusted peer (alert 75). What failing here means is the message:
+        // no route by the deadline. D's log, shown with it, explains D's
+        // side only -- a stand-in's refusal is in no log this case keeps.
         assert!(
             tokio::time::Instant::now() < deadline,
             "no route to {} within the deadline\n{}",
