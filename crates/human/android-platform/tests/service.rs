@@ -19,6 +19,7 @@ use interweave_human_android_platform::{
 use interweave_human_app_core::Update;
 use interweave_human_client_api::{ClientEvent, SessionState};
 use interweave_profile_config::{ProfilePaths, TrustBoundary};
+use interweave_transport_embedded::EmbeddedRefused;
 
 const PROFILE: &str = "human";
 const WAIT: Duration = Duration::from_secs(20);
@@ -204,6 +205,35 @@ fn a_profile_no_endpoint_admits_is_refused_and_leaves_nothing_running() {
     std::fs::write(paths.config_file(), &bad).expect("write");
 
     let service = ServiceHost::new();
+    assert_eq!(
+        service.start(launch(&app)),
+        Err(StartRefused::NoHumanEndpoint)
+    );
+    assert!(!service.is_running());
+    // The endpoint the Android profile names for its service decides,
+    // not the first entry open to the kind; one that names no enabled
+    // entry is refused by the profile's own validation, before the kind.
+    let elsewhere = good.replace(
+        "deployment: embedded-android",
+        "deployment: embedded-android\n  android:\n    endpoint: phone",
+    );
+    assert_ne!(
+        good, elsewhere,
+        "the control: the document names the deployment"
+    );
+    std::fs::write(paths.config_file(), &elsewhere).expect("write");
+    assert!(matches!(
+        service.start(launch(&app)),
+        Err(StartRefused::Runtime(EmbeddedRefused::ProfileInvalid(_)))
+    ));
+    // Nor does another entry open to the kind stand in for it.
+    let other = bad.replace(
+        "channels:",
+        "    - id: other\n      enabled: true\n      advertise: false\n      \
+         allowed_client_kinds: [human-client]\nchannels:",
+    );
+    assert_ne!(bad, other, "the control: the second entry was added");
+    std::fs::write(paths.config_file(), &other).expect("write");
     assert_eq!(
         service.start(launch(&app)),
         Err(StartRefused::NoHumanEndpoint)

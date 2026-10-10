@@ -49,7 +49,9 @@ pub struct ServiceLaunch {
 pub enum StartRefused {
     /// The embedded runtime refused, naming why.
     Runtime(EmbeddedRefused),
-    /// No enabled endpoint in the profile allows this client's kind.
+    /// The endpoint the profile names for the Android service
+    /// (`runtime.android.endpoint`) is not an enabled entry open to this
+    /// client's kind.
     NoHumanEndpoint,
     /// The message store needs recovery: corrupt, from a newer version,
     /// or its migration failed. It was not renamed, moved or deleted.
@@ -181,18 +183,18 @@ impl ServiceHost {
                 );
             }
         };
-        let Some(endpoint) = config
-            .endpoints
-            .entries
-            .iter()
-            .find(|e| {
-                e.enabled
+        // The endpoint the Android profile names for its service
+        // (`runtime.android.endpoint`, `human` by default), which must be
+        // an enabled entry open to this client's kind.
+        let Some(endpoint) = config.runtime.android.endpoint().filter(|id| {
+            config.endpoints.entries.iter().any(|e| {
+                &e.id == id
+                    && e.enabled
                     && e.allowed_client_kinds
                         .iter()
                         .any(|k| k.as_str() == CLIENT_KIND)
             })
-            .map(|e| e.id.clone())
-        else {
+        }) else {
             return refuse(host, StartRefused::NoHumanEndpoint);
         };
         let store = match HumanStore::open_profile(host.paths(), StoreOptions::default()) {
