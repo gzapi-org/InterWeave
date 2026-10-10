@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use interweave_human_android_platform::stand_in;
 use interweave_human_android_platform::{
-    Ended, ServiceHost, ServiceLaunch, StartRefused, ToView, ViewLink,
+    AvailabilityMode, Ended, ServiceHost, ServiceLaunch, StartRefused, ToView, ViewLink,
 };
 use interweave_human_app_core::Update;
 use interweave_human_client_api::{ClientEvent, SessionState};
@@ -244,6 +244,37 @@ fn a_profile_no_endpoint_admits_is_refused_and_leaves_nothing_running() {
     service
         .start(launch(&app))
         .expect("starts once the profile admits it");
+    let _ = service.stop(GRACE);
+}
+
+/// The availability the Service decides on: the stand-in profile's
+/// default, foreground-only (ADR-0041: staying reachable is an opt-in),
+/// and the profile's own field when it says stay-reachable.
+#[test]
+fn the_availability_is_the_profiles() {
+    let app = app();
+    let service = started(&app);
+    assert_eq!(
+        service.availability(),
+        Some(AvailabilityMode::ForegroundOnly)
+    );
+    let _ = service.stop(GRACE);
+    assert_eq!(service.availability(), None, "nothing runs");
+
+    let paths = ProfilePaths::resolve_embedded(PROFILE, TrustBoundary::new(&app.dir).expect("b"))
+        .expect("paths");
+    let text = std::fs::read_to_string(paths.config_file()).expect("read");
+    let reachable = text.replace(
+        "deployment: embedded-android",
+        "deployment: embedded-android\n  android:\n    availability_mode: stay-reachable",
+    );
+    assert_ne!(text, reachable, "the control: the document was changed");
+    std::fs::write(paths.config_file(), reachable).expect("write");
+    service.start(launch(&app)).expect("started");
+    assert_eq!(
+        service.availability(),
+        Some(AvailabilityMode::StayReachable)
+    );
     let _ = service.stop(GRACE);
 }
 

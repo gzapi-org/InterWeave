@@ -21,4 +21,6 @@ pub mod stand_in;
 
 pub use hub::{Hub, TO_VIEW, ToView, ViewLink};
 pub use notice::Notices;
-pub use service::{CLIENT_KIND, Ended, ServiceHost, ServiceLaunch, StartRefused, Stopped};
+pub use service::{
+    AvailabilityMode, CLIENT_KIND, Ended, ServiceHost, ServiceLaunch, StartRefused, Stopped,
+};

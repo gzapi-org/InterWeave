@@ -16,6 +16,7 @@ use interweave_human_app_core::FacadeSide;
 use interweave_human_store::{HumanStore, StoreError, StoreOptions};
 use interweave_human_transport_client::{ClientConfig, TransportClient};
 use interweave_profile_config::ProfileConfig;
+pub use interweave_profile_config::runtime::AvailabilityMode;
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::MAX_PAYLOAD_BYTES;
 use interweave_transport_embedded::{EmbeddedHost, EmbeddedLaunch, EmbeddedRefused, NetworkView};
@@ -92,6 +93,7 @@ pub struct Stopped {
 struct Running {
     host: Arc<EmbeddedHost>,
     facade: FacadeLoop,
+    availability: AvailabilityMode,
 }
 
 /// The process's one client host.
@@ -227,8 +229,20 @@ impl ServiceHost {
         *running = Some(Running {
             host: Arc::new(host),
             facade,
+            availability: config.runtime.android.availability_mode,
         });
         Ok(())
+    }
+
+    /// The profile's availability while the client runs: whether the
+    /// Service keeps it reachable as a foreground service (ADR-0041).
+    /// Read from the profile's `runtime.android.availability_mode`, the
+    /// authored default; the person's choice is a persisted overlay over
+    /// it (ADR-0041 A 2026-10-10), read here once the embedded host
+    /// exposes the effective mode. `None` while nothing runs.
+    #[must_use]
+    pub fn availability(&self) -> Option<AvailabilityMode> {
+        self.lock().as_ref().map(|r| r.availability)
     }
 
     /// Wait until the client is asked to stop. Returns at once when
@@ -263,7 +277,7 @@ impl ServiceHost {
     /// BLOCKS; call it off the Service's main thread.
     #[must_use]
     pub fn stop(&self, grace: Duration) -> Option<Stopped> {
-        let Running { host, facade } = self.lock().take()?;
+        let Running { host, facade, .. } = self.lock().take()?;
         // Releases a thread parked in `wait_ended` with this request: it
         // holds the host until it returns.
         let _ = host.request_shutdown(grace);
