@@ -263,3 +263,44 @@ fn a_request_and_a_runtime_end_win_over_a_changed_mode() {
     }
     host.stop(Duration::from_secs(1)).expect("stops");
 }
+
+/// A write that fails answers an error and leaves the host answering
+/// what is on disk: a failed turn-on leaves the authored mode and
+/// releases no waiter, a failed turn-off leaves the choice in place.
+/// The state directory made read-only (still owner-only, so it is judged
+/// private) refuses the temporary file and the unlink alike.
+#[test]
+fn a_failed_write_leaves_the_mode_on_disk() {
+    let app = provisioned(AvailabilityMode::ForegroundOnly);
+    let host = Arc::new(start(&app).expect("starts"));
+    let state = app.paths.state_dir().to_path_buf();
+    let read_only = |mode: u32| {
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(mode)).expect("chmod");
+    };
+
+    read_only(0o500);
+    let refused = host.set_availability(Some(StayReachable));
+    read_only(0o700);
+    assert!(refused.is_err(), "the write was refused: {refused:?}");
+    assert!(!path_for(&app.paths).exists(), "nothing was written");
+    assert_eq!(host.availability(), AvailabilityMode::ForegroundOnly);
+    let (rx, thread) = waiter(&host);
+    assert!(rx.recv_timeout(QUIET).is_err(), "no change was published");
+    released_by_request(&host, &rx);
+    thread.join().expect("the waiter ends");
+    stop(host);
+
+    // Started stay-reachable, a refused turn-off keeps the choice.
+    let host = start(&app).expect("starts");
+    host.set_availability(Some(StayReachable)).expect("on");
+    host.stop(Duration::from_secs(1)).expect("stops");
+    let host = start(&app).expect("starts again");
+    assert_eq!(host.availability(), AvailabilityMode::StayReachable);
+    read_only(0o500);
+    let refused = host.set_availability(None);
+    read_only(0o700);
+    assert!(refused.is_err(), "the removal was refused: {refused:?}");
+    assert!(path_for(&app.paths).exists(), "the choice is still there");
+    assert_eq!(host.availability(), AvailabilityMode::StayReachable);
+    host.stop(Duration::from_secs(1)).expect("stops");
+}
