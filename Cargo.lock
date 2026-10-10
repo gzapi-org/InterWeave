@@ -3257,6 +3257,7 @@ dependencies = [
 name = "interweave-android-e2e-tests"
 version = "0.0.0"
 dependencies = [
+ "interweave-android-e2e-cases",
  "interweave-human-chat-protocol",
  "interweave-human-store",
  "interweave-human-transport-client",
