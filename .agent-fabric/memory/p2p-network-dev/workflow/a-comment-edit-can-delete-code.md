@@ -5,7 +5,7 @@ topic: "a-comment-edit-can-delete-code"
 description: "A python exact-replace of a comment block whose anchor included the next code line dropped that line (#180, notices.end()); run the tests after any \"comment-only\" edit"
 tier: 1
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

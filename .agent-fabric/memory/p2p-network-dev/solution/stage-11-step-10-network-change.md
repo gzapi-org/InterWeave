@@ -5,7 +5,7 @@ topic: "stage-11-step-10-network-change"
 description: "Step 10 (network change) -- PR #104 MERGED 2026-09-19 on the owner's word after 3 rounds; Stage 11's list is complete (no step 11), the stage stays open on SPIKE-004 phase B; Stage 12 (composition root) awaits the owner's word; the last…"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

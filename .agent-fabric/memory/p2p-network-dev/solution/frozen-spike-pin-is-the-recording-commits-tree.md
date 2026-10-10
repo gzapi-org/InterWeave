@@ -5,7 +5,7 @@ topic: "frozen-spike-pin-is-the-recording-commits-tree"
 description: "a spike's first-party pin is the tree its last recorded RUN built against — the recording commit's parent — never a date"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

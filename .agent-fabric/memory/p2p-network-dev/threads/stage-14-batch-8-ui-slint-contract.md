@@ -5,7 +5,7 @@ topic: "stage-14-batch-8-ui-slint-contract"
 description: "Stage 14 batch 8 (ui-slint) surface agreed with rust-ui-dev-01 (relay seqs 10823, 10826, 10849); slint graph measurements; replay for full text"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

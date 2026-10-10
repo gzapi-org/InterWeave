@@ -5,7 +5,7 @@ topic: "pr137-landed-carry-to-batch-3"
 description: "Stage 12 batch 2 (#137) merged fe4da3d1 on 2026-09-28; the P3s and risks it carries into batch 3"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

@@ -5,7 +5,7 @@ topic: "ci-command-line-is-read-by-guards"
 description: "Before changing a ci.yml run: line in InterWeave, run the full cargo xtask checks — other guards grep the workflow's command lines"
 tier: 1
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "devex-tooling"
     host: "develop-qzapp"

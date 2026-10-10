@@ -5,7 +5,7 @@ topic: "stage-15-r1-r2-shapes"
 description: "Stage 15 work for rust-ui-dev (jobs j10, j11): the shapes architect-cto gave for R1a ServerState, R1b PeerPathChanged, R2 admin.trust.*, and ready(); replay relay seq 11166 for the full text"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

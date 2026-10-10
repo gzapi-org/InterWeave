@@ -5,7 +5,7 @@ topic: "pr166-armed-carry-to-batch-5"
 description: "Stage 14 first PR #166 (batches 2+4+3) armed 2026-10-02 at 7fcd8a85; three P3s and one risk carried to the batch-5 PR"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

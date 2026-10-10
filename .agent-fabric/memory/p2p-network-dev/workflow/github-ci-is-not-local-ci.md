@@ -5,7 +5,7 @@ topic: "github-ci-is-not-local-ci"
 description: "Local `cargo xtask ci` passing does not mean GitHub's rust job passes: the Fedora host has system -devel libraries the Ubuntu runner lacks; read the PR's checks after EVERY push"
 tier: 1
 knowledge_scope: full
-distilled_at: "2026-10-05"
+distilled_at: "2026-10-10"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"
