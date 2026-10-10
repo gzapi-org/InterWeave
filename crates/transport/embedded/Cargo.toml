@@ -29,6 +29,9 @@ workspace = true
 interweave-local-client-api = { path = "../../api/local-client-api" }
 interweave-profile-config = { path = "../../config/profile-config" }
 interweave-profile-identity = { path = "../../identity/profile-identity" }
+# The PeerId a custody record names (`custody`), as the neutral type the
+# identity's own checks take.
+interweave-transport-api = { path = "../../api/transport-api" }
 interweave-transport-composition = { path = "../composition" }
 # The host's own runtime: the Service thread is not async, and the
 # binding's futures need an executor the Service can drive them on.
@@ -41,6 +44,15 @@ tracing = { workspace = true }
 # A runtime of the test's own, to drop a host inside its async context.
 tokio = { workspace = true, features = ["rt"] }
 tempfile = { workspace = true }
+# The software AES-256-GCM `SeedCipher` the custody tests seal and open
+# with: the algorithm the Keystore's key runs, at the version already in
+# the graph (libp2p's). Without its default `getrandom`, which would pull
+# a second `rand_core` into the lockfile: the keys and IVs are the
+# workspace's `rand`.
+aes-gcm = { version = "0.10.3", default-features = false, features = ["aes", "alloc"] }
+rand = { workspace = true }
+# The frozen identity vectors the custody round trip is held to.
+serde_json = { workspace = true }
 # The test's copy of the daemon's filter construction, the oracle
 # `log_admits` is held to (`tests/log_filter.rs`).
 tracing-subscriber = { workspace = true }

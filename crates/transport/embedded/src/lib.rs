@@ -24,6 +24,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+pub mod custody;
+
 use interweave_local_client_api::{AdminBinding as _, AdminCapability, AdminPort as _};
 use interweave_profile_config::sections::LogLevel;
 use interweave_profile_config::trust_overlay::OverlayError;
@@ -49,8 +51,9 @@ pub struct EmbeddedLaunch {
     /// start.
     pub profile: String,
     /// The profile's identity, supplied rather than read: on a device it
-    /// is the Keystore-unwrapped key (plan §20 step 6), which never
-    /// rests in a file the host could read.
+    /// is what [`custody::unlock`] gave back from the Keystore-wrapped
+    /// record (plan §20 step 6), so the seed never rests in a file the
+    /// host could read.
     pub identity: ProfileIdentity,
 }
 

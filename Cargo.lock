@@ -3860,10 +3860,14 @@ dependencies = [
 name = "interweave-transport-embedded"
 version = "0.0.0"
 dependencies = [
+ "aes-gcm",
  "interweave-local-client-api",
  "interweave-profile-config",
  "interweave-profile-identity",
+ "interweave-transport-api",
  "interweave-transport-composition",
+ "rand 0.10.3",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",
