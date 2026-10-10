@@ -1050,7 +1050,9 @@ impl View {
                 window.set_header_id(full_id(key).into());
                 let path = model.path(key).map(placeholder_en::path);
                 window.set_header_path(path.unwrap_or_default().into());
-                window.set_composer_enabled(true);
+                // No composer while nothing can be sent: without network
+                // access, reading and keeping go on and sending does not.
+                window.set_composer_enabled(model.sending_offered());
                 let composer = model.composer(key);
                 // Never over typing the model has not had yet -- an edit
                 // still queued (review F4, rust-ui-dev F2), which, never

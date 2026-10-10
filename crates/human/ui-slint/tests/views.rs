@@ -594,6 +594,50 @@ fn the_not_running_notice_names_the_runtime_the_view_runs_on() {
     }
 }
 
+/// Without network access the window says so, its one action is a
+/// button that asks for it, the open conversation stays readable, and no
+/// composer is offered (human-client-android.md, "Runtime permissions and
+/// the network-denied state").
+#[test]
+fn network_denied_shows_its_action_and_no_composer() {
+    i_slint_backend_testing::init_no_event_loop();
+    let mut view = View::new(RuntimeHost::Embedded).expect("a window");
+    view.window().show().expect("shown");
+    let mut model = UiModel::new();
+    let alice = peer();
+    model.received(received(1, &alice, "hello alice"));
+    open(&mut view, &mut model, &direct(&alice));
+    the(&view, text(UiText::Composer));
+    assert!(
+        labelled(&view, text(UiText::AllowNetwork)).is_empty(),
+        "the control: no action while access is held"
+    );
+
+    model.network_access(false);
+    view.render(&model);
+    the(&view, text(UiText::NetworkDenied));
+    assert!(
+        labelled(&view, text(UiText::Composer)).is_empty(),
+        "no composer while nothing can be sent"
+    );
+    assert!(
+        all(&view).iter().any(|e| e
+            .accessible_label()
+            .is_some_and(|l| l.contains("hello alice"))),
+        "the message stays readable"
+    );
+    let allow = the(&view, text(UiText::AllowNetwork));
+    assert_eq!(
+        allow.accessible_role(),
+        Some(i_slint_backend_testing::AccessibleRole::Button)
+    );
+    allow.invoke_accessible_default_action();
+    assert!(
+        intents(&mut view, &mut model).contains(&Intent::AllowNetwork),
+        "the action asks for network access"
+    );
+}
+
 /// A window as narrow as a phone shows one pane at a time (plan section
 /// 20): the list, then the conversation a person opens, with a control
 /// back to the list; at the desktop's width, the control, both panes
