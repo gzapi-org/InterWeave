@@ -3248,8 +3248,10 @@ version = "0.0.0"
 dependencies = [
  "interweave-local-client-api",
  "interweave-local-client-fake",
+ "interweave-profile-config",
  "interweave-transport-api",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 
