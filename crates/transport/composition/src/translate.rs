@@ -60,6 +60,11 @@ pub enum CompositionError {
     /// would re-enable every endpoint the operator disabled (ADR-0028 A
     /// 2026-10-11).
     EndpointOverlay(interweave_profile_config::endpoint_overlay::EndpointOverlayError),
+    /// `config.yaml` validates, and with the endpoint overlay composed
+    /// over it does not: a rule reading the enabled set refuses what the
+    /// overlay enables or disables. The runtime does not start, and the
+    /// overlay is named as the cause.
+    EndpointOverlayConflicts(Vec<ConfigError>),
 }
 
 impl core::fmt::Display for CompositionError {
@@ -84,6 +89,19 @@ impl core::fmt::Display for CompositionError {
             ),
             Self::TrustOverlay(e) => write!(f, "{e}"),
             Self::EndpointOverlay(e) => write!(f, "{e}"),
+            Self::EndpointOverlayConflicts(errors) => {
+                write!(
+                    f,
+                    "config.yaml validates, but not with the endpoint overlay composed over it: "
+                )?;
+                for (i, e) in errors.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, "; ")?;
+                    }
+                    write!(f, "{e}")?;
+                }
+                Ok(())
+            }
         }
     }
 }

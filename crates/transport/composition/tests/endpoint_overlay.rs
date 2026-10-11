@@ -456,6 +456,101 @@ async fn an_overlay_is_normalised_and_in_force_from_the_start() {
     runtime.stop().await.expect("stops");
 }
 
+/// `human` and `agent` both advertised, `agent` disabled, at most one
+/// advertised: `config.yaml` validates, since only enabled endpoints
+/// count toward `directory.max_advertised`.
+fn one_advertised() -> ProfileConfig {
+    serde_norway::from_str(
+        "schema_version: 2
+trust:
+  policy: static-allowlist
+  allowed_peers: []
+endpoints:
+  directory:
+    max_advertised: 1
+  entries:
+    - id: human
+      enabled: true
+      advertise: true
+    - id: agent
+      enabled: false
+      advertise: true
+discovery:
+  providers:
+    - type: static-bootstrap
+      enabled: true
+      priority: 10
+      config:
+        peers: []
+",
+    )
+    .expect("the document parses")
+}
+
+/// A SET THE NEXT START WOULD REFUSE IS REFUSED NOW (#261 review F1):
+/// enabling `agent` past `directory.max_advertised` is answered
+/// `InvalidArgument`, nothing written, the runtime unchanged -- answered
+/// `ok`, the composed profile would fail validation at the next start.
+/// The control: with `human` disabled first, the same enable is room
+/// under the bound and survives a restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_set_the_next_start_would_refuse_is_refused_and_writes_nothing() {
+    let (identity, _) = id();
+    let (_dir, path) = state();
+    let profile = one_advertised();
+    let start = || ComposedRuntime::start(&identity, &profile, options(Some(&path)));
+    let runtime = start().await.expect("composes");
+    assert_eq!(
+        set_enabled(&runtime, "agent", true).await,
+        Err(TransportError::InvalidArgument)
+    );
+    assert!(!path.exists(), "nothing written");
+    assert_eq!(rows(&runtime).await[0], row("agent", false, false, true));
+
+    set_enabled(&runtime, "human", false)
+        .await
+        .expect("disabled");
+    set_enabled(&runtime, "agent", true)
+        .await
+        .expect("the control: room under the bound");
+    runtime.stop().await.expect("stops");
+    let runtime = start().await.expect("the next start composes");
+    assert_eq!(
+        rows(&runtime).await,
+        vec![
+            row("agent", true, false, true),
+            row("human", false, false, true)
+        ]
+    );
+    runtime.stop().await.expect("stops");
+}
+
+/// A file no set could have written -- hand-edited, or left by a
+/// `config.yaml` edit lowering the bound -- that composes into a profile
+/// failing validation stops the start naming the overlay, never as a
+/// `config.yaml` that validates alone. The control: the same
+/// `config.yaml` with no overlay starts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_overlay_the_composed_profile_refuses_stops_the_start_by_name() {
+    let (identity, _) = id();
+    let (_dir, path) = state();
+    std::fs::write(&path, r#"{"enabled":{"agent":true}}"#).expect("written");
+    chmod(&path, 0o600);
+    match ComposedRuntime::start(&identity, &one_advertised(), options(Some(&path))).await {
+        Err(CompositionError::EndpointOverlayConflicts(errors)) => {
+            assert!(!errors.is_empty());
+        }
+        Err(other) => panic!("refused naming the overlay: {other}"),
+        Ok(_) => panic!("refused"),
+    }
+    ComposedRuntime::start(&identity, &one_advertised(), options(None))
+        .await
+        .expect("the control")
+        .stop()
+        .await
+        .expect("stops");
+}
+
 /// How many ahead warnings the runtimes in this binary have logged.
 fn ahead_warnings() -> usize {
     logged()

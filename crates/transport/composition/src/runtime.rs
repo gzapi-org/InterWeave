@@ -21,7 +21,7 @@ use interweave_local_client_api::{Generation, TrustAdminView, TrustSource, Trust
 use interweave_profile_config::PersistError;
 use interweave_profile_config::endpoint_overlay::{EndpointOverlay, EndpointOverlayError};
 use interweave_profile_config::trust_overlay::{OverlayError, TrustOverlay};
-use interweave_profile_config::{EndpointsConfig, ProfileConfig, ProfilePaths, TrustBoundary};
+use interweave_profile_config::{ProfileConfig, ProfilePaths, TrustBoundary};
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::{
     Component, ComponentHealth, ConnectivitySummary, EndpointId, HealthReport, LocalIdentity,
@@ -380,8 +380,18 @@ impl ComposedRuntime {
             }
             None => EndpointOverlay::default(),
         };
+        // THE COMPOSED PROFILE IS VALIDATED AS ITS OWN: `config.yaml`
+        // validated alone, and an overlay can break a rule that reads the
+        // enabled set (`directory.max_advertised`, the Android lease
+        // endpoint) -- refused naming the overlay, never as a
+        // `config.yaml` the operator cannot find fault with.
+        let authored = profile.clone();
         let mut profile = profile.clone();
         profile.endpoints = endpoint_overlay.apply(&endpoints_configured);
+        let conflicts = profile.validate();
+        if !conflicts.is_empty() && authored.validate().is_empty() {
+            return Err(CompositionError::EndpointOverlayConflicts(conflicts));
+        }
         let profile = &profile;
         let composition = translate(profile, &local, options.queue_bound)?
             .with_allowed(allowed.clone(), &local)?;
@@ -488,7 +498,7 @@ impl ComposedRuntime {
             configured: configured_peers,
             overlay,
             overlay_file: options.trust_overlay_file.clone(),
-            endpoints_configured,
+            authored,
             endpoint_overlay,
             endpoint_overlay_file: options.endpoint_overlay_file.clone(),
             trust_boundary: options.trust_boundary.clone(),
@@ -749,11 +759,12 @@ struct Driver {
     overlay: TrustOverlay,
     /// Where the overlay is kept; `None` in a test construction.
     overlay_file: Option<PathBuf>,
-    /// `config.yaml`'s endpoints as the runtime started with them: what
-    /// the endpoint overlay is a delta against.
-    endpoints_configured: EndpointsConfig,
+    /// `config.yaml` as the runtime started with it: its endpoints are
+    /// what the endpoint overlay is a delta against, and the whole
+    /// profile is what a moved overlay is composed over and validated.
+    authored: ProfileConfig,
     /// The endpoint overlay as last written, normalised: the substrate's
-    /// endpoints are `endpoints_configured` with it composed over them.
+    /// endpoints are `authored`'s with it composed over them.
     endpoint_overlay: EndpointOverlay,
     /// Where the endpoint overlay is kept; `None` in a test construction.
     endpoint_overlay_file: Option<PathBuf>,
@@ -1112,11 +1123,9 @@ impl Driver {
                 let _ = reply.send(self.set_trust(peer, allowed).await);
             }
             Request::SetEndpointEnabled(endpoint, enabled, reply) => {
-                let moved = self.endpoint_overlay.set_enabled(
-                    &self.endpoints_configured,
-                    &endpoint,
-                    enabled,
-                );
+                let moved =
+                    self.endpoint_overlay
+                        .set_enabled(&self.authored.endpoints, &endpoint, enabled);
                 let fault = self.take_publish_fault();
                 let commander = self.swarm.commander();
                 let publish = async move {
@@ -1133,7 +1142,7 @@ impl Driver {
             Request::SetDefaultEndpoint(endpoint, reply) => {
                 let moved = self
                     .endpoint_overlay
-                    .set_default(&self.endpoints_configured, endpoint.as_ref());
+                    .set_default(&self.authored.endpoints, endpoint.as_ref());
                 let fault = self.take_publish_fault();
                 let commander = self.swarm.commander();
                 let publish = async move {
@@ -1258,6 +1267,18 @@ impl Driver {
             Err(EndpointOverlayError::Disabled) => return Err(TransportError::EndpointDisabled),
             Err(_) => return Err(TransportError::Internal),
         };
+        // A MOVE THE NEXT START WOULD REFUSE IS REFUSED NOW, nothing
+        // written: the composed profile is validated as the start
+        // validates it, so a set answered `ok` never makes that start
+        // fatal -- the trust overlay's bound, for every rule that reads
+        // the enabled set (#261 review F1).
+        if let Some(moved) = &overlay {
+            let mut composed = self.authored.clone();
+            composed.endpoints = moved.apply(&self.authored.endpoints);
+            if !composed.validate().is_empty() {
+                return Err(TransportError::InvalidArgument);
+            }
+        }
         let written = match (&overlay, self.endpoint_overlay_file.clone()) {
             (Some(overlay), Some(path)) => self.write_endpoint_overlay(overlay, &path).err(),
             _ => None,
