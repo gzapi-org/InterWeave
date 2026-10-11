@@ -304,7 +304,13 @@ the schema-agreement test binds the two.
 `set_default` are a **persisted overlay** (ADR-0028 A 2026-10-11): never
 written to `config.yaml`, they are kept in the state directory's
 endpoint overlay, written before the change is published and before the
-set is answered, so a restart starts with them; `admin.endpoints.revoke`
+set is answered, so a restart starts with them. A set whose result,
+composed over `config.yaml`, would fail the profile's validation -- a
+rule reading the enabled set, such as `directory.max_advertised` -- is
+refused `InvalidArgument` with nothing written, as the next start would
+refuse it; `set_default` naming an endpoint that is not configured or is
+disabled is `EndpointUnknown` or `EndpointDisabled`. Neither set is
+audited, unlike `admin.trust.set`. `admin.endpoints.revoke`
 stays runtime-only, a lease being a session's and not configuration.
 `admin.endpoints.list` answers each endpoint's effective state, and on a
 connection that negotiated 2.5 or later `persisted: true` on every row (a
