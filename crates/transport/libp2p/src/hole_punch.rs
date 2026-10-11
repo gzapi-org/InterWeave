@@ -1414,6 +1414,13 @@ mod tests {
         let plain: Multiaddr = "/ip4/93.184.216.41/tcp/4001".parse().expect("an address");
         observe(&mut s, &plain);
         assert_eq!(snapshot(&s).candidates_withheld.get("departed"), Some(&3));
+        // And an addition reported in the mapped form brings the plain
+        // IPv4 back: its observation is forwarded again.
+        let kept_before = snapshot(&s).observed_kept;
+        s.network_added(&["::ffff:93.184.216.41".parse().expect("an IP")]);
+        observe(&mut s, &plain);
+        assert_eq!(snapshot(&s).candidates_withheld.get("departed"), Some(&3));
+        assert_eq!(snapshot(&s).observed_kept, kept_before + 1);
 
         for n in 0..u32::try_from(MAX_DEPARTED_IPS + 10).expect("small") {
             s.network_changed(&[IpAddr::from(std::net::Ipv4Addr::from(0x0a00_0000 + n))]);
