@@ -7,8 +7,8 @@
 //! process can hold one: it drives the lifecycle and names a case of
 //! `interweave-android-e2e-cases` for the Android side to run in its own
 //! process, and reads the result back. The stand-in exposes its own
-//! binding beside the seam, for the host-only cases (`human_chat.rs`). The desktop's half
-//! of each case is here.
+//! binding beside the seam, for what the seam does not carry (the serving
+//! `PeerId` in `stand_in.rs`). The desktop's half of each case is here.
 //!
 //! Two runners implement the seam. [`HostStandIn`] -- the embedded
 //! runtime the app's foreground service hosts (`interweave-transport-
@@ -41,7 +41,10 @@ use interweave_android_e2e_cases::{
 use interweave_local_client_api::DataSessionPort;
 use serde_json::{Map, Value};
 
-use interweave_profile_config::{ProfilePaths, TrustBoundary, create_private_dir_within};
+use interweave_profile_config::sections::LogLevel;
+use interweave_profile_config::{
+    ProfileConfig, ProfilePaths, TrustBoundary, create_private_dir_within,
+};
 use interweave_profile_identity::{ProfileIdentity, RecoveryPhrase};
 use interweave_test_support::e2e;
 use interweave_transport_api::TransportIdentity;
@@ -53,6 +56,92 @@ pub use interweave_test_support::e2e::{
 };
 
 pub mod adb;
+
+/// The stand-in's log, as the app's shell would write it to logcat: a
+/// process-wide subscriber that admits an event exactly when the
+/// embedded host's own filter does (`log_admits`) at the profile's level
+/// -- set from the provisioned profile before the host starts, so its
+/// startup events are judged at it too (`audit_gate.rs` pins the level
+/// with events of its own at INFO and at WARN).
+/// The shell's writer is the app's, so this is what the stand-in has in
+/// its place -- the filter is the runtime's, the capture is the test's.
+/// One per test process, installed by [`log_capture::install`]; until
+/// then [`HostStandIn`]'s log is empty.
+pub mod log_capture {
+    use std::sync::{Mutex, OnceLock, RwLock};
+
+    use interweave_profile_config::sections::LogLevel;
+    use interweave_transport_embedded::log_admits;
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    static LINES: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+    static LEVEL: RwLock<LogLevel> = RwLock::new(LogLevel::Info);
+
+    struct Message(String);
+
+    impl tracing::field::Visit for Message {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.0 = format!("{value:?}");
+            }
+        }
+    }
+
+    struct Capture;
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let meta = event.metadata();
+            let level = *LEVEL
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !log_admits(meta.target(), *meta.level(), level) {
+                return;
+            }
+            let mut message = Message(String::new());
+            event.record(&mut message);
+            if let Some(lines) = LINES.get() {
+                lines
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(format!("{} {} {}", meta.level(), meta.target(), message.0));
+            }
+        }
+    }
+
+    /// Install the capture as this process's global subscriber, once.
+    ///
+    /// # Panics
+    /// If another global subscriber is already installed.
+    pub fn install() {
+        if LINES.set(Mutex::new(Vec::new())).is_ok() {
+            tracing::subscriber::set_global_default(tracing_subscriber::registry().with(Capture))
+                .expect("the only global subscriber");
+        }
+    }
+
+    /// The profile level the capture filters at: the running host's.
+    pub fn filter_at(level: LogLevel) {
+        *LEVEL
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = level;
+    }
+
+    /// What has been captured so far, one line per event.
+    #[must_use]
+    pub fn lines() -> String {
+        LINES.get().map_or_else(String::new, |lines| {
+            lines
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .join("\n")
+        })
+    }
+}
 
 /// How long a stand-in's stop lets exchanges in flight settle.
 const GRACE: Duration = Duration::from_secs(1);
@@ -98,6 +187,16 @@ pub trait Device {
     fn log(&self) -> String {
         String::new()
     }
+
+    /// The bytes of `path`, a file a case on the Android side wrote and
+    /// named in its result (`human_chat`'s payloads). The stand-ins share
+    /// this host's filesystem.
+    ///
+    /// # Panics
+    /// If it cannot be read.
+    fn pull(&self, path: &str) -> Vec<u8> {
+        std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"))
+    }
 }
 
 /// A case running on the Android side; [`passed`](Self::passed) waits
@@ -115,6 +214,13 @@ impl CaseRun {
             case: case.to_owned(),
             result: std::thread::spawn(result),
         }
+    }
+
+    /// Whether the case has answered, so the caller can stop playing its
+    /// half.
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.result.is_finished()
     }
 
     /// The case's result JSON, whatever it says.
@@ -186,6 +292,9 @@ pub struct HostStandIn {
     // construction, as a device's Keystore-unwrapped key is.
     phrase: RecoveryPhrase,
     host: Option<EmbeddedHost>,
+    // The provisioned profile's log level, which the capture filters at
+    // from BEFORE the host starts, so its startup events are judged at it.
+    log_level: LogLevel,
 }
 
 impl HostStandIn {
@@ -222,6 +331,7 @@ impl HostStandIn {
                 .recovery_phrase()
                 .expect("a generated identity has a phrase"),
             host: None,
+            log_level: LogLevel::Info,
         }
     }
 
@@ -238,7 +348,8 @@ impl HostStandIn {
     }
 
     /// The binding of the runtime now serving: the stand-in's own, for
-    /// what a host-only case drives directly (`human_chat.rs`).
+    /// what the seam does not carry (`stand_in.rs` reads the serving
+    /// `PeerId` over it).
     ///
     /// # Panics
     /// While the runtime is down.
@@ -263,6 +374,10 @@ impl Device for HostStandIn {
     }
 
     fn start(&mut self, config: &str) {
+        self.log_level = ProfileConfig::parse_yaml(config)
+            .expect("a profile document")
+            .observability
+            .log_level;
         provision(&self.app_data_dir, config);
         self.restart();
     }
@@ -281,6 +396,11 @@ impl Device for HostStandIn {
         drop(self.host.take());
     }
 
+    /// The capture's lines, when the test process installed it.
+    fn log(&self) -> String {
+        log_capture::lines()
+    }
+
     fn restart(&mut self) {
         assert!(self.host.is_none(), "restart of a runtime still up");
         let identity = ProfileIdentity::from_phrase(&self.phrase).expect("the same identity");
@@ -289,7 +409,14 @@ impl Device for HostStandIn {
             profile: PROFILE.to_owned(),
             identity,
         };
-        self.host = Some(off_runtime(|| EmbeddedHost::start(launch)).expect("the stand-in starts"));
+        log_capture::filter_at(self.log_level);
+        let host = off_runtime(|| EmbeddedHost::start(launch)).expect("the stand-in starts");
+        assert_eq!(
+            host.log_level(),
+            self.log_level,
+            "the host runs the provisioned level"
+        );
+        self.host = Some(host);
     }
 
     /// The case body on a thread of its own, as the instrumentation runs
@@ -298,11 +425,13 @@ impl Device for HostStandIn {
     fn run_case(&self, case: &str, args: &Value) -> CaseRun {
         let ctx = CaseCtx {
             peer: self.peer.clone(),
+            app_data_dir: self.app_data_dir.clone(),
             binding: self.host.as_ref().map(EmbeddedHost::binding),
             provision: Some(Box::new({
                 let app_data_dir = self.app_data_dir.clone();
                 move |config: &str| try_provision(&app_data_dir, config)
             })),
+            client: None,
         };
         let (name, args) = (case.to_owned(), args.to_string());
         CaseRun::on_thread(case, move || {
@@ -337,7 +466,12 @@ fn provision(app_data_dir: &Path, config: &str) {
     try_provision(app_data_dir, config).expect("provisioned");
 }
 
-fn try_provision(app_data_dir: &Path, config: &str) -> Result<(), String> {
+/// Write `config` as [`PROFILE`]'s `config.yaml` under `app_data_dir`,
+/// replacing what is there, as a case's `provision` does in the app.
+///
+/// # Errors
+/// What could not be made, by name.
+pub fn try_provision(app_data_dir: &Path, config: &str) -> Result<(), String> {
     let boundary = TrustBoundary::new(app_data_dir).map_err(|e| format!("a boundary: {e}"))?;
     let paths =
         ProfilePaths::resolve_embedded(PROFILE, boundary).map_err(|e| format!("paths: {e}"))?;

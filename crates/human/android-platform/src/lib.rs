@@ -12,6 +12,8 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "e2e-cases")]
+pub mod e2e;
 pub mod facade;
 pub mod hub;
 pub mod notice;

@@ -22,18 +22,29 @@
 //! invariant, checked by the packaging batch's check, which does not
 //! exist yet.
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
+use std::os::unix::fs::PermissionsExt as _;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use interweave_local_client_api::{
-    DataCapability, DataSessionBinding, DataSessionPort, LocalSessionEvent, ROUTE_ESTABLISHED,
-    SessionEvent, SessionRequest,
+    AdminBinding, AdminCapability, AdminPort as _, DataCapability, DataSessionBinding,
+    DataSessionPort, LocalSessionEvent, ROUTE_ESTABLISHED, SessionEvent, SessionRequest,
 };
+use interweave_profile_config::{ProfilePaths, TrustBoundary, resolve_private_dir_within};
 use interweave_transport_api::{
     DirectDestination, EndpointId, MediaType, MessageId, Payload, PeerPath, TransportIdentity,
 };
 use serde_json::{Map, Value};
+
+mod human_chat;
+
+pub use human_chat::{
+    AppClient, Handed, HumanChatArgs, Recording, RecordingSession, Tap, chat_text,
+    desktop_message_id, parse_payloads,
+};
 
 /// The result JSON's keys. The instrumentation copies each to the status
 /// key `interweave.<key>` (the seam agreed with rust-ui-dev, 01a12771).
@@ -48,10 +59,22 @@ pub mod keys {
     pub const PEER: &str = "peer";
     /// The path a case observed to the desktop (`paths`).
     pub const PATH: &str = "path";
-    /// Where captured payloads were written. Reserved by the seam agreed
-    /// with rust-ui-dev (01a12771) for the `HumanChatV2` case its j66 batch
-    /// moves here; no case writes it and no host reads it yet.
+    /// Where the payloads the runtime handed the app's client were
+    /// written, for the host to read and validate (`human_chat`; the
+    /// file's shape is [`crate::parse_payloads`]'s).
     pub const PAYLOADS: &str = "payloads";
+    /// The envelopes this side sent, as its facade committed them
+    /// (`human_chat`): a JSON array.
+    pub const SENT: &str = "sent";
+    /// The runtime root the embedded runtime's private directories lie
+    /// under (`trust_boundary`).
+    pub const ROOT: &str = "runtime_root";
+    /// The private directories found, each `<path> <octal mode>`
+    /// (`trust_boundary`).
+    pub const PRIVATE_DIRS: &str = "private_dirs";
+    /// Why a directory under the platform's `files/` was refused
+    /// (`trust_boundary`).
+    pub const REFUSED: &str = "refused";
     /// [`RESULT`] of a case that held.
     pub const PASS: &str = "pass";
     /// [`RESULT`] of a case that did not, or could not run.
@@ -69,10 +92,38 @@ pub mod cases {
     /// One direct message to the desktop and its reply, and the path this
     /// side was told the route began on. Arguments: [`super::PathsArgs`].
     pub const PATHS: &str = "paths";
+    /// Plan §20 gate (d), in the app's process: the runtime root sits
+    /// directly under the app data directory, it and every private
+    /// directory of the profile (argument `profile`) are owner-only, and a
+    /// private directory under the platform's `files/` -- which the
+    /// ancestor walk alone accepts, the control -- is refused by the
+    /// runtime root.
+    pub const TRUST_BOUNDARY: &str = "trust_boundary";
+    /// Plan §20 gate (g)'s Android half: set a peer (argument `peer`)
+    /// trusted through the admin port, which the runtime records on its
+    /// audit target. Whether the record reached the platform's log under
+    /// the profile's stricter level is the host's to read, with
+    /// `Device::log`.
+    pub const AUDIT: &str = "audit";
 
-    /// The cases a runner must have the app's runtime serving for; the
-    /// others run before it starts, as [`PROVISION`] must.
-    pub const NEED_A_RUNTIME: &[&str] = &[PATHS];
+    /// `HumanChatV2` with the desktop on the app's own client, both ways,
+    /// plain and `;ce=br`. Arguments: [`super::HumanChatArgs`].
+    pub const HUMAN_CHAT: &str = "human_chat";
+
+    /// The cases a runner must have the runtime ALONE serving for: the
+    /// app's runtime with the app's launch, identity and paths, and no
+    /// store and no facade, so the `human` lease is free for the case
+    /// (01a128a6/01a128a8). On the host stand-in that is an `EmbeddedHost`
+    /// started so. On a phone it is to be a runtime-alone start in the
+    /// app's service host, which the instrumentation's PR (rust-ui-dev's
+    /// j66) adds; until then no phone runner exists. The others run
+    /// before it starts, as [`PROVISION`] must.
+    pub const NEED_A_RUNTIME: &[&str] = &[PATHS, TRUST_BOUNDARY, AUDIT];
+
+    /// The cases a runner must have the app's service serving for in
+    /// full -- runtime, store, facade and hub -- handing the case
+    /// [`super::CaseCtx::client`].
+    pub const NEED_THE_CLIENT: &[&str] = &[HUMAN_CHAT];
 }
 
 /// How long a case waits for a route, a message or a notice when its
@@ -83,6 +134,9 @@ pub const DEFAULT_DEADLINE: Duration = Duration::from_secs(30);
 pub struct CaseCtx<B> {
     /// The profile's `PeerId`.
     pub peer: TransportIdentity,
+    /// The app's data directory: the trust boundary the platform
+    /// supplies (ADR-0028), under which the runtime keeps its own.
+    pub app_data_dir: PathBuf,
     /// The binding of the runtime now serving, or `None` when none is up:
     /// a case that needs one fails, saying so, rather than starting a
     /// runtime of its own -- the app's service holds the profile's lock,
@@ -93,6 +147,9 @@ pub struct CaseCtx<B> {
     /// directories, as the app's first start does. `None` where the
     /// runner cannot provision.
     pub provision: Option<Provision>,
+    /// The app's own client, for a case of [`cases::NEED_THE_CLIENT`]:
+    /// `None` where the app's service is not serving in full.
+    pub client: Option<Box<dyn AppClient>>,
 }
 
 /// How a runner writes the profile's configuration ([`CaseCtx::provision`]).
@@ -103,7 +160,11 @@ pub type Provision = Box<dyn FnOnce(&str) -> Result<(), String> + Send>;
 /// reports. A panic inside a case is that case's failure, caught here,
 /// since the instrumentation calls this across JNI, where an unwind must
 /// not cross.
-pub fn run<B: DataSessionBinding>(case: &str, args_json: &str, ctx: CaseCtx<B>) -> String {
+pub fn run<B: DataSessionBinding + AdminBinding>(
+    case: &str,
+    args_json: &str,
+    ctx: CaseCtx<B>,
+) -> String {
     let outcome = catch_unwind(AssertUnwindSafe(|| dispatch(case, args_json, ctx)));
     let mut out = match outcome {
         Ok(Ok(fields)) => {
@@ -133,7 +194,7 @@ fn panic_text(panic: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "the case panicked".to_owned())
 }
 
-fn dispatch<B: DataSessionBinding>(
+fn dispatch<B: DataSessionBinding + AdminBinding>(
     case: &str,
     args_json: &str,
     ctx: CaseCtx<B>,
@@ -162,6 +223,38 @@ fn dispatch<B: DataSessionBinding>(
                 .ok_or_else(|| "no runtime is serving: start the app's service first".to_owned())?;
             let path = block_on(paths(&binding, &args))??;
             out.insert(keys::PATH.to_owned(), path.label().into());
+        }
+        cases::TRUST_BOUNDARY => {
+            let profile = args
+                .get("profile")
+                .and_then(Value::as_str)
+                .ok_or("argument \"profile\" is missing")?;
+            if ctx.binding.is_none() {
+                return Err("no runtime is serving: start the app's service first".to_owned());
+            }
+            out.extend(trust_boundary(&ctx.app_data_dir, profile)?);
+        }
+        cases::AUDIT => {
+            let peer = args
+                .get("peer")
+                .and_then(Value::as_str)
+                .and_then(|p| TransportIdentity::parse(p).ok())
+                .ok_or("argument \"peer\" is not a PeerId")?;
+            let binding = ctx
+                .binding
+                .ok_or_else(|| "no runtime is serving: start the app's service first".to_owned())?;
+            block_on(audit(&binding, peer))??;
+        }
+        cases::HUMAN_CHAT => {
+            let args = HumanChatArgs::from_json(&args)?;
+            let mut client = ctx.client.ok_or_else(|| {
+                "the app's client is not serving: start the app's service first".to_owned()
+            })?;
+            out.extend(human_chat::human_chat(
+                client.as_mut(),
+                &args,
+                &ctx.app_data_dir,
+            )?);
         }
         other => return Err(format!("no case is named {other:?}")),
     }
@@ -248,6 +341,142 @@ impl PathsArgs {
             deadline,
         })
     }
+}
+
+/// Gate (d) in the running app: what `resolve_embedded` resolves for
+/// `profile` under the app data directory, judged on disk.
+fn trust_boundary(app_data_dir: &Path, profile: &str) -> Result<Map<String, Value>, String> {
+    // Where the directory resolves, not how it is spelled: the platform
+    // hands over `/data/user/0/<package>`, a symlink to `/data/data` on
+    // most devices, and the boundary below is canonical.
+    let canonical = std::fs::canonicalize(app_data_dir)
+        .map_err(|e| format!("the app data directory {}: {e}", app_data_dir.display()))?;
+    let app_data_dir = canonical.as_path();
+    let boundary = TrustBoundary::new(app_data_dir)
+        .map_err(|e| format!("the app data directory as a boundary: {e}"))?;
+    let walk_alone = boundary.clone();
+    let paths = ProfilePaths::resolve_embedded(profile, boundary)
+        .map_err(|e| format!("the profile's paths: {e}"))?;
+    let root = paths
+        .boundary()
+        .runtime_root()
+        .ok_or("the embedded boundary names no runtime root")?
+        .to_path_buf();
+    if root.parent() != Some(app_data_dir) {
+        return Err(format!(
+            "the runtime root {} is not directly under {}",
+            root.display(),
+            app_data_dir.display()
+        ));
+    }
+    let mut found = vec![];
+    for dir in [
+        root.as_path(),
+        paths.config_dir(),
+        paths.state_dir(),
+        paths.identity_dir(),
+        paths.cache_dir(),
+    ] {
+        if !dir.exists() {
+            continue;
+        }
+        if dir != root && !dir.starts_with(&root) {
+            return Err(format!(
+                "{} is outside the runtime root {}",
+                dir.display(),
+                root.display()
+            ));
+        }
+        let mode = std::fs::metadata(dir)
+            .map_err(|e| format!("{}: {e}", dir.display()))?
+            .permissions()
+            .mode()
+            & 0o7777;
+        if mode != 0o700 {
+            return Err(format!("{} is {mode:o}, not 700", dir.display()));
+        }
+        found.push(format!("{} {mode:o}", dir.display()));
+    }
+    // The runtime is serving, so at least its config and state are made.
+    for dir in [paths.config_dir(), paths.state_dir()] {
+        if !dir.exists() {
+            return Err(format!(
+                "{} does not exist under a serving runtime",
+                dir.display()
+            ));
+        }
+    }
+    let refused = refused_under_files(app_data_dir, &walk_alone, paths.boundary())?;
+    let mut out = Map::new();
+    out.insert(keys::ROOT.to_owned(), root.display().to_string().into());
+    out.insert(keys::PRIVATE_DIRS.to_owned(), found.into());
+    out.insert(keys::REFUSED.to_owned(), refused.into());
+    Ok(out)
+}
+
+/// A private directory made under the platform's `files/`: the walk
+/// alone accepts it -- the control, since `files/` passes ADR-0028's
+/// rule on a device -- and the embedded boundary refuses it. The probe is
+/// removed either way. On a host stand-in, `files/` is made as Android
+/// makes it, `0771`, where it is missing.
+fn refused_under_files(
+    app_data_dir: &Path,
+    walk_alone: &TrustBoundary,
+    embedded: &TrustBoundary,
+) -> Result<String, String> {
+    let files = app_data_dir.join("files");
+    if !files.exists() {
+        std::fs::create_dir(&files).map_err(|e| format!("files/: {e}"))?;
+        std::fs::set_permissions(&files, std::fs::Permissions::from_mode(0o771))
+            .map_err(|e| format!("files/: {e}"))?;
+    }
+    let probe = files.join("interweave-gate-d-probe");
+    // A run killed between the probe's making and its removal leaves it
+    // in a device's persistent files/; the next run takes it back first.
+    match std::fs::remove_dir(&probe) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(format!(
+                "a stale probe under files/ could not be removed: {e}"
+            ));
+        }
+    }
+    std::fs::create_dir(&probe).map_err(|e| format!("the probe under files/: {e}"))?;
+    let outcome = (|| {
+        std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("the probe: {e}"))?;
+        resolve_private_dir_within(&probe, walk_alone).map_err(|e| {
+            format!(
+                "the control failed: the walk alone refused {}: {e}",
+                probe.display()
+            )
+        })?;
+        match resolve_private_dir_within(&probe, embedded) {
+            Ok(_) => Err(format!(
+                "{} under files/ was accepted by the embedded boundary",
+                probe.display()
+            )),
+            Err(e) => Ok(e.to_string()),
+        }
+    })();
+    let _ = std::fs::remove_dir(&probe);
+    let refused = outcome?;
+    if !refused.contains("outside the runtime root") {
+        return Err(format!("refused, but not by the runtime root: {refused}"));
+    }
+    Ok(refused)
+}
+
+/// Gate (g)'s Android half: one trust change through the admin port.
+async fn audit(binding: &impl AdminBinding, peer: TransportIdentity) -> Result<(), String> {
+    let port = binding
+        .admin(BTreeSet::from([AdminCapability::Trust]))
+        .await
+        .map_err(|_| "the admin port with the trust capability was refused".to_owned())?;
+    port.set_trust(peer, true)
+        .await
+        .map_err(|_| "the trust change was refused".to_owned())
 }
 
 /// What the Android side sends in exchange `serial`, and its id.
@@ -545,8 +774,10 @@ mod tests {
                     &args,
                     CaseCtx {
                         peer: peer(),
+                        app_data_dir: PathBuf::from("/nonexistent"),
                         binding: Some(android),
                         provision: None,
+                        client: None,
                     },
                 )
             })
@@ -688,6 +919,135 @@ mod tests {
         assert!(forbidden.is_empty(), "reached: {forbidden:?}");
     }
 
+    /// An app data directory as the platform supplies it, owner-only, with
+    /// the profile's config and state directories made by the profile
+    /// crate itself, as a serving runtime leaves them.
+    fn app_dir_as_a_runtime_leaves_it() -> (tempfile::TempDir, PathBuf) {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let app = scratch.path().join("app");
+        std::fs::create_dir(&app).expect("app");
+        std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o700)).expect("0700");
+        let paths = ProfilePaths::resolve_embedded(
+            "human-android",
+            TrustBoundary::new(&app).expect("boundary"),
+        )
+        .expect("paths");
+        for dir in [paths.config_dir(), paths.state_dir()] {
+            interweave_profile_config::create_private_dir_within(dir, paths.boundary())
+                .expect("a private dir");
+        }
+        (scratch, app)
+    }
+
+    #[test]
+    fn trust_boundary_passes_on_the_layout_a_runtime_leaves_and_reports_the_refusal() {
+        let (_scratch, app) = app_dir_as_a_runtime_leaves_it();
+        let out = trust_boundary(&app, "human-android").expect("gate (d) holds");
+        // Where the root resolves: a host's temp directory may itself sit
+        // behind a symlink, as /var/run does.
+        let canonical = std::fs::canonicalize(&app).expect("canonical");
+        assert_eq!(
+            out[keys::ROOT],
+            canonical.join("interweave").display().to_string()
+        );
+        let dirs = out[keys::PRIVATE_DIRS].as_array().expect("dirs");
+        assert!(dirs.len() >= 3, "the root, config and state: {dirs:?}");
+        assert!(
+            dirs.iter()
+                .all(|d| d.as_str().is_some_and(|d| d.ends_with(" 700"))),
+            "{dirs:?}"
+        );
+        let refused = out[keys::REFUSED].as_str().expect("refused");
+        assert!(refused.contains("outside the runtime root"), "{refused}");
+        assert!(
+            !app.join("files").join("interweave-gate-d-probe").exists(),
+            "the probe is removed"
+        );
+    }
+
+    #[test]
+    fn trust_boundary_judges_where_a_symlinked_app_data_dir_resolves() {
+        let (scratch, app) = app_dir_as_a_runtime_leaves_it();
+        let link = scratch.path().join("data-user-0-link");
+        std::os::unix::fs::symlink(&app, &link).expect("a symlink, as /data/user/0 is");
+        let out = trust_boundary(&link, "human-android").expect("gate (d) holds through the link");
+        let canonical = std::fs::canonicalize(&app).expect("canonical");
+        assert_eq!(
+            out[keys::ROOT],
+            canonical.join("interweave").display().to_string()
+        );
+    }
+
+    #[test]
+    fn a_stale_probe_left_by_a_killed_run_is_taken_back() {
+        let (_scratch, app) = app_dir_as_a_runtime_leaves_it();
+        let files = app.join("files");
+        std::fs::create_dir(&files).expect("files/");
+        std::fs::set_permissions(&files, std::fs::Permissions::from_mode(0o771)).expect("0771");
+        std::fs::create_dir(files.join("interweave-gate-d-probe")).expect("a stale probe");
+        trust_boundary(&app, "human-android").expect("gate (d) holds after a killed run");
+        assert!(
+            !files.join("interweave-gate-d-probe").exists(),
+            "the probe is removed"
+        );
+    }
+
+    #[test]
+    fn trust_boundary_fails_on_a_private_dir_that_is_not_owner_only() {
+        let (_scratch, app) = app_dir_as_a_runtime_leaves_it();
+        let paths = ProfilePaths::resolve_embedded(
+            "human-android",
+            TrustBoundary::new(&app).expect("boundary"),
+        )
+        .expect("paths");
+        std::fs::set_permissions(paths.state_dir(), std::fs::Permissions::from_mode(0o750))
+            .expect("chmod");
+        let err = trust_boundary(&app, "human-android").expect_err("a 750 state dir");
+        assert!(err.contains("is 750, not 700"), "{err}");
+    }
+
+    #[test]
+    fn trust_boundary_fails_when_the_runtime_has_made_nothing() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let app = scratch.path().join("app");
+        std::fs::create_dir(&app).expect("app");
+        std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o700)).expect("0700");
+        let err = trust_boundary(&app, "human-android").expect_err("nothing made");
+        assert!(
+            err.contains("does not exist under a serving runtime"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn audit_sets_the_peer_trusted_through_the_admin_port() {
+        let (android, _desktop) = FakeNetwork::pair(config(peer()), config(other_peer()));
+        let stranger =
+            TransportIdentity::parse("12D3KooWJWoaqZhDaoEFshF7Rh1bpY9ohihFhzcW6d69Lr2NASuq")
+                .expect("a PeerId");
+        let args = serde_json::json!({ "peer": stranger.as_str() }).to_string();
+        let out = result(&run(
+            cases::AUDIT,
+            &args,
+            CaseCtx {
+                peer: peer(),
+                app_data_dir: PathBuf::from("/nonexistent"),
+                binding: Some(android.clone()),
+                provision: None,
+                client: None,
+            },
+        ));
+        assert_eq!(out[keys::RESULT], keys::PASS, "{out:?}");
+        let admin = block_on(android.admin(BTreeSet::from([AdminCapability::Status])))
+            .expect("rt")
+            .expect("admin");
+        let rows = block_on(admin.peers()).expect("rt").expect("rows");
+        assert!(
+            format!("{rows:?}").contains(stranger.as_str()),
+            "the stranger is trusted now: {rows:?}"
+        );
+    }
+
     #[test]
     fn paths_arguments_round_trip_and_name_what_is_wrong() {
         let args = PathsArgs {
@@ -738,11 +1098,13 @@ mod tests {
             let written = std::sync::Arc::clone(&written);
             CaseCtx::<FakeNode> {
                 peer: peer(),
+                app_data_dir: PathBuf::from("/nonexistent"),
                 binding: None,
                 provision: Some(Box::new(move |config: &str| {
                     written.lock().expect("lock").push(config.to_owned());
                     answer
                 })),
+                client: None,
             }
         };
         let config = "profile:\n  name: \"x\"\n";
@@ -766,8 +1128,10 @@ mod tests {
             "{}",
             CaseCtx {
                 peer: peer(),
+                app_data_dir: PathBuf::from("/nonexistent"),
                 binding: None,
                 provision: None,
+                client: None,
             },
         ));
         assert_eq!(out[keys::RESULT], keys::PASS);
@@ -797,6 +1161,22 @@ mod tests {
         }
     }
 
+    impl AdminBinding for Panics {
+        type Admin = interweave_local_client_fake::FakeAdmin;
+
+        #[allow(
+            clippy::panic,
+            clippy::unused_async_trait_impl,
+            reason = "the panic is the input under test, raised where the trait's future runs"
+        )]
+        async fn admin(
+            &self,
+            _: BTreeSet<AdminCapability>,
+        ) -> Result<Self::Admin, interweave_transport_api::TransportError> {
+            panic!("a check inside the case failed")
+        }
+    }
+
     #[test]
     fn a_panic_inside_a_case_is_its_failure_and_does_not_unwind_out_of_run() {
         let args = PathsArgs {
@@ -814,8 +1194,10 @@ mod tests {
             &args,
             CaseCtx {
                 peer: peer(),
+                app_data_dir: PathBuf::from("/nonexistent"),
                 binding: Some(Panics),
                 provision: None,
+                client: None,
             },
         ));
         assert_eq!(out[keys::RESULT], keys::FAIL);
@@ -826,13 +1208,25 @@ mod tests {
     fn a_case_that_cannot_run_fails_saying_why_and_never_unwinds() {
         let ctx = || CaseCtx::<FakeNode> {
             peer: peer(),
+            app_data_dir: PathBuf::from("/nonexistent"),
             binding: None,
             provision: None,
+            client: None,
         };
         let args = PathsArgs {
             desktop: peer(),
             path: PeerPath::Direct,
             serial: 1,
+            deadline: DEFAULT_DEADLINE,
+        }
+        .to_json()
+        .to_string();
+        let chat = HumanChatArgs {
+            desktop: peer(),
+            path: PeerPath::Direct,
+            side: "C".to_owned(),
+            sends: [3, 7],
+            answers: [4, 8],
             deadline: DEFAULT_DEADLINE,
         }
         .to_json()
@@ -844,6 +1238,12 @@ mod tests {
             (cases::PATHS, args.as_str(), "no runtime is serving"),
             (cases::PROVISION, "{}", "\"config\" is missing"),
             (cases::PROVISION, r#"{"config":"x"}"#, "cannot provision"),
+            (cases::HUMAN_CHAT, "{}", "\"desktop\" is missing"),
+            (
+                cases::HUMAN_CHAT,
+                chat.as_str(),
+                "the app's client is not serving",
+            ),
         ] {
             let out = result(&run(case, args, ctx()));
             assert_eq!(out[keys::RESULT], keys::FAIL, "{case} {args}");

@@ -3246,10 +3246,16 @@ checksum = "36eee07d8e02bd95bf52b2e642cf13d33701b94c6e4b04fbf1d1fb07e9cb19e7"
 name = "interweave-android-e2e-cases"
 version = "0.0.0"
 dependencies = [
+ "interweave-human-app-core",
+ "interweave-human-chat-protocol",
+ "interweave-human-client-api",
+ "interweave-human-ui-model",
  "interweave-local-client-api",
  "interweave-local-client-fake",
+ "interweave-profile-config",
  "interweave-transport-api",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 
@@ -3258,6 +3264,7 @@ name = "interweave-android-e2e-tests"
 version = "0.0.0"
 dependencies = [
  "interweave-android-e2e-cases",
+ "interweave-human-android-platform",
  "interweave-human-chat-protocol",
  "interweave-human-store",
  "interweave-human-transport-client",
@@ -3274,6 +3281,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3473,6 +3482,7 @@ dependencies = [
 name = "interweave-human-android-platform"
 version = "0.0.0"
 dependencies = [
+ "interweave-android-e2e-cases",
  "interweave-human-android-platform",
  "interweave-human-app-core",
  "interweave-human-chat-protocol",
