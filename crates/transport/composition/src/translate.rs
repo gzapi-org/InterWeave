@@ -55,6 +55,11 @@ pub enum CompositionError {
     /// failed: the runtime does not start, since skipping it would
     /// re-allow every peer the operator revoked (ADR-0028 A 2026-10-07).
     TrustOverlay(interweave_profile_config::trust_overlay::OverlayError),
+    /// The endpoint overlay cannot be trusted or its normalisation
+    /// rewrite failed: the runtime does not start, since skipping it
+    /// would re-enable every endpoint the operator disabled (ADR-0028 A
+    /// 2026-10-11).
+    EndpointOverlay(interweave_profile_config::endpoint_overlay::EndpointOverlayError),
 }
 
 impl core::fmt::Display for CompositionError {
@@ -78,6 +83,7 @@ impl core::fmt::Display for CompositionError {
                 "{field} is set to a value this build cannot honour yet; only the schema's default is accepted"
             ),
             Self::TrustOverlay(e) => write!(f, "{e}"),
+            Self::EndpointOverlay(e) => write!(f, "{e}"),
         }
     }
 }

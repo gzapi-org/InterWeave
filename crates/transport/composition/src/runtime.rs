@@ -19,12 +19,13 @@ use std::time::Duration;
 use interweave_local_client_api::{Generation, TrustAdminView, TrustSource, TrustedPeer};
 #[cfg(feature = "test-hooks")]
 use interweave_profile_config::PersistError;
+use interweave_profile_config::endpoint_overlay::{EndpointOverlay, EndpointOverlayError};
 use interweave_profile_config::trust_overlay::{OverlayError, TrustOverlay};
-use interweave_profile_config::{ProfileConfig, ProfilePaths, TrustBoundary};
+use interweave_profile_config::{EndpointsConfig, ProfileConfig, ProfilePaths, TrustBoundary};
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::{
-    Component, ComponentHealth, ConnectivitySummary, HealthReport, LocalIdentity, PathChangeReason,
-    PeerPath, PeerSummary, TransportCapabilities, TransportError, TransportEvent,
+    Component, ComponentHealth, ConnectivitySummary, EndpointId, HealthReport, LocalIdentity,
+    PathChangeReason, PeerPath, PeerSummary, TransportCapabilities, TransportError, TransportEvent,
     TransportIdentity, TransportRuntime,
 };
 use interweave_transport_libp2p::{
@@ -60,7 +61,13 @@ pub struct CompositionOptions {
     /// -- a test construction -- a set lasts until the runtime stops and
     /// every row reads `persisted: false` (`LOCAL-CLIENT.md` §7 item 11).
     pub trust_overlay_file: Option<PathBuf>,
-    /// Where the overlay file's directory walk stops (ADR-0028 A
+    /// The endpoint overlay's file (`EndpointOverlay::path_for`): what
+    /// `admin.endpoints.set_enabled` and `set_default` changed, kept
+    /// across restarts (ADR-0028 A 2026-10-11). Every production binding
+    /// supplies one; without one -- a test construction -- a set lasts
+    /// until the runtime stops and every row reads `persisted: false`.
+    pub endpoint_overlay_file: Option<PathBuf>,
+    /// Where the overlay files' directory walk stops (ADR-0028 A
     /// 2026-10-08): the profile paths' boundary -- `/` on the desktop,
     /// the app's data directory with its runtime root for an embedded
     /// runtime, whose overlay is kept under it (ADR-0028 A 2026-10-07).
@@ -84,6 +91,7 @@ impl CompositionOptions {
             listen: profile.transport.listen.addresses.clone(),
             peer_cache_file: Some(paths.peer_cache_file()),
             trust_overlay_file: Some(TrustOverlay::path_for(paths)),
+            endpoint_overlay_file: Some(EndpointOverlay::path_for(paths)),
             trust_boundary: paths.boundary().clone(),
             queue_bound: usize::try_from(profile.ipc.client_event_queue).unwrap_or(usize::MAX),
             ..Self::default()
@@ -97,6 +105,7 @@ impl Default for CompositionOptions {
             listen: Vec::new(),
             peer_cache_file: None,
             trust_overlay_file: None,
+            endpoint_overlay_file: None,
             trust_boundary: TrustBoundary::root(),
             queue_bound: 256,
             event_capacity: 1024,
@@ -175,16 +184,30 @@ pub(crate) enum Request {
         bool,
         oneshot::Sender<Result<(), TransportError>>,
     ),
+    /// Enable or disable an endpoint (`admin.endpoints.set_enabled`),
+    /// answered with the epoch disabling revoked.
+    SetEndpointEnabled(
+        EndpointId,
+        bool,
+        oneshot::Sender<Result<Option<Generation>, TransportError>>,
+    ),
+    /// Point omitted destinations at an endpoint, or at none
+    /// (`admin.endpoints.set_default`).
+    SetDefaultEndpoint(
+        Option<EndpointId>,
+        oneshot::Sender<Result<(), TransportError>>,
+    ),
     /// A path change posted as if the substrate had reported it, through
     /// the same handling (`Driver::post_path_change`): how a test between
     /// real runtimes reaches it without a relay. Test builds only.
     #[cfg(feature = "test-hooks")]
     InjectPathChange(TransportIdentity, PeerPath, PeerPath, oneshot::Sender<()>),
-    /// The failures the next trust overlay writes meet. Test builds only.
+    /// The failures the next overlay writes meet, trust or endpoint.
+    /// Test builds only.
     #[cfg(feature = "test-hooks")]
     FailOverlayWrites(Vec<OverlayFault>, oneshot::Sender<()>),
-    /// The next trust publishes fail as if the substrate were gone. Test
-    /// builds only.
+    /// The next trust or endpoint publishes fail as if the substrate
+    /// were gone. Test builds only.
     #[cfg(feature = "test-hooks")]
     FailPublishes(usize, oneshot::Sender<()>),
     /// End the driver as if its substrate had gone: how a test reaches
@@ -193,7 +216,7 @@ pub(crate) enum Request {
     EndDriver(oneshot::Sender<()>),
 }
 
-/// A failure a test makes the next trust overlay write meet, on either
+/// A failure a test makes the next overlay write meet, on either
 /// side of its rename (`ComposedRuntime::fail_overlay_writes`).
 #[cfg(feature = "test-hooks")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -332,6 +355,31 @@ impl ComposedRuntime {
             }
             None => (TrustOverlay::default(), configured_peers.clone()),
         };
+        // THE ENDPOINT OVERLAY BEFORE THE SUBSTRATE, for the same reason:
+        // composed over `config.yaml`'s endpoints here, so the substrate
+        // starts with what an administrator set and no claim is ever
+        // admitted to an endpoint they disabled. A present overlay that
+        // cannot be trusted stops the start (ADR-0028 A 2026-10-11);
+        // what normalising it changed is warned, naming each entry.
+        let endpoints_configured = profile.endpoints.clone();
+        let endpoint_overlay = match &options.endpoint_overlay_file {
+            Some(path) => {
+                let (overlay, changes) = EndpointOverlay::load_within(
+                    path,
+                    &endpoints_configured,
+                    &options.trust_boundary,
+                )
+                .map_err(CompositionError::EndpointOverlay)?;
+                for change in &changes {
+                    tracing::warn!("the endpoint overlay was normalised at load: {change}");
+                }
+                overlay
+            }
+            None => EndpointOverlay::default(),
+        };
+        let mut profile = profile.clone();
+        profile.endpoints = endpoint_overlay.apply(&endpoints_configured);
+        let profile = &profile;
         let composition = translate(profile, &local, options.queue_bound)?
             .with_allowed(allowed.clone(), &local)?;
         // A WALL-CLOCK ANCHOR ADVANCED BY THE MONOTONIC CLOCK. The peer
@@ -412,6 +460,7 @@ impl ComposedRuntime {
             local.clone(),
             Arc::new(shutdown_tx),
             notices.clone(),
+            options.endpoint_overlay_file.is_some(),
         );
         let (event_tx, events) = mpsc::channel(options.event_capacity.max(1));
         let dropped = Arc::new(AtomicU64::new(0));
@@ -436,6 +485,9 @@ impl ComposedRuntime {
             configured: configured_peers,
             overlay,
             overlay_file: options.trust_overlay_file.clone(),
+            endpoints_configured,
+            endpoint_overlay,
+            endpoint_overlay_file: options.endpoint_overlay_file.clone(),
             trust_boundary: options.trust_boundary.clone(),
             #[cfg(feature = "test-hooks")]
             overlay_faults: std::collections::VecDeque::new(),
@@ -604,8 +656,8 @@ impl ComposedRuntime {
             .await
     }
 
-    /// Make the next `count` trust publishes fail as if the substrate
-    /// were gone, after their overlay was written: how a test reaches the
+    /// Make the next `count` trust or endpoint publishes fail as if the
+    /// substrate were gone, after their overlay was written: how a test reaches the
     /// restore after a failed publish. TEST BUILDS ONLY.
     ///
     /// # Errors
@@ -615,7 +667,7 @@ impl ComposedRuntime {
         self.ask(|reply| Request::FailPublishes(count, reply)).await
     }
 
-    /// Make the next trust overlay writes meet `faults`, one each, in
+    /// Make the next overlay writes, trust or endpoint, meet `faults`, one each, in
     /// order: how a test reaches a write that fails after its rename,
     /// which no permission can produce. TEST BUILDS ONLY.
     ///
@@ -694,7 +746,15 @@ struct Driver {
     overlay: TrustOverlay,
     /// Where the overlay is kept; `None` in a test construction.
     overlay_file: Option<PathBuf>,
-    /// Where `overlay_file`'s directory walk stops.
+    /// `config.yaml`'s endpoints as the runtime started with them: what
+    /// the endpoint overlay is a delta against.
+    endpoints_configured: EndpointsConfig,
+    /// The endpoint overlay as last written, normalised: the substrate's
+    /// endpoints are `endpoints_configured` with it composed over them.
+    endpoint_overlay: EndpointOverlay,
+    /// Where the endpoint overlay is kept; `None` in a test construction.
+    endpoint_overlay_file: Option<PathBuf>,
+    /// Where both overlay files' directory walk stops.
     trust_boundary: TrustBoundary,
     /// The failures the next overlay writes meet, in order (test builds).
     #[cfg(feature = "test-hooks")]
@@ -1048,6 +1108,42 @@ impl Driver {
             Request::SetTrust(peer, allowed, reply) => {
                 let _ = reply.send(self.set_trust(peer, allowed).await);
             }
+            Request::SetEndpointEnabled(endpoint, enabled, reply) => {
+                let moved = self.endpoint_overlay.set_enabled(
+                    &self.endpoints_configured,
+                    &endpoint,
+                    enabled,
+                );
+                let fault = self.take_publish_fault();
+                let commander = self.swarm.commander();
+                let publish = async move {
+                    if fault {
+                        return Err(TransportError::BackendUnavailable);
+                    }
+                    commander
+                        .set_endpoint_enabled(endpoint, enabled)
+                        .await
+                        .map_err(|_| TransportError::BackendUnavailable)?
+                };
+                let _ = reply.send(self.set_endpoints("set_enabled", moved, publish).await);
+            }
+            Request::SetDefaultEndpoint(endpoint, reply) => {
+                let moved = self
+                    .endpoint_overlay
+                    .set_default(&self.endpoints_configured, endpoint.as_ref());
+                let fault = self.take_publish_fault();
+                let commander = self.swarm.commander();
+                let publish = async move {
+                    if fault {
+                        return Err(TransportError::BackendUnavailable);
+                    }
+                    commander
+                        .set_default_endpoint(endpoint)
+                        .await
+                        .map_err(|_| TransportError::BackendUnavailable)?
+                };
+                let _ = reply.send(self.set_endpoints("set_default", moved, publish).await);
+            }
             #[cfg(feature = "test-hooks")]
             Request::InjectPathChange(peer, previous, current, reply) => {
                 self.post_path_change(peer, previous, current, PathChange::HolePunched)
@@ -1071,9 +1167,7 @@ impl Driver {
     /// `BackendUnavailable` -- or, test builds only, the failure a test
     /// queued for the next publish.
     async fn publish(&mut self, next: PeerTrustPolicy) -> Result<bool, TransportError> {
-        #[cfg(feature = "test-hooks")]
-        if self.publish_faults > 0 {
-            self.publish_faults -= 1;
+        if self.take_publish_fault() {
             return Err(TransportError::BackendUnavailable);
         }
         self.swarm
@@ -1081,6 +1175,120 @@ impl Driver {
             .await
             .map(|_closed| true)
             .map_err(|_| TransportError::BackendUnavailable)
+    }
+
+    /// Whether the next publish is to fail as if the substrate were gone
+    /// (test builds only), counting it off.
+    #[cfg_attr(
+        not(feature = "test-hooks"),
+        expect(
+            clippy::unused_self,
+            clippy::missing_const_for_fn,
+            reason = "the test-hooks build reads and counts self.publish_faults"
+        )
+    )]
+    fn take_publish_fault(&mut self) -> bool {
+        #[cfg(feature = "test-hooks")]
+        if self.publish_faults > 0 {
+            self.publish_faults -= 1;
+            return true;
+        }
+        false
+    }
+
+    /// Write `overlay` to `path`: the endpoint overlay's own write, or --
+    /// test builds only -- the next fault a test queued for it.
+    fn write_endpoint_overlay(
+        &mut self,
+        overlay: &EndpointOverlay,
+        path: &std::path::Path,
+    ) -> Result<(), EndpointOverlayError> {
+        #[cfg(feature = "test-hooks")]
+        if let Some(fault) = self.overlay_faults.pop_front() {
+            return match fault {
+                OverlayFault::BeforeRename => Err(EndpointOverlayError::Write(PersistError::Io(
+                    std::io::Error::other("an injected failure before the rename"),
+                ))),
+                OverlayFault::AfterRename => {
+                    overlay.write_within(path, &self.trust_boundary)?;
+                    Err(EndpointOverlayError::Write(PersistError::Unsynced(
+                        std::io::Error::other("an injected failure to sync the directory"),
+                    )))
+                }
+            };
+        }
+        overlay.write_within(path, &self.trust_boundary)
+    }
+
+    /// One endpoint set, `admin.endpoints.<what>`: the overlay's move
+    /// `moved` written, then `publish` -- the substrate's own set --
+    /// awaited, with the trust overlay's write discipline verbatim
+    /// (ADR-0028 A 2026-10-11).
+    ///
+    /// WRITTEN BEFORE PUBLISHED: a set answered `ok` survives a crash,
+    /// and a set whose write fails changes nothing -- not the runtime,
+    /// not a lease, not what the next start loads. A move refused by the
+    /// overlay (an unknown endpoint, a disabled default) is refused
+    /// before anything is written, as the substrate would refuse it. A
+    /// set the overlay already records still publishes: the overlay can
+    /// be ahead of the runtime (below), and the substrate's set changes
+    /// nothing when it already agrees.
+    ///
+    /// THE PREVIOUS OVERLAY IS PUT BACK whenever the new one may be on
+    /// disk and the set is not answered `ok` -- a failed publish, or a
+    /// write that installed it and then failed -- so the next start
+    /// loads what the runtime holds. A restore that fails before its
+    /// rename leaves the overlay AHEAD: answered `Internal`, a warning
+    /// logged, taking effect at the next start; every later set is a
+    /// move on the overlay kept on disk. The runtime is not stopped on a
+    /// disk fault.
+    async fn set_endpoints<T>(
+        &mut self,
+        what: &'static str,
+        moved: Result<Option<EndpointOverlay>, EndpointOverlayError>,
+        publish: impl Future<Output = Result<T, TransportError>>,
+    ) -> Result<T, TransportError> {
+        let overlay = match moved {
+            Ok(overlay) => overlay,
+            Err(EndpointOverlayError::Unknown) => return Err(TransportError::EndpointUnknown),
+            Err(EndpointOverlayError::Disabled) => return Err(TransportError::EndpointDisabled),
+            Err(_) => return Err(TransportError::Internal),
+        };
+        let written = match (&overlay, self.endpoint_overlay_file.clone()) {
+            (Some(overlay), Some(path)) => self.write_endpoint_overlay(overlay, &path).err(),
+            _ => None,
+        };
+        let published = if written.is_some() {
+            Err(TransportError::Internal)
+        } else {
+            publish.await
+        };
+        // A write that failed before its rename left the previous file:
+        // nothing to put back.
+        let restore = match &written {
+            Some(e) => e.installed(),
+            None => published.is_err(),
+        };
+        if let (true, Some(new), Some(path)) =
+            (restore, &overlay, self.endpoint_overlay_file.clone())
+        {
+            let previous = self.endpoint_overlay.clone();
+            if let Err(e) = self.write_endpoint_overlay(&previous, &path)
+                && !e.installed()
+            {
+                tracing::warn!(
+                    "admin.endpoints.{what}: the endpoint overlay is ahead of the runtime; \
+                     the set takes effect at the next start"
+                );
+                self.endpoint_overlay = new.clone();
+                return Err(TransportError::Internal);
+            }
+        }
+        let answer = published?;
+        if let Some(overlay) = overlay {
+            self.endpoint_overlay = overlay;
+        }
+        Ok(answer)
     }
 
     /// Write `overlay` to `path`: the overlay's own write, or -- test
