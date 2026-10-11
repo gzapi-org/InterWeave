@@ -29,6 +29,7 @@ pub mod custody;
 use interweave_local_client_api::{AdminBinding as _, AdminCapability, AdminPort as _};
 pub use interweave_profile_config::availability_overlay::StayReachable;
 use interweave_profile_config::availability_overlay::{self, AvailabilityError};
+use interweave_profile_config::endpoint_overlay::EndpointOverlayError;
 pub use interweave_profile_config::runtime::AvailabilityMode;
 use interweave_profile_config::sections::LogLevel;
 use interweave_profile_config::trust_overlay::OverlayError;
@@ -190,7 +191,8 @@ impl From<CompositionError> for EmbeddedRefused {
             CompositionError::InvalidProfile(_) | CompositionError::Unhonoured { .. } => {
                 Self::ProfileInvalid(e.to_string())
             }
-            CompositionError::TrustOverlay(OverlayError::NotPrivate { .. }) => {
+            CompositionError::TrustOverlay(OverlayError::NotPrivate { .. })
+            | CompositionError::EndpointOverlay(EndpointOverlayError::NotPrivate { .. }) => {
                 Self::DirectoryRefused(e.to_string())
             }
             _ => Self::Internal(e.to_string()),

@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use interweave_local_client_api::{AdminBinding, AdminCapability, AdminPort};
+use interweave_profile_config::endpoint_overlay::EndpointOverlay;
 use interweave_profile_config::sections::LogLevel;
 use interweave_profile_config::trust_overlay::TrustOverlay;
 use interweave_profile_config::{ProfilePaths, TrustBoundary, create_private_dir_within};
@@ -159,6 +160,67 @@ fn the_host_serves_under_its_root() {
             .expect("the overlay reads back");
     assert!(effective.contains(&other));
     drop(port);
+    host.stop(Duration::from_secs(1)).expect("stops");
+}
+
+/// THE EMBEDDED RUNTIME BINDS THE ENDPOINT OVERLAY RULE (ADR-0028 A
+/// 2026-10-11): Android has no admin surface, so nothing writes the file
+/// and the load finds none -- a no-op, the configured endpoint enabled,
+/// no file created -- while the store is supplied all the same, under the
+/// host's root, so each row says it persists. The control that the file
+/// is read where the binding says: one written there disabling the
+/// endpoint is in force at the next start.
+#[test]
+fn the_endpoint_overlay_loads_absent_as_a_no_op_under_the_root() {
+    let app = app();
+    // A second endpoint, so the one the overlay disables is not the
+    // endpoint the embedded profile must lease.
+    let text = document("embedded-android", false).replace(
+        "endpoints:\n  entries:\n",
+        "endpoints:\n  entries:\n    - id: agent\n      enabled: true\n      advertise: false\n",
+    );
+    assert!(text.contains("id: agent"), "{text}");
+    provision(&app.dir, &text);
+    let rows = |host: &EmbeddedHost| {
+        let port = host
+            .runtime()
+            .block_on(host.binding().admin([AdminCapability::Endpoints].into()))
+            .expect("an admin port");
+        host.runtime()
+            .block_on(port.leases())
+            .expect("the endpoints")
+            .into_iter()
+            .map(|r| (r.endpoint.as_str().to_owned(), r.enabled, r.persisted))
+            .collect::<Vec<_>>()
+    };
+
+    let host = EmbeddedHost::start(launch(&app.dir)).expect("starts");
+    let overlay = EndpointOverlay::path_for(host.paths());
+    assert!(
+        overlay.starts_with(app.dir.join("interweave")),
+        "{}",
+        overlay.display()
+    );
+    assert_eq!(
+        rows(&host),
+        vec![
+            ("agent".to_owned(), true, true),
+            ("human".to_owned(), true, true)
+        ]
+    );
+    assert!(!overlay.exists(), "loaded absent, and not created");
+    host.stop(Duration::from_secs(1)).expect("stops");
+
+    std::fs::write(&overlay, r#"{"enabled":{"agent":false}}"#).expect("written");
+    std::fs::set_permissions(&overlay, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+    let host = EmbeddedHost::start(launch(&app.dir)).expect("restarts");
+    assert_eq!(
+        rows(&host),
+        vec![
+            ("agent".to_owned(), false, true),
+            ("human".to_owned(), true, true)
+        ]
+    );
     host.stop(Duration::from_secs(1)).expect("stops");
 }
 
