@@ -477,11 +477,20 @@ async fn relayed_and_direct<R: Device, C: Device>(mut r: R, mut c: C) {
         }
         // D keeps its half going until the Android side has seen what it
         // waits for and answered.
-        side.until(clock, &log, &format!("{name}'s case answering"), |s| {
-            replies.iter().all(|m| s.accepted(&m.app_message_id)) && run.is_finished()
+        // The case's answer first, so a failing one reports its own
+        // detail; only then must D's replies have been accepted.
+        side.until(clock, &log, &format!("{name}'s case answering"), |_| {
+            run.is_finished()
         })
         .await;
         let out = run.passed(log);
+        side.until(
+            clock,
+            &log,
+            &format!("D's replies accepted at {name}"),
+            |s| replies.iter().all(|m| s.accepted(&m.app_message_id)),
+        )
+        .await;
 
         // What D was handed is what the Android side's facade composed.
         let sent: Vec<HumanChatV2> = out
