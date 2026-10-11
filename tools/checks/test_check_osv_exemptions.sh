@@ -83,9 +83,10 @@ code="$(run_code "$GOOD" --today 2026-11-10)"
 
 # Each case: a name, a fragment the output must carry, and the file.
 failing() {
-    local name="$1" says="$2"
+    local name="$1" says="$2" extra="${3:-}"
     local r="$TMP/case-$((pass + fail))"
     make_root "$r"
+    [[ -n "$extra" ]] && printf '%s\n' "$extra" >> "$r/apps/human-android/android/app/gradle.lockfile"
     cat > "$r/apps/human-android/android/osv-scanner.toml"
     local out code
     out="$(run "$r")"; code="$(run_code "$r")"
@@ -121,13 +122,38 @@ failing "31 days for a CRITICAL fails" "at most 30" < <(entry GHSA-aaaa-bbbb-ccc
 code="$(run_code "$GOOD" --today 2026-11-11)"
 [[ "$code" == 1 ]] && ok "--today after an ignoreUntil fails" || bad "--today after an ignoreUntil: exit $code"
 
-echo "rule 5: a configuration that ships"
-failing "naming a RuntimeClasspath fails" "reaches the APK" < <(entry GHSA-aaaa-bbbb-cccc org.example:ships:2.0.0 releaseRuntimeClasspath LOW 2026-10-11 2026-12-01)
+echo "rule 5: only a known build-only configuration"
+failing "naming a RuntimeClasspath fails" "not a known build-only configuration" < <(entry GHSA-aaaa-bbbb-cccc org.example:ships:2.0.0 releaseRuntimeClasspath LOW 2026-10-11 2026-12-01)
+failing "naming a CompileClasspath fails" "not a known build-only configuration" \
+    "org.example:compiled:1.0.0=releaseCompileClasspath" \
+    < <(entry GHSA-aaaa-bbbb-cccc org.example:compiled:1.0.0 releaseCompileClasspath LOW 2026-10-11 2026-12-01)
+failing "naming coreLibraryDesugaring, dexed into the APK, fails" "not a known build-only configuration" \
+    "com.android.tools:desugar_jdk_libs:2.0.0=coreLibraryDesugaring" \
+    < <(entry GHSA-aaaa-bbbb-cccc com.android.tools:desugar_jdk_libs:2.0.0 coreLibraryDesugaring LOW 2026-10-11 2026-12-01)
+failing "naming a configuration nobody classified fails" "not a known build-only configuration" \
+    "org.example:lint-dep:1.0.0=lintChecks" \
+    < <(entry GHSA-aaaa-bbbb-cccc org.example:lint-dep:1.0.0 lintChecks LOW 2026-10-11 2026-12-01)
 
 echo "rule 6: the entry against the lockfiles"
 failing "an artefact on no lockfile fails" "on no committed lockfile" < <(entry GHSA-aaaa-bbbb-cccc org.example:lint-only:9.9.9 androidLintTool LOW 2026-10-11 2026-12-01)
-failing "a configuration the lockfiles do not give it fails" "do not put" < <(entry GHSA-aaaa-bbbb-cccc org.example:plugin-dep:3.0.0 androidLintTool LOW 2026-10-11 2026-12-01)
-failing "\"lint only\" about an artefact that also ships fails" "which reach the APK" < <(entry GHSA-aaaa-bbbb-cccc org.example:ships:2.0.0 androidLintTool LOW 2026-10-11 2026-12-01)
+failing "a configuration the lockfiles do not give it fails" "but the lockfiles give" < <(entry GHSA-aaaa-bbbb-cccc org.example:plugin-dep:3.0.0 androidLintTool LOW 2026-10-11 2026-12-01)
+failing "naming only some of the artefact's configurations fails" "but the lockfiles give" \
+    "org.example:two-places:1.0.0=androidLintTool,kotlinCompilerClasspath" \
+    < <(entry GHSA-aaaa-bbbb-cccc org.example:two-places:1.0.0 androidLintTool LOW 2026-10-11 2026-12-01)
+failing "\"lint only\" about an artefact that also ships fails" "not build-only" < <(entry GHSA-aaaa-bbbb-cccc org.example:ships:2.0.0 androidLintTool LOW 2026-10-11 2026-12-01)
+failing "a build-only version beside a shipped version of the same artefact fails" "lint-only:0.9.0" \
+    "org.example:lint-only:0.9.0=releaseRuntimeClasspath" \
+    < <(entry GHSA-aaaa-bbbb-cccc org.example:lint-only:1.0.0 androidLintTool LOW 2026-10-11 2026-12-01)
+# The control for the two above: another build-only version passes.
+CTRL="$TMP/ctrl"; make_root "$CTRL"
+printf 'org.example:lint-only:0.9.0=kotlinCompilerClasspath\n' >> "$CTRL/apps/human-android/android/app/gradle.lockfile"
+entry GHSA-aaaa-bbbb-cccc org.example:lint-only:1.0.0 androidLintTool LOW 2026-10-11 2026-12-01 > "$CTRL/apps/human-android/android/osv-scanner.toml"
+code="$(run_code "$CTRL")"
+[[ "$code" == 0 ]] && ok "a second, build-only version of the same artefact passes" || { bad "build-only second version: exit $code"; run "$CTRL" >&2; }
+
+failing "an IgnoredVulns element that is not a table fails" "not a table" <<'EOF'
+IgnoredVulns = ["GHSA-aaaa-bbbb-cccc"]
+EOF
 
 echo "could not run"
 BROKEN="$TMP/broken"; make_root "$BROKEN"

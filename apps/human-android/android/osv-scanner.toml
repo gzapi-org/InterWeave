@@ -14,13 +14,19 @@
 # tree checks, against the committed lockfiles; its --help is the rule
 # text.
 #
-#   1. A finding on a configuration whose classes reach the APK (any
-#      *RuntimeClasspath or *CompileClasspath) is never accepted. It is
-#      bumped or removed before the push.
-#   2. A finding on a build-only configuration (the buildscript
-#      `classpath`, androidLintTool, any other tool configuration) is
-#      accepted only as one [[IgnoredVulns]] per OSV id, with an
-#      ignoreUntil. The reason carries these labelled lines:
+#   1. A finding is accepted only on a configuration known to be
+#      build-only: the buildscript `classpath`, androidLintTool, and the
+#      Kotlin compiler's classpaths (the check's BUILD_ONLY list). A
+#      finding anywhere else is never accepted -- what ships
+#      (*RuntimeClasspath, *CompileClasspath, coreLibraryDesugaring),
+#      and what nobody has classified yet. It is bumped or removed before
+#      the push.
+#   2. An accepted finding is one [[IgnoredVulns]] per OSV id, with an
+#      ignoreUntil. An entry silences its id on EVERY package the scan
+#      matches, not only the one it names. So no version of the same
+#      artefact may sit anywhere but on a build-only configuration, and
+#      the scan with the entries removed must show the id on the named
+#      artefact alone. The reason carries these labelled lines:
 #        artefact:      group:name:version, as the lockfile writes it
 #        configuration: every configuration the lockfiles give it
 #        severity:      OSV's LOW / MODERATE / HIGH / CRITICAL

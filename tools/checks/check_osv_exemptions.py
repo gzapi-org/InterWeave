@@ -31,14 +31,20 @@
 #      01a12883), `reviewed: YYYY-MM-DD`;
 #   4. an entry's ignoreUntil is not after its review date, or is more
 #      than 90 days after it -- 30 for a CRITICAL;
-#   5. a named configuration is one whose classes reach the APK: any
-#      *RuntimeClasspath or *CompileClasspath. Those findings are never
-#      accepted;
-#   6. the artefact, at that version, is on no committed *.lockfile
-#      under the build with every named configuration -- an entry must
-#      describe the graph as it is -- or the lockfiles put it on a
-#      configuration from rule 5. So an entry cannot say "lint only"
-#      about an artefact that also ships.
+#   5. a named configuration is not one known to be build-only. The list
+#      is BUILD_ONLY below: the buildscript `classpath`, androidLintTool,
+#      and the Kotlin compiler's own classpaths. Every other
+#      configuration is refused, whether it ships (*RuntimeClasspath,
+#      *CompileClasspath, coreLibraryDesugaring, whose classes are dexed
+#      into the APK) or nobody has classified it yet. Adding a name to
+#      the list is a reviewed change to this file;
+#   6. the entry does not describe the graph as it is: the artefact at
+#      that version is on no committed *.lockfile under the build, or
+#      `configuration:` is not exactly the configurations the lockfiles
+#      give it -- or ANY version of the same group:name sits on a
+#      configuration rule 5 refuses. An [[IgnoredVulns]] entry silences
+#      its id on every package the scan matches, not just the one named,
+#      so a build-only copy cannot vouch for a shipped one.
 #
 # With --today, an entry whose ignoreUntil has passed fails too. That is
 # for a local run: in CI a date passing would turn an unrelated PR red,
@@ -47,7 +53,11 @@
 #
 # NOT CHECKED: whether the OSV id names that artefact, or whether the
 # finding exists at all -- that is osv-scanner's, and needs the network.
-# Nor whether the `why` is true: a reviewer reads it.
+# Nor whether the same id also matches a DIFFERENT artefact that ships:
+# the id is suppressed on every package, and only the scan knows which
+# packages it covers, so the local run's output with the entries removed
+# is what shows that the id hits only the named artefact. Nor whether
+# the `why` is true: a reviewer reads it.
 #
 # A tree without osv-scanner.toml passes, saying so: nothing is accepted.
 #
@@ -81,8 +91,14 @@ PARTS = ("artefact", "configuration", "severity", "why", "changes", "checked", "
 SEVERITIES = {"LOW", "MODERATE", "HIGH", "CRITICAL"}
 HORIZON_DAYS = {"CRITICAL": 30}
 DEFAULT_HORIZON_DAYS = 90
-# A configuration whose classes reach the APK (plan §20's policy, rule 1).
-SHIPS = re.compile(r"(RuntimeClasspath|CompileClasspath)$")
+# The configurations known to be build-only (rule 5): the buildscript's
+# plugin classpath, lint's own tool classpath, and the Kotlin compiler's
+# classpaths. Their classes run in the build, never in the APK. Anything
+# else is refused until it is classified here.
+BUILD_ONLY = re.compile(
+    r"^(classpath|androidLintTool|kotlinCompilerClasspath|kotlinBuildToolsApiClasspath"
+    r"|kotlinCompilerPluginClasspath[A-Za-z]*)$"
+)
 ARTEFACT = re.compile(r"^[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+:[A-Za-z0-9_.+-]+$")
 
 
@@ -141,6 +157,9 @@ def check(root: Path, today: datetime.date | None) -> list[str]:
     locks = lockfile_configurations(root / BUILD)
     seen = set()
     for n, entry in enumerate(entries, 1):
+        if not isinstance(entry, dict):
+            problems.append(f"entry {n}: not a table")
+            continue
         where = f"entry {n} ({entry.get('id', 'no id')})"
         extra = set(entry) - {"id", "ignoreUntil", "reason"}
         if extra:
@@ -186,8 +205,8 @@ def check(root: Path, today: datetime.date | None) -> list[str]:
         artefact = parts["artefact"]
         named = [c.strip() for c in parts["configuration"].split(",") if c.strip()]
         for c in named:
-            if SHIPS.search(c):
-                problems.append(f"{where}: {c} reaches the APK; a finding there is never accepted")
+            if not BUILD_ONLY.match(c):
+                problems.append(f"{where}: {c} is not a known build-only configuration; a finding there is never accepted")
         if not ARTEFACT.match(artefact):
             problems.append(f"{where}: `artefact:` {artefact!r} is not group:name:version")
             continue
@@ -195,12 +214,20 @@ def check(root: Path, today: datetime.date | None) -> list[str]:
         if on is None:
             problems.append(f"{where}: {artefact} is on no committed lockfile under {BUILD}")
             continue
-        absent = [c for c in named if c not in on]
-        if absent:
-            problems.append(f"{where}: the lockfiles do not put {artefact} on {absent} (they say {sorted(on)})")
-        shipping = sorted(c for c in on if SHIPS.search(c))
-        if shipping:
-            problems.append(f"{where}: the lockfiles put {artefact} on {shipping}, which reach the APK")
+        if set(named) != on:
+            problems.append(
+                f"{where}: `configuration:` names {sorted(named)}, but the lockfiles give {artefact} {sorted(on)}"
+            )
+        group_name = artefact.rsplit(":", 1)[0]
+        for coordinate, configurations in sorted(locks.items()):
+            if coordinate.rsplit(":", 1)[0] != group_name:
+                continue
+            refused = sorted(c for c in configurations if not BUILD_ONLY.match(c))
+            if refused:
+                problems.append(
+                    f"{where}: the lockfiles put {coordinate} on {refused}, which are not build-only; "
+                    "the entry's id would be silenced there too"
+                )
     if not problems:
         print(f"{NAME}: OK -- {len(entries)} accepted finding(s), each dated, explained and build-only")
     return problems
