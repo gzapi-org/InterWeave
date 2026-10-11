@@ -96,8 +96,11 @@ pub mod cases {
     /// `Device::log`.
     pub const AUDIT: &str = "audit";
 
-    /// The cases a runner must have the app's runtime serving for; the
-    /// others run before it starts, as [`PROVISION`] must.
+    /// The cases a runner must have the runtime ALONE serving for: the
+    /// app's runtime, started as the app starts it, with no store and no
+    /// facade, so nothing else holds the profile's endpoint leases (agreed
+    /// with rust-ui-dev, 01a128a6/01a128a8). The others run before it
+    /// starts, as [`PROVISION`] must.
     pub const NEED_A_RUNTIME: &[&str] = &[PATHS, TRUST_BOUNDARY, AUDIT];
 }
 

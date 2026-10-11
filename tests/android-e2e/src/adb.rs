@@ -117,7 +117,10 @@ impl Device for AdbDevice {
         self.reversed.push(port);
     }
 
+    /// Provisions `config`, after clearing the device's log: what a case
+    /// reads from logcat is then this run's, never an earlier one's.
     fn start(&mut self, config: &str) {
+        run_ok(&["logcat", "-c"]);
         let out = parse(&instrument(
             &self.instrumentation,
             cases::PROVISION,

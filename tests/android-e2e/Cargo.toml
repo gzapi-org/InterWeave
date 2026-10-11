@@ -34,6 +34,9 @@ interweave-ipc-client = { path = "../../crates/local/ipc-client" }
 # 2026-10-10), and its result JSON.
 interweave-android-e2e-cases = { path = "../android-e2e-cases" }
 serde_json = { workspace = true }
+# The stand-in's log, filtered as the embedded host filters (gate (g)).
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 # human_chat.rs: the human client's own facade, store, envelope and

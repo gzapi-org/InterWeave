@@ -54,6 +54,89 @@ pub use interweave_test_support::e2e::{
 
 pub mod adb;
 
+/// The stand-in's log, as the app's shell would write it to logcat: a
+/// process-wide subscriber that admits an event exactly when the
+/// embedded host's own filter does (`log_admits`) at the profile's level.
+/// The shell's writer is the app's, so this is what the stand-in has in
+/// its place -- the filter is the runtime's, the capture is the test's.
+/// One per test process, installed by [`log_capture::install`]; until
+/// then [`HostStandIn`]'s log is empty.
+pub mod log_capture {
+    use std::sync::{Mutex, OnceLock, RwLock};
+
+    use interweave_profile_config::sections::LogLevel;
+    use interweave_transport_embedded::log_admits;
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    static LINES: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+    static LEVEL: RwLock<LogLevel> = RwLock::new(LogLevel::Info);
+
+    struct Message(String);
+
+    impl tracing::field::Visit for Message {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.0 = format!("{value:?}");
+            }
+        }
+    }
+
+    struct Capture;
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let meta = event.metadata();
+            let level = *LEVEL
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !log_admits(meta.target(), *meta.level(), level) {
+                return;
+            }
+            let mut message = Message(String::new());
+            event.record(&mut message);
+            if let Some(lines) = LINES.get() {
+                lines
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(format!("{} {} {}", meta.level(), meta.target(), message.0));
+            }
+        }
+    }
+
+    /// Install the capture as this process's global subscriber, once.
+    ///
+    /// # Panics
+    /// If another global subscriber is already installed.
+    pub fn install() {
+        if LINES.set(Mutex::new(Vec::new())).is_ok() {
+            tracing::subscriber::set_global_default(tracing_subscriber::registry().with(Capture))
+                .expect("the only global subscriber");
+        }
+    }
+
+    /// The profile level the capture filters at: the running host's.
+    pub fn filter_at(level: LogLevel) {
+        *LEVEL
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = level;
+    }
+
+    /// What has been captured so far, one line per event.
+    #[must_use]
+    pub fn lines() -> String {
+        LINES.get().map_or_else(String::new, |lines| {
+            lines
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .join("\n")
+        })
+    }
+}
+
 /// How long a stand-in's stop lets exchanges in flight settle.
 const GRACE: Duration = Duration::from_secs(1);
 
@@ -281,6 +364,11 @@ impl Device for HostStandIn {
         drop(self.host.take());
     }
 
+    /// The capture's lines, when the test process installed it.
+    fn log(&self) -> String {
+        log_capture::lines()
+    }
+
     fn restart(&mut self) {
         assert!(self.host.is_none(), "restart of a runtime still up");
         let identity = ProfileIdentity::from_phrase(&self.phrase).expect("the same identity");
@@ -289,7 +377,9 @@ impl Device for HostStandIn {
             profile: PROFILE.to_owned(),
             identity,
         };
-        self.host = Some(off_runtime(|| EmbeddedHost::start(launch)).expect("the stand-in starts"));
+        let host = off_runtime(|| EmbeddedHost::start(launch)).expect("the stand-in starts");
+        log_capture::filter_at(host.log_level());
+        self.host = Some(host);
     }
 
     /// The case body on a thread of its own, as the instrumentation runs
@@ -298,6 +388,7 @@ impl Device for HostStandIn {
     fn run_case(&self, case: &str, args: &Value) -> CaseRun {
         let ctx = CaseCtx {
             peer: self.peer.clone(),
+            app_data_dir: self.app_data_dir.clone(),
             binding: self.host.as_ref().map(EmbeddedHost::binding),
             provision: Some(Box::new({
                 let app_data_dir = self.app_data_dir.clone();
