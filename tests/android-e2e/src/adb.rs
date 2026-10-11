@@ -10,7 +10,9 @@
 //! What a device run is, so its evidence is read for what it is:
 //! - **Every case is a fresh process.** `am instrument` starts the app's
 //!   process for the run and the process ends with it, so the runtime
-//!   starts for each case that needs one ([`cases::NEED_A_RUNTIME`]).
+//!   starts for each case that needs one -- alone for
+//!   [`cases::NEED_A_RUNTIME`], the app's service in full for
+//!   [`cases::NEED_THE_CLIENT`].
 //!   [`restart`](AdbDevice::restart) is therefore the next case, and a
 //!   stop is the platform's force-stop; the app's graceful stop is the
 //!   app's own platform test, not this.
@@ -144,6 +146,19 @@ impl Device for AdbDevice {
 
     fn log(&self) -> String {
         logcat()
+    }
+
+    /// Read through `run-as`, as the app: what a case wrote is under the
+    /// app's private data directory, which `run-as` opens to the shell
+    /// for a debuggable build -- the androidTest build's app is one.
+    fn pull(&self, path: &str) -> Vec<u8> {
+        let out = adb(&["exec-out", "run-as", PACKAGE, "cat", path]).expect("adb");
+        assert!(
+            out.status.success() && out.stderr.is_empty(),
+            "reading {path} as the app: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
     }
 
     fn run_case(&self, case: &str, args: &Value) -> CaseRun {

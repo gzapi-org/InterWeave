@@ -7,8 +7,8 @@
 //! process can hold one: it drives the lifecycle and names a case of
 //! `interweave-android-e2e-cases` for the Android side to run in its own
 //! process, and reads the result back. The stand-in exposes its own
-//! binding beside the seam, for the host-only cases (`human_chat.rs`). The desktop's half
-//! of each case is here.
+//! binding beside the seam, for what the seam does not carry (the serving
+//! `PeerId` in `stand_in.rs`). The desktop's half of each case is here.
 //!
 //! Two runners implement the seam. [`HostStandIn`] -- the embedded
 //! runtime the app's foreground service hosts (`interweave-transport-
@@ -98,6 +98,16 @@ pub trait Device {
     fn log(&self) -> String {
         String::new()
     }
+
+    /// The bytes of `path`, a file a case on the Android side wrote and
+    /// named in its result (`human_chat`'s payloads). The stand-ins share
+    /// this host's filesystem.
+    ///
+    /// # Panics
+    /// If it cannot be read.
+    fn pull(&self, path: &str) -> Vec<u8> {
+        std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"))
+    }
 }
 
 /// A case running on the Android side; [`passed`](Self::passed) waits
@@ -115,6 +125,13 @@ impl CaseRun {
             case: case.to_owned(),
             result: std::thread::spawn(result),
         }
+    }
+
+    /// Whether the case has answered, so the caller can stop playing its
+    /// half.
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.result.is_finished()
     }
 
     /// The case's result JSON, whatever it says.
@@ -238,7 +255,8 @@ impl HostStandIn {
     }
 
     /// The binding of the runtime now serving: the stand-in's own, for
-    /// what a host-only case drives directly (`human_chat.rs`).
+    /// what the seam does not carry (`stand_in.rs` reads the serving
+    /// `PeerId` over it).
     ///
     /// # Panics
     /// While the runtime is down.
@@ -298,6 +316,7 @@ impl Device for HostStandIn {
     fn run_case(&self, case: &str, args: &Value) -> CaseRun {
         let ctx = CaseCtx {
             peer: self.peer.clone(),
+            app_data_dir: self.app_data_dir.clone(),
             binding: self.host.as_ref().map(EmbeddedHost::binding),
             provision: Some(Box::new({
                 let app_data_dir = self.app_data_dir.clone();
@@ -338,7 +357,12 @@ fn provision(app_data_dir: &Path, config: &str) {
     try_provision(app_data_dir, config).expect("provisioned");
 }
 
-fn try_provision(app_data_dir: &Path, config: &str) -> Result<(), String> {
+/// Write `config` as [`PROFILE`]'s `config.yaml` under `app_data_dir`,
+/// replacing what is there, as a case's `provision` does in the app.
+///
+/// # Errors
+/// What could not be made, by name.
+pub fn try_provision(app_data_dir: &Path, config: &str) -> Result<(), String> {
     let boundary = TrustBoundary::new(app_data_dir).map_err(|e| format!("a boundary: {e}"))?;
     let paths =
         ProfilePaths::resolve_embedded(PROFILE, boundary).map_err(|e| format!("paths: {e}"))?;
