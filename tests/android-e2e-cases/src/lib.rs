@@ -110,12 +110,14 @@ pub mod cases {
     /// plain and `;ce=br`. Arguments: [`super::HumanChatArgs`].
     pub const HUMAN_CHAT: &str = "human_chat";
 
-    /// The cases a runner must have the runtime ALONE serving for: started
-    /// as the app's service starts it -- the same launch, identity and
-    /// paths, through the app's service host rather than a runtime of the
-    /// case's own -- with no store and no facade, so
-    /// the `human` lease is free for the case (01a128a6/01a128a8). The
-    /// others run before it starts, as [`PROVISION`] must.
+    /// The cases a runner must have the runtime ALONE serving for: the
+    /// app's runtime with the app's launch, identity and paths, and no
+    /// store and no facade, so the `human` lease is free for the case
+    /// (01a128a6/01a128a8). On the host stand-in that is an `EmbeddedHost`
+    /// started so; on a phone it is the runtime-alone start the
+    /// instrumentation adds to the app's service host, never a second
+    /// runtime beside the app's. The others run before it starts, as
+    /// [`PROVISION`] must.
     pub const NEED_A_RUNTIME: &[&str] = &[PATHS, TRUST_BOUNDARY, AUDIT];
 
     /// The cases a runner must have the app's service serving for in
@@ -344,6 +346,12 @@ impl PathsArgs {
 /// Gate (d) in the running app: what `resolve_embedded` resolves for
 /// `profile` under the app data directory, judged on disk.
 fn trust_boundary(app_data_dir: &Path, profile: &str) -> Result<Map<String, Value>, String> {
+    // Where the directory resolves, not how it is spelled: the platform
+    // hands over `/data/user/0/<package>`, a symlink to `/data/data` on
+    // most devices, and the boundary below is canonical.
+    let canonical = std::fs::canonicalize(app_data_dir)
+        .map_err(|e| format!("the app data directory {}: {e}", app_data_dir.display()))?;
+    let app_data_dir = canonical.as_path();
     let boundary = TrustBoundary::new(app_data_dir)
         .map_err(|e| format!("the app data directory as a boundary: {e}"))?;
     let walk_alone = boundary.clone();
@@ -423,6 +431,17 @@ fn refused_under_files(
             .map_err(|e| format!("files/: {e}"))?;
     }
     let probe = files.join("interweave-gate-d-probe");
+    // A run killed between the probe's making and its removal leaves it
+    // in a device's persistent files/; the next run takes it back first.
+    match std::fs::remove_dir(&probe) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(format!(
+                "a stale probe under files/ could not be removed: {e}"
+            ));
+        }
+    }
     std::fs::create_dir(&probe).map_err(|e| format!("the probe under files/: {e}"))?;
     let outcome = (|| {
         std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o700))
@@ -939,6 +958,33 @@ mod tests {
         assert!(refused.contains("outside the runtime root"), "{refused}");
         assert!(
             !app.join("files").join("interweave-gate-d-probe").exists(),
+            "the probe is removed"
+        );
+    }
+
+    #[test]
+    fn trust_boundary_judges_where_a_symlinked_app_data_dir_resolves() {
+        let (scratch, app) = app_dir_as_a_runtime_leaves_it();
+        let link = scratch.path().join("data-user-0-link");
+        std::os::unix::fs::symlink(&app, &link).expect("a symlink, as /data/user/0 is");
+        let out = trust_boundary(&link, "human-android").expect("gate (d) holds through the link");
+        let canonical = std::fs::canonicalize(&app).expect("canonical");
+        assert_eq!(
+            out[keys::ROOT],
+            canonical.join("interweave").display().to_string()
+        );
+    }
+
+    #[test]
+    fn a_stale_probe_left_by_a_killed_run_is_taken_back() {
+        let (_scratch, app) = app_dir_as_a_runtime_leaves_it();
+        let files = app.join("files");
+        std::fs::create_dir(&files).expect("files/");
+        std::fs::set_permissions(&files, std::fs::Permissions::from_mode(0o771)).expect("0771");
+        std::fs::create_dir(files.join("interweave-gate-d-probe")).expect("a stale probe");
+        trust_boundary(&app, "human-android").expect("gate (d) holds after a killed run");
+        assert!(
+            !files.join("interweave-gate-d-probe").exists(),
             "the probe is removed"
         );
     }

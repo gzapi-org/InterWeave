@@ -41,7 +41,10 @@ use interweave_android_e2e_cases::{
 use interweave_local_client_api::DataSessionPort;
 use serde_json::{Map, Value};
 
-use interweave_profile_config::{ProfilePaths, TrustBoundary, create_private_dir_within};
+use interweave_profile_config::sections::LogLevel;
+use interweave_profile_config::{
+    ProfileConfig, ProfilePaths, TrustBoundary, create_private_dir_within,
+};
 use interweave_profile_identity::{ProfileIdentity, RecoveryPhrase};
 use interweave_test_support::e2e;
 use interweave_transport_api::TransportIdentity;
@@ -56,7 +59,10 @@ pub mod adb;
 
 /// The stand-in's log, as the app's shell would write it to logcat: a
 /// process-wide subscriber that admits an event exactly when the
-/// embedded host's own filter does (`log_admits`) at the profile's level.
+/// embedded host's own filter does (`log_admits`) at the profile's level
+/// -- set from the provisioned profile before the host starts, so its
+/// startup events are judged at it too (`audit_gate.rs` pins the level
+/// with events of its own at INFO and at WARN).
 /// The shell's writer is the app's, so this is what the stand-in has in
 /// its place -- the filter is the runtime's, the capture is the test's.
 /// One per test process, installed by [`log_capture::install`]; until
@@ -286,6 +292,9 @@ pub struct HostStandIn {
     // construction, as a device's Keystore-unwrapped key is.
     phrase: RecoveryPhrase,
     host: Option<EmbeddedHost>,
+    // The provisioned profile's log level, which the capture filters at
+    // from BEFORE the host starts, so its startup events are judged at it.
+    log_level: LogLevel,
 }
 
 impl HostStandIn {
@@ -322,6 +331,7 @@ impl HostStandIn {
                 .recovery_phrase()
                 .expect("a generated identity has a phrase"),
             host: None,
+            log_level: LogLevel::Info,
         }
     }
 
@@ -364,6 +374,10 @@ impl Device for HostStandIn {
     }
 
     fn start(&mut self, config: &str) {
+        self.log_level = ProfileConfig::parse_yaml(config)
+            .expect("a profile document")
+            .observability
+            .log_level;
         provision(&self.app_data_dir, config);
         self.restart();
     }
@@ -395,8 +409,13 @@ impl Device for HostStandIn {
             profile: PROFILE.to_owned(),
             identity,
         };
+        log_capture::filter_at(self.log_level);
         let host = off_runtime(|| EmbeddedHost::start(launch)).expect("the stand-in starts");
-        log_capture::filter_at(host.log_level());
+        assert_eq!(
+            host.log_level(),
+            self.log_level,
+            "the host runs the provisioned level"
+        );
         self.host = Some(host);
     }
 

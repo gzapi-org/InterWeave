@@ -80,11 +80,19 @@ fn audit<A: Device>(mut android: A) {
 fn gate_g_on_the_stand_in_a_trust_set_reaches_a_log_filtered_at_warn() {
     log_capture::install();
     audit(HostStandIn::new());
-    // The control: the filter is live. At WARN it let the audit record
-    // through and nothing else below WARN -- a run at DEBUG captures the
-    // runtime's DEBUG lines (`interweave::connectivity`), so a filter that
-    // admitted more than WARN would show them here.
+    // The control, which does not depend on the runtime having logged
+    // anything below WARN in this run: a first-party INFO line and a
+    // first-party WARN line, each made here, with the filter still at the
+    // profile's WARN. The WARN filter keeps the second and drops the
+    // first, so a filter left at INFO, or one that ignored the profile,
+    // shows the first.
+    tracing::info!(target: "interweave::connectivity", "gate g control below the profile level");
+    tracing::warn!(target: "interweave::connectivity", "gate g control at the profile level");
     let lines = log_capture::lines();
+    assert!(
+        lines.contains("gate g control at the profile level"),
+        "the capture is live: the control WARN line is in it:\n{lines}"
+    );
     let below_warn: Vec<&str> = lines
         .lines()
         .filter(|l| {
