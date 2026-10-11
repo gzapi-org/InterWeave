@@ -898,7 +898,9 @@ impl SwarmCommander {
             .await
     }
 
-    /// Enable or disable `endpoint`, a runtime overlay lost on restart.
+    /// Enable or disable `endpoint` in the running substrate. What
+    /// survives a restart is not kept here: the composition writes its
+    /// endpoint overlay before it calls this (ADR-0028 A 2026-10-11).
     /// Disabling ends a live lease as [`revoke_endpoint`](Self::revoke_endpoint)
     /// does -- its holder is owed the epoch, its queue is closed -- and
     /// rebinds nothing.

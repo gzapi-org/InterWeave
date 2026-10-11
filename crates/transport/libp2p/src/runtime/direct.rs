@@ -363,8 +363,9 @@ impl DirectState {
         taken
     }
 
-    /// Enable or disable `endpoint` (a runtime overlay: the profile is
-    /// never rewritten). Disabling ends a live lease as [`revoke`](Self::revoke)
+    /// Enable or disable `endpoint` (the profile is never rewritten; what
+    /// survives a restart is the composition's endpoint overlay, ADR-0028
+    /// A 2026-10-11). Disabling ends a live lease as [`revoke`](Self::revoke)
     /// does -- holder told, queue closed -- and rebinds nothing: the next
     /// claim is a session's own. Returns the epoch that ended.
     ///

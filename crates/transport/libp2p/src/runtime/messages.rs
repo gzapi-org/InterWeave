@@ -262,8 +262,9 @@ pub enum SwarmCommand {
         /// Answered with the number of undelivered events discarded.
         reply: oneshot::Sender<usize>,
     },
-    /// Enable or disable one endpoint: a runtime overlay, lost on
-    /// restart. Disabling ends a live lease as `RevokeEndpoint` does and
+    /// Enable or disable one endpoint in the running substrate; the
+    /// composition's endpoint overlay is what survives a restart
+    /// (ADR-0028 A 2026-10-11). Disabling ends a live lease as `RevokeEndpoint` does and
     /// rebinds nothing.
     SetEndpointEnabled {
         /// Which endpoint.
@@ -274,8 +275,9 @@ pub enum SwarmCommand {
         reply:
             oneshot::Sender<Result<Option<interweave_local_client_api::Generation>, DirectError>>,
     },
-    /// Point omitted destinations at one endpoint, or at none: a runtime
-    /// overlay, lost on restart.
+    /// Point omitted destinations at one endpoint, or at none, in the
+    /// running substrate; kept across a restart by the composition's
+    /// endpoint overlay.
     SetDefaultEndpoint {
         /// The new default; `None` clears it.
         endpoint: Option<EndpointId>,
