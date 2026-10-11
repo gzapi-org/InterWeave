@@ -67,7 +67,8 @@
 //!   counts its rounds only for keep-alive), and in a retry the new crate
 //!   orders. The handler is the crate's, and nothing outside it can
 //!   rewrite or stop it; closing such a connection is what would end it,
-//!   and a relayed connection is the peer's path until a punch lands;
+//!   and a relayed connection stays the peer's announced path until a direct
+//!   one has held for `direct_stability_period` (step 9);
 //! - a listener CLOSED while its IP is still held is not offered again
 //!   (`forget_listener`) but stays in the cache until the next network
 //!   change or until newer candidates push it out -- still an address
