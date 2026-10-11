@@ -308,9 +308,8 @@ pub struct LeaseRecord {
 /// One configured endpoint and its runtime state
 /// (`ipc/endpoint-list.schema.json`'s row).
 ///
-/// Every row is a runtime overlay over the profile: an administrative
-/// change is lost on restart, so nothing here says `persisted` -- the
-/// answer is always no, and the IPC mirror writes that constant.
+/// `enabled` and `default` are the effective state: `config.yaml` with
+/// the endpoint overlay composed over it (ADR-0028 A 2026-10-11).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EndpointAdminView {
     /// The endpoint.
@@ -319,6 +318,12 @@ pub struct EndpointAdminView {
     pub enabled: bool,
     /// Whether it receives directed sends that name no endpoint.
     pub default: bool,
+    /// The row's `enabled` and `default` survive a restart: what an
+    /// administrator set is kept by the endpoint overlay. False only
+    /// where the runtime keeps no overlay, which no production binding
+    /// is (a test construction), and on a row read over IPC below 2.5,
+    /// whose row says nothing else.
+    pub persisted: bool,
     /// Its live lease, if one is held.
     pub lease: Option<LeaseRecord>,
 }

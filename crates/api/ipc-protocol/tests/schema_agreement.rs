@@ -757,12 +757,14 @@ fn every_result() -> Vec<(&'static str, Value)> {
             endpoint: ep("bot"),
             enabled: false,
             default: false,
+            persisted: false,
             lease: None,
         },
         EndpointAdminView {
             endpoint: ep("human"),
             enabled: true,
             default: true,
+            persisted: false,
             lease: Some(LeaseRecord {
                 endpoint: ep("human"),
                 epoch: epoch(),

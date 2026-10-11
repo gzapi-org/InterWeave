@@ -432,6 +432,9 @@ impl DirectState {
                 endpoint: id.clone(),
                 enabled: registered.enabled,
                 default: default == Some(id),
+                // The substrate keeps no overlay; the composition, which
+                // does, says whether its rows persist.
+                persisted: false,
                 lease: self.registry.lease(id).map(|lease| LeaseRecord {
                     endpoint: id.clone(),
                     epoch: lease.epoch.clone(),

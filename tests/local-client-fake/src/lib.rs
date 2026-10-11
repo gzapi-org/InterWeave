@@ -1013,6 +1013,7 @@ impl AdminPort for FakeAdmin {
                 endpoint: e.id.clone(),
                 enabled: e.enabled,
                 default: state.default.as_ref() == Some(&e.id),
+                persisted: false,
                 lease: state.leases.get(&e.id).map(|lease| LeaseRecord {
                     endpoint: e.id.clone(),
                     epoch: lease.epoch.clone(),

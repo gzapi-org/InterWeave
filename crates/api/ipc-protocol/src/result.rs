@@ -365,6 +365,7 @@ impl From<EndpointRow> for EndpointAdminView {
             endpoint,
             enabled: row.enabled,
             default: row.default,
+            persisted: false,
         }
     }
 }
@@ -837,6 +838,7 @@ mod tests {
             endpoint: ep("human"),
             enabled: true,
             default: true,
+            persisted: false,
             lease: Some(LeaseRecord {
                 endpoint: ep("human"),
                 epoch: epoch(),
@@ -871,6 +873,7 @@ mod tests {
             endpoint: ep("human"),
             enabled: true,
             default: false,
+            persisted: false,
             lease: Some(lease.clone()),
         };
         let row = EndpointRow::try_from(view.clone()).expect("a row");
@@ -975,6 +978,7 @@ mod tests {
             endpoint: ep("human"),
             enabled: true,
             default: false,
+            persisted: false,
             lease: Some(LeaseRecord {
                 endpoint: ep("human"),
                 epoch: epoch(),
@@ -1000,6 +1004,7 @@ mod tests {
             endpoint: ep(&format!("e{i}")),
             enabled: true,
             default: false,
+            persisted: false,
             lease: None,
         };
         assert!(EndpointList::from_views((0..MAX_ENDPOINT_ROWS).map(view).collect()).is_ok());
