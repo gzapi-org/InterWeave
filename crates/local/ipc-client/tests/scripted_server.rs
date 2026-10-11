@@ -1379,6 +1379,53 @@ async fn peers_reads_every_page_at_two_two_and_sends_nothing_below_it() {
     }
 }
 
+/// The endpoint list is read in the row its minor names: below 2.5 the
+/// 2.0 row, `persisted: false`; from 2.5 the 2.5 row, `persisted: true`.
+/// A row in the other minor's shape is refused `Internal`, never read as
+/// a value, at both minors -- the gate's two sides.
+#[tokio::test]
+async fn an_endpoint_row_is_read_only_in_the_shape_its_minor_names() {
+    use interweave_local_client_api::{AdminBinding as _, AdminCapability, AdminPort as _};
+    use interweave_transport_api::TransportError;
+    for (minor, persisted, read) in [
+        (4, false, Ok(false)),
+        (4, true, Err(TransportError::Internal)),
+        (5, true, Ok(true)),
+        (5, false, Err(TransportError::Internal)),
+    ] {
+        let case = format!("2.{minor} persisted={persisted}");
+        let script = Script::new();
+        let (admin, mut server) = tokio::join!(
+            script.binding.admin([AdminCapability::Endpoints].into()),
+            async {
+                let (mut server, _) = admin_hello(&script).await;
+                admin_response(&mut server, minor, &["admin.endpoints"]).await;
+                server
+            }
+        );
+        let admin = admin.expect("a port");
+        let (rows, ()) = tokio::join!(tokio::time::timeout(PATIENCE, admin.leases()), async {
+            let Some(Frame::Request(request)) = server.read().await else {
+                panic!("a request");
+            };
+            assert_eq!(request.method.as_str(), "admin.endpoints.list");
+            server
+                .write(
+                    &json!({"type": "response", "id": request.id.as_str(), "ok": true,
+                    "result": {"endpoints": [{"id": "human", "enabled": false,
+                        "default": false, "persisted": persisted}]}}),
+                )
+                .await;
+        });
+        let rows = rows.expect("answered");
+        assert_eq!(
+            rows.map(|rows| rows.iter().map(|r| r.persisted).collect::<Vec<_>>()),
+            read.map(|p| vec![p]),
+            "{case}"
+        );
+    }
+}
+
 /// Below 2.3 the trust read is refused `ProtocolUnsupported` and nothing
 /// is sent -- the 2.1 row carries no source, and an unknown is never
 /// shown as a value -- while `set_trust`, which carries no row, is sent
