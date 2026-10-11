@@ -219,6 +219,11 @@ fn tree_checks() -> Vec<Task> {
             &["tools/checks/check_docs_integrity.py"],
         ),
         Task::new(
+            "every accepted OSV finding of the Gradle graph is dated, explained and build-only",
+            "python3",
+            &["tools/checks/check_osv_exemptions.py"],
+        ),
+        Task::new(
             "every guard is reachable from a workflow",
             "bash",
             &["tools/checks/check_guards_are_wired.sh"],
