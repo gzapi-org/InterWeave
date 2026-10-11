@@ -114,10 +114,10 @@ pub mod cases {
     /// app's runtime with the app's launch, identity and paths, and no
     /// store and no facade, so the `human` lease is free for the case
     /// (01a128a6/01a128a8). On the host stand-in that is an `EmbeddedHost`
-    /// started so; on a phone it is the runtime-alone start the
-    /// instrumentation adds to the app's service host, never a second
-    /// runtime beside the app's. The others run before it starts, as
-    /// [`PROVISION`] must.
+    /// started so. On a phone it is to be a runtime-alone start in the
+    /// app's service host, which the instrumentation's PR (rust-ui-dev's
+    /// j66) adds; until then no phone runner exists. The others run
+    /// before it starts, as [`PROVISION`] must.
     pub const NEED_A_RUNTIME: &[&str] = &[PATHS, TRUST_BOUNDARY, AUDIT];
 
     /// The cases a runner must have the app's service serving for in
@@ -943,9 +943,12 @@ mod tests {
     fn trust_boundary_passes_on_the_layout_a_runtime_leaves_and_reports_the_refusal() {
         let (_scratch, app) = app_dir_as_a_runtime_leaves_it();
         let out = trust_boundary(&app, "human-android").expect("gate (d) holds");
+        // Where the root resolves: a host's temp directory may itself sit
+        // behind a symlink, as /var/run does.
+        let canonical = std::fs::canonicalize(&app).expect("canonical");
         assert_eq!(
             out[keys::ROOT],
-            app.join("interweave").display().to_string()
+            canonical.join("interweave").display().to_string()
         );
         let dirs = out[keys::PRIVATE_DIRS].as_array().expect("dirs");
         assert!(dirs.len() >= 3, "the root, config and state: {dirs:?}");
