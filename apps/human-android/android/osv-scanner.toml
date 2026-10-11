@@ -7,14 +7,167 @@
 # every lockfile the scan finds (osv-scanner otherwise reads a config only
 # from each lockfile's own directory).
 #
-# An entry is a reviewed exemption, not a way past the check, and the
-# policy is the network lane's. One [[IgnoredVulns]] per accepted finding:
+# An entry is a reviewed exemption, not a way past the check. The
+# acceptance policy is the network lane's (j58, agreed with rust-ui-dev
+# in 01a12881 and 01a12883, 2026-10-11).
+# tools/checks/check_osv_exemptions.py enforces the shape below in CI's
+# tree checks, against the committed lockfiles; its --help is the rule
+# text.
 #
-#   [[IgnoredVulns]]
-#   id = "GHSA-xxxx-xxxx-xxxx"          # the OSV id the scan printed
-#   # ignoreUntil = 2026-12-31          # where the exemption is dated
-#   reason = "<artefact:version>: why it does not apply here; what would change the answer"
+#   1. A finding on a configuration whose classes reach the APK (any
+#      *RuntimeClasspath or *CompileClasspath) is never accepted. It is
+#      bumped or removed before the push.
+#   2. A finding on a build-only configuration (the buildscript
+#      `classpath`, androidLintTool, any other tool configuration) is
+#      accepted only as one [[IgnoredVulns]] per OSV id, with an
+#      ignoreUntil. The reason carries these labelled lines:
+#        artefact:      group:name:version, as the lockfile writes it
+#        configuration: every configuration the lockfiles give it
+#        severity:      OSV's LOW / MODERATE / HIGH / CRITICAL
+#        why:           why no untrusted input reaches it in this build
+#        changes:       what would change the answer
+#        checked:       the newest stable release of the pinned plugin
+#                       line, and the date that was read
+#        reviewed:      the review date
+#      ignoreUntil is at most 90 days after the review, and 30 for a
+#      CRITICAL.
+#   3. A bump comes first. Where a stable release of the pinned plugin
+#      line removes a finding, the bump is the answer, not an entry. A
+#      new stable release ends an entry early, whatever its ignoreUntil
+#      says.
+#   4. Never [[PackageOverrides]]: it ignores every finding of a
+#      package, not one.
 #
-# The reason names the artefact because the entry has no field for it.
-# Never [[PackageOverrides]]: it ignores every finding of a package, not
-# one. An entry without its sentence is what a reviewer refuses.
+# What the entries below rest on, as of the review:
+#   - Every row sits only on androidLintTool (app/gradle.lockfile) or on
+#     AGP's build classpath (buildscript-gradle.lockfile). The tree check
+#     rereads this against the lockfiles on every change.
+#   - The build reads only this repository's sources and the artifacts
+#     of the repositories settings.gradle.kts names: google() and
+#     mavenCentral() for dependencies, plus gradlePluginPortal() for
+#     plugins. Project-level repositories are refused. There is no
+#     Gradle dependency-verification metadata, so those artifacts are
+#     trusted by transport, not by checksum.
+#   - No Gradle or Kotlin build cache is enabled, locally or in CI, so
+#     no cache entry produced elsewhere is read.
+#   - AGP is pinned at 9.4.1, and no 9.4.x stable release after it
+#     existed when checked (9.5.0 was at alpha09). kotlin-gradle-plugin
+#     comes in through AGP and is not declared. rust-ui-dev's j63 bumps
+#     on the next stable release and removes what it clears.
+
+[[IgnoredVulns]]
+id = "GHSA-j288-q9x7-2f5v"
+ignoreUntil = 2027-01-09
+reason = """
+artefact: org.apache.commons:commons-lang3:3.16.0
+configuration: androidLintTool, classpath
+severity: MODERATE
+why: uncontrolled recursion on a long input string; lint and AGP hand it this repository's own sources and build files, which no outside party writes
+changes: commons-lang3 3.18.0 on AGP's or lint's classpath, or an outside party's input reaching lint or the build
+checked: AGP 9.4.1 2026-10-11
+reviewed: 2026-10-11
+"""
+
+[[IgnoredVulns]]
+id = "GHSA-7r82-7xv7-xcpj"
+ignoreUntil = 2027-01-09
+reason = """
+artefact: org.apache.httpcomponents:httpclient:4.5.6
+configuration: androidLintTool
+severity: MODERATE
+why: mishandling of malformed URIs; lint is given only this repository's sources and the pinned repositories' artifacts, so no URI it handles is chosen by an outside party
+changes: httpclient 4.5.13 or later in lint, or lint configured to fetch from a source an outside party controls
+checked: AGP 9.4.1 2026-10-11
+reviewed: 2026-10-11
+"""
+
+[[IgnoredVulns]]
+id = "GHSA-3677-xxcr-wjqv"
+ignoreUntil = 2027-01-09
+reason = """
+artefact: org.bitbucket.b_c:jose4j:0.9.5
+configuration: classpath
+severity: HIGH
+why: a denial of service on compressed JWE content; the build decrypts no JWE produced outside it, and a stall would fail a local or CI build, not a shipped app
+changes: jose4j 0.9.6 on AGP's classpath, or a build step that reads a JWE from outside the repository
+checked: AGP 9.4.1 2026-10-11
+reviewed: 2026-10-11
+"""
+
+[[IgnoredVulns]]
+id = "GHSA-wg6q-6289-32hp"
+ignoreUntil = 2027-01-09
+reason = """
+artefact: org.bouncycastle:bcpkix-jdk18on:1.80.2
+configuration: androidLintTool, classpath
+severity: MODERATE
+why: a weak-algorithm finding in PKIX handling; the build configures no release signing (app/build.gradle.kts has no signingConfigs), and it is handed no certificate an outside party supplies
+changes: bcpkix 1.84 on AGP's or lint's classpath, or a release-signing or certificate-verification step fed outside material
+checked: AGP 9.4.1 2026-10-11
+reviewed: 2026-10-11
+"""
+
+[[IgnoredVulns]]
+id = "GHSA-9pwp-9qqc-pr26"
+ignoreUntil = 2026-11-10
+reason = """
+artefact: org.bouncycastle:bcprov-jdk18on:1.80.2
+configuration: androidLintTool, classpath
+severity: CRITICAL
+why: a name-constraints bypass in certificate path validation; no build step this repository configures hands it a certificate chain an outside party presents. Whether AGP routes its repository TLS through this provider was not read
+changes: bcprov 1.85 on AGP's or lint's classpath, or a build step that validates an outside party's certificate chain with Bouncy Castle
+checked: AGP 9.4.1 2026-10-11
+reviewed: 2026-10-11
+"""
+
+[[IgnoredVulns]]
+id = "GHSA-c3fc-8qff-9hwx"
+ignoreUntil = 2027-01-09
+reason = """
+artefact: org.bouncycastle:bcprov-jdk18on:1.80.2
+configuration: androidLintTool, classpath
+severity: MODERATE
+why: an LDAP injection; the build makes no LDAP query
+changes: bcprov 1.84 or later on AGP's or lint's classpath, or a build step that queries LDAP
+checked: AGP 9.4.1 2026-10-11
+reviewed: 2026-10-11
+"""
+
+[[IgnoredVulns]]
+id = "GHSA-qp49-qgx5-5m26"
+ignoreUntil = 2027-01-09
+reason = """
+artefact: org.bouncycastle:bcprov-jdk18on:1.80.2
+configuration: androidLintTool, classpath
+severity: HIGH
+why: excessive ASN.1 nesting on parsing; the build parses no ASN.1 an outside party supplies, and a stall would fail a build, not a shipped app
+changes: bcprov 1.85 on AGP's or lint's classpath, or a build step that parses outside ASN.1
+checked: AGP 9.4.1 2026-10-11
+reviewed: 2026-10-11
+"""
+
+[[IgnoredVulns]]
+id = "GHSA-2363-cqg2-863c"
+ignoreUntil = 2027-01-09
+reason = """
+artefact: org.jdom:jdom2:2.0.6
+configuration: classpath
+severity: HIGH
+why: XML external-entity resolution; AGP parses this repository's own manifests and resources and the pinned repositories' artifacts, none of which an outside party writes
+changes: jdom2 2.0.6.1 on AGP's classpath, or a build step that parses XML from outside the repository and the pinned repositories
+checked: AGP 9.4.1 2026-10-11
+reviewed: 2026-10-11
+"""
+
+[[IgnoredVulns]]
+id = "GHSA-r937-wjx7-w2jp"
+ignoreUntil = 2027-01-09
+reason = """
+artefact: org.jetbrains.kotlin:kotlin-gradle-plugin:2.2.10
+configuration: classpath
+severity: MODERATE
+why: unsafe deserialization from the Kotlin build cache; no Gradle or Kotlin build cache is enabled, locally or in CI, so nothing is read from a cache another party wrote
+changes: a stable Kotlin plugin release with the fix (only 2.4.20-Beta1 had it when checked) reaching AGP's classpath, or any build cache being enabled
+checked: AGP 9.4.1 2026-10-11
+reviewed: 2026-10-11
+"""
