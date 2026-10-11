@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# OSV.dev suppressions for the Gradle graph (plan section 20, "Dependency
+# hygiene for the Gradle build"), read by the one command in
+# apps/human-android/README.md through --config, so this file governs
+# every lockfile the scan finds (osv-scanner otherwise reads a config only
+# from each lockfile's own directory).
+#
+# An entry is a reviewed exemption, not a way past the check, and the
+# policy is the network lane's. One [[IgnoredVulns]] per accepted finding:
+#
+#   [[IgnoredVulns]]
+#   id = "GHSA-xxxx-xxxx-xxxx"          # the OSV id the scan printed
+#   # ignoreUntil = 2026-12-31          # where the exemption is dated
+#   reason = "<artefact:version>: why it does not apply here; what would change the answer"
+#
+# The reason names the artefact because the entry has no field for it.
+# Never [[PackageOverrides]]: it ignores every finding of a package, not
+# one. An entry without its sentence is what a reviewer refuses.
