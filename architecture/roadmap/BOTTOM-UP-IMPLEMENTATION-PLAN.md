@@ -3116,7 +3116,9 @@ sockets only, the Windows named-pipe binding carried by name; the IPC
 method and event vocabulary becomes machine-readable contract BEFORE the
 code; `profile-config` models every block `config.schema.yaml` declares;
 `admin.status` joins the closed capability set and endpoint mutations
-over IPC are a runtime overlay never written to `config.yaml`; the
+over IPC are a runtime overlay never written to `config.yaml` (persisted
+since 2026-10-11, §20 gate (e), ADR-0028 A 2026-10-11; still never
+written to `config.yaml`); the
 production dependencies `tracing`, `tracing-subscriber` (apps and
 `crates/local` only), `serde_norway` (promoted; the one YAML loader) and
 `rpassword` (hidden phrase entry) are admitted through `deny.toml`,
@@ -3186,7 +3188,9 @@ constant (5 s), expiry closes with `Timeout`.
 more. `set_enabled(false)` revokes a live lease with
 `endpoint.lease_changed` and never auto-rebinds; the mutations are a
 runtime overlay, lost on restart, and `admin.endpoints.list` says
-`persisted: false`. ADR-0032's trust and discovery/bootstrap
+`persisted: false` (as Stage 13 built it; since 2026-10-11 a persisted
+overlay, §20 gate (e), ADR-0028 A 2026-10-11, `persisted: true` from
+IPC 2.5). ADR-0032's trust and discovery/bootstrap
 administration are carried to Stage 15 (§18) by name. `admin.status`
 carries the raw detail `LOCAL-IPC.md` reserves for a diagnostics/admin
 capability — the full `ConnectivitySummary`, the counters, the lease
