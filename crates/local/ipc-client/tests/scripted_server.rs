@@ -1423,6 +1423,33 @@ async fn an_endpoint_row_is_read_only_in_the_shape_its_minor_names() {
             read.map(|p| vec![p]),
             "{case}"
         );
+        // The same gate on transportctl's raw read, which leases() wraps:
+        // a row in the other minor's shape is refused there too (#261
+        // review area 2 F2).
+        let (list, ()) = tokio::join!(
+            tokio::time::timeout(PATIENCE, admin.endpoints_result()),
+            async {
+                let Some(Frame::Request(request)) = server.read().await else {
+                    panic!("a request");
+                };
+                server
+                    .write(
+                        &json!({"type": "response", "id": request.id.as_str(), "ok": true,
+                        "result": {"endpoints": [{"id": "human", "enabled": false,
+                            "default": false, "persisted": persisted}]}}),
+                    )
+                    .await;
+            }
+        );
+        assert_eq!(
+            list.expect("answered").map(|list| list
+                .endpoints
+                .iter()
+                .map(|r| r.persisted)
+                .collect::<Vec<_>>()),
+            read.map(|p| vec![p]),
+            "{case}: endpoints_result"
+        );
     }
 }
 
