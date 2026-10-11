@@ -90,12 +90,14 @@ pub(crate) struct Pair {
     /// What A restarts from: its identity, profile and options, its trust
     /// overlay among them.
     a_restart: (ProfileIdentity, ProfileConfig, CompositionOptions),
-    /// Each runtime's state directory, holding its trust overlay: every
-    /// production binding keeps one (ADR-0028 A 2026-10-07).
+    /// Each runtime's state directory, holding its trust and endpoint
+    /// overlays: every production binding keeps both (ADR-0028 A
+    /// 2026-10-07, A 2026-10-11).
     state: [tempfile::TempDir; 2],
 }
 
-/// A private state directory and the options naming its trust overlay.
+/// A private state directory and the options naming its trust and
+/// endpoint overlays.
 fn with_state(options: &CompositionOptions) -> (tempfile::TempDir, CompositionOptions) {
     use std::os::unix::fs::PermissionsExt as _;
     let dir = tempfile::tempdir().expect("a state directory");
@@ -104,6 +106,10 @@ fn with_state(options: &CompositionOptions) -> (tempfile::TempDir, CompositionOp
         trust_overlay_file: Some(
             dir.path()
                 .join(interweave_profile_config::trust_overlay::TRUST_OVERLAY_FILE),
+        ),
+        endpoint_overlay_file: Some(
+            dir.path()
+                .join(interweave_profile_config::endpoint_overlay::ENDPOINT_OVERLAY_FILE),
         ),
         ..options.clone()
     };
