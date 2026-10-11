@@ -373,6 +373,34 @@ async fn a_failed_publish_restores_the_previous_overlay() {
     runtime.stop().await.expect("stops");
 }
 
+/// A failed publish whose restore then fails before its rename leaves
+/// the overlay AHEAD: answered `Internal`, never the publish's own
+/// `BackendUnavailable`, since the set does take effect at the next
+/// start -- the file says so and the runtime does not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_publish_whose_restore_fails_is_left_ahead() {
+    use interweave_transport_composition::OverlayFault::{BeforeRename, Clean};
+
+    let (_dir, path) = state();
+    let runtime = start(Some(&path)).await.expect("composes");
+    runtime.fail_publishes(1).await.expect("queued");
+    // The set's own write is clean; the restore's meets the fault.
+    runtime
+        .fail_overlay_writes(vec![Clean, BeforeRename])
+        .await
+        .expect("queued");
+    assert_eq!(
+        set_enabled(&runtime, "agent", false).await,
+        Err(TransportError::Internal)
+    );
+    assert!(
+        rows(&runtime).await[0].1,
+        "not published: agent still enabled"
+    );
+    assert!(!on_disk(&path)[0].1, "ahead: disabled on disk");
+    runtime.stop().await.expect("stops");
+}
+
 /// A present overlay that cannot be trusted stops the start, never
 /// skipped; the same contents, private, start with them in force.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

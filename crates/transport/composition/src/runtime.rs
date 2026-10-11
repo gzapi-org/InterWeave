@@ -221,6 +221,9 @@ pub(crate) enum Request {
 #[cfg(feature = "test-hooks")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverlayFault {
+    /// The write goes through as normal: how a test reaches a later
+    /// write, such as the restore after a failed publish.
+    Clean,
     /// Nothing is written: the previous overlay stays.
     BeforeRename,
     /// The overlay is written in place, then syncing its directory fails.
@@ -1206,6 +1209,7 @@ impl Driver {
         #[cfg(feature = "test-hooks")]
         if let Some(fault) = self.overlay_faults.pop_front() {
             return match fault {
+                OverlayFault::Clean => overlay.write_within(path, &self.trust_boundary),
                 OverlayFault::BeforeRename => Err(EndpointOverlayError::Write(PersistError::Io(
                     std::io::Error::other("an injected failure before the rename"),
                 ))),
@@ -1301,6 +1305,7 @@ impl Driver {
         #[cfg(feature = "test-hooks")]
         if let Some(fault) = self.overlay_faults.pop_front() {
             return match fault {
+                OverlayFault::Clean => overlay.write_within(path, &self.trust_boundary),
                 OverlayFault::BeforeRename => Err(OverlayError::Write(PersistError::Io(
                     std::io::Error::other("an injected failure before the rename"),
                 ))),
