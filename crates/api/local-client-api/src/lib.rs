@@ -98,8 +98,9 @@ pub enum AdminCapability {
     /// Shut the runtime down.
     #[serde(rename = "admin.shutdown")]
     Shutdown,
-    /// Read and change the profile's peer trust policy (ADR-0032), a
-    /// runtime overlay like the endpoint changes. Introduced at IPC minor
+    /// Read and change the profile's peer trust policy (ADR-0032), kept
+    /// in the state directory's trust overlay (ADR-0028 A 2026-10-07), as
+    /// the endpoint changes are in theirs. Introduced at IPC minor
     /// 2.1, so an IPC binding names it only to a daemon known to speak it
     /// (`LOCAL-IPC.md` §Version negotiation).
     #[serde(rename = "admin.trust")]
