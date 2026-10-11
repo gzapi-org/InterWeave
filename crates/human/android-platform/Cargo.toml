@@ -29,8 +29,8 @@ interweave-profile-identity = { path = "../../identity/profile-identity" }
 interweave-transport-api = { path = "../../api/transport-api" }
 interweave-transport-embedded = { path = "../../transport/embedded" }
 # TEST BUILDS ONLY, under `e2e-cases`: the android-e2e cases' recorder
-# and client handle (src/e2e.rs): a test crate, behind a feature only the
-# app's debug build turns on.
+# and client handle (src/e2e.rs): a test crate, behind a feature off by
+# default.
 interweave-android-e2e-cases = { path = "../../../tests/android-e2e-cases", optional = true }
 # The facade's command channel and its turn timer, on the embedded
 # runtime's executor.
@@ -48,8 +48,9 @@ test-hooks = ["interweave-transport-embedded/test-hooks"]
 # TEST-ONLY: the app's service started with a payload recorder
 # (ServiceHost::start_recording) and the hub as a case's client
 # (e2e::HubClient), for tests/android-e2e's human_chat on the phone's
-# instrumentation and on the host. The app turns it on for its debug
-# build alone, beside dev-stand-ins.
+# instrumentation and on the host. Off by default: today this crate's own
+# tests and tests/android-e2e turn it on, and no build of the app does yet
+# -- its instrumentation build is to, and its release build is not to.
 e2e-cases = ["dep:interweave-android-e2e-cases"]
 
 [dev-dependencies]

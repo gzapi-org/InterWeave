@@ -176,8 +176,8 @@ impl ServiceHost {
     /// [`start`](Self::start), with the facade's data binding wrapped in a
     /// recorder of every payload the runtime hands it, for the android-e2e
     /// cases that check what crossed (`interweave-android-e2e-cases`'
-    /// `human_chat`). TEST BUILDS ONLY: the release library has no such
-    /// feature, and so names neither the recorder nor the cases.
+    /// `human_chat`). Compiled under the `e2e-cases` feature alone, which
+    /// is off by default and which no build of the app turns on today.
     ///
     /// # Errors
     /// [`StartRefused`], as for [`start`](Self::start).
