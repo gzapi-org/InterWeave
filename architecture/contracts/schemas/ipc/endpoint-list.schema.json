@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:interweave:schemas:ipc:endpoint-list",
   "title": "IPC admin.endpoints.list result",
-  "description": "Every configured local endpoint with its runtime state. `persisted: false` on every row says what the mutating admin methods are: a runtime overlay over config.yaml, lost on restart.",
+  "description": "Every configured local endpoint with its effective state: config.yaml's endpoints with the state directory's endpoint overlay composed over them (ADR-0028 A 2026-10-11). On a connection that negotiated 2.5 or later `persisted: true` on every row -- what admin.endpoints.set_enabled and set_default changed survives a daemon restart -- and below 2.5 the 2.0 row, `persisted: false` (1.0.0 described only that row, `const false`; 1.1.0 widens it behind the minor under ADR-0017 A 2026-10-07: a closed result shape widens behind a new minor while the old shape is served below it). A lease is a session's, not configuration: admin.endpoints.revoke stays runtime-only.",
   "type": "object",
   "required": [
     "endpoints"
@@ -32,7 +32,8 @@
             "type": "boolean"
           },
           "persisted": {
-            "const": false
+            "type": "boolean",
+            "description": "false on a connection below 2.5 (the 2.0 row); true on 2.5 and later: the row's enabled and default survive a daemon restart, kept by the state directory's endpoint overlay (ADR-0028 A 2026-10-11)."
           },
           "lease": {
             "type": "object",
@@ -63,7 +64,7 @@
   "x-contract": {
     "name": "ipc.endpoint-list",
     "status": "active",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "adr": [
       "0017",
       "0037",

@@ -16,11 +16,11 @@
       "type": "boolean"
     }
   },
-  "description": "Disabling an endpoint revokes its live lease at once (`endpoint.lease_changed`) and never auto-rebinds; the change is a RUNTIME OVERLAY, lost on restart, never written to config.yaml (ADR-0028).",
+  "description": "Disabling an endpoint revokes its live lease at once (`endpoint.lease_changed`) and never auto-rebinds; the change is kept in the state directory's endpoint overlay, written before it is published and before it is answered, so it survives a restart; config.yaml is never written (ADR-0028 A 2026-10-11).",
   "x-contract": {
     "name": "ipc.set-enabled-params",
     "status": "active",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "adr": [
       "0017",
       "0037",

@@ -17,13 +17,13 @@
           "type": "null"
         }
       ],
-      "description": "The endpoint that receives directed sends naming no endpoint, or null to clear the default. A runtime overlay, not persisted."
+      "description": "The endpoint that receives directed sends naming no endpoint, or null to clear the default. Kept in the state directory's endpoint overlay and survives a restart; config.yaml is never written (ADR-0028 A 2026-10-11)."
     }
   },
   "x-contract": {
     "name": "ipc.set-default-params",
     "status": "active",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "adr": [
       "0017",
       "0037",

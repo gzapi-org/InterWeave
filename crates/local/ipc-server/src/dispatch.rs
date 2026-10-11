@@ -11,8 +11,9 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use interweave_ipc_protocol::{
-    AdminStatusResult, DirectoryResult, EmptyResult, EndpointList, PeerList, Request, RequestId,
-    ResponseFrame, SendResult, SetEnabledResult, TRUST_SOURCE_SINCE_MINOR, TrustList,
+    AdminStatusResult, DirectoryResult, ENDPOINT_PERSISTED_SINCE_MINOR, EmptyResult, EndpointList,
+    PeerList, Request, RequestId, ResponseFrame, SendResult, SetEnabledResult,
+    TRUST_SOURCE_SINCE_MINOR, TrustList,
 };
 use interweave_local_client_api::{AdminPort, DataSessionPort};
 use interweave_transport_api::{BroadcastMessageV1, DirectDestination, TransportError};
@@ -101,12 +102,25 @@ pub(crate) async fn admin<A: AdminPort>(
             }
             Err(code) => ResponseFrame::failure(id, code),
         },
-        Request::AdminEndpointsList => {
-            match port.leases().await.and_then(EndpointList::from_views) {
+        // The row is the shape the connection negotiated (2.0 or 2.5).
+        Request::AdminEndpointsList => match port.leases().await {
+            // A ROW THAT DOES NOT PERSIST AT 2.5 OR LATER IS REFUSED, as
+            // the trust row is at 2.3: only a store-less runtime reports
+            // one, and it is never served over IPC -- one that is served
+            // is refused here with `Internal`, never served a row the 2.5
+            // contract does not describe for it.
+            Ok(views)
+                if minor >= ENDPOINT_PERSISTED_SINCE_MINOR
+                    && views.iter().any(|row| !row.persisted) =>
+            {
+                ResponseFrame::failure(id, TransportError::Internal)
+            }
+            Ok(views) => match EndpointList::from_views(views, minor) {
                 Ok(list) => ResponseFrame::success(id, &list),
                 Err(code) => ResponseFrame::failure(id, code),
-            }
-        }
+            },
+            Err(code) => ResponseFrame::failure(id, code),
+        },
         Request::AdminEndpointsRevoke(p) => empty(id, port.revoke_endpoint(p.endpoint).await),
         Request::AdminEndpointsSetEnabled(p) => {
             match port.set_endpoint_enabled(p.endpoint, p.enabled).await {
@@ -486,6 +500,64 @@ mod tests {
                     assert!(served, "{case}: served");
                     assert_eq!(page.allowed.len(), 1, "{case}");
                     assert_eq!(page.allowed[0].persisted, !unpersisted, "{case}");
+                }
+                Err(code) => {
+                    assert!(!served, "{case}: refused {code:?}");
+                    assert_eq!(code, TransportError::Internal, "{case}");
+                }
+            }
+        }
+    }
+
+    /// A runtime whose endpoint rows do not persist is refused `Internal`
+    /// on a connection at 2.5 or later, and served the 2.0 row below 2.5,
+    /// where it is the contract's; a persisting runtime is served the 2.0
+    /// row below 2.5 too, and the 2.5 row from it. An empty list at 2.5
+    /// is served: no row claims anything.
+    #[tokio::test]
+    async fn an_unpersisted_endpoint_row_is_refused_at_two_five() {
+        use interweave_ipc_protocol::{ENDPOINT_PERSISTED_SINCE_MINOR, EndpointList};
+        use interweave_local_client_api::EndpointAdminView;
+        for (rows, persisted, minor, served) in [
+            (1, false, ENDPOINT_PERSISTED_SINCE_MINOR, false),
+            (1, false, ENDPOINT_PERSISTED_SINCE_MINOR - 1, true),
+            (1, true, ENDPOINT_PERSISTED_SINCE_MINOR - 1, true),
+            (1, true, ENDPOINT_PERSISTED_SINCE_MINOR, true),
+            (0, false, ENDPOINT_PERSISTED_SINCE_MINOR, true),
+        ] {
+            let fake = Fake::default();
+            fake.script().endpoints = (0..rows)
+                .map(|_| EndpointAdminView {
+                    endpoint: interweave_transport_api::EndpointId::parse("human")
+                        .expect("endpoint"),
+                    enabled: true,
+                    default: true,
+                    persisted,
+                    lease: None,
+                })
+                .collect();
+            let port = fake.admin([].into()).await.expect("port");
+            let frame = admin(
+                &port,
+                &Counters::default(),
+                Duration::from_secs(1),
+                id(),
+                request(Method::AdminEndpointsList, &serde_json::json!({})),
+                minor,
+            )
+            .await;
+            let case = format!("rows={rows} persisted={persisted} minor={minor}");
+            match frame.outcome::<EndpointList>() {
+                Ok(list) => {
+                    assert!(served, "{case}: served");
+                    assert_eq!(list.endpoints.len(), rows, "{case}");
+                    if let Some(row) = list.endpoints.first() {
+                        assert_eq!(
+                            row.persisted,
+                            persisted && minor >= ENDPOINT_PERSISTED_SINCE_MINOR,
+                            "{case}"
+                        );
+                    }
                 }
                 Err(code) => {
                     assert!(!served, "{case}: refused {code:?}");

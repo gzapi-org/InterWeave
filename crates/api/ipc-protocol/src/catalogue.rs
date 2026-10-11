@@ -46,10 +46,10 @@ pub enum Method {
     /// Revoke an endpoint's live lease.
     #[serde(rename = "admin.endpoints.revoke")]
     AdminEndpointsRevoke,
-    /// Enable or disable an endpoint (runtime overlay).
+    /// Enable or disable an endpoint (kept in the endpoint overlay).
     #[serde(rename = "admin.endpoints.set_enabled")]
     AdminEndpointsSetEnabled,
-    /// Set or clear the default endpoint (runtime overlay).
+    /// Set or clear the default endpoint (kept in the endpoint overlay).
     #[serde(rename = "admin.endpoints.set_default")]
     AdminEndpointsSetDefault,
     /// Shut the runtime down.
