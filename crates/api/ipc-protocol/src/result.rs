@@ -351,7 +351,7 @@ impl EndpointRow {
     ///
     /// # Errors
     /// [`TransportError::Internal`] for a lease outside its bounds.
-    pub fn from_view(view: EndpointAdminView, minor: u64) -> Result<Self, TransportError> {
+    pub(crate) fn from_view(view: EndpointAdminView, minor: u64) -> Result<Self, TransportError> {
         Ok(Self {
             id: view.endpoint,
             enabled: view.enabled,
