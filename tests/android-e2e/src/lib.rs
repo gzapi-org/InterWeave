@@ -303,6 +303,7 @@ impl Device for HostStandIn {
                 let app_data_dir = self.app_data_dir.clone();
                 move |config: &str| try_provision(&app_data_dir, config)
             })),
+            client: None,
         };
         let (name, args) = (case.to_owned(), args.to_string());
         CaseRun::on_thread(case, move || {
