@@ -222,6 +222,27 @@ fn the_endpoint_overlay_loads_absent_as_a_no_op_under_the_root() {
         ]
     );
     host.stop(Duration::from_secs(1)).expect("stops");
+
+    // Readable by others: refused by its named cause, the overlay, never
+    // skipped; 0600 again is the control above.
+    std::fs::set_permissions(&overlay, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+    match EmbeddedHost::start(launch(&app.dir)) {
+        Err(EmbeddedRefused::DirectoryRefused(detail)) => {
+            assert!(detail.contains("endpoint overlay"), "{detail}");
+        }
+        other => panic!("refused as not private: {:?}", other.map(|_| ())),
+    }
+    // Disabling the endpoint the embedded profile must lease: config.yaml
+    // validates alone, the composed profile does not, and the refusal
+    // names the overlay.
+    std::fs::write(&overlay, r#"{"enabled":{"human":false}}"#).expect("written");
+    std::fs::set_permissions(&overlay, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+    match EmbeddedHost::start(launch(&app.dir)) {
+        Err(EmbeddedRefused::ProfileInvalid(detail)) => {
+            assert!(detail.contains("endpoint overlay"), "{detail}");
+        }
+        other => panic!("refused naming the overlay: {:?}", other.map(|_| ())),
+    }
 }
 
 /// A FRESH INSTALL: nothing has written `config.yaml`, so the start is

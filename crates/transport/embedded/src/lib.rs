@@ -94,10 +94,13 @@ pub enum EmbeddedRefused {
     LockHeld(String),
     /// The profile's `runtime.deployment` is not `embedded-android`.
     NotEmbedded,
-    /// `config.yaml` is missing, unreadable or fails validation.
+    /// `config.yaml` is missing, unreadable or fails validation, or it
+    /// fails validation with the endpoint overlay composed over it (the
+    /// text names the overlay).
     ProfileInvalid(String),
-    /// The trust boundary, or a private directory under it, is refused
-    /// by ADR-0028's rules or lies outside the host's root.
+    /// The trust boundary, a private directory under it, or a private
+    /// file in one (an overlay), is refused by ADR-0028's rules or lies
+    /// outside the host's root.
     DirectoryRefused(String),
     /// The supplied identity carries no transport identity.
     IdentityRejected,
@@ -188,9 +191,9 @@ impl From<CompositionError> for EmbeddedRefused {
             CompositionError::Substrate(SubstrateError::ListenDenied(_)) => {
                 Self::NetworkDenied(e.to_string())
             }
-            CompositionError::InvalidProfile(_) | CompositionError::Unhonoured { .. } => {
-                Self::ProfileInvalid(e.to_string())
-            }
+            CompositionError::InvalidProfile(_)
+            | CompositionError::Unhonoured { .. }
+            | CompositionError::EndpointOverlayConflicts(_) => Self::ProfileInvalid(e.to_string()),
             CompositionError::TrustOverlay(OverlayError::NotPrivate { .. })
             | CompositionError::EndpointOverlay(EndpointOverlayError::NotPrivate { .. }) => {
                 Self::DirectoryRefused(e.to_string())
