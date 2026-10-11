@@ -3479,6 +3479,7 @@ dependencies = [
 name = "interweave-human-android-platform"
 version = "0.0.0"
 dependencies = [
+ "interweave-android-e2e-cases",
  "interweave-human-android-platform",
  "interweave-human-app-core",
  "interweave-human-chat-protocol",

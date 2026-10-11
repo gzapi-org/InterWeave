@@ -15,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use interweave_human_app_core::FacadeSide;
 use interweave_human_store::{HumanStore, StoreError, StoreOptions};
 use interweave_human_transport_client::{ClientConfig, TransportClient};
+use interweave_local_client_api::DataSessionBinding;
 use interweave_profile_config::ProfileConfig;
 pub use interweave_profile_config::runtime::AvailabilityMode;
 use interweave_profile_identity::ProfileIdentity;
@@ -169,6 +170,38 @@ impl ServiceHost {
     /// # Errors
     /// [`StartRefused`]; nothing is left running.
     pub fn start(&self, launch: ServiceLaunch) -> Result<(), StartRefused> {
+        self.start_with(launch, EmbeddedHost::binding)
+    }
+
+    /// [`start`](Self::start), with the facade's data binding wrapped in a
+    /// recorder of every payload the runtime hands it, for the android-e2e
+    /// cases that check what crossed (`interweave-android-e2e-cases`'
+    /// `human_chat`). TEST BUILDS ONLY: the release library has no such
+    /// feature, and so names neither the recorder nor the cases.
+    ///
+    /// # Errors
+    /// [`StartRefused`], as for [`start`](Self::start).
+    #[cfg(feature = "e2e-cases")]
+    pub fn start_recording(
+        &self,
+        launch: ServiceLaunch,
+        tap: interweave_android_e2e_cases::Tap,
+    ) -> Result<(), StartRefused> {
+        self.start_with(launch, move |host| {
+            interweave_android_e2e_cases::Recording::new(host.binding(), tap)
+        })
+    }
+
+    /// The start, with the facade's data binding made by `data` from the
+    /// runtime's host; the admin binding is the runtime's own either way.
+    fn start_with<B>(
+        &self,
+        launch: ServiceLaunch,
+        data: impl FnOnce(&EmbeddedHost) -> B,
+    ) -> Result<(), StartRefused>
+    where
+        B: DataSessionBinding + Send + 'static,
+    {
         let mut running = self.lock();
         if running.is_some() {
             return Ok(());
@@ -211,7 +244,7 @@ impl ServiceHost {
             Ok(store) => store,
             Err(e) => return refuse(host, classify(&e)),
         };
-        let binding = host.binding();
+        let (data, admin) = (data(&host), host.binding());
         let client_config = ClientConfig {
             client_kind: CLIENT_KIND.to_owned(),
             endpoint: Some(endpoint.clone()),
@@ -219,14 +252,8 @@ impl ServiceHost {
             max_payload_bytes: MAX_PAYLOAD_BYTES,
         };
         let make = move || {
-            let client = TransportClient::new(
-                binding.clone(),
-                binding,
-                store,
-                client_config,
-                Box::new(wall_ms),
-                0,
-            )?;
+            let client =
+                TransportClient::new(data, admin, store, client_config, Box::new(wall_ms), 0)?;
             Ok(FacadeSide::new(client, Some(endpoint), wall_ms))
         };
         let facade = match FacadeLoop::spawn(host.runtime(), make, &self.hub) {
