@@ -25,6 +25,10 @@ pub use gate::{CONNECTIVITY_TARGET, LastOutcome, PeerGateRow};
 /// ([`ComposedRuntime::network_changed`]), re-exported for the same
 /// reason.
 pub use interweave_transport_libp2p::NetworkView;
+/// What [`CompositionError::Substrate`] carries, re-exported so a binding
+/// tells its causes apart -- `ListenDenied`, the platform refusing a
+/// listening socket, above all -- without depending on the backend.
+pub use interweave_transport_libp2p::SubstrateError;
 /// The grace a stop gives exchanges already in flight when it names none
 /// (`ComposedRuntime::stop`): the substrate's, re-exported so a
 /// composition root names it without depending on the backend.

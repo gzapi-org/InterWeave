@@ -468,8 +468,16 @@ impl SubstrateConfig {
 /// What can go wrong building or driving the substrate.
 #[derive(Debug)]
 pub enum SubstrateError {
-    /// The transport could not be constructed.
+    /// The transport could not be constructed, or a listener could not
+    /// bind.
     Transport(String),
+    /// A listener's socket was refused by the platform: the bind, the
+    /// socket or the listen call answered `PermissionDenied` (EPERM or
+    /// EACCES). On Android 17 an ungranted INTERNET runtime permission
+    /// reads this way, and so does a port below 1024 without the
+    /// privilege: which it was is the caller's to tell. The text is for
+    /// the log only.
+    ListenDenied(String),
     /// The Swarm task is gone.
     ///
     /// Every command path returns this rather than panicking: the task
@@ -528,6 +536,7 @@ impl core::fmt::Display for SubstrateError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Transport(d) => write!(f, "transport: {d}"),
+            Self::ListenDenied(d) => write!(f, "the platform refused a listening socket: {d}"),
             Self::Stopped => write!(f, "the swarm task has stopped"),
             Self::Identity(d) => write!(f, "identity: {d}"),
             Self::Kademlia(rule) => write!(f, "kademlia configuration: {rule}"),

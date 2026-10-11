@@ -2338,12 +2338,10 @@ async fn drain(runtime: &mut SwarmRuntime, window: Duration) {
 /// removal clears the wrapper's offered set and the tick's re-offer, like
 /// the bind's own offer, passes only what the host still holds
 /// (`NetworkSet::holds`). What this measures is the wrapper's offered set
-/// (`listeners_offered`); an address offered BEFORE the removal stays in
-/// libp2p-dcutr 0.15.0's own candidate cache (an LRU of 20), which
-/// nothing prunes when its address departs and which every new relayed
-/// handler's CONNECT carries -- a gap that
-/// predates the platform's view, recorded on #250. The control: before
-/// the view, the private listener is offered.
+/// (`listeners_offered`); that an address offered BEFORE the removal is
+/// not sent either -- libp2p-dcutr's own candidate cache, built again by
+/// the change -- is `a_departed_address_is_not_sent_in_a_later_connect`.
+/// The control: before the view, the private listener is offered.
 #[tokio::test]
 async fn a_listener_on_an_ip_the_view_removed_is_not_offered() {
     let ip = interweave_test_support::net::require_private_interface_v4();
@@ -2390,4 +2388,127 @@ async fn a_listener_on_an_ip_the_view_removed_is_not_offered() {
     );
 
     subject.shutdown().await.expect("shutdown");
+}
+
+/// What the subject's CONNECT carries to a bare peer that dials its
+/// circuit, read off the bare peer's outcome as
+/// `a_loopback_only_subject_sends_no_candidate_at_all` reads it: `Ok` when
+/// the punch to a candidate landed, the crate's error text when the
+/// CONNECT carried no address. The subject listens on this host's private
+/// address, which it offers to the crate; then the platform's view
+/// removes `departs`, if any, before the circuit is dialled -- the
+/// listener's own IP, or another the first view named.
+async fn connect_outcome(ip: Ipv4Addr, departs: Option<Ipv4Addr>) -> Result<(), String> {
+    let Reserved {
+        mut relay,
+        relay_peer,
+        target: mut subject,
+        target_peer: subject_peer,
+        circuit,
+    } = reserved(
+        LOOPBACK,
+        |client| SubstrateConfig {
+            relay_client: Some(client),
+            dcutr: Some(punching()),
+            ..SubstrateConfig::default()
+        },
+        |relay_peer| trust(&[], &[relay_peer]),
+    )
+    .await;
+    let _private = listening(&subject, ip).await;
+    // Past a tick, so the bound listener has reached the crate's cache.
+    drain(&mut subject, Duration::from_secs(2)).await;
+    assert_eq!(
+        subject
+            .dcutr_counters()
+            .expect("the subject hole punches")
+            .listeners_offered,
+        1,
+        "the private listener was offered to the crate"
+    );
+    if let Some(gone) = departs {
+        // Two views, the first read before the second is sent, as
+        // `a_listener_on_an_ip_the_view_removed_is_not_offered` sends them:
+        // the first names the listener's IP and another, the second drops
+        // `gone`.
+        let named = [ip, OTHER_IP];
+        subject.network_changed(NetworkView {
+            addresses: named.iter().map(|&a| a.into()).collect(),
+        });
+        until_network_changed(&mut subject).await;
+        subject.network_changed(NetworkView {
+            addresses: named
+                .iter()
+                .filter(|&&a| a != gone)
+                .map(|&a| a.into())
+                .collect(),
+        });
+        until_network_changed(&mut subject).await;
+        drain(&mut subject, Duration::from_secs(2)).await;
+    }
+    let mut seen = Seen::default();
+    let bare_keys = identity::Keypair::generate_ed25519();
+    let bare_peer = identity_of(&bare_keys);
+    let mut bare = bare_initiator(bare_keys);
+    bare.listen_on(any_port(LOOPBACK)).expect("listens");
+    subject
+        .set_trust(trust(&[&bare_peer], &[&relay_peer]))
+        .await
+        .expect("trust installs");
+    bare.dial(circuit)
+        .expect("a circuit dial is accepted by the transport");
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    let outcome = loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(!remaining.is_zero(), "the bare peer reported no outcome");
+        tokio::select! {
+            event = subject.next_event() => {
+                let _ = event.expect("the subject is alive");
+            }
+            event = bare.select_next_some() => {
+                if let Libp2pSwarmEvent::Behaviour(BareInitiatorEvent::Dcutr(
+                    libp2p::dcutr::Event { remote_peer_id, result },
+                )) = event
+                    && remote_peer_id == pid(&subject_peer)
+                {
+                    break result.map(|_| ()).map_err(|e| e.to_string());
+                }
+            }
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
+            () = tokio::time::sleep(remaining) => {}
+        }
+    };
+    subject.shutdown().await.expect("shutdown");
+    outcome
+}
+
+/// An address the first view names beside the listener's, which no
+/// interface of this host holds.
+const OTHER_IP: Ipv4Addr = Ipv4Addr::new(10, 255, 0, 3);
+
+/// An address offered to the crate before its IP left the host is not
+/// sent in a CONNECT after: the network change builds the crate again, so
+/// its candidate cache -- which nothing else empties -- starts from what
+/// the host still holds (`HolePunchScope::network_changed`). Over this
+/// host's private address, since loopback candidates are withheld. TWO
+/// CONTROLS: with no change the private candidate is sent and the bare
+/// peer's punch lands; and after a change that removed ANOTHER IP -- the
+/// crate built again all the same -- the listener still held is offered
+/// to the new crate and sent, so the punch lands too.
+#[tokio::test]
+async fn a_departed_address_is_not_sent_in_a_later_connect() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    connect_outcome(ip, None)
+        .await
+        .expect("the control: the held private candidate is sent and the punch lands");
+    connect_outcome(ip, Some(OTHER_IP))
+        .await
+        .expect("after another IP left, the held candidate reaches the rebuilt crate");
+    let detail = connect_outcome(ip, Some(ip))
+        .await
+        .expect_err("the departed candidate is not sent, so nothing can be punched");
+    assert_eq!(
+        detail, "Failed to hole-punch connection: Inbound stream error: Protocol error",
+        "the subject's CONNECT carried no address"
+    );
 }

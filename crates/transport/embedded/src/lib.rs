@@ -40,6 +40,7 @@ use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_composition::Ended as ComposedEnded;
 use interweave_transport_composition::{
     AUDIT_TARGET, ComposedRuntime, CompositionError, CompositionOptions, InProcessBinding,
+    SubstrateError,
 };
 pub use interweave_transport_composition::{NetworkView, ShutdownRequest};
 
@@ -99,6 +100,16 @@ pub enum EmbeddedRefused {
     DirectoryRefused(String),
     /// The supplied identity carries no transport identity.
     IdentityRejected,
+    /// The platform refused the runtime a listening socket: the socket,
+    /// the bind or the listen answered `PermissionDenied` (EPERM or
+    /// EACCES). On Android 17 an ungranted INTERNET runtime permission
+    /// reads this way -- measured on a Pixel 9a, API 37 -- and so does a
+    /// listener on a port below 1024 without the privilege, which this
+    /// variant does not tell apart: a caller that shows the person a
+    /// cause must check the permission itself to know which (agreed with
+    /// the Android client's owner for its Service, plan §20). The text
+    /// is for the log only.
+    NetworkDenied(String),
     /// The runtime failed to start or to stop.
     Internal(String),
 }
@@ -111,6 +122,9 @@ impl std::fmt::Display for EmbeddedRefused {
             Self::ProfileInvalid(detail) => write!(f, "the profile cannot be used: {detail}"),
             Self::DirectoryRefused(detail) => write!(f, "a directory is refused: {detail}"),
             Self::IdentityRejected => f.write_str("the identity has no transport identity"),
+            Self::NetworkDenied(detail) => {
+                write!(f, "the platform refused a network socket: {detail}")
+            }
             Self::Internal(detail) => write!(f, "the runtime failed: {detail}"),
         }
     }
@@ -170,6 +184,9 @@ impl From<AvailabilityError> for EmbeddedRefused {
 impl From<CompositionError> for EmbeddedRefused {
     fn from(e: CompositionError) -> Self {
         match e {
+            CompositionError::Substrate(SubstrateError::ListenDenied(_)) => {
+                Self::NetworkDenied(e.to_string())
+            }
             CompositionError::InvalidProfile(_) | CompositionError::Unhonoured { .. } => {
                 Self::ProfileInvalid(e.to_string())
             }

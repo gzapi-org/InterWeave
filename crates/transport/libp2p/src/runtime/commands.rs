@@ -31,6 +31,7 @@ use super::dialing::{
 use super::messages::{DialRefusal, SwarmCommand, SwarmEvent};
 
 // Still beside the loop that owns them; step 5 moves these out.
+use super::config::SubstrateError;
 use super::direct::DirectState;
 use super::{PendingDirect, admit_outbound, to_peer_id, to_transport_identity};
 
@@ -82,9 +83,9 @@ pub(super) fn handle_command(
             // declining to remember the reply would leave the OS listener
             // open with nobody able to close it.
             if listens.len() >= max_pending_listens {
-                let _ = reply.send(Err(format!(
+                let _ = reply.send(Err(SubstrateError::Transport(format!(
                     "at most {max_pending_listens} listeners may be awaiting an address"
-                )));
+                ))));
                 return;
             }
             // AND THE BOUND THAT SURVIVES BINDING. The check above counts
@@ -94,12 +95,12 @@ pub(super) fn handle_command(
             // open. Pending and active are counted together because both
             // hold an OS listener.
             if listens.len().saturating_add(active.len()) >= max_active_listeners {
-                let _ = reply.send(Err(format!(
+                let _ = reply.send(Err(SubstrateError::Transport(format!(
                     "at most {max_active_listeners} listeners may be bound at once"
-                )));
+                ))));
                 return;
             }
-            match swarm.listen_on(address) {
+            match swarm.listen_on(address.clone()) {
                 // Held until `NewListenAddr` names the assigned address.
                 // Answering now could only mean answering with a
                 // placeholder, and `listen` documents its result as the
@@ -108,7 +109,13 @@ pub(super) fn handle_command(
                     listens.insert(id, reply);
                 }
                 Err(e) => {
-                    let _ = reply.send(Err(error_chain(&e)));
+                    // The OS is asked only when a socket call failed:
+                    // `MultiaddrNotSupported` is refused before any
+                    // socket, the profile's fault, never the platform's
+                    // (`an_address_libp2p_cannot_listen_on_is_not_denied`).
+                    let probe = matches!(e, libp2p::core::transport::TransportError::Other(_))
+                        .then_some(&address);
+                    let _ = reply.send(Err(listen_refusal(&e, probe)));
                 }
             }
         }
@@ -1398,7 +1405,9 @@ pub(super) fn translate(
             reason,
         } => {
             if let Some(reply) = listens.remove(&listener_id) {
-                let _ = reply.send(Err("the listener closed before binding".to_owned()));
+                let _ = reply.send(Err(SubstrateError::Transport(
+                    "the listener closed before binding".to_owned(),
+                )));
                 // It never bound, so there is no `Listening` to withdraw
                 // and the caller has already been told directly.
                 return None;
@@ -1417,7 +1426,7 @@ pub(super) fn translate(
         }
         Libp2pSwarmEvent::ListenerError { listener_id, error } => {
             if let Some(reply) = listens.remove(&listener_id) {
-                let _ = reply.send(Err(error_chain(&error)));
+                let _ = reply.send(Err(listen_refusal(&error, None)));
             }
             None
         }
@@ -1682,6 +1691,83 @@ pub(super) fn dispatch_held(
     }
 }
 
+/// Why a listener did not bind, as the caller can act on it: the
+/// platform refusing this process a socket -- EPERM or EACCES, an
+/// ungranted INTERNET permission on Android 17 or a port below 1024
+/// without the privilege -- is [`SubstrateError::ListenDenied`], and
+/// every other failure [`SubstrateError::Transport`]; both carry
+/// [`error_chain`]'s text.
+///
+/// TWO WAYS TO KNOW, because the error alone does not always say. The
+/// Swarm's transport wraps the TCP error in `either::Either`, whose
+/// `source()` answers its inner error's source and skips the inner
+/// error itself, so the OS's `PermissionDenied` is unreachable by any
+/// walk (measured: `Other(Custom { .. Transport(Left(Left(Os { code:
+/// 13, .. }))) })`). So a refused TCP listen also asks the OS the same
+/// question -- a plain bind of `address`'s socket address, released at
+/// once -- and a `PermissionDenied` there is the platform's answer too.
+/// `address` is `None` where there is nothing to ask about: libp2p
+/// refused the address before any socket (`MultiaddrNotSupported`), or
+/// the error came from a listener already created (`ListenerError`),
+/// whose address the caller does not hold -- there only the error's own
+/// chain decides.
+/// Pinned by `a_listener_the_platform_refuses_is_denied`
+/// (`tests/listen_refusal.rs`, real sockets) and the unit tests beside
+/// this.
+fn listen_refusal(
+    e: &(dyn std::error::Error + 'static),
+    address: Option<&Multiaddr>,
+) -> SubstrateError {
+    if permission_denied(e) || address.is_some_and(platform_refuses) {
+        SubstrateError::ListenDenied(error_chain(e))
+    } else {
+        SubstrateError::Transport(error_chain(e))
+    }
+}
+
+/// Whether the OS refuses this process a TCP listener on `address`'s
+/// socket address with `PermissionDenied`. Any other answer, a bind that
+/// succeeds included (released at once), is no.
+fn platform_refuses(address: &Multiaddr) -> bool {
+    use libp2p::multiaddr::Protocol;
+    let mut parts = address.iter();
+    let ip: std::net::IpAddr = match parts.next() {
+        Some(Protocol::Ip4(ip)) => ip.into(),
+        Some(Protocol::Ip6(ip)) => ip.into(),
+        _ => return false,
+    };
+    let Some(Protocol::Tcp(port)) = parts.next() else {
+        return false;
+    };
+    std::net::TcpListener::bind((ip, port))
+        .is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
+}
+
+/// Whether `e`, a source under it, or an error an `io::Error` WRAPS is a
+/// `PermissionDenied`. The wrapped one is not on the `source()` chain:
+/// `io::Error::source` answers the inner error's source, skipping the
+/// inner error itself, so an `io::Error` wrapping an OS error hides it
+/// (the unit test's `wrapped` case). This does NOT reach the Swarm's own
+/// shape, where `either::Either` hides it again -- `listen_refusal`'s OS
+/// question is what answers that.
+fn permission_denied(e: &(dyn std::error::Error + 'static)) -> bool {
+    let mut next = Some(e);
+    while let Some(err) = next {
+        if let Some(io) = err.downcast_ref::<std::io::Error>() {
+            if io.kind() == std::io::ErrorKind::PermissionDenied {
+                return true;
+            }
+            if let Some(inner) = io.get_ref()
+                && permission_denied(inner)
+            {
+                return true;
+            }
+        }
+        next = err.source();
+    }
+    false
+}
+
 /// `e` and every source under it, joined by `: `, the empty ones left
 /// out and a source whose text the previous part already ends with left
 /// out too: libp2p-dns's `Error::Transport` displays its source AND
@@ -1702,6 +1788,88 @@ fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
         next = err.source();
     }
     parts.join(": ")
+}
+
+#[cfg(test)]
+mod listen_refusal_tests {
+    use super::{SubstrateError, listen_refusal};
+    use libp2p::core::transport::TransportError;
+
+    /// An address the OS probe cannot judge (not TCP), so the error
+    /// alone decides.
+    fn udp() -> libp2p::Multiaddr {
+        "/ip4/127.0.0.1/udp/9".parse().expect("multiaddr")
+    }
+
+    /// An error whose chain names no `PermissionDenied`, as the Swarm's
+    /// `Either` wrapping leaves it.
+    fn opaque() -> TransportError<std::io::Error> {
+        TransportError::Other(std::io::Error::other("opaque"))
+    }
+
+    /// The error alone: EPERM (os error 1, the Pixel 9a's) as libp2p
+    /// hands it over, or wrapped as the boxed transport wraps it, is
+    /// `ListenDenied`; an address not held stays `Transport`.
+    #[test]
+    fn a_permission_refusal_anywhere_in_the_chain_is_denied() {
+        let eperm = TransportError::Other(std::io::Error::from_raw_os_error(1));
+        assert!(matches!(
+            listen_refusal(&eperm, Some(&udp())),
+            SubstrateError::ListenDenied(text) if text.contains("os error 1")
+        ));
+        // An I/O error wrapping another directly: `io::Error::source`
+        // answers the INNER error's source -- none for an OS error -- so
+        // only entering the wrapped error finds the refusal.
+        let wrapped =
+            TransportError::Other(std::io::Error::other(std::io::Error::from_raw_os_error(13)));
+        assert!(matches!(
+            listen_refusal(&wrapped, Some(&udp())),
+            SubstrateError::ListenDenied(_)
+        ));
+        let not_held =
+            TransportError::Other(std::io::Error::from(std::io::ErrorKind::AddrNotAvailable));
+        assert!(matches!(
+            listen_refusal(&not_held, Some(&udp())),
+            SubstrateError::Transport(_)
+        ));
+    }
+
+    /// `MultiaddrNotSupported` is refused before any socket -- the
+    /// profile's fault -- so the caller passes no address to probe, and
+    /// a port the OS would refuse does not make it `ListenDenied`. Fed as
+    /// the Listen arm feeds it, through the same `matches!`.
+    #[test]
+    fn an_address_libp2p_cannot_listen_on_is_not_denied() {
+        let ws: libp2p::Multiaddr = "/ip4/127.0.0.1/tcp/80/ws".parse().expect("multiaddr");
+        let e: TransportError<std::io::Error> = TransportError::MultiaddrNotSupported(ws.clone());
+        let probe = matches!(e, TransportError::Other(_)).then_some(&ws);
+        assert!(matches!(
+            listen_refusal(&e, probe),
+            SubstrateError::Transport(_)
+        ));
+    }
+
+    /// The OS probe: an error that names no permission, for a TCP
+    /// address the OS refuses an unprivileged process (port 80), is
+    /// `ListenDenied`; the same error for a port it grants stays
+    /// `Transport`. Needs an unprivileged runner, as the integration test.
+    #[test]
+    fn the_os_is_asked_when_the_error_does_not_say() {
+        let privileged: libp2p::Multiaddr = "/ip4/127.0.0.1/tcp/80".parse().expect("multiaddr");
+        assert!(matches!(
+            listen_refusal(&opaque(), Some(&privileged)),
+            SubstrateError::ListenDenied(_)
+        ));
+        let any: libp2p::Multiaddr = "/ip4/127.0.0.1/tcp/0".parse().expect("multiaddr");
+        assert!(matches!(
+            listen_refusal(&opaque(), Some(&any)),
+            SubstrateError::Transport(_)
+        ));
+        assert!(matches!(
+            listen_refusal(&opaque(), None),
+            SubstrateError::Transport(_)
+        ));
+    }
 }
 
 #[cfg(test)]

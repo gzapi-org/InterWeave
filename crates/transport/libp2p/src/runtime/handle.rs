@@ -91,18 +91,17 @@ impl SwarmRuntime {
     /// so it waits for the listener to report it.
     ///
     /// # Errors
-    /// Returns [`SubstrateError::Stopped`] if the task is gone, or
-    /// [`SubstrateError::Transport`] if the listener could not bind.
+    /// Returns [`SubstrateError::Stopped`] if the task is gone,
+    /// [`SubstrateError::ListenDenied`] if the platform refused this
+    /// process the socket, or [`SubstrateError::Transport`] if the
+    /// listener could not bind for any other reason.
     pub async fn listen(&self, address: Multiaddr) -> Result<Multiaddr, SubstrateError> {
         let (reply, answer) = oneshot::channel();
         self.commands
             .send(SwarmCommand::Listen { address, reply })
             .await
             .map_err(|_| SubstrateError::Stopped)?;
-        answer
-            .await
-            .map_err(|_| SubstrateError::Stopped)?
-            .map_err(SubstrateError::Transport)
+        answer.await.map_err(|_| SubstrateError::Stopped)?
     }
 
     /// Stop the listener serving `address`.

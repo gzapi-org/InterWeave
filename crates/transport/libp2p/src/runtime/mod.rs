@@ -148,6 +148,9 @@ fn follow_verdict(
 /// up to five minutes after it is back. And every relay backing off whose
 /// peer the gate does not still hold after that lift is asked again at
 /// the next tick, its ladder kept (`ReservationManager::network_added`).
+/// The DCUtR wrapper stops treating the added IPs as departed, so an
+/// observation on one is forwarded again (`dcutr_driver::network_changed`,
+/// which takes every change, an addition included).
 /// Each once per lift floor
 /// (ADR-0011 A 2026-10-09): a relay-only profile is otherwise unreachable for the
 /// rest of its relay backoff.
@@ -179,6 +182,7 @@ fn on_network_change(
         }
         return;
     };
+    dcutr_driver::network_changed(swarm.dcutr_mut(), &change);
     if change.invalidates() {
         if let Some(state) = autonat_state {
             let mut autonat_events = Vec::new();
@@ -205,7 +209,6 @@ fn on_network_change(
                 }
             }
         }
-        dcutr_driver::network_changed(swarm.dcutr_mut());
         let departed: std::collections::BTreeSet<std::net::IpAddr> =
             change.removed.iter().copied().collect();
         for (id, connection) in open {

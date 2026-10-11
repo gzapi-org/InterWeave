@@ -38,7 +38,7 @@ pub enum SwarmCommand {
         /// immediately: `listen_on` returns only a `ListenerId`, so an
         /// immediate answer could carry nothing a caller could advertise
         /// or dial.
-        reply: oneshot::Sender<Result<Multiaddr, String>>,
+        reply: oneshot::Sender<Result<Multiaddr, SubstrateError>>,
     },
     /// Install broadcast configuration and hold the desired channels.
     ///
