@@ -36,6 +36,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod availability_overlay;
 pub mod connectivity;
+pub mod endpoint_overlay;
 pub mod ipc;
 pub mod kademlia;
 pub mod load;
