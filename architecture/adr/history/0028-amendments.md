@@ -505,13 +505,27 @@ What changed:
   "Y"}` with Y disabled in `config.yaml` keeps Y (the blind review's
   two cases). A member named twice is refused, never last-wins; the
   file is read under a size constant the store names. Each rewrite
-  logs a warning naming the entry. Set-time behaviour is unchanged:
+  logs a warning naming the entry. Set-time behaviour is unchanged, except the composed-profile refusal
+  in the bullet below:
   `set_default` refuses a disabled or unknown endpoint, and
   `set_enabled(false)` on the default clears it, the one write carrying
   both deltas.
 - Fatal at start, never skipped, when present and untrusted or
   unparseable: a skipped overlay re-enables what the operator disabled.
   Backed up with the profile; never deleted to reset.
+- The composed profile is validated as `config.yaml` is (added in the
+  landing PR from InterWeave #261's review F1, which falsified the first
+  draft's "no analogue of the `MAX_ALLOWED_PEERS` bound since endpoint
+  names are `config.yaml`'s and bounded by its validation":
+  `directory.max_advertised` and the Android lease endpoint read the
+  ENABLED set, so validation bounds the configured set, not the composed
+  one). A set the next start would refuse is refused `InvalidArgument`,
+  nothing written; at start a composed profile that fails validation is
+  fatal naming the overlay and the rule, `ProfileInvalid` on the
+  embedded runtime. Normalising at load instead — dropping enables until
+  the profile validates — was rejected 2026-10-11: it would choose for
+  the operator which enables survive, the truncation the trust decision
+  ruled out, and a conflicting disable has nothing to drop.
 - `admin.endpoints.revoke` and leases stay runtime-only: a lease is a
   session's.
 - Every production binding supplies the store under its own state
