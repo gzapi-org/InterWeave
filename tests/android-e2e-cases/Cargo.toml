@@ -25,6 +25,13 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+# The human_chat case: the app's own client as its window drives it --
+# the model side and its updates, the model, the envelope and the
+# facade's statuses. None reaches a transport runtime (the graph test).
+interweave-human-app-core = { path = "../../crates/human/app-core" }
+interweave-human-chat-protocol = { path = "../../crates/human/chat-protocol" }
+interweave-human-client-api = { path = "../../crates/human/client-api" }
+interweave-human-ui-model = { path = "../../crates/human/ui-model" }
 interweave-local-client-api = { path = "../../crates/api/local-client-api" }
 # Gate (d): the embedded boundary and its runtime root, as the app
 # resolves them; built for the phone as the app already builds it.

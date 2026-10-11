@@ -39,6 +39,13 @@ use interweave_transport_api::{
 };
 use serde_json::{Map, Value};
 
+mod human_chat;
+
+pub use human_chat::{
+    AppClient, Handed, HumanChatArgs, Recording, RecordingSession, Tap, chat_text,
+    desktop_message_id, parse_payloads,
+};
+
 /// The result JSON's keys. The instrumentation copies each to the status
 /// key `interweave.<key>` (the seam agreed with rust-ui-dev, 01a12771).
 pub mod keys {
@@ -52,10 +59,13 @@ pub mod keys {
     pub const PEER: &str = "peer";
     /// The path a case observed to the desktop (`paths`).
     pub const PATH: &str = "path";
-    /// Where captured payloads were written. Reserved by the seam agreed
-    /// with rust-ui-dev (01a12771) for the `HumanChatV2` case its j66 batch
-    /// moves here; no case writes it and no host reads it yet.
+    /// Where the payloads the runtime handed the app's client were
+    /// written, for the host to read and validate (`human_chat`; the
+    /// file's shape is [`crate::parse_payloads`]'s).
     pub const PAYLOADS: &str = "payloads";
+    /// The envelopes this side sent, as its facade committed them
+    /// (`human_chat`): a JSON array.
+    pub const SENT: &str = "sent";
     /// The runtime root the embedded runtime's private directories lie
     /// under (`trust_boundary`).
     pub const ROOT: &str = "runtime_root";
@@ -96,12 +106,22 @@ pub mod cases {
     /// `Device::log`.
     pub const AUDIT: &str = "audit";
 
-    /// The cases a runner must have the runtime ALONE serving for: the
-    /// app's runtime, started as the app starts it, with no store and no
-    /// facade, so nothing else holds the profile's endpoint leases (agreed
-    /// with rust-ui-dev, 01a128a6/01a128a8). The others run before it
-    /// starts, as [`PROVISION`] must.
+    /// `HumanChatV2` with the desktop on the app's own client, both ways,
+    /// plain and `;ce=br`. Arguments: [`super::HumanChatArgs`].
+    pub const HUMAN_CHAT: &str = "human_chat";
+
+    /// The cases a runner must have the runtime ALONE serving for: started
+    /// as the app's service starts it -- the same launch, identity and
+    /// paths, through the app's service host rather than a runtime of the
+    /// case's own -- with no store and no facade, so
+    /// the `human` lease is free for the case (01a128a6/01a128a8). The
+    /// others run before it starts, as [`PROVISION`] must.
     pub const NEED_A_RUNTIME: &[&str] = &[PATHS, TRUST_BOUNDARY, AUDIT];
+
+    /// The cases a runner must have the app's service serving for in
+    /// full -- runtime, store, facade and hub -- handing the case
+    /// [`super::CaseCtx::client`].
+    pub const NEED_THE_CLIENT: &[&str] = &[HUMAN_CHAT];
 }
 
 /// How long a case waits for a route, a message or a notice when its
@@ -125,6 +145,9 @@ pub struct CaseCtx<B> {
     /// directories, as the app's first start does. `None` where the
     /// runner cannot provision.
     pub provision: Option<Provision>,
+    /// The app's own client, for a case of [`cases::NEED_THE_CLIENT`]:
+    /// `None` where the app's service is not serving in full.
+    pub client: Option<Box<dyn AppClient>>,
 }
 
 /// How a runner writes the profile's configuration ([`CaseCtx::provision`]).
@@ -219,6 +242,17 @@ fn dispatch<B: DataSessionBinding + AdminBinding>(
                 .binding
                 .ok_or_else(|| "no runtime is serving: start the app's service first".to_owned())?;
             block_on(audit(&binding, peer))??;
+        }
+        cases::HUMAN_CHAT => {
+            let args = HumanChatArgs::from_json(&args)?;
+            let mut client = ctx.client.ok_or_else(|| {
+                "the app's client is not serving: start the app's service first".to_owned()
+            })?;
+            out.extend(human_chat::human_chat(
+                client.as_mut(),
+                &args,
+                &ctx.app_data_dir,
+            )?);
         }
         other => return Err(format!("no case is named {other:?}")),
     }
@@ -724,6 +758,7 @@ mod tests {
                         app_data_dir: PathBuf::from("/nonexistent"),
                         binding: Some(android),
                         provision: None,
+                        client: None,
                     },
                 )
             })
@@ -950,6 +985,7 @@ mod tests {
                 app_data_dir: PathBuf::from("/nonexistent"),
                 binding: Some(android.clone()),
                 provision: None,
+                client: None,
             },
         ));
         assert_eq!(out[keys::RESULT], keys::PASS, "{out:?}");
@@ -1019,6 +1055,7 @@ mod tests {
                     written.lock().expect("lock").push(config.to_owned());
                     answer
                 })),
+                client: None,
             }
         };
         let config = "profile:\n  name: \"x\"\n";
@@ -1045,6 +1082,7 @@ mod tests {
                 app_data_dir: PathBuf::from("/nonexistent"),
                 binding: None,
                 provision: None,
+                client: None,
             },
         ));
         assert_eq!(out[keys::RESULT], keys::PASS);
@@ -1110,6 +1148,7 @@ mod tests {
                 app_data_dir: PathBuf::from("/nonexistent"),
                 binding: Some(Panics),
                 provision: None,
+                client: None,
             },
         ));
         assert_eq!(out[keys::RESULT], keys::FAIL);
@@ -1123,11 +1162,22 @@ mod tests {
             app_data_dir: PathBuf::from("/nonexistent"),
             binding: None,
             provision: None,
+            client: None,
         };
         let args = PathsArgs {
             desktop: peer(),
             path: PeerPath::Direct,
             serial: 1,
+            deadline: DEFAULT_DEADLINE,
+        }
+        .to_json()
+        .to_string();
+        let chat = HumanChatArgs {
+            desktop: peer(),
+            path: PeerPath::Direct,
+            side: "C".to_owned(),
+            sends: [3, 7],
+            answers: [4, 8],
             deadline: DEFAULT_DEADLINE,
         }
         .to_json()
@@ -1139,6 +1189,12 @@ mod tests {
             (cases::PATHS, args.as_str(), "no runtime is serving"),
             (cases::PROVISION, "{}", "\"config\" is missing"),
             (cases::PROVISION, r#"{"config":"x"}"#, "cannot provision"),
+            (cases::HUMAN_CHAT, "{}", "\"desktop\" is missing"),
+            (
+                cases::HUMAN_CHAT,
+                chat.as_str(),
+                "the app's client is not serving",
+            ),
         ] {
             let out = result(&run(case, args, ctx()));
             assert_eq!(out[keys::RESULT], keys::FAIL, "{case} {args}");

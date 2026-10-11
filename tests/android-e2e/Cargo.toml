@@ -39,8 +39,12 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
-# human_chat.rs: the human client's own facade, store, envelope and
-# model on each side, and the captured payloads' schema check.
+# human_chat.rs: the app's own service host on the host's stand-in for
+# the app's process, with the cases' recorder and client handle -- the
+# composition the phone's instrumentation runs the case on.
+interweave-human-android-platform = { path = "../../crates/human/android-platform", features = ["e2e-cases"] }
+# human_chat.rs: the desktop client's own facade, store, envelope and
+# model, and the captured payloads' schema check.
 interweave-human-chat-protocol = { path = "../../crates/human/chat-protocol" }
 interweave-human-store = { path = "../../crates/human/store" }
 interweave-human-transport-client = { path = "../../crates/human/transport-client" }
