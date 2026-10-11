@@ -52,6 +52,7 @@ pub const MAX_ENDPOINT_OVERLAY_BYTES: u64 = 16 * 1024;
 #[serde(deny_unknown_fields)]
 pub struct EndpointOverlay {
     /// The endpoints whose enabled state differs from `config.yaml`'s.
+    #[serde(deserialize_with = "unique_entries")]
     enabled: BTreeMap<EndpointId, bool>,
     /// `None`: absent, the configured default applies. `Some(None)`:
     /// `null`, no default. `Some(Some(id))`: that endpoint.
@@ -75,6 +76,36 @@ pub struct EndpointOverlay {
 )]
 fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Option<EndpointId>>, D::Error> {
     Option::<EndpointId>::deserialize(d).map(Some)
+}
+
+/// `enabled`'s entries, an endpoint named twice refused: a map keeps the
+/// last of a key named twice, which would read the operator's first
+/// state of it as never written (ADR-0028 A 2026-10-11).
+fn unique_entries<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<EndpointId, bool>, D::Error> {
+    struct Entries;
+    impl<'de> serde::de::Visitor<'de> for Entries {
+        type Value = BTreeMap<EndpointId, bool>;
+        fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.write_str("an object of endpoint ids to booleans")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut out = BTreeMap::new();
+            while let Some((id, on)) = map.next_entry::<EndpointId, bool>()? {
+                if out.contains_key(&id) {
+                    return Err(serde::de::Error::custom(format!(
+                        "endpoint {} named twice",
+                        id.as_str()
+                    )));
+                }
+                out.insert(id, on);
+            }
+            Ok(out)
+        }
+    }
+    d.deserialize_map(Entries)
 }
 
 /// The endpoints' state once the overlay is composed over the

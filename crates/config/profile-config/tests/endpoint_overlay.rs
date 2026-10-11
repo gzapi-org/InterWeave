@@ -190,17 +190,26 @@ fn each_normalisation_rewrites_the_file_exactly() {
 }
 
 /// A normalised overlay is not rewritten: the file loaded is the file
-/// left, byte for byte, in whatever layout it was written.
+/// left, byte for byte, in whatever layout it was written. Among them
+/// the two the predicate keeps because it reads the EFFECTIVE state: an
+/// overlay default that is enabled while the configured default is
+/// disabled, and an overlay default `config.yaml` disables that the
+/// overlay itself enables.
 #[test]
 fn a_normalised_overlay_is_not_rewritten() {
-    let (_dir, path) = state();
-    let text = r#"{"enabled":{"a":false,"c":true},"default":"c"}"#;
-    put(&path, text);
-    let (overlay, changes) = load(&path, &config(Some("a"))).expect("loads");
-    assert!(changes.is_empty(), "{changes:?}");
-    assert_eq!(read(&path), text);
-    let effective = overlay.effective(&config(Some("a")));
-    assert_eq!(effective.default, Some(id("c")));
+    for (text, default) in [
+        (r#"{"enabled":{"a":false},"default":"b"}"#, "b"),
+        (r#"{"enabled":{"c":true},"default":"c"}"#, "c"),
+        (r#"{"enabled":{"a":false,"c":true},"default":"c"}"#, "c"),
+    ] {
+        let (_dir, path) = state();
+        put(&path, text);
+        let (overlay, changes) = load(&path, &config(Some("a"))).expect("loads");
+        assert!(changes.is_empty(), "{text}: {changes:?}");
+        assert_eq!(read(&path), text);
+        let effective = overlay.effective(&config(Some("a")));
+        assert_eq!(effective.default, Some(id(default)), "{text}");
+    }
 }
 
 /// An absent overlay is the empty one and is not created.
@@ -333,6 +342,10 @@ fn a_present_overlay_that_cannot_be_trusted_stops_the_load() {
         (
             "a member named twice",
             r#"{"enabled":{},"enabled":{"b":false}}"#,
+        ),
+        (
+            "an endpoint named twice",
+            r#"{"enabled":{"b":false,"b":true}}"#,
         ),
     ] {
         let (_dir, path) = state();
