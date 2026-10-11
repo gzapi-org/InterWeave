@@ -141,7 +141,7 @@ Endpoint lease is exclusive and connection-bound. Client cannot change EndpointI
 - `commands`: the data-domain methods of the catalogue (`channel.join`, `channel.leave`, `broadcast.publish`, `direct.send`); connectivity reaches a data client only as the normalized `server_state.connectivity` push, never as a method;
 - `endpoints.query`: query a trusted remote peer's advertised endpoint directory;
 - `admin.status`: read the administrative status view (`admin-status`: health, the full connectivity summary, counters, lease count) — read-only, admin socket only (A 2026-09-28); `ipc.events_dropped_total` is emitted only by a binding that keeps a per-client drop count; while none does, the member is omitted — a counter the server cannot keep is absent, never `0` (A 2026-09-29).
-- `admin.endpoints`: inspect/revoke local endpoint leases or mutate the endpoint runtime overlay (enable/disable, default) through an administrative adapter;
+- `admin.endpoints`: inspect/revoke local endpoint leases or change the endpoint overlay (enable/disable, default) through an administrative adapter;
 - `admin.shutdown`: invoke transport `shutdown(grace)`.
 - `admin.trust` (2.1, A 2026-10-03): read the profile's peer trust policy and mutate it through an administrative adapter — admin socket only, never on the data socket under any `client.kind` (ADR-0037 A 2026-10-03; ADR-0032: trust mutation requires the platform admin binding).
 
@@ -300,11 +300,27 @@ the schema-agreement test binds the two.
 | `admin.peers.list` | admin | `admin.status` | `peer-list-params` | `peer-list` | 2.2 |
 
 `admin.endpoints.set_enabled(false)` revokes a live lease at once
-(`endpoint.lease_changed`) and never auto-rebinds. The three mutating
-admin methods are a **runtime overlay**: they change the running
-daemon's view and are never written to `config.yaml`, so a restart
-returns to the configured state; `admin.endpoints.list` says
-`persisted: false` on every row (ADR-0028). Trust administration
+(`endpoint.lease_changed`) and never auto-rebinds. `set_enabled` and
+`set_default` are a **persisted overlay** (ADR-0028 A 2026-10-11): never
+written to `config.yaml`, they are kept in the state directory's
+endpoint overlay, written before the change is published and before the
+set is answered, so a restart starts with them. A set whose result,
+composed over `config.yaml`, would fail the profile's validation -- a
+rule reading the enabled set, such as `directory.max_advertised` -- is
+refused `InvalidArgument` with nothing written, as the next start would
+refuse it; `set_default` naming an endpoint that is not configured or is
+disabled is `EndpointUnknown` or `EndpointDisabled`. Neither set is
+audited, unlike `admin.trust.set`. `admin.endpoints.revoke`
+stays runtime-only, a lease being a session's and not configuration.
+`admin.endpoints.list` answers each endpoint's effective state, and on a
+connection that negotiated 2.5 or later `persisted: true` on every row (a
+row the runtime cannot persist is answered `Internal` there, a state only
+a store-less runtime reports, never served over IPC); below 2.5 the 2.0
+row, `persisted: false`, is served unchanged (`ipc/endpoint-list` 1.1.0,
+ADR-0017 A 2026-10-07: a closed result shape widens behind a new minor;
+2.5 adds no method or capability). Until 2026-10-11 all three were a
+runtime overlay, a restart returning to the configured state, and every
+row said `persisted: false`. Trust administration
 (ADR-0032) arrived in 2.1 (A 2026-10-03, Stage 15's R2): the two
 `admin.trust.*` rows above moved into the table from an approved list,
 with their schemas and the Rust mirror, in the batch that implements
@@ -376,10 +392,12 @@ connection that negotiated minor 2.1 or later, and `admin.trust` is
 requested only in a hello sent after the client has learnt the daemon
 speaks 2.1 (§Version negotiation's capability rule); the `close` frame's
 `supported` list was `[{major: 2, minor: 1}]` from R1, `[{major: 2,
-minor: 2}]` from `admin.peers.list` (A 2026-10-06), and is `[{major: 2,
-minor: 3}]` since the trust overlay (A 2026-10-07): it names the
+minor: 2}]` from `admin.peers.list` (A 2026-10-06), `[{major: 2,
+minor: 3}]` from the trust overlay (A 2026-10-07), `[{major: 2,
+minor: 4}]` from the route notices (A 2026-10-09), and is `[{major: 2,
+minor: 5}]` since the endpoint overlay (A 2026-10-11): it names the
 server's `IPC_MAX_MINOR`, never a literal. The two were the
-same runtime overlay as `admin.endpoints.*` — never written to
+same runtime overlay as `admin.endpoints.*` then was — never written to
 `config.yaml`, `persisted: false` — until the owner decided persistence
 on 2026-10-07 (ADR-0028's question, routed with the Stage 15 record):
 since then a set is a persisted overlay in the state directory, still
@@ -492,7 +510,7 @@ connection below 2.4 opened as a session that declines route notices.
 The first production build spoke 2.0; Stage 15's R1 batch, which
 brought `peer.path_changed`, spoke 2.1, and R2 added `admin.trust.*` to
 it; `admin.peers.list` brought 2.2 (A 2026-10-06); the persisted trust
-row brought 2.3 (A 2026-10-07, #215); the route-begin and reconnect `peer.path_changed` (`previous` absent, `reason_class` `route_established` or `reconnected`; `ipc/path-changed` 1.1.0) bring 2.4 (A 2026-10-09, Stage 17's relay pair) — below 2.4 nothing is sent when a route begins or a routed peer reconnects.
+row brought 2.3 (A 2026-10-07, #215); the route-begin and reconnect `peer.path_changed` (`previous` absent, `reason_class` `route_established` or `reconnected`; `ipc/path-changed` 1.1.0) brought 2.4 (A 2026-10-09, Stage 17's relay pair) — below 2.4 nothing is sent when a route begins or a routed peer reconnects; the persisted endpoint row (`ipc/endpoint-list` 1.1.0, `persisted: true`) brings 2.5 (ADR-0028 A 2026-10-11, plan §20 (e)) — below 2.5 the 2.0 row is served.
 
 Phases and directions, which JSON Schema cannot express and
 `tests/ipc-v2` asserts: `hello` is the client's first frame and only its

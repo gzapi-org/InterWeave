@@ -67,6 +67,8 @@ pub(crate) struct Script {
     pub(crate) panic_shutdown: bool,
     /// The rows `peers()` answers with.
     pub(crate) peers: Vec<interweave_local_client_api::PeerGateView>,
+    /// The rows `leases()` answers with.
+    pub(crate) endpoints: Vec<EndpointAdminView>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -268,7 +270,7 @@ impl AdminPort for FakeAdmin {
 
     async fn leases(&self) -> Result<Vec<EndpointAdminView>, TransportError> {
         self.fake.call("leases".to_owned());
-        Ok(Vec::new())
+        Ok(self.fake.script().endpoints.clone())
     }
 
     async fn revoke_endpoint(&self, endpoint: EndpointId) -> Result<(), TransportError> {

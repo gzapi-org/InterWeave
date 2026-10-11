@@ -109,8 +109,9 @@ impl Node {
         keepalive: KeepalivePolicy,
     ) -> Self {
         let root = tempfile::tempdir().expect("tempdir");
-        // The daemon's shape: a state directory holding the trust overlay
-        // (ADR-0028 A 2026-10-07), owner-only as the overlay requires.
+        // The daemon's shape: a state directory holding the trust and
+        // endpoint overlays (ADR-0028 A 2026-10-07, A 2026-10-11),
+        // owner-only as the overlays require.
         let state = root.path().join("state");
         std::fs::create_dir(&state).expect("a state directory");
         {
@@ -122,6 +123,9 @@ impl Node {
             listen: vec![listen.to_owned()],
             trust_overlay_file: Some(
                 state.join(interweave_profile_config::trust_overlay::TRUST_OVERLAY_FILE),
+            ),
+            endpoint_overlay_file: Some(
+                state.join(interweave_profile_config::endpoint_overlay::ENDPOINT_OVERLAY_FILE),
             ),
             ..CompositionOptions::default()
         };

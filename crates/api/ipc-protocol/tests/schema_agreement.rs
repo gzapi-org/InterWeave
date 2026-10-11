@@ -594,6 +594,37 @@ fn the_trust_row_shapes_agree_with_the_schema_both_ways() {
     }
 }
 
+/// `ipc/endpoint-list` 1.1.0 widens `persisted` from the literal
+/// `false` to a boolean -- the 2.0 row and the 2.5 row -- and the mirror
+/// reads exactly what the schema admits: both values pass both, and a
+/// row missing it or naming it as anything else fails both.
+#[test]
+fn the_endpoint_row_shapes_agree_with_the_schema_both_ways() {
+    let path = "architecture/contracts/schemas/ipc/endpoint-list.schema.json";
+    let schema = validator(path);
+    let row = |persisted: Option<Value>| {
+        let mut row = serde_json::json!({"id": "human", "enabled": true, "default": false});
+        if let Some(p) = persisted {
+            row["persisted"] = p;
+        }
+        serde_json::json!({ "endpoints": [row] })
+    };
+    for (list, legal) in [
+        (row(Some(Value::Bool(false))), true),
+        (row(Some(Value::Bool(true))), true),
+        (row(None), false),
+        (row(Some(Value::Null)), false),
+        (row(Some(serde_json::json!("true"))), false),
+    ] {
+        assert_eq!(schema.is_valid(&list), legal, "the schema on {list}");
+        assert_eq!(
+            serde_json::from_value::<EndpointList>(list.clone()).is_ok(),
+            legal,
+            "the mirror on {list}"
+        );
+    }
+}
+
 const PEER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
 const OTHER_PEER: &str = "12D3KooWHsy9ZMqTYfTPpJd8YXhZGKrLWzkWT9BgX9DeyF8Fs3GQ";
 
@@ -752,25 +783,30 @@ fn every_result() -> Vec<(&'static str, Value)> {
         },
         ServerCounters::default(),
     );
-    let list = EndpointList::from_views(vec![
-        EndpointAdminView {
-            endpoint: ep("bot"),
-            enabled: false,
-            default: false,
-            lease: None,
-        },
-        EndpointAdminView {
-            endpoint: ep("human"),
-            enabled: true,
-            default: true,
-            lease: Some(LeaseRecord {
+    let list = EndpointList::from_views(
+        vec![
+            EndpointAdminView {
+                endpoint: ep("bot"),
+                enabled: false,
+                default: false,
+                persisted: false,
+                lease: None,
+            },
+            EndpointAdminView {
                 endpoint: ep("human"),
-                epoch: epoch(),
-                client_kind: "human-client".into(),
-                session_id: Some("s".into()),
-            }),
-        },
-    ])
+                enabled: true,
+                default: true,
+                persisted: true,
+                lease: Some(LeaseRecord {
+                    endpoint: ep("human"),
+                    epoch: epoch(),
+                    client_kind: "human-client".into(),
+                    session_id: Some("s".into()),
+                }),
+            },
+        ],
+        interweave_ipc_protocol::IPC_MAX_MINOR,
+    )
     .expect("rows");
     let trust = TrustAdminView {
         local_peer: Some(

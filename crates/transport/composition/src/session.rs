@@ -210,9 +210,16 @@ pub struct InProcessBinding {
     /// The notices and wake-ups the driver posts to every session holding
     /// `events`.
     notices: SessionNotices,
+    /// Whether the runtime keeps an endpoint overlay, so an endpoint
+    /// row's state survives a restart (ADR-0028 A 2026-10-11).
+    endpoints_persisted: bool,
 }
 
 impl InProcessBinding {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each is a separate handle of the one runtime start composes, from its one call site"
+    )]
     pub(crate) const fn new(
         commander: SwarmCommander,
         runtime: tokio::runtime::Handle,
@@ -221,6 +228,7 @@ impl InProcessBinding {
         peer: TransportIdentity,
         shutdown: Arc<watch::Sender<Option<ShutdownRequest>>>,
         notices: SessionNotices,
+        endpoints_persisted: bool,
     ) -> Self {
         Self {
             commander,
@@ -230,6 +238,7 @@ impl InProcessBinding {
             peer,
             shutdown,
             notices,
+            endpoints_persisted,
         }
     }
 }
@@ -254,6 +263,7 @@ impl AdminBinding for InProcessBinding {
             driver: self.driver.clone(),
             peer: self.peer.clone(),
             shutdown: Arc::clone(&self.shutdown),
+            endpoints_persisted: self.endpoints_persisted,
         })
     }
 }
@@ -662,6 +672,7 @@ pub struct InProcessAdmin {
     driver: mpsc::WeakSender<Request>,
     peer: TransportIdentity,
     shutdown: Arc<watch::Sender<Option<ShutdownRequest>>>,
+    endpoints_persisted: bool,
 }
 
 impl InProcessAdmin {
@@ -729,7 +740,11 @@ impl AdminPort for InProcessAdmin {
 
     async fn leases(&self) -> Result<Vec<EndpointAdminView>, TransportError> {
         self.require(AdminCapability::Endpoints)?;
-        self.commander.list_endpoints().await.map_err(stopped)
+        let mut rows = self.commander.list_endpoints().await.map_err(stopped)?;
+        for row in &mut rows {
+            row.persisted = self.endpoints_persisted;
+        }
+        Ok(rows)
     }
 
     async fn revoke_endpoint(&self, endpoint: EndpointId) -> Result<(), TransportError> {
@@ -751,10 +766,12 @@ impl AdminPort for InProcessAdmin {
         enabled: bool,
     ) -> Result<Option<Generation>, TransportError> {
         self.require(AdminCapability::Endpoints)?;
-        self.commander
-            .set_endpoint_enabled(endpoint, enabled)
-            .await
-            .map_err(stopped)?
+        // Through the driver, which holds the endpoint overlay: it is
+        // written before the substrate is told (ADR-0028 A 2026-10-11).
+        ask_driver(&self.driver()?, |reply| {
+            Request::SetEndpointEnabled(endpoint, enabled, reply)
+        })
+        .await?
     }
 
     async fn set_default_endpoint(
@@ -762,10 +779,10 @@ impl AdminPort for InProcessAdmin {
         endpoint: Option<EndpointId>,
     ) -> Result<(), TransportError> {
         self.require(AdminCapability::Endpoints)?;
-        self.commander
-            .set_default_endpoint(endpoint)
-            .await
-            .map_err(stopped)?
+        ask_driver(&self.driver()?, |reply| {
+            Request::SetDefaultEndpoint(endpoint, reply)
+        })
+        .await?
     }
 
     async fn trust(&self) -> Result<TrustAdminView, TransportError> {

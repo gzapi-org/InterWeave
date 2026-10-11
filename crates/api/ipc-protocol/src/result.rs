@@ -35,6 +35,13 @@ pub const MAX_ENDPOINT_ROWS: usize = 64;
 /// `a_full_trust_page_of_the_largest_rows_fits_the_body`.
 pub const MAX_TRUST_PAGE_ROWS: usize = 1024;
 
+/// The minor from which an `endpoint-list` row says `persisted: true`
+/// for a runtime that keeps the endpoint overlay (ADR-0028 A 2026-10-11;
+/// `ipc/endpoint-list` 1.1.0, behind the minor under ADR-0017 A
+/// 2026-10-07). Below it the 2.0 row is served unchanged, `persisted:
+/// false`.
+pub const ENDPOINT_PERSISTED_SINCE_MINOR: u64 = 5;
+
 /// The minor from which a `trust-list` row is the 2.3 row: `persisted`
 /// true with its `source` (ADR-0017 A 2026-10-07; `ipc/trust-list`
 /// 1.1.0). Below it the 2.1 row is served unchanged.
@@ -278,20 +285,23 @@ pub struct EndpointList {
 }
 
 impl EndpointList {
-    /// The port's rows.
+    /// The port's rows, in the row shape the connection's `minor`
+    /// negotiated: below [`ENDPOINT_PERSISTED_SINCE_MINOR`] the 2.0 row,
+    /// `persisted: false` byte for byte as before it, and from it each
+    /// view's own `persisted`.
     ///
     /// # Errors
     /// [`TransportError::Internal`] for more rows than the contract
     /// carries, or a lease whose client kind is outside its bounds: a
     /// port that answered either broke its own contract, and the server
     /// answers that rather than truncating.
-    pub fn from_views(views: Vec<EndpointAdminView>) -> Result<Self, TransportError> {
+    pub fn from_views(views: Vec<EndpointAdminView>, minor: u64) -> Result<Self, TransportError> {
         if views.len() > MAX_ENDPOINT_ROWS {
             return Err(TransportError::Internal);
         }
         let endpoints = views
             .into_iter()
-            .map(EndpointRow::try_from)
+            .map(|view| EndpointRow::from_view(view, minor))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self { endpoints })
     }
@@ -323,9 +333,10 @@ pub struct EndpointRow {
     pub enabled: bool,
     /// Whether it receives directed sends naming no endpoint.
     pub default: bool,
-    /// Always `false`: every administrative change is a runtime overlay
-    /// (ADR-0028).
-    pub persisted: NotPersisted,
+    /// Whether `enabled` and `default` survive a daemon restart: `true`
+    /// on 2.5 and later for a runtime keeping the endpoint overlay
+    /// (ADR-0028 A 2026-10-11); `false` below 2.5, the 2.0 row.
+    pub persisted: bool,
     /// Present while a connection holds the lease.
     #[serde(
         default,
@@ -335,15 +346,17 @@ pub struct EndpointRow {
     pub lease: Option<LeaseRow>,
 }
 
-impl TryFrom<EndpointAdminView> for EndpointRow {
-    type Error = TransportError;
-
-    fn try_from(view: EndpointAdminView) -> Result<Self, TransportError> {
+impl EndpointRow {
+    /// `view` as the row `minor` names ([`EndpointList::from_views`]).
+    ///
+    /// # Errors
+    /// [`TransportError::Internal`] for a lease outside its bounds.
+    pub(crate) fn from_view(view: EndpointAdminView, minor: u64) -> Result<Self, TransportError> {
         Ok(Self {
             id: view.endpoint,
             enabled: view.enabled,
             default: view.default,
-            persisted: NotPersisted,
+            persisted: minor >= ENDPOINT_PERSISTED_SINCE_MINOR && view.persisted,
             lease: view.lease.map(LeaseRow::try_from).transpose()?,
         })
     }
@@ -365,6 +378,7 @@ impl From<EndpointRow> for EndpointAdminView {
             endpoint,
             enabled: row.enabled,
             default: row.default,
+            persisted: row.persisted,
         }
     }
 }
@@ -714,25 +728,6 @@ fn absent_or_identity<'de, D: serde::Deserializer<'de>>(
     TransportIdentity::deserialize(d).map(Some)
 }
 
-/// The literal `false` of an endpoint row's `persisted`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NotPersisted;
-
-impl Serialize for NotPersisted {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_bool(false)
-    }
-}
-
-impl<'de> Deserialize<'de> for NotPersisted {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        if bool::deserialize(d)? {
-            return Err(serde::de::Error::custom("persisted is always false"));
-        }
-        Ok(Self)
-    }
-}
-
 /// A row's live lease.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -837,6 +832,7 @@ mod tests {
             endpoint: ep("human"),
             enabled: true,
             default: true,
+            persisted: false,
             lease: Some(LeaseRecord {
                 endpoint: ep("human"),
                 epoch: epoch(),
@@ -844,7 +840,7 @@ mod tests {
                 session_id: Some("s1".into()),
             }),
         };
-        let list = EndpointList::from_views(vec![view]).expect("one row");
+        let list = EndpointList::from_views(vec![view], 4).expect("one row");
         assert_eq!(
             serde_json::to_value(&list).expect("ser"),
             json!({"endpoints": [{
@@ -855,6 +851,41 @@ mod tests {
         let back: EndpointList =
             serde_json::from_value(serde_json::to_value(&list).expect("ser")).expect("de");
         assert_eq!(back, list);
+    }
+
+    /// The row is the shape the connection's minor names: below 2.5 the
+    /// 2.0 row, `persisted: false` whatever the view says; from 2.5 the
+    /// view's own, and a view that does not persist says so there too.
+    /// Each reads back as the view the client is owed.
+    #[test]
+    fn an_endpoint_row_is_the_shape_its_minor_names() {
+        let view = |persisted| EndpointAdminView {
+            endpoint: ep("human"),
+            enabled: false,
+            default: false,
+            persisted,
+            lease: None,
+        };
+        for (persisted, minor, on_wire) in [
+            (true, ENDPOINT_PERSISTED_SINCE_MINOR - 1, false),
+            (true, ENDPOINT_PERSISTED_SINCE_MINOR, true),
+            (false, ENDPOINT_PERSISTED_SINCE_MINOR, false),
+            (false, 0, false),
+        ] {
+            let list = EndpointList::from_views(vec![view(persisted)], minor).expect("a row");
+            assert_eq!(
+                serde_json::to_value(&list).expect("ser"),
+                json!({"endpoints": [{
+                    "id": "human", "enabled": false, "default": false, "persisted": on_wire
+                }]}),
+                "persisted={persisted} minor={minor}"
+            );
+            let back = EndpointAdminView::from(list.endpoints[0].clone());
+            assert_eq!(
+                back.persisted, on_wire,
+                "persisted={persisted} minor={minor}"
+            );
+        }
     }
 
     /// A client reads back what the server built from the port, less the
@@ -871,9 +902,10 @@ mod tests {
             endpoint: ep("human"),
             enabled: true,
             default: false,
+            persisted: false,
             lease: Some(lease.clone()),
         };
-        let row = EndpointRow::try_from(view.clone()).expect("a row");
+        let row = EndpointRow::from_view(view.clone(), 4).expect("a row");
         let back = EndpointAdminView::from(row);
         assert_eq!(
             back,
@@ -975,6 +1007,7 @@ mod tests {
             endpoint: ep("human"),
             enabled: true,
             default: false,
+            persisted: false,
             lease: Some(LeaseRecord {
                 endpoint: ep("human"),
                 epoch: epoch(),
@@ -982,14 +1015,14 @@ mod tests {
                 session_id: Some("s".into()),
             }),
         };
-        assert!(EndpointList::from_views(vec![view("é".repeat(MAX_CLIENT_KIND_CHARS))]).is_ok());
+        assert!(EndpointList::from_views(vec![view("é".repeat(MAX_CLIENT_KIND_CHARS))], 4).is_ok());
         assert_eq!(
-            EndpointList::from_views(vec![view("é".repeat(MAX_CLIENT_KIND_CHARS + 1))]),
+            EndpointList::from_views(vec![view("é".repeat(MAX_CLIENT_KIND_CHARS + 1))], 4),
             Err(TransportError::Internal)
         );
         // And the lower bound: an empty kind is not a label (`minLength: 1`).
         assert_eq!(
-            EndpointList::from_views(vec![view(String::new())]),
+            EndpointList::from_views(vec![view(String::new())], 4),
             Err(TransportError::Internal)
         );
     }
@@ -1000,11 +1033,12 @@ mod tests {
             endpoint: ep(&format!("e{i}")),
             enabled: true,
             default: false,
+            persisted: false,
             lease: None,
         };
-        assert!(EndpointList::from_views((0..MAX_ENDPOINT_ROWS).map(view).collect()).is_ok());
+        assert!(EndpointList::from_views((0..MAX_ENDPOINT_ROWS).map(view).collect(), 4).is_ok());
         assert_eq!(
-            EndpointList::from_views((0..=MAX_ENDPOINT_ROWS).map(view).collect()),
+            EndpointList::from_views((0..=MAX_ENDPOINT_ROWS).map(view).collect(), 4),
             Err(TransportError::Internal)
         );
         let row = json!({"id": "a", "enabled": true, "default": false, "persisted": false});
@@ -1012,10 +1046,10 @@ mod tests {
             serde_json::from_value::<EndpointList>(json!({"endpoints": [row.clone(), row]}))
                 .is_err()
         );
-        let persisted = json!({"endpoints": [
-            {"id": "a", "enabled": true, "default": false, "persisted": true}
+        let not_a_bool = json!({"endpoints": [
+            {"id": "a", "enabled": true, "default": false, "persisted": "yes"}
         ]});
-        assert!(serde_json::from_value::<EndpointList>(persisted).is_err());
+        assert!(serde_json::from_value::<EndpointList>(not_a_bool).is_err());
     }
 
     #[test]

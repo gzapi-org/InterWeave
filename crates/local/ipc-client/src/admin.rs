@@ -6,10 +6,10 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use interweave_ipc_protocol::{
-    AdminStatusResult, EmptyResult, EndpointList, EndpointParams, MAX_SHUTDOWN_GRACE_MS, Method,
-    PeerList, PeerListParams, Request, RequestedCapability, SetDefaultParams, SetEnabledParams,
-    SetEnabledResult, ShutdownParams, TRUST_SOURCE_SINCE_MINOR, TrustList, TrustListParams,
-    TrustSetParams,
+    AdminStatusResult, ENDPOINT_PERSISTED_SINCE_MINOR, EmptyResult, EndpointList, EndpointParams,
+    MAX_SHUTDOWN_GRACE_MS, Method, PeerList, PeerListParams, Request, RequestedCapability,
+    SetDefaultParams, SetEnabledParams, SetEnabledResult, ShutdownParams, TRUST_SOURCE_SINCE_MINOR,
+    TrustList, TrustListParams, TrustSetParams,
 };
 use interweave_local_client_api::{
     AdminBinding, AdminCapability, AdminPort, AdminStatus, EndpointAdminView, Generation,
@@ -167,14 +167,28 @@ impl IpcAdmin {
     }
 
     /// `admin.endpoints.list`'s result object as the daemon sent it, for
-    /// `transportctl endpoints list --json`.
+    /// `transportctl endpoints list --json` and [`AdminPort::leases`]: the
+    /// one reader, so both hold the row to its minor's shape. From 2.5 the
+    /// 2.5 row, `persisted: true` -- a production daemon keeps the
+    /// endpoint overlay, and one without it is never served there; below
+    /// 2.5 the 2.0 row, `persisted: false`, which is what a daemon
+    /// speaking no 2.5 does, since it keeps no overlay. A row in the other
+    /// minor's shape is a daemon this client cannot read truthfully:
+    /// refused `Internal`, never read as a value (ADR-0028 A 2026-10-11),
+    /// as a 2.1 trust row is at 2.3.
     ///
     /// # Errors
-    /// As [`AdminPort::leases`].
+    /// The call's, and `Internal` for a row in the other minor's shape.
     pub async fn endpoints_result(&self) -> Result<EndpointList, TransportError> {
-        self.connection
+        let list = self
+            .connection
             .call::<EndpointList>(Request::AdminEndpointsList)
-            .await
+            .await?;
+        let persists = self.minor >= ENDPOINT_PERSISTED_SINCE_MINOR;
+        if list.endpoints.iter().any(|row| row.persisted != persists) {
+            return Err(TransportError::Internal);
+        }
+        Ok(list)
     }
 
     /// Every page of `admin.trust.list` as the daemon sent it, in order,

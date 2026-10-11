@@ -67,9 +67,9 @@ pub use request::{
     TrustSetParams,
 };
 pub use result::{
-    AdminStatusResult, DirectoryResult, EmptyResult, EndpointList, EndpointRow, IngressCounters,
-    IpcCounters, LeaseRow, MAX_ENDPOINT_ROWS, MAX_PEER_PAGE_ROWS, MAX_TRUST_PAGE_ROWS,
-    NotPersisted, PeerList, PeerRow, PreAuthCounters, SendResult, ServerCounters, SetEnabledResult,
-    TRUST_SOURCE_SINCE_MINOR, TrustList, TrustRow,
+    AdminStatusResult, DirectoryResult, ENDPOINT_PERSISTED_SINCE_MINOR, EmptyResult, EndpointList,
+    EndpointRow, IngressCounters, IpcCounters, LeaseRow, MAX_ENDPOINT_ROWS, MAX_PEER_PAGE_ROWS,
+    MAX_TRUST_PAGE_ROWS, PeerList, PeerRow, PreAuthCounters, SendResult, ServerCounters,
+    SetEnabledResult, TRUST_SOURCE_SINCE_MINOR, TrustList, TrustRow,
 };
 pub use version::{IPC_MAJOR, IPC_MAX_MINOR, IpcVersion, UnsupportedMajor, negotiate, supported};

@@ -463,3 +463,91 @@ private group" where they said "the daemon user's".
 ### Amendment 2026-10-10 — The Android availability choice is the trust overlay's sibling
 
 ADR-0041's amendment of the same day puts the person's Android stay-reachable choice where trust's administrative changes already live: a persisted overlay in the profile's state directory under the trust boundary, owner-only under this record's rule, never a rewrite of `config.yaml`. The Decision's overlay sentence names it as the trust overlay's sibling so the rule — authored files are never rewritten by the daemon or the host; a runtime-made change is an overlay in state — is stated once for both. Built (InterWeave #254): `<state>/availability-overlay.json`, owner-only, exactly `{"availability_mode": "stay-reachable"}`, read through the private reader shared with `trust-overlay.json`; an untrusted present overlay refuses the host's start, as the trust overlay's does.
+
+### Amendment 2026-10-11 — Admin endpoint changes are a persisted overlay in the state directory
+
+Plan §20 gate (e) taken (architect-cto's ruling of 2026-10-11 on
+p2p-network-dev's proposal, DECISION 01a12935-2f9e-74c2-a89e-0b44e93d4493).
+The Decision said, since 2026-09-28: "Endpoint enable/disable/default
+changed over administrative IPC is a RUNTIME OVERLAY over the configured
+state, never written back to `config.yaml`, and does not survive a
+restart", and since 2026-10-07: "Endpoint changes stay the runtime
+overlay above; the same file shape is available to them when their
+carried item is taken (plan §20)". Both sentences are replaced.
+
+What changed:
+
+- `admin.endpoints.set_enabled` and `set_default` are a PERSISTED
+  OVERLAY, `<state>/endpoint-overlay.json`, the trust overlay's sibling:
+  the same private-file rule, trust boundary, reader, writer and
+  failure model. The reason is the owner's of 2026-10-07 applied to the
+  neighbouring surface: an operator's disable undone by a daemon
+  restart is the surprise the trust decision ruled out.
+- The shape, exactly: `{"enabled": {<endpoint>: <bool>, …}, "default":
+  <endpoint> | null}` — deltas against `config.yaml`; `enabled` always
+  present; `default` present only when it differs from the configured
+  default, `null` meaning no default where `config.yaml` names one.
+- Normalised at load, rewritten when that changed anything, the
+  rewrite's failure fatal: entries equal to the configuration or naming
+  an endpoint it no longer has leave. The default/disabled interaction
+  is a predicate, not a case list: the effective default is enabled or
+  there is none, and normalisation never undoes a disable, only a
+  default — both judged on the EFFECTIVE state after the deltas: the
+  default that would apply (the overlay's if present, else the
+  configured) and that endpoint's enabled state (its overlay entry if
+  present, else `config.yaml`'s). An effectively disabled default that
+  is the configured one becomes `default: null` (the owner's
+  2026-09-28 rule, disabling the default clears the default, applied
+  at load); one that is the overlay's leaves, and the configured
+  default applies, judged the same way. An effectively enabled default
+  stays: `{"enabled": {"X": false}, "default": "Y"}` with X the
+  configured default keeps Y, and `{"enabled": {"Y": true}, "default":
+  "Y"}` with Y disabled in `config.yaml` keeps Y (the blind review's
+  two cases). A member named twice is refused, never last-wins; the
+  file is read under a size constant the store names. Each rewrite
+  logs a warning naming the entry. Set-time behaviour is unchanged, except the composed-profile refusal
+  in the bullet below:
+  `set_default` refuses a disabled or unknown endpoint, and
+  `set_enabled(false)` on the default clears it, the one write carrying
+  both deltas.
+- Fatal at start, never skipped, when present and untrusted or
+  unparseable: a skipped overlay re-enables what the operator disabled.
+  Backed up with the profile; never deleted to reset.
+- The composed profile is validated as `config.yaml` is (added in the
+  landing PR from InterWeave #261's review F1, which falsified the first
+  draft's "no analogue of the `MAX_ALLOWED_PEERS` bound since endpoint
+  names are `config.yaml`'s and bounded by its validation":
+  `directory.max_advertised` and the Android lease endpoint read the
+  ENABLED set, so validation bounds the configured set, not the composed
+  one). A set the next start would refuse is refused `InvalidArgument`,
+  nothing written; at start a composed profile that fails validation is
+  fatal naming the overlay and the rule, `ProfileInvalid` on the
+  embedded runtime. Normalising at load instead — dropping enables until
+  the profile validates — was rejected 2026-10-11: it would choose for
+  the operator which enables survive, the truncation the trust decision
+  ruled out, and a conflicting disable has nothing to drop.
+- `admin.endpoints.revoke` and leases stay runtime-only: a lease is a
+  session's.
+- Every production binding supplies the store under its own state
+  directory, the embedded runtime's never written (Android has no
+  administrative surface); a store-less runtime is test-only.
+- IPC: `endpoint-list`'s `persisted` member is a constant `false` in the
+  2.0 row, so reporting the truth widens a closed result shape and goes
+  behind a new minor, 2.5, with the 2.0 row served below it (ADR-0017
+  A 2026-10-07), as the trust row's `persisted`/`source` went behind
+  2.3. No `source` member: every endpoint is configured, what is
+  administered is its state; a per-row source is a later widening if a
+  reader needs it.
+
+Alternatives: re-carrying the item once more, which gate (e) allowed —
+a decided shape left unbuilt a third time; and a per-row `source`.
+Consequences and Security implications name the overlay beside the
+trust overlay; `configuration.md`'s state table gains its row and the
+private-file list its name; the failure model and the threat model gain
+its fatal conditions and its row.
+
+Landing with the pull request this note lands in
+(`develop-qzapp/p2p-network-dev-01/feat/endpoint-overlay`, the store,
+normalisation, write path, the 2.5 row and the contract's minor); the
+restart test that is gate (e)'s evidence is named in §20's closing
+record.
