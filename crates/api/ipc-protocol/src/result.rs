@@ -853,8 +853,6 @@ mod tests {
         assert_eq!(back, list);
     }
 
-    /// A client reads back what the server built from the port, less the
-    /// binding-local session id, which the wire never carries.
     /// The row is the shape the connection's minor names: below 2.5 the
     /// 2.0 row, `persisted: false` whatever the view says; from 2.5 the
     /// view's own, and a view that does not persist says so there too.
@@ -890,6 +888,8 @@ mod tests {
         }
     }
 
+    /// A client reads back what the server built from the port, less the
+    /// binding-local session id, which the wire never carries.
     #[test]
     fn a_row_reads_back_as_the_view_without_its_session_id() {
         let lease = LeaseRecord {
